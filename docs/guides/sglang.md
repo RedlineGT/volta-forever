@@ -61,7 +61,6 @@ Start the official SGLang server in the active environment on a 32 GiB V100. It 
 
 ```sh
 export PATH="$CUDA_HOME/bin:$PATH"
-export PTXAS_OPTIONS='--override-directive-values --maxrregcount=192 --opt-level=3'
 export VF_CAPABILITY=8.0
 export SGLANG_MOE_CONFIG_DIR="$HOME/volta-forever/tuning/sglang"
 export NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80'
@@ -93,7 +92,7 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-The command above measured **318.60 tokens/s in prefill** and **52.91 tokens/s in decode**. SGLang captures graphs for prefill chunks of 8, 16 and 32 tokens and uses the V100 configuration for its W4A16 expert kernels. With eager prefill, a separate run reached 255.19 and 53.44 tokens/s. [Per-request results and tile comparison](./benchmarks/sglang-stock-sm80.json)
+The command above measured **311.97 tokens/s in prefill** and **52.68 tokens/s in decode** with Triton’s default assembler options. SGLang captures graphs for prefill chunks of 8, 16 and 32 tokens and uses V100-specific W4A16 expert tiles. An earlier graph run with a 192-register cap on another V100 measured 318.60 and 52.91 tokens/s. A separate eager-prefill run measured 255.19 and 53.44. [Per-request results and tile comparison](./benchmarks/sglang-stock-sm80.json)
 
 An earlier VF 0.1.1 run at capability 7.5 measured **181.48 prefill** and **38.83 decode** tokens/s at 32 tokens per chunk. At eight tokens per chunk we compared the effect of decode graphs on the same card. [Earlier 32-token results](./benchmarks/sglang-stock-compile.json)
 

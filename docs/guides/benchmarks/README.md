@@ -26,7 +26,7 @@ The official server used the V100 FP16 expert tiles, Marlin and full and piecewi
 
 ## SGLang
 
-The official SGLang server with V100 expert tiles and CUDA graphs for prefill and decode reached **318.60 prefill and 52.91 decode tokens/s**. It captured prefill chunks of 8, 16 and 32 tokens. A separate run with eager prefill reached 255.19 and 53.44. [Configurations, responses and phase timers](sglang-stock-sm80.json)
+The official SGLang server with V100 expert tiles and CUDA graphs for prefill and decode reached **311.97 prefill and 52.68 decode tokens/s** with Triton's default assembler options. It captured prefill chunks of 8, 16 and 32 tokens. A separate run with eager prefill reached 255.19 and 53.44. [Configurations, responses and phase timers](sglang-stock-sm80.json)
 
 With eight-token chunks, a paired series using the same cache salts measured **62.55/38.25** with graphs and **72.97/12.27** with graphs disabled. The server processed 227 uncached tokens and returned 64 for each of the three requests. [Same-GPU measurements](sglang-stock-graphs.json) · [Eager diagnostic](sglang-stock-results.json)
 

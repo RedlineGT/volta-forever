@@ -128,7 +128,8 @@
           "prefill_tokens_per_s": 219.91814480076297,
           "decode_tokens_per_s": 45.006830829849335
         }
-      ]
+      ],
+      "gpu_uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712"
     },
     "v100_tiling": {
       "gpu_index": 1,
@@ -181,7 +182,8 @@
           "prefill_tokens_per_s": 225.56619394013728,
           "decode_tokens_per_s": 52.98633279089229
         }
-      ]
+      ],
+      "gpu_uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712"
     },
     "v100_tiling_default_startup": {
       "gpu_index": 2,
@@ -239,7 +241,8 @@
           "prefill_tokens_per_s": 255.18966347405583,
           "decode_tokens_per_s": 53.444963858838115
         }
-      ]
+      ],
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948"
     },
     "v100_tiling_prefill_graphs": {
       "gpu_index": 1,
@@ -304,7 +307,83 @@
           "prefill_tokens_per_s": 318.6041741258064,
           "decode_tokens_per_s": 52.90945976649608
         }
-      ]
+      ],
+      "gpu_uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712"
+    },
+    "v100_tiling_prefill_graphs_default_assembler": {
+      "gpu_index": 0,
+      "SGLANG_MOE_CONFIG_DIR": "tuning/sglang",
+      "server_overrides": {
+        "cuda_graph_backend_prefill": "breakable",
+        "cuda_graph_bs_prefill": [
+          8,
+          16,
+          32
+        ],
+        "cuda_graph_backend_decode": "full",
+        "model_loader_extra_config": "{}",
+        "skip_server_warmup": false,
+        "watchdog_timeout": 300
+      },
+      "chat_answer": "Paris",
+      "new_driver_xid": false,
+      "results": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.6502348747253421,
+          "decode_s": 1.1960340499877944,
+          "prefill_tokens_per_s": 350.6425275886759,
+          "decode_tokens_per_s": 52.67408565888481,
+          "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to ensure smooth operations for our visitors. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member ins"
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.7276369934082076,
+          "decode_s": 1.1959695339202874,
+          "prefill_tokens_per_s": 311.9687454822022,
+          "decode_tokens_per_s": 52.67692714001778,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.7275827255249006,
+          "decode_s": 1.195576324462884,
+          "prefill_tokens_per_s": 311.9920141537654,
+          "decode_tokens_per_s": 52.694251894209195,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.7294873657226546,
+          "decode_s": 1.196026880264279,
+          "prefill_tokens_per_s": 311.17742495118637,
+          "decode_tokens_per_s": 52.674401419873824,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in the room situated by the entrance, where a yellow envelope is placed on the long table each morning to signal the start of duties. Before the doors open, another volunteer"
+        },
+        {
+          "id": "median",
+          "prefill_tokens_per_s": 311.9687454822022,
+          "decode_tokens_per_s": 52.67692714001778
+        }
+      ],
+      "environment_overrides": {
+        "PTXAS_OPTIONS": null
+      },
+      "fresh_caches": [
+        "Triton",
+        "TorchInductor",
+        "VF proxy",
+        "CUDA driver"
+      ],
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c"
     }
   }
 }
