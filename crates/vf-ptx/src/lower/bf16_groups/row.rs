@@ -35,24 +35,30 @@ pub(super) fn batch<'a, 't>(
     None
 }
 
-pub(super) fn write(
-    out: &mut String,
-    id: usize,
-    batch: &[IndexedProduct<'_>],
-    mode: Bf16Row,
-    small: bool,
-    original: &str,
-) {
-    let r = format!("%bfgroup_{id}_r");
+pub(super) fn multiplicand_bounds(out: &mut String, r: &str, w: &str, mode: Bf16Row) {
+    writeln!(out, "and.b32 {r}x,{w},0x7fff7fff;").unwrap();
+    match mode {
+        Bf16Row::Tree => {
+            // Each 16-bit addition/subtraction is carry/borrow independent.
+            writeln!(
+                out,
+                "add.u32 {r}y,{r}x,0x7fff7fff; add.u32 {r}z,{r}x,0x50805080;\n\
+                     sub.u32 {r}x,0xcf7fcf7f,{r}x; and.b32 {r}x,{r}x,{r}z;\n\
+                     not.b32 {r}x,{r}x; and.b32 {r}x,{r}x,{r}y;"
+            )
+            .unwrap();
+        }
+        Bf16Row::Ordered => writeln!(out, "add.u32 {r}x,{r}x,0x00800080;").unwrap(),
+        Bf16Row::Off => unreachable!(),
+    }
+    writeln!(out, "or.b32 {r}bounds,{r}bounds,{r}x;").unwrap();
+}
+
+fn write_guard(out: &mut String, r: &str, id: usize, batch: &[IndexedProduct<'_>], mode: Bf16Row, small: bool) {
     let a = &batch[0].1.a;
     writeln!(
         out,
-        ".reg .b32 {r}lane,{r}t,{r}g,{r}col,{r}even,{r}odd,{r}lo,{r}hi,{r}word,{r}k,{r}acc,{r}next;\n\
-         .reg .b32 {r}x,{r}y,{r}z,{r}flags,{r}bounds,{r}index,{r}evenlane,{r}oddlane,{r}a<16>;\n\
-         .reg .pred {r}row,{r}bad,{r}warp,{r}oddcol;\n\
-         mov.u32 {r}lane,%laneid; and.b32 {r}t,{r}lane,3; and.b32 {r}g,{r}lane,28;\n\
-         shr.u32 {r}col,{r}lane,2; setp.eq.u32 {r}row,{r}g,0;\n\
-         or.b32 {r}x,{},{}; selp.b32 {r}flags,0,{r}x,{r}row;\n\
+        "or.b32 {r}x,{},{}; selp.b32 {r}flags,0,{r}x,{r}row;\n\
          or.b32 {r}x,{},{}; or.b32 {r}flags,{r}flags,{r}x;",
         a[0], a[2], a[1], a[3]
     )
@@ -99,31 +105,40 @@ pub(super) fn write(
     }
     writeln!(out, "mov.b32 {r}bounds,0;").unwrap();
     for w in words {
-        writeln!(out, "and.b32 {r}x,{w},0x7fff7fff;").unwrap();
-        match mode {
-            Bf16Row::Tree => {
-                // Each 16-bit addition/subtraction is carry/borrow independent.
-                writeln!(
-                    out,
-                    "add.u32 {r}y,{r}x,0x7fff7fff; add.u32 {r}z,{r}x,0x50805080;\n\
-                     sub.u32 {r}x,0xcf7fcf7f,{r}x; and.b32 {r}x,{r}x,{r}z;\n\
-                     not.b32 {r}x,{r}x; and.b32 {r}x,{r}x,{r}y;"
-                )
-                .unwrap();
-            }
-            Bf16Row::Ordered => writeln!(out, "add.u32 {r}x,{r}x,0x00800080;").unwrap(),
-            Bf16Row::Off => unreachable!(),
-        }
-        writeln!(out, "or.b32 {r}bounds,{r}bounds,{r}x;").unwrap();
+        multiplicand_bounds(out, r, w, mode);
     }
     writeln!(
         out,
         "and.b32 {r}bounds,{r}bounds,0x80008000; or.b32 {r}flags,{r}flags,{r}bounds;\n\
          setp.ne.u32 {r}bad,{r}flags,0; vote.sync.any.pred {r}warp,{r}bad,0xffffffff;\n\
-         @{r}warp bra.uni $bfgroup_row_slow_{id};\n\
-         shl.b32 {r}evenlane,{r}t,3; or.b32 {r}oddlane,{r}evenlane,4;"
+         @{r}warp bra.uni $bfgroup_row_slow_{id};"
     )
     .unwrap();
+}
+
+pub(super) fn write(
+    out: &mut String,
+    id: usize,
+    batch: &[IndexedProduct<'_>],
+    mode: Bf16Row,
+    small: bool,
+    original: Option<&str>,
+) {
+    let r = format!("%bfgroup_{id}_r");
+    let a = &batch[0].1.a;
+    writeln!(
+        out,
+        ".reg .b32 {r}lane,{r}t,{r}g,{r}col,{r}even,{r}odd,{r}lo,{r}hi,{r}word,{r}k,{r}acc,{r}next;\n\
+         .reg .b32 {r}x,{r}y,{r}z,{r}flags,{r}bounds,{r}index,{r}evenlane,{r}oddlane,{r}a<16>;\n\
+         .reg .pred {r}row,{r}bad,{r}warp,{r}oddcol;\n\
+         mov.u32 {r}lane,%laneid; and.b32 {r}t,{r}lane,3; and.b32 {r}g,{r}lane,28;\n\
+         shr.u32 {r}col,{r}lane,2; setp.eq.u32 {r}row,{r}g,0;"
+    )
+    .unwrap();
+    if original.is_some() {
+        write_guard(out, &r, id, batch, mode, small);
+    }
+    writeln!(out, "shl.b32 {r}evenlane,{r}t,3; or.b32 {r}oddlane,{r}evenlane,4;").unwrap();
     // Before either product writes D, broadcast the original A fragments once.
     if mode == Bf16Row::Ordered {
         writeln!(
@@ -225,11 +240,13 @@ pub(super) fn write(
             .unwrap();
         }
     }
-    writeln!(
-        out,
-        "bra.uni $bfgroup_row_done_{id};\n$bfgroup_row_slow_{id}:\n{original}\n$bfgroup_row_done_{id}:"
-    )
-    .unwrap();
+    if let Some(original) = original {
+        writeln!(
+            out,
+            "bra.uni $bfgroup_row_done_{id};\n$bfgroup_row_slow_{id}:\n{original}\n$bfgroup_row_done_{id}:"
+        )
+        .unwrap();
+    }
 }
 
 #[cfg(test)]

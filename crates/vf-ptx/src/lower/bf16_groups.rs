@@ -1,6 +1,7 @@
 //! Convert consecutive BF16 MMAs to FP16 MMAs when every participating lane has exactly
 //! representable inputs. Keep the original operations behind a warp-uniform branch for all
 //! other inputs. A group shares one vote and converts each distinct multiplicand once.
+mod region;
 mod row;
 mod schedule;
 
@@ -189,11 +190,31 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
                 scheduled.contains(&items[first].range.start),
             )
         {
+            if options.bf16_row == Bf16Row::Tree
+                && small
+                && batch.len() == 4
+                && let Some(region) = region::Region::find(text, items, first, &declarations, &small_b)
+            {
+                let begin = items[first].range.start;
+                out.push_str(&text[copied..begin]);
+                region.write(&mut out, text, items, groups);
+                groups += 2 * region.rounds.len();
+                first = region.end() + 1;
+                copied = items[first - 1].range.end;
+                continue;
+            }
             let begin = items[first].range.start;
             let last_product = batch.last().unwrap().0;
             let end = items[last_product].range.end;
             out.push_str(&text[copied..begin]);
-            row::write(&mut out, groups, batch, options.bf16_row, small, &text[begin..end]);
+            row::write(
+                &mut out,
+                groups,
+                batch,
+                options.bf16_row,
+                small,
+                Some(&text[begin..end]),
+            );
             copied = end;
             groups += 1;
             first = last_product + 1;
