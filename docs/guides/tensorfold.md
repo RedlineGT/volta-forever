@@ -55,7 +55,7 @@ tensorfold-native --version
 
 ## 4. Test
 
-Download the 20.4 GB MLX checkpoint with 4-bit experts and 8-bit routers. TensorFold 1.3.2 accepts this layout. It refuses GGUF files at startup. [Qwen3.5 checkpoint](https://huggingface.co/henrybravo/Qwen3.5-35B-A3B-4bit)
+Download the 20.4 GB MLX checkpoint with 4-bit experts and 8-bit routers. TensorFold 1.3.2 and 1.3.3 accept this layout. It refuses GGUF files at startup. [Qwen3.5 checkpoint](https://huggingface.co/henrybravo/Qwen3.5-35B-A3B-4bit)
 
 ```sh
 hf download henrybravo/Qwen3.5-35B-A3B-4bit --local-dir ~/models/qwen35-4bit
@@ -84,20 +84,26 @@ curl -fsSLO "$base/tensorfold.py" && curl -fsSLO "$base/prompts.json"
 python3 tensorfold.py
 ```
 
-Each measured request read 227 uncached tokens and generated 64. All three responses began with the requested city. Median time to the first token was 1.344 seconds over loopback. [Measured responses and timings](./benchmarks/tensorfold-results.json)
+Each measured request used 227 uncached prompt tokens and generated 64. The answers began with Kyoto, Lyon and Lima. TensorFold reports prefill time separately and counts the 63 tokens after the first for decode. These are medians on the same Tesla V100-SXM2-32GB. [Official TensorFold measurements](./benchmarks/tensorfold-results.json) · [Local experiment and native reference](./benchmarks/tensorfold-experimental.json)
 
-| Phase | Three runs (tokens/s) | Median (tokens/s) |
-| --- | --- | ---: |
-| Prefill | 169.57, 169.69, 169.31 | **169.57** |
-| Decode | 17.56, 17.10, 16.47 | **17.10** |
+| Engine and settings | Prefill (tokens/s) | Decode (tokens/s) |
+| --- | ---: | ---: |
+| Official TensorFold 1.3.2 source, BF16 prompts | 170.35 | 17.18 |
+| Official TensorFold 1.3.2 source, INT8 prompts, drafts off | 326.80 | 17.01 |
+| Official TensorFold 1.3.3 source, BF16 prompts | 170.38 | 17.19 |
+| Official TensorFold 1.3.3 source, INT8 prompts, drafts off | 326.74 | 16.99 |
+| Local TensorFold 1.3.2 with four CUDA changes, INT8 prompts, drafts off | **650.38** | **108.93** |
+| Native llama.cpp sm70, GGUF Q4_K_M | 473.88 | 99.22 |
 
-Prefill uses TensorFold’s `prefill_seconds`. Decode counts the 63 tokens after the first. On the same V100 and prompts, native llama.cpp reached **460.45 prefill and 99.12 decode tokens/s** using the Q4_K_M GGUF. TensorFold measured **170.35 and 17.18** with MLX affine Q4, or **326.80 and 17.01** with INT8 prompt activations. The two engines use different quantizations of Qwen3.5-35B-A3B. [Same-GPU reference and checkpoint revisions](./benchmarks/tensorfold-results.json)
+For the official INT8 configuration, add `--no-drafts --prompt-precision int8` to the server command in step 4. TensorFold used MLX affine Q4 with 8-bit routers. The llama.cpp reference used the GGUF Q4_K_M quantization of Qwen3.5-35B-A3B. It ran immediately after the local TensorFold experiment in the same GPU reservation. [Checkpoint revisions and per-request timings](./benchmarks/tensorfold-experimental.json)
 
-The INT8 run used `--no-drafts --prompt-precision int8`. All three cities were correct and the generated continuations changed. During BF16 decoding, the CUDA graph replayed successfully and the routed experts’ fused gate/up kernel accounted for about 60% of sampled GPU kernel time. [Option tests and GPU measurements](./benchmarks/tensorfold-results.json)
+The faster TensorFold run used four changes to the engine's CUDA source. It processes routed experts one row at a time during decode, uses smaller expert tiles during prefill, specializes dense projections for a single input row and preserves the router's FP32 accumulation order in a single-row kernel. The warm-up and all three responses matched the official INT8 engine token for token. TensorFold reported a median time to the first token of 0.352 s. [Experiment results](./benchmarks/tensorfold-experimental.json)
 
 ## 6. Additional notes
 
-The 1.3.2 Linux release contains 131 CUDA bundles with machine code for sm80, sm86, sm89, sm120 and sm121. None embeds PTX. On a Tesla V100-SXM2-32GB with VF 0.1.1, the released server returned `CUDA_ERROR_NO_BINARY_FOR_GPU (209)` for both a Qwen3.5 MLX checkpoint and NVIDIA’s Qwen3.6 NVFP4 checkpoint. The default, 8.0 and 12.0 capability profiles gave the same result. [TensorFold 1.3.2 release](https://github.com/ashhart/TensorFold/releases/tag/v1.3.2)
+TensorFold 1.3.3 selects fixed CUDA kernels for MLX affine Q4 experts. Its `TF_NVFP4_DECODE_WARPS` setting applies to NVFP4 weights, and its experimental `TF_CUDA_TEST_MLP128` setting requires sm120. Enabling the four paths measured here requires changes to the engine. [Official expert dispatch](https://github.com/ashhart/TensorFold/blob/v1.3.3/zig/src/cuda/experts.zig#L143-L223) · [Official tile override](https://github.com/ashhart/TensorFold/blob/v1.3.3/zig/src/cuda/sm120_test_override.zig#L6-L13)
+
+The official Linux binaries contain 131 CUDA bundles in 1.3.2 and 139 in 1.3.3. Both ship machine code for sm80, sm86, sm89, sm120 and sm121, with zero embedded PTX images. Both binaries returned `CUDA_ERROR_NO_BINARY_FOR_GPU (209)` on the V100 with the Qwen3.5 MLX checkpoint. With release 1.3.2, the default, 8.0 and 12.0 capability profiles also gave this error with NVIDIA’s Qwen3.6 NVFP4 checkpoint. [TensorFold 1.3.2 release](https://github.com/ashhart/TensorFold/releases/tag/v1.3.2) · [TensorFold 1.3.3 release](https://github.com/ashhart/TensorFold/releases/tag/v1.3.3)
 
 On the V100, both 4-bit prompt kernels reproduced all 132,096 BF16 reference values for the first layer’s shared-expert gate projection using real weights from the checkpoint. The causal attention kernel matched a separate CPU reference across 68,608 outputs with a maximum absolute error of 0.00133. [TensorFold 4-bit prompt kernels](https://github.com/ashhart/TensorFold/blob/v1.3.2/zig/kernels/cuda/qmm_prefill.cu)
 

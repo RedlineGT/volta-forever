@@ -1,0 +1,313 @@
+{
+  "scope": "Local TensorFold source experiment. The four CUDA changes are outside the official 1.3.2 codebase.",
+  "upstream_version": "1.3.2",
+  "upstream_commit": "b472b9f84ca9505d1d31020bed8fb4b5c7fdc33a",
+  "upstream_source": "https://github.com/ashhart/TensorFold/tree/v1.3.2",
+  "compiler": {
+    "zig": "0.17.0",
+    "nvcc": "13.5.37",
+    "embedded_ptx": "compute_80",
+    "cpu_target": "x86_64_v2"
+  },
+  "vf_proxy_sha256": "817a19ec224ea323bdd60eeb40b85aae05212946c8ee00f53227e6c290452719",
+  "engine_sha256": "d755244c5dd81fa02ac1f89ae0dd2c26a4dbcc9cc9ac8eb037ad057a7e96a46f",
+  "hardware": {
+    "device": "Tesla V100-SXM2-32GB",
+    "gpu_uuid": "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd",
+    "pci": "00000000:AF:00.0",
+    "driver": "580.178.04"
+  },
+  "protocol": {
+    "warmups": 1,
+    "measured_requests": 3,
+    "concurrency": 1,
+    "temperature": 0,
+    "context": 512,
+    "max_output_tokens": 64,
+    "prompt_cache": false,
+    "prompt_file": "prompts.json",
+    "prompt_file_sha256": "c40ce4a6b25ec6821587480eb3e13bf0ba0186106c4a960e4f69d5c8ede3f4a9",
+    "aggregation": "Median of the three measured requests; warm-up excluded. TensorFold prefill = input_tokens / prefill_seconds; decode = (output_tokens - 1) / decode_seconds. llama.cpp timings use prompt_per_second and predicted_per_second."
+  },
+  "tensorfold": {
+    "checkpoint": "henrybravo/Qwen3.5-35B-A3B-4bit",
+    "revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "quantization": "MLX affine Q4, 64-element groups, 8-bit routers",
+    "weights_sha256": {
+      "model-00001-of-00004.safetensors": "2f0b46971988739b06ab2f6e1e9a817068f5641570556385043f0d7cebd09451",
+      "model-00002-of-00004.safetensors": "1a53c8753b7a3314980f77aeca8f2a4736a0986451fee9059b2b54d54713950b",
+      "model-00003-of-00004.safetensors": "b813fcb8159dc7b008000f3c69970d42b328a4ca0f4898a05afb423b5fd60991",
+      "model-00004-of-00004.safetensors": "a863ceefd68bb5a81522cd9c7063fed2a3c14d7dc65c3a0c80b0923617548b88"
+    },
+    "options": [
+      "--no-drafts",
+      "--prompt-precision",
+      "int8"
+    ],
+    "environment": {
+      "VF_CAPABILITY": "8.0",
+      "VF_FIT_SHARED": "1",
+      "TF_QWEN_KV_PAGES": "0"
+    },
+    "experimental_changes": [
+      {
+        "review_patch": "moe-router-row.patch",
+        "sha256": "c02d083f8875290e78d42f2f01a8a3307a16e7e2be60efd3ecb24960ed7ee564"
+      },
+      {
+        "review_patch": "affine4-dense-rows.patch",
+        "sha256": "fa01fda25eee185235766dc2c80d5f7141b75e98a07607a0b7be8025db0e3855"
+      },
+      {
+        "review_patch": "affine4-prefill-tiles.patch",
+        "sha256": "879a85eaba701d143443c0391881d89647b5992f5a485b0b1b4b07497c8ee97d"
+      },
+      {
+        "review_patch": "affine4-decode-rows.patch",
+        "sha256": "4278daf26cbc1070396d6e92efc6e5609f7b2e991aeafcb40788a01952826824"
+      }
+    ],
+    "all_benchmark_token_hashes_match_unmodified_int8_control": true,
+    "stop_tests": [
+      "Paris answer",
+      "explicit Paris stop sequence",
+      "one-token length cap"
+    ],
+    "same_binary_router_off": {
+      "prefill_tokens_per_second": 649.441,
+      "decode_tokens_per_second": 95.1116
+    },
+    "requests": [
+      {
+        "id": "warmup",
+        "city": "Lisbon",
+        "input_tokens": 228,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 649.7895,
+        "decode_tokens_per_second": 108.9517,
+        "client_ttft_seconds": 0.396464,
+        "prefill_seconds": 0.350882864,
+        "decode_seconds": 0.578237729,
+        "native_ttft_seconds": 0.35805825,
+        "output_token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948"
+      },
+      {
+        "id": "run1",
+        "city": "Kyoto",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 650.381,
+        "decode_tokens_per_second": 108.9799,
+        "client_ttft_seconds": 0.353631,
+        "prefill_seconds": 0.349026209,
+        "decode_seconds": 0.578088049,
+        "native_ttft_seconds": 0.352245066,
+        "output_token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371"
+      },
+      {
+        "id": "run2",
+        "city": "Lyon",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 649.9704,
+        "decode_tokens_per_second": 108.9188,
+        "client_ttft_seconds": 0.353486,
+        "prefill_seconds": 0.349246669,
+        "decode_seconds": 0.578412685,
+        "native_ttft_seconds": 0.352272861,
+        "output_token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863"
+      },
+      {
+        "id": "run3",
+        "city": "Lima",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 651.0059,
+        "decode_tokens_per_second": 108.9303,
+        "client_ttft_seconds": 0.353183,
+        "prefill_seconds": 0.34869113,
+        "decode_seconds": 0.578351283,
+        "native_ttft_seconds": 0.351811486,
+        "output_token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7"
+      }
+    ],
+    "median": {
+      "prefill_tokens_per_second": 650.381,
+      "decode_tokens_per_second": 108.9303
+    }
+  },
+  "llama_cpp": {
+    "commit": "13ec8f614cfef964fe97bbf872bc436dbc484a1f",
+    "source": "https://github.com/ggml-org/llama.cpp/commit/13ec8f614cfef964fe97bbf872bc436dbc484a1f",
+    "cuda": "12.8, native sm70",
+    "checkpoint": "unsloth/Qwen3.5-35B-A3B-GGUF",
+    "revision": "bc014a17be43adabd7066b7a86075ff935c6a4e2",
+    "weights_sha256": "3b46d1066bc91cc2d613e3bc22ce691dd77e6f0d33c9060690d24ce6de494375",
+    "quantization": "GGUF Q4_K_M",
+    "same_gpu_reservation": true,
+    "requests": [
+      {
+        "id": "warmup",
+        "city": "Lisbon",
+        "input_tokens": 228,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 43.7962,
+        "decode_tokens_per_second": 89.0592,
+        "client_ttft_seconds": 5.443448,
+        "prompt_ms": 5205.937,
+        "predicted_ms": 707.395
+      },
+      {
+        "id": "run1",
+        "city": "Kyoto",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 473.8773,
+        "decode_tokens_per_second": 99.2459,
+        "client_ttft_seconds": 0.515426,
+        "prompt_ms": 479.027,
+        "predicted_ms": 634.787
+      },
+      {
+        "id": "run2",
+        "city": "Lyon",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 469.81,
+        "decode_tokens_per_second": 99.2188,
+        "client_ttft_seconds": 0.491907,
+        "prompt_ms": 483.174,
+        "predicted_ms": 634.96
+      },
+      {
+        "id": "run3",
+        "city": "Lima",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "cached_tokens": 0,
+        "finish_reason": "length",
+        "prefill_tokens_per_second": 478.0236,
+        "decode_tokens_per_second": 99.1459,
+        "client_ttft_seconds": 0.483351,
+        "prompt_ms": 474.872,
+        "predicted_ms": 635.427
+      }
+    ],
+    "median": {
+      "prefill_tokens_per_second": 473.8773,
+      "decode_tokens_per_second": 99.2188
+    }
+  },
+  "successive_int8_results": [
+    {
+      "stage": "Official TensorFold INT8 control",
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "prefill_tokens_per_second": 326.1767,
+      "decode_tokens_per_second": 16.9621
+    },
+    {
+      "stage": "Row-oriented expert decode",
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "prefill_tokens_per_second": 325.6634,
+      "decode_tokens_per_second": 50.2705
+    },
+    {
+      "stage": "Compact expert prefill tiles",
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "prefill_tokens_per_second": 643.9515,
+      "decode_tokens_per_second": 50.1286
+    },
+    {
+      "stage": "One-row dense projections",
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "prefill_tokens_per_second": 649.9252,
+      "decode_tokens_per_second": 95.5713
+    },
+    {
+      "stage": "One-row FP32 router",
+      "gpu_uuid": "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd",
+      "prefill_tokens_per_second": 650.381,
+      "decode_tokens_per_second": 108.9303
+    }
+  ],
+  "graph": {
+    "one_row_replays": 223,
+    "kernel_nodes": 594,
+    "router_calls_per_graph": 40,
+    "estimated_router_ms_per_graph": 0.885
+  },
+  "new_driver_xid_events": 0,
+  "official_release_check": {
+    "source": "https://github.com/ashhart/TensorFold/releases/tag/v1.3.3",
+    "precompiled_linux": {
+      "release": "v1.3.3",
+      "commit": "1e4a32cb5e80f2908e4642f9e7ffe71ae63792cc",
+      "executable_sha256": "f9e12ad61623468da8ead68368a703dbada42434a126c05235d53dcd4f9ebf29",
+      "archive_sha256": "928c34949c4b23089fa240765e424e6cc95451568ec295f9729f906964fc17f2",
+      "fatbins": 139,
+      "embedded_ptx_entries": 0,
+      "architectures": {
+        "80": 139,
+        "86": 139,
+        "89": 139,
+        "120": 139,
+        "121": 139
+      },
+      "driver_load_error": "CUDA_ERROR_NO_BINARY_FOR_GPU (209)"
+    },
+    "unmodified_source_rebuild_sha256": "6ce4ee3108b3b67246ab1b82f59a7edf07f8f17d1d74675e04b5c5a92f45ab84",
+    "gpu_uuid": "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd",
+    "source_options": {
+      "bf16": [],
+      "int8": [
+        "--no-drafts",
+        "--prompt-precision",
+        "int8"
+      ],
+      "extra": "INT8 options plus TF_AFFINE4_DECODE_ROWS=all, TF_AFFINE4_PREFILL_TILES=compact, TF_AFFINE4_DENSE_ROWS=1, TF_MOE_ROUTER_ROW=1, TF_NVFP4_DECODE_WARPS=1"
+    },
+    "medians": {
+      "bf16": {
+        "prefill_tokens_per_second": 170.3773,
+        "decode_tokens_per_second": 17.1872,
+        "median_native_ttft_seconds": 1.336177,
+        "all_semantic_and_stop_checks_passed": true
+      },
+      "int8": {
+        "prefill_tokens_per_second": 326.7387,
+        "decode_tokens_per_second": 16.9859,
+        "median_native_ttft_seconds": 0.69801,
+        "all_semantic_and_stop_checks_passed": true
+      },
+      "extra": {
+        "prefill_tokens_per_second": 326.6539,
+        "decode_tokens_per_second": 17.0146,
+        "median_native_ttft_seconds": 0.698248,
+        "all_semantic_and_stop_checks_passed": true
+      }
+    },
+    "identical_four_output_token_hashes_for_int8_and_extra": true,
+    "int8_output_token_sha256": [
+      "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+      "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+      "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+      "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7"
+    ],
+    "reviewed_main": "1eed88bb097d974a2e0ef70c69ca874306e16c6d",
+    "affected_cuda_and_dispatch_files_unchanged_between_tags_and_reviewed_main": 7
+  }
+}

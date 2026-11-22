@@ -111,7 +111,7 @@ Start with Ubuntu 24.04 and a Tesla V100. Each guide checks for the NVIDIA R580 
 | [ZML](docs/guides/zml.md) | Qwen3.5-0.8B | The CUDA example answered “Paris”. The 35B AWQ loader stopped on a missing expert tensor. |
 | [Strata](docs/guides/strata.md) | Qwen3.5-35B-A3B-MTP, GGUF UD-Q4_K_XL | The CUDA 13 server answered “Paris”. With VF, **1866.8 tokens/s** prefill and **152.0 tokens/s** decode. [Native CUDA 12 comparison](docs/guides/benchmarks/strata-results.json) |
 | [NInfer](docs/guides/ninfer.md) | Qwen3.6-35B-A3B, upstream `.ninfer` | The official CLI answered “Paris” using the published Q4/Q5/Q6 weights and `VF_CAPABILITY=12.0`. |
-| [TensorFold](docs/guides/tensorfold.md) | Qwen3.5-35B-A3B, MLX 4-bit experts and 8-bit routers | The server answered “Paris”. INT8 prompt processing reached **327.37 tokens/s** prefill and **17.03 tokens/s** decode. [Benchmark](docs/guides/benchmarks/tensorfold-results.json) |
+| [TensorFold](docs/guides/tensorfold.md) | Qwen3.5-35B-A3B, MLX 4-bit experts and 8-bit routers | The official 1.3.3 source build answered “Paris” and reached **326.74 tokens/s** prefill and **16.99 tokens/s** decode with INT8 prompt processing. [Measurements](docs/guides/benchmarks/tensorfold-experimental.json) |
 
 ## What runs
 
