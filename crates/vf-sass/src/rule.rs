@@ -133,6 +133,8 @@ mod tests {
             (0x000fc8000f8ffa3f_0000000506067291, 0x000fc800078ffaff_000000696a6a7211),
             // LEA.HI R0, R2, UR14, RZ, 0x1c -> LEA.HI R0, R2, R114, RZ, 0x1c
             (0x000fe4000f8fe0ff_0000000e02007c11, 0x000fe400078fe0ff_0000007202007211),
+            // ULEA.HI UR4, UR4, 0x1, URZ, 0x1e -> LEA.HI R104, R104, 0x1, RZ, 0x1e
+            (0x000fce000f8ff03f_0000000104047891, 0x000fce00078ff0ff_0000000168687811),
         ];
         let mut decoder = Decoder::new(75);
         for (source, expected) in cases {
