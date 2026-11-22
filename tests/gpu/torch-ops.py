@@ -21,8 +21,17 @@ GPU do not round every function alike). A case ends as
 The cases run in a worker process, restarted after the one that ends it. With PATTERN, only the cases
 whose name contains one of them; -v prints every case. The exit status is 1 if a case is DIFFERENT
 or a CRASH.
+
+A worker writes its verdicts on a descriptor of its own: kernels print on standard output, and a
+message that runs into a verdict would hide it. What the workers print on standard output and on
+standard error goes to two files beside the proxy log. A case that has not ended after
+$VF_CASE_WAIT seconds (default 600) is stopped and counted as a CRASH. The exit status is 1 too if
+the run itself went wrong: a worker wrote a line that is not a verdict, the verdicts are not as many
+as the cases, or a worker ended, or had to be stopped, outside a case; 2 if no case could be run.
 """
-import os, re, subprocess, sys, tempfile
+import os, re, select, signal, subprocess, sys, tempfile
+
+VERDICTS = ('ok', 'DIFFERENT', 'refused', 'error', 'CRASH', 'skipped')
 
 
 def build():
@@ -393,19 +402,30 @@ def through_double(expected, got, truth):
     return None
 
 
-def worker(first, patterns):
-    """Run the cases from number `first` on; one line each: number, name, verdict, detail."""
+def worker(first, channel, patterns):
+    """Run the cases from number `first` on. On the descriptor `channel`: the number of cases
+    selected ('cases', N), then a line when a case starts and one when it ends: number, name,
+    verdict, detail."""
+    import faulthandler
     import torch
+    os.set_inheritable(channel, False)
+    out = os.fdopen(channel, 'w', buffering=1)
+
+    def say(*fields):
+        out.write('\t'.join(str(f) for f in fields) + '\n')
+    # (Where it was, on standard error, when it is stopped for taking too long.)
+    faulthandler.register(signal.SIGUSR1)
     cases = build()
+    say('cases', sum(1 for name, fn, inputs in cases if not patterns or any(p in name for p in patterns)))
     torch.zeros(1, device='cuda')
     for number, (name, fn, inputs) in enumerate(cases):
         if number < first or (patterns and not any(p in name for p in patterns)):
             continue
-        print('%d\t%s\tstart\t' % (number, name), flush=True)
+        say(number, name, 'start', '')
         try:
             expected = fn('cpu') if inputs == (None,) else fn(*inputs)
         except Exception as e:
-            print('%d\t%s\tskipped\t%s' % (number, name, str(e).split('\n')[0][:150]), flush=True)
+            say(number, name, 'skipped', str(e).split('\n')[0][:150])
             continue
         try:
             got = fn('cuda') if inputs == (None,) else fn(*[t.cuda() for t in inputs])
@@ -426,60 +446,146 @@ def worker(first, patterns):
                 (torch.zeros(4, device='cuda') + 1).cpu()
                 torch.cuda.synchronize()
             except Exception:
-                print('%d\t%s\tCRASH\t%s' % (number, name, detail), flush=True)
-                sys.stdout.flush()
+                say(number, name, 'CRASH', detail)
+                out.flush()
                 os._exit(3)
-        print('%d\t%s\t%s\t%s' % (number, name, verdict, detail), flush=True)
+        say(number, name, verdict, detail)
+
+
+def lines(fd, wait):
+    """What a worker writes on its channel, line by line, until it closes it; None as the last
+    item if it writes nothing for `wait` seconds."""
+    pending = b''
+    while True:
+        if not select.select([fd], [], [], wait)[0]:
+            yield None
+            return
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        pending += chunk
+        *complete, pending = pending.split(b'\n')
+        for line in complete:
+            yield line.decode(errors='replace')
+    if pending:
+        yield pending.decode(errors='replace')
+
+
+def stop(p):
+    """Stop a worker: SIGUSR1 first (its fault handler then writes where it was on its standard
+    error), then SIGKILL. False if it has not ended even so."""
+    for sig, wait in ((signal.SIGUSR1, 1), (signal.SIGKILL, 60)):
+        p.send_signal(sig)
+        try:
+            p.wait(wait)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+    return False
+
+
+def tail(path, offset):
+    """What was written to the file `path` from `offset` on: its last 2,000 characters at most."""
+    with open(path, 'rb') as f:
+        f.seek(max(offset, os.path.getsize(path) - 2000))
+        return f.read().decode(errors='replace').strip()
 
 
 def main():
     args = sys.argv[1:]
     if args[:1] == ['--worker']:
-        return worker(int(args[1]), args[2:])
+        return worker(int(args[1]), int(args[2]), args[3:])
     verbose = '-v' in args
     patterns = [a for a in args if a != '-v']
+    wait = int(os.environ.get('VF_CASE_WAIT', '600'))
     # (With the other logs when the script that runs this says where they are: not in /tmp,
     # which on the nodes is memory.)
     logs = os.path.join(os.environ['VF_OUT'], 'logs') if os.environ.get('VF_OUT') else None
     if logs:
         os.makedirs(logs, exist_ok=True)
     log = tempfile.NamedTemporaryFile(prefix='vf-torch-', suffix='.log', delete=False, dir=logs).name
+    output, errors = log[:-len('.log')] + '.out', log[:-len('.log')] + '.err'
     env = dict(os.environ, VF_LOG=log, VF_LOG_LEVEL=os.environ.get('VF_LOG_LEVEL', '1'))
-    results, first = {}, 0
+    results, first, expected, problems = {}, 0, None, []
+
+    def problem(text):
+        problems.append(text)
+        print('%-9s %s' % ('RUN', text), flush=True)
     while True:
-        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), '--worker', str(first)] + patterns,
-                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        running = None
-        for line in p.stdout:
-            number, name, verdict, detail = (line.rstrip('\n').split('\t') + ['', '', ''])[:4]
-            if not number.isdigit():
+        offset = os.path.getsize(errors) if os.path.exists(errors) else 0
+        r, w = os.pipe()
+        with open(output, 'ab') as out, open(errors, 'ab') as err:
+            p = subprocess.Popen([sys.executable, os.path.abspath(__file__), '--worker', str(first), str(w)] + patterns,
+                                 env=env, stdout=out, stderr=err, pass_fds=(w,))
+        os.close(w)
+        running, last, silent = None, None, False
+        for line in lines(r, wait):
+            if line is None:
+                silent = True
+                break
+            fields = line.split('\t', 3)
+            if len(fields) == 2 and fields[0] == 'cases' and fields[1].isdigit():
+                if expected is not None and int(fields[1]) != expected:
+                    problem('a worker said %s cases, the first %d' % (fields[1], expected))
+                expected = int(fields[1])
                 continue
+            if len(fields) != 4 or not fields[0].isdigit() or fields[2] not in VERDICTS + ('start',):
+                problem('a worker wrote what is not a verdict: %r' % line[:200])
+                continue
+            number, name, verdict, detail = int(fields[0]), fields[1], fields[2], fields[3]
             if verdict == 'start':
-                running = (int(number), name)
+                running = (number, name)
                 continue
-            results[int(number)] = (name, verdict, detail)
-            running = None
+            results[number] = (name, verdict, detail)
+            running, last = None, verdict
             if verdict == 'CRASH':
-                first = int(number) + 1
+                first = number + 1
             if verbose or verdict not in ('ok', 'skipped', 'refused'):
                 print('%-9s %-28s %s' % (verdict, name, detail), flush=True)
-        errors = p.stderr.read()
-        p.wait()
-        if running is None and p.returncode == 3:
-            continue                    # it lost the GPU in a case and said so: on from the next
-        if running is None:
-            if p.returncode != 0 and not results:
-                print(errors[-2000:])
-                return 2
+        os.close(r)
+        # (The worker closes its channel when it ends; it may also be stuck after that.)
+        ended = not silent
+        if ended:
+            try:
+                p.wait(wait)
+            except subprocess.TimeoutExpired:
+                ended = False
+        if not ended and not stop(p):
+            problem('the worker from case %d did not end even with SIGKILL: the run ends here' % first)
             break
-        # The worker ended inside a case.
-        results[running[0]] = (running[1], 'CRASH', 'exit status %d; %s' % (p.returncode, errors.strip().split('\n')[-1][:200]))
-        print('%-9s %-28s %s' % ('CRASH', running[1], results[running[0]][2]), flush=True)
-        first = running[0] + 1
+        if running is not None:
+            # The worker ended inside a case, or was stopped there.
+            detail = ('no end within %d s: stopped' % wait if silent
+                      else 'exit status %d; %s' % (p.returncode, tail(errors, offset).split('\n')[-1][:200]))
+            results[running[0]] = (running[1], 'CRASH', detail)
+            print('%-9s %-28s %s' % ('CRASH', running[1], detail), flush=True)
+            first = running[0] + 1
+            continue
+        if not ended:
+            problem('the worker from case %d %s and was stopped' % (
+                first, 'wrote nothing for %d s outside a case' % wait if silent else 'did not end within %d s after its last case' % wait))
+            break
+        if p.returncode == 3 and last == 'CRASH':
+            continue                    # it lost the GPU in a case and said so: on from the next
+        if p.returncode != 0:
+            if not results:
+                print(tail(errors, offset))
+                return 2
+            problem('the worker from case %d ended with status %d outside a case: %s' % (
+                first, p.returncode, tail(errors, offset).split('\n')[-1][:200]))
+        break
+    if expected is None:
+        print(tail(errors, 0))
+        print('no worker said how many cases there are')
+        return 2
+    if len(results) != expected:
+        problem('%d verdicts for %d cases' % (len(results), expected))
     count = {}
     for name, verdict, detail in results.values():
         count[verdict] = count.get(verdict, 0) + 1
     print('%d cases: %s' % (len(results), ', '.join('%d %s' % (n, v) for v, n in sorted(count.items(), key=lambda kv: -kv[1]))))
+    if problems:
+        print('the run itself went wrong %d time%s (the RUN lines)' % (len(problems), '' if len(problems) == 1 else 's'))
     reasons = {}
     for line in open(log, errors='replace') if os.path.exists(log) else []:
         m = re.search(r'is not given to the program: (.*)$', line)
@@ -501,7 +607,8 @@ def main():
         for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print('  %4d  %s' % (n, reason[:160]))
     print('the proxy log: %s' % log)
-    return 1 if count.get('DIFFERENT') or count.get('CRASH') else 0
+    print('what the workers printed: %s, %s' % (output, errors))
+    return 1 if count.get('DIFFERENT') or count.get('CRASH') or problems else 0
 
 
 if __name__ == '__main__':

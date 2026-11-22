@@ -6,7 +6,9 @@
 #   a   transformers in float32 on the GPU: every token the CPU's (plain greedy)
 #   b   a kernel compiled by Triton: the CPU's result, bit for bit
 #   c   vLLM's engine, greedy, float16: every token the CPU's (float32, plain greedy)
-#   c2  vLLM's engine, sampling (top-k 50, top-p 0.9): it answers (there is nothing to compare with)
+#   c2  vLLM's engine, sampling (top-k 50, top-p 0.9): every token it samples is among the 50
+#       most likely and within 0.9 of their probability, by the log-probabilities of the logits
+#       that the engine itself computed (the kernels of the sampling; the logits are c's)
 #   d   vLLM's HTTP server (the OpenAI API): a completion for each prompt, greedy with the
 #       repetition penalty that the model's own configuration asks for (the server applies it by
 #       default, and then its kernel for penalties runs): the CPU's text, made with that penalty
@@ -133,13 +135,17 @@ refused() {
     echo "$1" | grep -m1 'cannot run on this GPU' | cut -c1-300
 }
 verdict() {
-    # verdict STAGE OUTPUT WORD: PASS when a line of the output is WORD, else REFUSED or FAIL.
-    # With ALL_MATCH for WORD, a text that leaves the CPU's only where the CPU itself had a near
-    # tie (greedy_compare.py) passes too, and says so.
-    if echo "$2" | grep -q "^$3\$"; then
+    # verdict STAGE OUTPUT WORD: PASS when the program's verdict is WORD, else REFUSED or FAIL. The
+    # verdict is what follows `verdict: ` on the last line of the output that starts so: what
+    # else the program, its libraries and its kernels printed is not looked at for it. With
+    # ALL_MATCH for WORD, a text that leaves the CPU's only where the CPU itself had a near tie
+    # (greedy_compare.py) passes too, and says so.
+    local said
+    said=$(echo "$2" | sed -n 's/^verdict: //p' | tail -1)
+    if [ "$said" = "$3" ]; then
         echo "PASS stage-$1"
-    elif [ "$3" = ALL_MATCH ] && echo "$2" | grep -q "^MATCH_BUT_NEAR_TIES "; then
-        echo "PASS stage-$1 (with $(echo "$2" | sed -n 's/^MATCH_BUT_NEAR_TIES //p') near tie(s): see the lines above)"
+    elif [ "$3" = ALL_MATCH ] && [[ "$said" =~ ^MATCH_BUT_NEAR_TIES\ [0-9]+$ ]]; then
+        echo "PASS stage-$1 (with ${said#MATCH_BUT_NEAR_TIES } near tie(s): see the lines above)"
     elif [ -n "$(refused "$2")" ]; then
         echo "REFUSED stage-$1: $(refused "$2")"; failed=1
     elif echo "$2" | grep -q '^RAN OUT OF TIME$'; then
@@ -204,8 +210,8 @@ if want c2; then
     echo "=== stage c2: vLLM's engine, sampling (top_k=50, top_p=0.9, seed=42) ==="
     vllm_sample=$(MODEL="$model" DTYPE=float16 MAX_TOKENS=50 TEMPERATURE=0.8 TOP_K=50 TOP_P=0.9 SEED=42 \
         timeout "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1; [ $? = 124 ] && echo "RAN OUT OF TIME") || true
-    echo "$vllm_sample" | grep -E "prompt [0-9]|tok/s|^FAIL" | cut -c1-200
-    verdict c2 "$vllm_sample" PASS
+    echo "$vllm_sample" | grep -E "prompt [0-9]|WITHIN|OUTSIDE|tok/s|^FAIL" | cut -c1-200
+    verdict c2 "$vllm_sample" ALL_WITHIN
 fi
 
 # ---------- stage d: vLLM's HTTP server ----------

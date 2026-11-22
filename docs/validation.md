@@ -251,7 +251,7 @@ with the next instruction waiting, and the distances between the steps and after
 ## 3. Controls
 
 A check that never objects proves nothing. `reference/controls.py` makes the reference translator
-wrong on purpose, one way at a time, and counts what the validator finds in the result: 103
+wrong on purpose, one way at a time, and counts what the validator finds in the result: 107
 controls, each described at the head of that file. A control that changes translations and meets
 no objection anywhere is a hole in the validator, or a control that tests nothing.
 
@@ -263,7 +263,7 @@ its top, which a register is loaded with (`VF_BORROW=3`), for the two controls o
 register. In each pass the translation as it is is validated first. On 34 cubins (the 13 test cubins of `tests/kernels`, 17 of PyTorch's and
 4 of the held-out corpus, chosen for having what the controls need):
 
-- **100 of the 103 controls are objected to**, each in one cubin at least, and none changes
+- **104 of the 107 controls are objected to**, each in one cubin at least, and none changes
   translations without being objected to somewhere;
 - 2 change nothing in any of these cubins, nor in any of PyTorch's 475: nothing at hand has
   what they take away (below);
@@ -351,7 +351,7 @@ control was written for: a fault often breaks more than one rule.)
 | `short_home` | The declarations say less than the life of a uniform register in its home: an instruction of the life that neither reads nor writes it is left out (the translation is as it was: what the validator is told is wrong) | default: 1 of 2; `VF_BORROW=1`: 17 of 18 |
 | `pool_in_home_unsaid` | As overlap_pool, and no line of the declarations says that the pair is taken where it is the home of a uniform register that is alive | default: 1 of 1; `VF_BORROW=1`: 5 of 5 |
 
-**The frame (26)**
+**The frame (30)**
 
 | Control | What is made wrong | Objected to (cubins objected to, of those it changes) |
 |---|---|---|
@@ -381,6 +381,10 @@ control was written for: a fault often breaks more than one rule.)
 | `standin_operand_l3` | A uniform register of the frame is loaded into an ordinary register that the instruction itself reads, and read from there | default: 7 of 7; `=8`: 18 of 18; `=5`: 10 of 10 |
 | `standin_shared_l3` | Two uniform registers of the frame that an instruction reads are loaded into one register | default: 5 of 5; `=8`: 20 of 20; `=5`: 10 of 10 |
 | `base_after_use_l3` | The top of the frame is loaded after the first load or store that takes its address from it, with the waits that this order asks for: that access is addressed from what the register held before | `=3`: 16 of 16 |
+| `up_standin_l3` | A uniform predicate kept in the frame is loaded, after the uniform registers of the frame that the instruction reads, into the register that stands for the first of them, and read back from there | default: 1 of 1; `=8`: 1 of 1; `=5`: 2 of 2 |
+| `up_wrong_word_l3` | A uniform predicate kept in the frame is loaded from the word after its own | default: 1 of 1; `=8`: 1 of 1; `=5`: 2 of 2 |
+| `up_no_store_l3` | What an instruction writes of a uniform predicate kept in the frame is written down in its temporary register and not stored | default: 1 of 1; `=8`: 1 of 1; `=5`: 2 of 2 |
+| `up_unwaited_l3` | What reads back a uniform predicate loaded from the frame does not wait for the load | default: 1 of 1; `=8`: 1 of 1; `=5`: 2 of 2 |
 
 **Room (16)**
 
@@ -439,7 +443,7 @@ declared put away at an instruction where nothing stored it or brought it back p
 of pairs with a half that had no other half ended the validator on an exception instead of an
 objection; and in a function that borrows registers, each half of a pair was objected to for
 writing the destination of its other product, which is what it must do. Controls find such
-faults where someone thought of a control: the 102 above are the measure of what was thought
+faults where someone thought of a control: the 106 above are the measure of what was thought
 of. (Nine of them were written on 2026-11-20 for the rule on what the frame's moves carry,
 after a reading by someone else had shown two wrong translations that passed: section 7.
 They make the translator put its instructions in a wrong order, or take a wrong register,
@@ -752,8 +756,10 @@ and 0.0005, and the CPU's most likely token at 97.9 % and 98.4 % of the position
 
 **vLLM 0.34.0** (`tests/gpu/vllm.sh`, Qwen2.5-0.5B-Instruct, three prompts). `transformers` in
 f32 on the GPU gives every token of the CPU; a kernel compiled by Triton gives the CPU's result
-bit for bit; the engine's greedy text (f16) is the CPU's (f32) token for token; with sampling it
-answers, which is compared with nothing; its HTTP server, with the repetition penalty that the
+bit for bit; the engine's greedy text (f16) is the CPU's (f32) token for token; with sampling
+(top-k 50, top-p 0.9), every token it samples is among the 50 most likely and within 0.9 of their
+probability by the log-probabilities of its own logits, 150 of 150 (what the kernels of the
+sampling do, not what the model computes); its HTTP server, with the repetition penalty that the
 model's configuration asks for, gives the CPU's text made with that penalty.
 
 **SGLang 0.5.23** (`tests/gpu/sglang.sh`, the same model and prompts), with its default

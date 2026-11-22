@@ -1023,6 +1023,53 @@ fn held_predicate_survives_in_the_frame_under_register_pressure() {
     assert_eq!((away.op_or_name("Rb", 255), back.op_or_name("Rd", 255)), (2, 2));
 }
 
+/// USGXT, which no instruction of either corpus has (Triton's kernels do), through the whole
+/// translator: in `k_guarded_state` of `k_guards.sm75.cubin`, `ULOP3.LUT UR6, UR5, 0x1, URZ,
+/// 0xc0, !UPT` at 0x120 made `USGXT UR6, UR5, 0x1` (its scheduling kept). It becomes SGXT from
+/// the register that the load of UR5 at 0x20 writes into the register that the comparison of
+/// UR6 at 0x150 reads. (The reference translator gives the same bytes and map for that cubin,
+/// and its validator finds nothing, at the default and with VF_BORROW=8.)
+#[test]
+fn a_uniform_sign_extension_becomes_sgxt() {
+    let template = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/kernels/translate/k_guards.sm75.cubin"
+    ));
+    let mut input = crate::elf::Elf::parse(template).unwrap();
+    let section = input.section(".text.k_guarded_state").unwrap();
+    let code = &mut input.sections[section].data;
+    assert_eq!(
+        &code[0x120..0x130],
+        &0x000fe2000f8ec03f_0000000105067892_u128.to_le_bytes()
+    );
+    code[0x120..0x130].copy_from_slice(&0x000fe20008000200_000000010506789a_u128.to_le_bytes());
+    let result = translate_with_options(&input.write(), true, &Options::default()).unwrap();
+    assert!(result.report.iter().all(|function| function.refused.is_none()));
+    let out = crate::elf::Elf::parse(&result.bytes).unwrap();
+    let code = &out.sections[out.section(".text.k_guarded_state").unwrap()].data;
+    let map = result.map.unwrap();
+    let mut decoder = Decoder::new(70);
+    let mut became = |origin: u64| {
+        let (_, new, _, what) = map
+            .iter()
+            .find(|(function, _, old, _)| function == "k_guarded_state" && *old == origin)
+            .unwrap();
+        let at = *new as usize;
+        let d = decoder
+            .decode(u128::from_le_bytes(code[at..at + 16].try_into().unwrap()))
+            .unwrap();
+        (what.clone(), d)
+    };
+    let (load_what, load) = became(0x20);
+    let (what, sgxt) = became(0x120);
+    let (_, compare) = became(0x150);
+    assert_eq!((load_what.as_str(), load.mnemonic), ("constant", "MOV"));
+    assert_eq!((what.as_str(), sgxt.mnemonic), ("ordinary registers", "SGXT"));
+    assert_eq!(sgxt.op_or_name("Sb", 0), 1);
+    assert_eq!(sgxt.op_or_name("Ra", 255), load.op_or_name("Rd", 254));
+    assert_eq!(sgxt.op_or_name("Rd", 255), compare.op_or_name("Ra", 254));
+}
+
 #[test]
 fn graph_register_policy_only_rebudgets_an_entry_that_loses_a_legal_block() {
     let original = include_bytes!("../../../../tests/kernels/k_fit_test.135.sm75.cubin");

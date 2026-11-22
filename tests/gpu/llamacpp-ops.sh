@@ -49,7 +49,10 @@ for operation in "$@"; do
     if [ "$mode" = test ]; then
         proxy test -o "$operation" -b CUDA0 >"$log-test-proxy.log" 2>&1
         status=$?
-        ok=$(grep -c "OK" "$log-test-proxy.log") bad=$(grep -c "FAIL" "$log-test-proxy.log")
+        # (The lines of the cases only, "  OPERATION(PARAMETERS): ... OK" or "... FAIL", the colours
+        # taken away: not "  Backend CUDA0: OK", the last "OK", nor any other line with the word.)
+        cases=$(sed 's/\x1b\[[0-9;]*m//g' "$log-test-proxy.log" | grep -a '^  [A-Za-z0-9_][A-Za-z0-9_]*(.*): .*\(OK\|FAIL\)$')
+        ok=$(printf '%s\n' "$cases" | grep -c 'OK$') bad=$(printf '%s\n' "$cases" | grep -c 'FAIL$')
         if [ "$ok" -gt 0 ] && [ "$bad" = 0 ] && [ "$status" = 0 ]; then verdict=PASS; else verdict=FAIL; failed=1; fi
         stopped=
         [ "$status" = 0 ] || [ "$bad" != 0 ] || stopped=", then the program stopped (status $status): $(grep -a -m1 "cannot run on this GPU\|CUDA error" "$log-test-proxy.log" | cut -c1-200)"

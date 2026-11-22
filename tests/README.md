@@ -93,6 +93,13 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 
 (Times on one V100 with everything already compiled and in the file cache.)
 
+`torch-ops.py` and `torch-models.py` run their cases in worker processes, which write their
+verdicts on a descriptor or to a file of their own (what kernels print on standard output cannot
+hide one); a case that has not ended after `$VF_CASE_WAIT` seconds (default 600) is stopped and
+counted as a CRASH. `python3 tests/gpu/torch-workers.py` checks that on the host, with fake
+workers (no GPU, no PyTorch, 15 seconds): kernels that print, a worker that fills its standard
+error or does not end, a line that is not a verdict, fewer verdicts than cases.
+
 ### Launcher tests (`tests/launcher/`)
 
 No GPU needed. Exercises the launcher (`vf`) on fake installations (both the archive and

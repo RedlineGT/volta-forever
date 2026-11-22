@@ -9,7 +9,9 @@ such a first difference is a NEAR TIE, said as such with the lead, and what foll
 compared (another prefix). Any other first difference is a DIFFERENCE.
 
     compare(record, ids=None, text=None) -> (kind, detail): kind is 'match', 'near' or 'differ'
-    conclude(kinds) -> the last line to print: ALL_MATCH, MATCH_BUT_NEAR_TIES n, or SOME_DIFFER
+    conclude(kinds) -> the verdict: ALL_MATCH, MATCH_BUT_NEAR_TIES n, or SOME_DIFFER, which the
+        programs print on a line of its own after `verdict: ` (vllm.sh and sglang.sh read that
+        line, the last of them, and no other)
 """
 
 NEAR = 0.1

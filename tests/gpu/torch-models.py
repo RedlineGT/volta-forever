@@ -24,8 +24,13 @@ With -v the line of every case says how far the GPU is from the CPU (the largest
 fraction of the largest value) and how long the GPU took. A refused case names the kernel and why
 its function is not translated, as the proxy says it. The exit status is 1 if a case is DIFFERENT
 or a CRASH.
+
+A case writes its verdict to a file of its own: kernels print on standard output, and a message
+that runs into a verdict would hide it. A process that ends without a verdict, or with a line that
+is not one, is a CRASH; so is one that has not ended after $VF_CASE_WAIT seconds (default 600): it
+is stopped.
 """
-import os, re, subprocess, sys, tempfile
+import os, re, signal, subprocess, sys, tempfile
 
 
 def cases():
@@ -207,10 +212,17 @@ def cases():
     return out
 
 
-def worker(name):
-    """One case: 'VERDICT<tab>DETAIL' on standard output."""
+def worker(name, path):
+    """One case: 'VERDICT<tab>DETAIL' to the file `path`."""
+    import faulthandler
     import time
     import torch
+
+    def say(line):
+        with open(path, 'w') as f:
+            f.write(line + '\n')
+    # (Where it was, on standard error, when it is stopped for taking too long.)
+    faulthandler.register(signal.SIGUSR1)
     build, tolerance = next((b, t) for n, b, t in cases() if n == name)
     reference = build(torch.device('cpu'))
     reference = reference if isinstance(reference, tuple) else (reference,)
@@ -227,7 +239,7 @@ def worker(name):
     except Exception as e:                                   # noqa: BLE001 (whatever PyTorch raises is the result)
         text = str(e).split('\n')[0][:160]
         refused = 'PTX JIT compilation failed' in str(e) or 'invalid device function' in str(e)
-        print('%s\t%s' % ('refused' if refused else 'error', '' if refused else '%s: %s' % (type(e).__name__, text)))
+        say('%s\t%s' % ('refused' if refused else 'error', '' if refused else '%s: %s' % (type(e).__name__, text)))
         return
     result = result if isinstance(result, tuple) else (result,)
     worst, nan = 0.0, 0
@@ -237,19 +249,33 @@ def worker(name):
         scale = float(want.abs().max()) or 1.0
         worst = max(worst, float((got - want).abs().max()) / scale)
     ok = worst <= tolerance and not nan
-    print('%s\tfrom the CPU by %.2e of the largest value (allowed %.0e)%s; %.0f ms, then %.0f ms' % (
+    say('%s\tfrom the CPU by %.2e of the largest value (allowed %.0e)%s; %.0f ms, then %.0f ms' % (
         'ok' if ok else 'DIFFERENT', worst, tolerance, ', %d NaN or infinite' % nan if nan else '', 1000 * first, 1000 * again))
+
+
+def stop(p):
+    """Stop a case's process: SIGUSR1 first (its fault handler then writes where it was on its
+    standard error), then SIGKILL. False if it has not ended even so."""
+    for sig, wait in ((signal.SIGUSR1, 1), (signal.SIGKILL, 60)):
+        p.send_signal(sig)
+        try:
+            p.wait(wait)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+    return False
 
 
 def main():
     args = sys.argv[1:]
     if args[:1] == ['--worker']:
-        return worker(args[1])
+        return worker(args[1], args[2])
     if args[:1] == ['--list']:
         print('\n'.join(n for n, b, t in cases()))
         return 0
     verbose = '-v' in args
     patterns = [a for a in args if a != '-v']
+    wait = int(os.environ.get('VF_CASE_WAIT', '600'))
     names = [n for n, b, t in cases() if not patterns or any(p in n for p in patterns)]
     counts, bad = {}, False
     # (With the other logs when the script that runs this says where they are: not in /tmp,
@@ -258,16 +284,38 @@ def main():
     if logs:
         os.makedirs(logs, exist_ok=True)
     log = tempfile.NamedTemporaryFile(prefix='vf-models-', suffix='.log', delete=False, dir=logs).name
+    answer = log[:-len('.log')] + '.verdict'
     env = dict(os.environ, VF_LOG=log, VF_LOG_LEVEL=os.environ.get('VF_LOG_LEVEL', '1'))
     for name in names:
         open(log, 'w').close()
-        p = subprocess.run([sys.executable, os.path.abspath(__file__), '--worker', name], capture_output=True, text=True, env=env)
-        lines = [line for line in p.stdout.splitlines() if '\t' in line]
-        if p.returncode != 0 or not lines:
-            tail = (p.stderr.strip().splitlines() or [''])[-1][:160]
+        if os.path.exists(answer):
+            os.unlink(answer)
+        # (Standard output and error to files: the process is not held by a full pipe.)
+        with tempfile.TemporaryFile(dir=logs) as out, tempfile.TemporaryFile(dir=logs) as err:
+            p = subprocess.Popen([sys.executable, os.path.abspath(__file__), '--worker', name, answer],
+                                 stdout=out, stderr=err, env=env)
+            try:
+                p.wait(wait)
+                stopped = None
+            except subprocess.TimeoutExpired:
+                stopped = stop(p)
+            err.seek(max(0, err.seek(0, 2) - 2000))
+            tail = (err.read().decode(errors='replace').strip().splitlines() or [''])[-1][:160]
+        verdict = open(answer, errors='replace').read() if os.path.exists(answer) else ''
+        fields = verdict[:-1].split('\t', 1) if verdict.endswith('\n') and verdict.count('\n') == 1 else []
+        if stopped is not None:
+            detail = 'no end within %d s: stopped' % wait
+            if verdict:
+                detail += ' (it had written %r)' % verdict[:120]
+            if not stopped:
+                detail += '; it did not end even with SIGKILL: the run ends here'
+            verdict = 'CRASH'
+        elif p.returncode != 0 or not verdict:
             verdict, detail = 'CRASH', 'the process ended with status %d: %s' % (p.returncode, tail)
+        elif len(fields) != 2 or fields[0] not in ('ok', 'DIFFERENT', 'refused', 'error'):
+            verdict, detail = 'CRASH', 'the process ended with what is not a verdict: %r' % verdict[:160]
         else:
-            verdict, detail = lines[-1].split('\t', 1)
+            verdict, detail = fields
         if verdict == 'refused':
             # What the proxy said of the kernels it did not give: their names, and why.
             said = []
@@ -280,8 +328,13 @@ def main():
         bad = bad or verdict in ('DIFFERENT', 'CRASH')
         if verbose or verdict != 'ok':
             print('%-9s %-28s %s' % (verdict, name, detail), flush=True)
-    print('%d cases: %s' % (len(names), ', '.join('%d %s' % (counts[v], v) for v in ('ok', 'DIFFERENT', 'refused', 'error', 'CRASH') if v in counts)))
+        if stopped is False:
+            break
+    print('%d cases: %s%s' % (len(names), ', '.join('%d %s' % (counts[v], v) for v in ('ok', 'DIFFERENT', 'refused', 'error', 'CRASH') if v in counts),
+                              ', %d not run' % (len(names) - sum(counts.values())) if sum(counts.values()) < len(names) else ''))
     os.unlink(log)
+    if os.path.exists(answer):
+        os.unlink(answer)
     return 1 if bad else 0
 
 

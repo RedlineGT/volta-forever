@@ -41,6 +41,8 @@ jobs:
         run: |
           dash tests/launcher/launcher.sh
           bash --posix tests/launcher/launcher.sh
+      - name: How the PyTorch test programs run their workers, with fake workers
+        run: python3 tests/gpu/torch-workers.py
       - name: The installer is a POSIX shell script
         run: |
           dash -n install.sh

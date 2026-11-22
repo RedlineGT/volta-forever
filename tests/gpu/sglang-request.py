@@ -4,7 +4,7 @@ reference, greedy, and compare it with the reference's (tests/gpu/sglang.sh, sta
 
 Environment: PORT (the server listens on 127.0.0.1), REF_FILE (made by vllm-ref.py, plain greedy).
 The request says: temperature 0, no repetition penalty, as many new tokens as the reference has.
-Prints a line for each prompt, then ALL_MATCH, MATCH_BUT_NEAR_TIES n or SOME_DIFFER
+Prints a line for each prompt, then `verdict: ` and ALL_MATCH, MATCH_BUT_NEAR_TIES n or SOME_DIFFER
 (greedy_compare.py says what a near tie is)."""
 import json, os, sys, time, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,5 +36,5 @@ for i, r in enumerate(ref):
             print('     the server\'s own log-probabilities at that token: %s' % ', '.join('%r %.4f' % (t[2], t[0]) for t in top))
         except Exception as e:
             print('     (the server\'s log-probabilities at that token were not read: %s)' % str(e)[:100])
-print(greedy_compare.conclude(kinds))
+print('verdict:', greedy_compare.conclude(kinds))
 sys.exit(1 if 'differ' in kinds else 0)
