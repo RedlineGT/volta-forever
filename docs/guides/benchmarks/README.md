@@ -95,7 +95,7 @@ The official NInfer server processed each 227-token prompt without a prefix-cach
 
 ## TensorFold
 
-On official TensorFold 1.3.3, VF raised decode from **72.05 to 78.55 tokens/s** by changing how each warp loads the two BF16 rows used for router scores. Prefill measured **463.90 / 463.73**. All four replies matched with drafting disabled. The three measured requests read 227 uncached tokens and generated 64. Native llama.cpp measured **470.60 / 99.49** on the same V100 with GGUF Q4_K_M. TensorFold used MLX affine Q4. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [Per-request timings and GPU profiles](tensorfold-bf16-router.json) · [Earlier Q4 expert comparison](tensorfold-affine-q4.json) · [Native reference](tensorfold-stock-vf.json)
+Official TensorFold 1.3.3 ran the MLX affine Q4 checkpoint at **463.54 prefill and 57.69 decode tokens/s**. The three measured requests used 227 uncached input tokens, 64 output tokens and drafting disabled. Native llama.cpp on the same V100 measured **468.67 / 99.67** with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [TensorFold timings](tensorfold-generic.json) · [Native reference](llamacpp-reference.json)
 
 ## llama.cpp
 

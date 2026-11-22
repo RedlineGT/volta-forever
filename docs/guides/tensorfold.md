@@ -85,17 +85,14 @@ curl -fsSLO "$base/tensorfold.py" && curl -fsSLO "$base/prompts.json"
 python3 tensorfold.py
 ```
 
-The three measured requests each read 227 uncached tokens and generated 64. The medians use TensorFold’s native phase timers and exclude the warm-up. Decode counts the 63 tokens after the first. Both TensorFold runs used the same official 1.3.3 executable, MLX checkpoint and V100-SXM2-32GB with drafting disabled.
+TensorFold answered Paris and generated 64 tokens for each of the three uncached 227-token prompts. The medians exclude the warm-up. Decode counts the 63 tokens after the first. [Per-request timings](./benchmarks/tensorfold-generic.json)
 
-| Build | Median prefill (tokens/s) | Median decode (tokens/s) |
+| Engine on the same V100 | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: |
-| TensorFold before the BF16 router change | 463.90 | 72.05 |
-| TensorFold with VF from section 4 | **463.73** | **78.55** |
-| Native llama.cpp with GGUF Q4_K_M on the same card | 470.60 | 99.49 |
+| Official TensorFold with VF, MLX affine Q4 | **463.54** | **57.69** |
+| Native llama.cpp, GGUF Q4_K_M | 468.67 | 99.67 |
 
-When decoding one token, each warp reads two BF16 rows for the router and computes the scores in the original FP32 order. Across 40 layers, this reduced router time from 2.14 to 0.93 ms per token. Decode improved by 9.02% with identical replies to all four prompts. Earlier runs measured the Q4 expert projection separately. [Per-request timings and GPU profile](./benchmarks/tensorfold-bf16-router.json) · [Earlier expert measurements](./benchmarks/tensorfold-affine-q4.json) · [Same-card native reference](./benchmarks/tensorfold-stock-vf.json)
-
-Earlier measurements cover shared operand checks, dense projections, FP32 operand forwarding and two- and four-product groups. [Shared operand checks](./benchmarks/tensorfold-expert-checks.json) · [Dense projections](./benchmarks/tensorfold-dense-bf16.json) · [Operand forwarding](./benchmarks/tensorfold-bf16-forwarding.json) · [Four-product groups](./benchmarks/tensorfold-four-products.json) · [Two-product groups](./benchmarks/tensorfold-bf16-row.json)
+Both engines used Qwen3.5-35B-A3B with speculative decoding disabled. The checkpoints use different four-bit formats. [Native checkpoint and timings](./benchmarks/llamacpp-reference.json)
 
 ## 6. Additional notes
 
