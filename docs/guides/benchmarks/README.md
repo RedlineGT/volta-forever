@@ -46,7 +46,7 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 ## Strata
 
-The CUDA 13 engine with VF and the native CUDA 12.9 engine served the same Qwen3.5-35B-A3B-MTP checkpoint on the same V100. Over 15 uncached requests per configuration, Strata 0.1.64 with VF reached 1871.4 prefill and 152.2 decode tokens/s. The native 0.1.64 engine reached 1877.6 and 150.9 on the same card. [Ubuntu guide](../strata.md#5-benchmarks) · [Results and native comparison](strata-results.json)
+Strata CUDA 13 with VF and cuBLAS FP32 prompt projections reached **1894.8 prefill and 152.5 decode tokens/s** on Qwen3.5-35B-A3B-MTP. The default projections reached 1869.9 and 152.4 on the same V100. Each setting ran 15 uncached chats, with 227 prompt and 64 generated tokens each. [Ubuntu guide](../strata.md#5-benchmarks) · [Per-request results and native CUDA comparison](strata-results.json)
 
 ## TensorFold
 
