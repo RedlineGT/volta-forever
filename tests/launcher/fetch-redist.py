@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/fetch-redist.py"
@@ -96,6 +97,34 @@ class FetchTest(unittest.TestCase):
         self.component("a")
         self.finish(self.launch("--runtime"))
         self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+
+    def test_nccl_wheel_runtime_and_retry(self):
+        archive = self.root / "nvidia_nccl_cu12-test.whl"
+        license_name = "nvidia_nccl_cu12-2.32.6.dist-info/licenses/License.txt"
+        lib = self.tree / "lib"
+        lib.mkdir(parents=True)
+        (lib / "libnccl.so.2.vf-part").write_bytes(b"partial from interrupted installation")
+        for complete in (False, True):
+            with zipfile.ZipFile(archive, "w") as wheel:
+                wheel.writestr(license_name, "NCCL license")
+                wheel.writestr("nvidia/nccl/include/nccl.h", "unused header")
+                if complete:
+                    wheel.writestr("nvidia/nccl/lib/libnccl.so.2", b"NCCL runtime")
+            self.manifest["libnccl"] = {"version": "2.32.6", "linux-x86_64": {
+                "relative_path": archive.name, "size": archive.stat().st_size,
+                "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }}
+            (self.root / "manifest.json").write_text(json.dumps(self.manifest))
+            self.finish(self.launch("--runtime", "--only", "libnccl"), success=complete)
+            if not complete:
+                self.assertFalse((self.tree / "lib/libnccl.so.2").exists())
+                self.assertFalse((self.tree / "COMPONENTS.tsv").exists())
+        self.assertEqual((self.tree / "lib/libnccl.so.2").read_bytes(), b"NCCL runtime")
+        self.assertEqual((self.tree / "NCCL-LICENSE.txt").read_text(), "NCCL license")
+        self.assertFalse((self.tree / "include/nccl.h").exists())
+        self.assertFalse((lib / "libnccl.so.2.vf-part").exists())
+        archive.unlink()
+        self.assertIn("unpacked before", self.finish(self.launch("--runtime", "--only", "libnccl")))
 
     def test_concurrent_installs(self):
         self.component("a")

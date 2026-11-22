@@ -59,7 +59,7 @@ libraries.
 
 A program's other CUDA 13 libraries (the cuFFT, cuSOLVER and cuSPARSE of a PyTorch wheel) are
 translated like the rest of its code. `vf fetch --all` downloads their CUDA 12.9.2 builds too
-(2.7 GB in all), which still have code for Volta, and the layer then uses those instead.
+(about 3.0 GB including NVIDIA's CUDA 12 NCCL for multi-GPU collectives). These libraries have code for Volta.
 
 ### Running Ampere kernels on a V100 (`sm_80`)
 

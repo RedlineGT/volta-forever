@@ -70,9 +70,11 @@ them into `cuda-12.9.2/` of the archive's directory, where it looks for them aft
 
 ```sh
 vf fetch           # cuBLAS, cuBLASLt, nvJitLink: 1.0 GB to download, 0.95 GB on disk
-vf fetch --all     # cuFFT, cuSOLVER, cuSPARSE, cuRAND, NPP, nvJPEG, NVRTC too:
-                   # 2.7 GB to download, 3.0 GB on disk
+vf fetch --only libnccl  # multi-GPU collectives: 337 MB to download, 421 MB on disk
+vf fetch --all     # also cuFFT, cuSOLVER, cuSPARSE, cuRAND, NPP, nvJPEG, NVRTC and NCCL
 ```
+
+NCCL comes from NVIDIA's `nvidia-nccl-cu12` wheel. VF verifies its SHA-256 and installs the shared library and its license into the same tree. [NVIDIA NCCL on PyPI](https://pypi.org/project/nvidia-nccl-cu12/2.32.6/)
 
 It needs `python3` and GNU `tar` (and uses `aria2c` when there is one). It unpacks the shared
 libraries and NVIDIA's licence, nothing else, and removes each archive once it is unpacked. It

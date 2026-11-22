@@ -24,11 +24,23 @@ import fcntl
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
+
+
+# NVIDIA publishes NCCL separately from its CUDA redistrib manifest.
+NCCL_VERSION = "2.32.6"
+NCCL_WHEEL = {
+    "relative_path": "nvidia_nccl_cu12-2.32.6-py3-none-manylinux_2_27_x86_64.whl",
+    "base_url": "https://files.pythonhosted.org/packages/95/9f/ba87c8199a53ea3058640607c242174c8537e9e64d7a17991f332cd1c391",
+    "sha256": "2a6e6d5ddfc08970eca872be3dfa2650b24fa10a2043974465a9cae9c64ed6d8",
+    "size": 336541086,
+}
 
 
 def sha256(path):
@@ -95,12 +107,17 @@ def main():
     ap.add_argument("--variant", default=None)
     ap.add_argument("--runtime", action="store_true")
     ap.add_argument("--discard", action="store_true")
+    ap.add_argument("--with-nccl", action="store_true", help="include NVIDIA's CUDA 12 NCCL runtime wheel among selectable components")
     a = ap.parse_args()
+    if a.with_nccl and not a.runtime:
+        ap.error("--with-nccl requires --runtime")
 
     if not _has_aria2c():
         print("note: aria2c not found; using Python's urllib (slower)", file=sys.stderr)
 
     manifest = load_manifest(a.manifest)
+    if a.with_nccl:
+        manifest["libnccl"] = {"version": NCCL_VERSION, "linux-x86_64": NCCL_WHEEL}
     os.makedirs(a.dl_dir, exist_ok=True)
     os.makedirs(a.tree_dir, exist_ok=True)
     rows = []
@@ -161,6 +178,29 @@ def write_receipts(path, receipts):
     os.replace(tmp, path)
 
 
+def install_nccl_runtime(wheel, tree, version):
+    tree = Path(tree)
+    (tree / "lib").mkdir(exist_ok=True)
+    files = [
+        (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", tree / "NCCL-LICENSE.txt"),
+        ("nvidia/nccl/lib/libnccl.so.2", tree / "lib/libnccl.so.2"),
+    ]
+    # Writers hold the tree lock. A retry reclaims the partial 421 MB runtime
+    # even if the previous installer was killed before it could clean up.
+    staged = [(member, dest, dest.with_name(dest.name + ".vf-part")) for member, dest in files]
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            for member, dest, part in staged:
+                part.unlink(missing_ok=True)
+                with archive.open(member) as src, part.open("xb") as dst:
+                    shutil.copyfileobj(src, dst, length=1 << 20)
+        for member, dest, part in staged:
+            os.replace(part, dest)
+    finally:
+        for member, dest, part in staged:
+            part.unlink(missing_ok=True)
+
+
 def install_components(a, rows, lock_fds):
     record = os.path.join(a.tree_dir, "COMPONENTS.tsv")
     receipts = read_receipts(record)
@@ -175,7 +215,7 @@ def install_components(a, rows, lock_fds):
                  "(Debian and Ubuntu: the package xz-utils; Fedora and RHEL: xz)")
 
     for name, version, entry in rows:
-        url = f"{a.base_url}/{entry['relative_path']}"
+        url = f"{entry.get('base_url', a.base_url)}/{entry['relative_path']}"
         dest = os.path.join(a.dl_dir, os.path.basename(entry["relative_path"]))
         expected = entry["sha256"]
         prior = receipts.get(name)
@@ -193,7 +233,9 @@ def install_components(a, rows, lock_fds):
         if prior:
             del receipts[name]
             write_receipts(record, receipts)
-        if subprocess.run(["tar", "-xf", dest] + extract, pass_fds=lock_fds).returncode != 0:
+        if name == "libnccl" and dest.endswith(".whl"):
+            install_nccl_runtime(dest, a.tree_dir, version)
+        elif subprocess.run(["tar", "-xf", dest] + extract, pass_fds=lock_fds).returncode != 0:
             sys.exit(f"cannot unpack {dest} into {a.tree_dir}")
         installed = "full" if same_archive and prior[4] == "full" else requested
         receipts[name] = [name, version, os.path.basename(dest), expected, installed]

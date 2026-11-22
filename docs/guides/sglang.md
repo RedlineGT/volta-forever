@@ -109,10 +109,8 @@ The launch command selects FlashInfer’s CUDA normalization on V100. To reprodu
 
 The optional JIT router with FlashInfer’s CUDA normalization measured 2,002.22 prefill and 77.20 decode tokens/s in the same virtual environment. [Installation and comparison](./benchmarks/sglang-fresh-venv.json)
 
-For SGLang tensor parallelism across V100s, install NVIDIA's CUDA 12 NCCL wheel in its own directory and map the library for both SGLang and PyTorch. Run this in the activated VF environment before starting the server with `--tp 2` or `--tp 4`. A two-rank all-reduce passed with NCCL 2.32.6. The reporter also tested SGLang generation with two and four ranks. [Multi-GPU results and tested models](https://github.com/nbald/volta-forever/issues/2)
+For tensor parallelism on V100s, fetch the CUDA 12 build of NCCL before starting SGLang with `--tp 2` or `--tp 4`. VF selects this library for both SGLang and PyTorch, including when either opens the wheel's `libnccl.so.2` by absolute path. The issue reporter verified generation on two and four GPUs. [Multi-GPU results and tested models](https://github.com/nbald/volta-forever/issues/2)
 
 ```sh
-nccl_dir="$HOME/.local/share/volta-forever/nccl-cu12"
-python -m pip install --upgrade --no-deps --target "$nccl_dir" nvidia-nccl-cu12
-export VF_AUDIT_MAP="libnccl.so.2=$nccl_dir/nvidia/nccl/lib/libnccl.so.2${VF_AUDIT_MAP:+:$VF_AUDIT_MAP}"
+vf fetch --only libnccl
 ```

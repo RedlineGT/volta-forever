@@ -151,6 +151,31 @@ case ":$map:" in
     *) fail "$name" "nvJitLink adapter absent from the map" ;;
 esac
 
+name="nccl-runtime-in-audit-map"
+case ":$map:" in
+    *":libnccl.so.2="*) fail "$name" "absent NCCL was mapped" ;;
+    *) pass "$name (optional)" ;;
+esac
+nccl=$arch/cuda-12.9.2/lib/libnccl.so.2
+: >"$nccl"
+map=$(VF_AUDIT_MAP=libnccl.so.2=/user/choice get_var "$vf" VF_AUDIT_MAP)
+case ":$map:" in
+    *":libnccl.so.2=/user/choice:"*"libnccl.so.2=$nccl:"*) pass "$name (override first)" ;;
+    *) fail "$name" "got: $map" ;;
+esac
+name="nccl-supplements-existing-cuda"
+supp=$tmp/nccl-supplement
+mk_archive "$supp"
+mkdir -p "$supp/cuda-12.9.2/lib" "$supp/toolkits/cuda-12.9.2/lib"
+: >"$supp/cuda-12.9.2/lib/libnccl.so.2"
+: >"$supp/toolkits/cuda-12.9.2/lib/libcublas.so.12"
+map=$(get_var "$supp/bin/vf" VF_AUDIT_MAP)
+case "$map" in
+    *"libnccl.so.2=$supp/cuda-12.9.2/lib/libnccl.so.2"*"libcublas.so.12=$supp/toolkits/cuda-12.9.2/lib/libcublas.so.12"*) pass "$name" ;;
+    *) fail "$name" "got: $map" ;;
+esac
+rm "$nccl"
+
 name="env-ld-audit"
 lda=$(get_var "$vf" LD_AUDIT)
 case $lda in
@@ -628,7 +653,7 @@ PATH="$tmp/fake-bin:$PATH" "$vf" fetch --to "$tmp/fetch-out" >"$tmp/fetch.out" 2
 if [ -f "$tmp/fetch-record.txt" ]; then
     rec=$(cat "$tmp/fetch-record.txt")
     case $rec in
-        *"fetch-redist.py"*"redistrib_12.9.2.json"*"$tmp/fetch-out/dl"*"$tmp/fetch-out"*"--runtime"*"--discard"*"--only"*'^(libcublas|libnvjitlink)$')
+        *"fetch-redist.py"*"redistrib_12.9.2.json"*"$tmp/fetch-out/dl"*"$tmp/fetch-out"*"--runtime"*"--discard"*"--with-nccl"*"--only"*'^(libcublas|libnvjitlink)$')
             pass "$name" ;;
         *)
             fail "$name" "unexpected fetch command: $rec" ;;
@@ -655,7 +680,7 @@ PATH="$tmp/fake-bin:$PATH" "$vf" fetch --all --to "$tmp/fetch-out2" >"$tmp/fetch
 if [ -f "$tmp/fetch-all-record.txt" ]; then
     rec=$(cat "$tmp/fetch-all-record.txt")
     case $rec in
-        *"libcublas|libcufft|libcusolver|libcusparse|libcurand|libnpp|libnvjpeg|cuda_nvrtc|libnvjitlink"*)
+        *"libcublas|libcufft|libcusolver|libcusparse|libcurand|libnpp|libnvjpeg|cuda_nvrtc|libnvjitlink|libnccl"*)
             pass "$name" ;;
         *)
             fail "$name" "unexpected fetch --all command: $rec" ;;
