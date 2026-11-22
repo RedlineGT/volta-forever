@@ -232,23 +232,17 @@ def move_into_place(stage, tree):
         os.replace(source, dest)
 
 
-def install_nccl_runtime(wheel, tree, version):
+def stage_nccl_runtime(wheel, stage, version):
     files = [
         (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", "NCCL-LICENSE.txt"),
         ("nvidia/nccl/lib/libnccl.so.2", "lib/libnccl.so.2"),
     ]
-    # Writers hold the tree lock. The 421 MB runtime is staged, and what a killed
-    # installer left there is removed by the next fetch.
-    stage = Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=tree))
-    try:
-        (stage / "lib").mkdir()
-        with zipfile.ZipFile(wheel) as archive:
-            for member, dest in files:
-                with archive.open(member) as src, (stage / dest).open("xb") as dst:
-                    shutil.copyfileobj(src, dst, length=1 << 20)
-        move_into_place(stage, tree)
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
+    stage = Path(stage)
+    (stage / "lib").mkdir()
+    with zipfile.ZipFile(wheel) as archive:
+        for member, dest in files:
+            with archive.open(member) as src, (stage / dest).open("xb") as dst:
+                shutil.copyfileobj(src, dst, length=1 << 20)
 
 
 def install_components(a, rows, lock_fds):
@@ -256,7 +250,7 @@ def install_components(a, rows, lock_fds):
     record = os.path.join(a.tree_dir, "COMPONENTS.tsv")
     receipts = read_receipts(record)
     requested = "runtime" if a.runtime else "full"
-    extract = ["--strip-components=1", "-C", a.tree_dir]
+    extract = ["--strip-components=1"]
     if a.runtime:
         extract += ["--wildcards", "--exclude=*/lib/stubs/*", "*/lib/*.so*", "*/LICENSE"]
 
@@ -279,15 +273,22 @@ def install_components(a, rows, lock_fds):
             download(url, a.dl_dir, os.path.basename(dest), expected, lock_fds)
         else:
             print(f"have {name} {version}", flush=True)
-        # A failed extraction may already have overwritten files of the previous
-        # version. Invalidate its receipt before tar starts modifying the tree.
-        if prior:
-            del receipts[name]
-            write_receipts(record, receipts)
-        if name == "libnccl" and dest.endswith(".whl"):
-            install_nccl_runtime(dest, a.tree_dir, version)
-        elif subprocess.run(["tar", "-xf", dest] + extract, pass_fds=lock_fds).returncode != 0:
-            sys.exit(f"cannot unpack {dest} into {a.tree_dir}")
+        # Unpacked in a directory of the tree, then moved into place: a failure on the way (a
+        # full disk, a damaged archive) leaves the tree as it was. Writers hold the tree lock;
+        # what a killed fetch staged (the 421 MB NCCL runtime, say), the next one removes.
+        stage = tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=a.tree_dir)
+        try:
+            if name == "libnccl" and dest.endswith(".whl"):
+                stage_nccl_runtime(dest, stage, version)
+            elif subprocess.run(["tar", "-xf", dest, "-C", stage] + extract, pass_fds=lock_fds).returncode != 0:
+                sys.exit(f"cannot unpack {dest} into {a.tree_dir}")
+            # The files of the previous version are replaced from here: its receipt goes first.
+            if prior:
+                del receipts[name]
+                write_receipts(record, receipts)
+            move_into_place(stage, a.tree_dir)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
         installed = "full" if same_archive and prior[4] == "full" else requested
         receipts[name] = [name, version, os.path.basename(dest), expected, installed]
         write_receipts(record, receipts)

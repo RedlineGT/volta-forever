@@ -93,6 +93,7 @@ class FetchTest(unittest.TestCase):
         self.component("b", license=False)
         self.finish(self.launch("--runtime"), success=False)
         self.assertTrue((self.tree / "lib/a.so").exists())
+        self.assertFalse((self.tree / "lib/b.so").exists(), "a failed unpacking changed the tree")
         self.assertFalse((self.cache / "a.tar").exists())
         first.unlink()  # The retry must use the receipt, even if the first download is now offline.
         self.component("b")
@@ -118,15 +119,44 @@ class FetchTest(unittest.TestCase):
         self.finish(self.launch())
         self.assertTrue((self.tree / "include/a.h").exists())
 
-    def test_failed_replacement_invalidates_previous_receipt(self):
+    def test_failed_replacement_keeps_previous_version(self):
+        # The new archive fails half-way (its library unpacked, its licence missing): the tree
+        # keeps the previous version, and its receipt, rather than a mix of the two.
         self.component("a")
         self.finish(self.launch("--runtime"))
         self.component("a", license=False, data=b"changed")
         self.finish(self.launch("--runtime"), success=False)
-        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"changed")
-        self.component("a")
-        self.finish(self.launch("--runtime"))
         self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+        self.assertEqual(list(self.tree.glob(".vf-stage-*")), [])
+        self.component("a")
+        self.assertIn("unpacked before", self.finish(self.launch("--runtime")))
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+        self.component("a", data=b"changed")
+        self.finish(self.launch("--runtime"))
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"changed")
+
+    def test_links_replace_links(self):
+        # A library's links are moved as links, after the files that they name.
+        for version in ("1.2", "1.3"):
+            path = self.root / "x.tar"
+            with tarfile.open(path, "w") as archive:
+                for member in (f"lib/x.so.{version}", "LICENSE"):
+                    item = tarfile.TarInfo("pkg/" + member)
+                    item.size = len(version)
+                    archive.addfile(item, io.BytesIO(version.encode()))
+                for name, target in (("lib/x.so.1", f"x.so.{version}"), ("lib/x.so", "x.so.1")):
+                    item = tarfile.TarInfo("pkg/" + name)
+                    item.type, item.linkname = tarfile.SYMTYPE, target
+                    archive.addfile(item)
+            self.manifest["x"] = {"version": version, "linux-x86_64": {
+                "relative_path": path.name, "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }}
+            (self.root / "manifest.json").write_text(json.dumps(self.manifest))
+            self.finish(self.launch("--runtime"))
+            self.assertEqual(os.readlink(self.tree / "lib/x.so.1"), f"x.so.{version}")
+            self.assertEqual(os.readlink(self.tree / "lib/x.so"), "x.so.1")
+            self.assertEqual((self.tree / "lib/x.so").read_text(), version)
 
     def test_nccl_wheel_runtime_and_retry(self):
         archive = self.root / "nvidia_nccl_cu12-test.whl"
