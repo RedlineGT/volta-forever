@@ -439,12 +439,14 @@ pub unsafe extern "C" fn cuModuleLoad(module: *mut *mut c_void, path: *const c_c
 
 /// A lookup of kernel `name` in the module or library `handle`: refused when the kernel cannot run on
 /// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced.
+/// A refusal leaves NULL in `kernel_out`, as NVIDIA's driver does for a name it does not have: a
+/// program that ignores the error then launches nothing, not what its variable held before.
 /// When `kernel_out` is not null and the lookup succeeds, the profiler records the kernel handle ->
 /// name mapping (since `cuFuncGetName` does not work for lazily compiled sub-modules).
 ///
 /// # Safety
-/// `name` must be null or a C string. `kernel_out` must be null or point to the handle the driver
-/// stored.
+/// `name` must be null or a C string. `kernel_out` must be null or writable; after a success it
+/// points to the handle the driver stored.
 unsafe fn lookup(
     handle: usize,
     name: *const c_char,
@@ -456,6 +458,9 @@ unsafe fn lookup(
     }
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     if kernels::refused(handle, &name) {
+        if !kernel_out.is_null() {
+            unsafe { *kernel_out = std::ptr::null_mut() };
+        }
         return CUDA_ERROR_INVALID_PTX;
     }
     let result = find();

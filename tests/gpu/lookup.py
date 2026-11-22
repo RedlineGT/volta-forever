@@ -27,7 +27,8 @@ def main(path, cases):
             get, unload = cuda.cuLibraryGetKernel, cuda.cuLibraryUnload
         for case in cases:
             name, expected = case.split("=")
-            handle = C.c_void_p()
+            # A failed lookup must leave NULL, as the driver does for a name it does not have.
+            handle = C.c_void_p(0xDEADBEEF)
             status = get(C.byref(handle), owner, name.encode("ascii"))
             print(f"{api} {name} -> {status}, handle={bool(handle)}", flush=True)
             if status != int(expected) or bool(handle) != (status == 0):
