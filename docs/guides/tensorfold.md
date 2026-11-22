@@ -59,7 +59,7 @@ Download the 20.4 GB MLX checkpoint with 4-bit experts and 8-bit routers. Tensor
 
 ```sh
 hf download henrybravo/Qwen3.5-35B-A3B-4bit --local-dir ~/models/qwen35-4bit
-VF_CAPABILITY=8.0 VF_FIT_SHARED=1 VF_BF16_TC_GROUPS=1 TF_QWEN_KV_PAGES=0 \
+VF_CAPABILITY=8.0 VF_FIT_SHARED=1 VF_BF16_TC_GROUPS=1 VF_BF16_ROW=tree TF_QWEN_KV_PAGES=0 \
   vf tensorfold-native serve ~/models/qwen35-4bit --backend cuda \
   --context 512 --parallel 1 --prompt-cache-gib 0 --name qwen --no-thinking \
   --no-drafts --prompt-precision int8
@@ -85,17 +85,16 @@ curl -fsSLO "$base/tensorfold.py" && curl -fsSLO "$base/prompts.json"
 python3 tensorfold.py
 ```
 
-Each measured request read 227 uncached tokens and generated 64. The answers began with Kyoto, Lyon and Lima. TensorFold reports prefill time separately and counts 63 decode steps after the first output token.
+The official TensorFold 1.3.3 source build used the same executable and Tesla V100-SXM2-32GB for all three modes. Each measured request read 227 uncached tokens and produced 64. TensorFold counts 63 decode steps after the first output token. To reproduce each row, restart the server from section 4 with the indicated `VF_BF16_ROW` value and rerun the client. Keep `VF_BF16_TC_GROUPS=1` for all three.
 
-| On the same Tesla V100-SXM2-32GB | Median prefill (tokens/s) | Median decode (tokens/s) |
+| TensorFold 1.3.3 with Qwen3.5 MLX Q4, three requests of 227 input / 64 output tokens | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Official TensorFold with both VF optimizations (command above) | **461.63** | **34.04** |
-| VF with prefill optimization alone | 460.65 | 20.10 |
-| VF with grouped BF16 Tensor Cores alone | 367.80 | 34.04 |
-| Same executable before either optimization | 367.92 | 20.10 |
-| Native llama.cpp, Qwen3.5-35B-A3B GGUF Q4_K_M | 470.60 | 99.49 |
+| `VF_BF16_ROW=off` | 461.27 | 34.01 |
+| `VF_BF16_ROW=ordered` | 462.39 | 35.67 |
+| `VF_BF16_ROW=tree` (command above) | 461.64 | **37.19** |
+| Native llama.cpp target on the same V100, Qwen3.5 GGUF Q4_K_M | 470.60 | 99.49 |
 
-All four runs used the same TensorFold 1.3.3 executable and passed the answer, stop-sequence and output-length checks. VF’s prefill optimization preserved every output token. Grouped BF16 Tensor Core accumulation can round differently. With it enabled, Kyoto and Lyon produced identical token sequences to the control, while Lisbon (warm-up) and Lima produced different wording. Set `VF_BF16_TC_GROUPS=0` for the standard accumulation order. Both optimizations are in VF `70e2edb`. [Requests, phase timings and token hashes](./benchmarks/tensorfold-stock-vf.json) · [Native reference on the same GPU](./benchmarks/ninfer-results.json)
+All modes answered `Paris`, passed the stop and maximum-length checks, and reported `drafts=false`. Both options changed the Lisbon warm-up from “document our activities” to “organize our daily activities”. Compared with `off`, the three measured token sequences for Kyoto, Lyon and Lima were identical with `tree`. With `ordered`, the Kyoto and Lima continuations changed. The ordered mode retains scalar FP32 accumulation order and improved median decode by 4.87%. The tree mode sums four partial products in parallel and improved it by 9.34%. Both phase rates remain below the native target. [Per-request timings, replies and token hashes](./benchmarks/tensorfold-bf16-row.json) · [Earlier grouped BF16 measurements](./benchmarks/tensorfold-stock-vf.json) · [Native reference](./benchmarks/ninfer-results.json)
 
 ## 6. Additional notes
 
