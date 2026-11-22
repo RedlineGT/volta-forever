@@ -13,7 +13,7 @@
 // refused too.
 //
 // Attributes are kept by handle, the name queries on enumerated kernels are counted, and a load
-// can be paused from another thread.
+// or a setting can be paused from another thread.
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -97,6 +97,25 @@ int cuModuleGetSurfRef(void **t, void *m, const char *n) {
     (void)n; (void)m; *t = (void*)0x2000; return 0;
 }
 
+// A call on a second image (an even module) that can be held: a setting when fit_mock_hold_second
+// is 1, a launch when it is 2. The first such call takes effect, then does not return until
+// fit_mock_second_release is set. An unload of that module meanwhile is counted (the driver may
+// then give its handle to another function, which the call would reach).
+_Atomic int fit_mock_hold_second = 0;
+_Atomic int fit_mock_second_held = 0;
+_Atomic int fit_mock_second_release = 0;
+_Atomic uintptr_t fit_mock_busy = 0;
+int fit_mock_unloads_during_call = 0;
+static void hold_second(uintptr_t handle, int call) {
+    int wanted = call;
+    if (!((handle / 256) & 1) && atomic_compare_exchange_strong(&fit_mock_hold_second, &wanted, 0)) {
+        fit_mock_busy = handle / 256;
+        fit_mock_second_held = 1;
+        while (!fit_mock_second_release) usleep(1000);
+        fit_mock_busy = 0;
+    }
+}
+
 // A launch: refused when the kernel's module (handle / 256) is odd. When fit_mock_require_attr is
 // non-zero, a second image (even module) also needs fit_mock_attrs[module] == 65536.
 static int do_launch(void *f) {
@@ -104,6 +123,7 @@ static int do_launch(void *f) {
     uintptr_t module_of = (uintptr_t)f / 256;
     if (module_of & 1) return 701;
     if (fit_mock_require_attr && fit_mock_attrs[module_of] != 65536) return 701;
+    hold_second((uintptr_t)f, 2);
     return 0;
 }
 int cuLaunchKernel(void *f, unsigned a, unsigned b, unsigned c, unsigned d, unsigned e,
@@ -134,8 +154,16 @@ int cuKernelGetName(const char **name, void *k) {
     if ((uintptr_t)k == 0xdeadbeef) { fit_mock_bad_name_queries++; return 400; }
     (void)k; *name = "k_fit_regs"; return 0;
 }
-int cuModuleUnload(void *m) { (void)m; fit_mock_unloads++; return 0; }
-int cuLibraryUnload(void *m) { (void)m; fit_mock_unloads++; return 0; }
+int cuModuleUnload(void *m) {
+    fit_mock_unloads++;
+    if ((uintptr_t)m == fit_mock_busy) fit_mock_unloads_during_call++;
+    return 0;
+}
+int cuLibraryUnload(void *m) {
+    fit_mock_unloads++;
+    if ((uintptr_t)m == fit_mock_busy) fit_mock_unloads_during_call++;
+    return 0;
+}
 // A setting that can be held: when fit_mock_hold_set is a value, the first call that sets that
 // value on a first image (an odd module) takes effect, then does not return until
 // fit_mock_set_release is set. (Two calls at once: the driver takes one, then the other, and
@@ -155,6 +183,7 @@ int cuKernelSetAttribute(int a, int v, void *k, int d) {
     fit_mock_set_calls++;
     fit_mock_attrs[(uintptr_t)k / 256] = v;
     hold_set((uintptr_t)k, v);
+    hold_second((uintptr_t)k, 1);
     return 0;
 }
 int cuFuncSetAttribute(void *f, int a, int v) {
@@ -162,6 +191,7 @@ int cuFuncSetAttribute(void *f, int a, int v) {
     fit_mock_set_calls++;
     fit_mock_attrs[(uintptr_t)f / 256] = v;
     hold_set((uintptr_t)f, v);
+    hold_second((uintptr_t)f, 1);
     return 0;
 }
 int cuCtxGetDevice(int *dev) {

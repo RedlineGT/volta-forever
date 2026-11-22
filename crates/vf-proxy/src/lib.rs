@@ -43,7 +43,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
 
 #[allow(non_snake_case)]
 mod generated {
@@ -51,6 +51,7 @@ mod generated {
 }
 mod cache;
 mod callers;
+mod contexts;
 pub mod fit;
 mod hooks;
 mod images;
@@ -66,6 +67,8 @@ pub use generated::{HOOKED, NAMES, NSYM, idx};
 pub static REALS: [AtomicUsize; NSYM] = [const { AtomicUsize::new(0) }; NSYM];
 /// Number of calls of each function.
 pub static COUNTS: [AtomicUsize; NSYM] = [const { AtomicUsize::new(0) }; NSYM];
+/// The process that the library was loaded in, whose reports `fini` prints.
+static LOADED_IN: AtomicU32 = AtomicU32::new(0);
 
 const CUDA_ERROR_NOT_INITIALIZED: i32 = 3;
 const CUDA_ERROR_NOT_SUPPORTED: i32 = 801;
@@ -199,6 +202,7 @@ fn real_library() -> Option<CString> {
 }
 
 extern "C" fn init() {
+    LOADED_IN.store(std::process::id(), Relaxed);
     let config = config();
     log::open();
     profile::open();
@@ -267,6 +271,14 @@ extern "C" fn init() {
 }
 
 extern "C" fn fini() {
+    // A child made by fork() comes here too when it ends with exit(). What it would report is its
+    // parent's, counted before the fork; and it has its parent's locks as they were then: one that
+    // another thread of the parent held stays held for ever in the child, and the report would
+    // wait for it (the log's, which every line takes; with VF_STATS or VF_PROFILE, two more). The
+    // reports are those of the process that loaded the library.
+    if std::process::id() != LOADED_IN.load(Relaxed) {
+        return;
+    }
     profile::write();
     kernels::summary();
     fit::summary();

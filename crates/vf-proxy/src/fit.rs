@@ -46,6 +46,10 @@
 //! when there is one. Two threads that set the same thing at once leave the kernel and its
 //! second translation with the same value, whichever of the two the driver took last.
 //!
+//! **An unload.** The unload of a module takes both locks over what it forgets and the unload of
+//! its second translation: no setting is being given to the second translation then, and no
+//! launch made from it, whose handle the driver may give at once to a function of another module.
+//!
 //! **Contexts.** A library's kernel is valid in every context, and the second translation of a
 //! library is loaded as a library. A module belongs to the context it was loaded in: its second
 //! translation is loaded in the context that is current at the refused launch, which is that one
@@ -229,9 +233,11 @@ impl State {
 
 static STATE: LazyLock<(Mutex<State>, Condvar)> = LazyLock::new(|| (Mutex::new(State::default()), Condvar::new()));
 
-/// Commit point for second-image launches vs. data exclusion. `retry` takes this shared around the
-/// [re-check + launch] step; `asked_for_data` takes it exclusive around its update. The slow part
-/// (second_kernel: translation + load) stays outside both. Lock order: COMMIT, then STATE's mutex.
+/// Commit point for second-image launches vs. data exclusion and unloads. `retry` takes this shared
+/// around the [settle the attributes + re-check + launch] step; `asked_for_data` takes it exclusive
+/// around its update, `unload` around its forgetting and the unload of the second image. The slow
+/// part (second_kernel: translation + load) stays outside all. Lock order: COMMIT, then
+/// ATTR_ORDER, then STATE's mutex.
 static COMMIT: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 
 /// The order of the settings. Held in `set_attribute` over [the driver's call on the kernel +
@@ -241,7 +247,9 @@ static COMMIT: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 /// 2026-11-21 the driver's call was made before the lock was taken: of two calls at once, the
 /// one that the driver took first could be recorded last, and the second kernel was left with
 /// a value that the first no longer had.) One lock for all kernels: a setting is a short call
-/// that a program makes a few times, and the driver's own lock is the context's.
+/// that a program makes a few times, and the driver's own lock is the context's. Held in `unload`
+/// too, over [forget + unload the second image]: no setting is applied to a second image that is
+/// being unloaded.
 static ATTR_ORDER: LazyLock<Mutex<()>> = LazyLock::new(Mutex::default);
 
 /// For the summary: original images held now (count, bytes), the most bytes held at once, second
@@ -527,6 +535,10 @@ pub fn unload(handle: usize) {
     if !enabled() {
         return;
     }
+    // Alone: no launch from its second translation and no setting of it is under way while the
+    // second translation is unloaded, and none starts after (its handle is then gone from here).
+    let _commit = COMMIT.write().unwrap_or_else(|e| e.into_inner());
+    let _order = ATTR_ORDER.lock().unwrap_or_else(|e| e.into_inner());
     let gone = state().remove(handle);
     STATE.1.notify_all();
     // (With a library goes the module that the driver gave for it, and its second translation.)
@@ -618,12 +630,13 @@ pub unsafe fn retry(
             second
         }
     };
+    // The commit point: `asked_for_data` and `unload` take this lock alone, so that neither
+    // returns while a second translation is being given settings or launched from, and none of
+    // that starts after them.
+    let _commit = COMMIT.read().unwrap_or_else(|e| e.into_inner());
     if !settle_attributes(handle, second, library, &name) {
         return None;
     }
-    // The commit point: `asked_for_data` takes this lock alone, so that it does not return
-    // while a launch into a second translation is being made, and none starts after it.
-    let _commit = COMMIT.read().unwrap_or_else(|e| e.into_inner());
     {
         let state = state();
         let kernel = state.kernels.get(&handle)?;
@@ -663,15 +676,21 @@ pub unsafe fn retry(
 
 /// Give the second kernel of `handle` what the program set and it does not have yet (all of it
 /// when it was just taken; again, for a function of a library's module, after a setting of the
-/// library's kernel). False when that cannot be done faithfully, with a line in the log: the
-/// kernel is then not launched from there this time.
+/// library's kernel). False when that cannot be done faithfully, with a line in the log, or when
+/// `second` is not the kernel's second any more: the kernel is then not launched from there this
+/// time. Called under `COMMIT`, shared, which keeps `second` from being unloaded.
 fn settle_attributes(handle: usize, second: usize, library: bool, name: &str) -> bool {
     let _order = ATTR_ORDER.lock().unwrap_or_else(|e| e.into_inner());
     // (Asked of the driver before the state is locked: no call to the driver under that lock.)
     let device = if library { None } else { current_device() };
     let attributes = {
         let mut state = state();
-        let Some(kernel) = state.kernels.get(&handle) else {
+        // (Unloaded, or excluded, since the caller read it.)
+        let Some(kernel) = state
+            .kernels
+            .get(&handle)
+            .filter(|kernel| kernel.second == Some(second))
+        else {
             return false;
         };
         if !kernel.attrs_stale {
@@ -863,6 +882,9 @@ fn load(image: Vec<u8>, library: bool) -> Option<usize> {
     // (The handle is new: nothing of the layer's own may be left under it.)
     forget(handle as usize);
     crate::images::keep(handle as usize, crate::images::Replacement::from_vec(image));
+    if !library {
+        crate::contexts::loaded(handle as usize);
+    }
     Some(handle as usize)
 }
 

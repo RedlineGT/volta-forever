@@ -16,7 +16,11 @@
 //     driver gives for a library: the same;
 //   - a library and that module are one image: a variable asked for through either excludes
 //     the kernels taken through the other, and the module's second translation is unloaded
-//     with the library.
+//     with the library;
+//   - an unload of the module while the second translation is given the kernel's settings at a
+//     refused launch waits for the launch: the second translation is not unloaded under the
+//     setting (its handle could be given to another function), and the launch is made; nor while
+//     the launch from it is being made, nor while a setting that the program makes is given to it.
 //
 // usage: fit_api PROXY MOCK CUBIN
 // PROXY is the layer's libcuda.so.1, MOCK the stand-in, CUBIN an sm_75 cubin with the kernel
@@ -59,6 +63,10 @@ static void reset_counters(void) {
     *(_Atomic int*)dlsym(mock, "fit_mock_hold_set") = 0;
     *(_Atomic int*)dlsym(mock, "fit_mock_set_held") = 0;
     *(_Atomic int*)dlsym(mock, "fit_mock_set_release") = 0;
+    *(_Atomic int*)dlsym(mock, "fit_mock_hold_second") = 0;
+    *(_Atomic int*)dlsym(mock, "fit_mock_second_held") = 0;
+    *(_Atomic int*)dlsym(mock, "fit_mock_second_release") = 0;
+    *(int*)dlsym(mock, "fit_mock_unloads_during_call") = 0;
 }
 static int mock_loads(void) { return *(int*)dlsym(mock, "fit_mock_loads"); }
 static int mock_unloads(void) { return *(int*)dlsym(mock, "fit_mock_unloads"); }
@@ -107,6 +115,15 @@ static void check_unloads(const char *name, int expect) {
 }
 
 struct launch_args { void *func; CUresult *result; };
+// An unload made from a thread.
+struct unload_args { void *module; _Atomic int tid, done; };
+static void *unload_thread_fn(void *arg) {
+    struct unload_args *p = arg;
+    p->tid = (int)syscall(SYS_gettid);
+    cuModuleUnload(p->module);
+    p->done = 1;
+    return NULL;
+}
 static void *launch_thread_fn(void *arg) {
     struct launch_args *p = arg;
     *p->result = cuLaunchKernel(p->func, 1,1,1, 1024,1,1, 0, NULL, NULL, NULL);
@@ -550,6 +567,111 @@ int main(int argc, char **argv) {
     r = cuLaunchKernel(function, 1,1,1, 1024,1,1, 0, NULL, NULL, NULL);
     check("data_during_fit_later", r, 701, 2, 2);
     cuModuleUnload(module);
+
+    // ---- an unload while the second translation is given the kernel's settings ----
+
+    // Thread A: the kernel has a setting; its first launch is refused, the second translation is
+    // made, and the setting given to it is held in the stand-in. Thread B: the program unloads
+    // the module. B's unload of the second translation waits for A's launch, which is made.
+    reset_counters();
+    r = cuModuleLoadData(&module, image); if (r) return 1;
+    r = cuModuleGetFunction(&function, module, "k_fit_regs"); if (r) return 1;
+    cuFuncSetAttribute(function, 8, 65536);
+    *(_Atomic int*)dlsym(mock, "fit_mock_hold_second") = 1;
+    {
+        CUresult launched = -1;
+        struct launch_args a = { function, &launched };
+        struct unload_args b = { .module = module };
+        pthread_t ta, tb;
+        pthread_create(&ta, NULL, launch_thread_fn, &a);
+        _Atomic int *held = dlsym(mock, "fit_mock_second_held");
+        for (int i = 0; i < 10000 && !*held; i++) usleep(1000);
+        if (!*held) { fprintf(stderr, "unload_during_settings: the setting was not held\n"); return 2; }
+        pthread_create(&tb, NULL, unload_thread_fn, &b);
+        int observed = 0;
+        for (int i = 0; i < 10000 && !observed; i++) {
+            observed = b.done || waiting_on_setter(b.tid);
+            if (!observed) usleep(1000);
+        }
+        *(_Atomic int*)dlsym(mock, "fit_mock_second_release") = 1;
+        pthread_join(ta, NULL);
+        pthread_join(tb, NULL);
+        if (!observed) { fprintf(stderr, "unload_during_settings: could not observe the unload\n"); return 2; }
+        int during = *(int*)dlsym(mock, "fit_mock_unloads_during_call");
+        checks++;
+        int ok = during == 0;
+        if (!ok) wrong++;
+        printf("%s  %-50s unloads during the setting=%d (want 0)\n", ok ? "ok   " : "WRONG",
+               "unload_during_settings_waits", during);
+        check("unload_during_settings_launch", launched, 0, 2, 2);
+        check_unloads("unload_during_settings_unloaded", 2);
+    }
+
+    // The same while the launch from the second translation is being made.
+    reset_counters();
+    r = cuModuleLoadData(&module, image); if (r) return 1;
+    r = cuModuleGetFunction(&function, module, "k_fit_regs"); if (r) return 1;
+    *(_Atomic int*)dlsym(mock, "fit_mock_hold_second") = 2;
+    {
+        CUresult launched = -1;
+        struct launch_args a = { function, &launched };
+        struct unload_args b = { .module = module };
+        pthread_t ta, tb;
+        pthread_create(&ta, NULL, launch_thread_fn, &a);
+        _Atomic int *held = dlsym(mock, "fit_mock_second_held");
+        for (int i = 0; i < 10000 && !*held; i++) usleep(1000);
+        if (!*held) { fprintf(stderr, "unload_during_launch: the launch was not held\n"); return 2; }
+        pthread_create(&tb, NULL, unload_thread_fn, &b);
+        int observed = 0;
+        for (int i = 0; i < 10000 && !observed; i++) {
+            observed = b.done || waiting_on_setter(b.tid);
+            if (!observed) usleep(1000);
+        }
+        *(_Atomic int*)dlsym(mock, "fit_mock_second_release") = 1;
+        pthread_join(ta, NULL);
+        pthread_join(tb, NULL);
+        if (!observed) { fprintf(stderr, "unload_during_launch: could not observe the unload\n"); return 2; }
+        int during = *(int*)dlsym(mock, "fit_mock_unloads_during_call");
+        checks++;
+        int ok = during == 0 && launched == 0;
+        if (!ok) wrong++;
+        printf("%s  %-50s unloads during the launch=%d (want 0), launch=%d (want 0)\n",
+               ok ? "ok   " : "WRONG", "unload_during_launch_waits", during, launched);
+    }
+
+    // The same while a setting that the program makes on the kernel is given to its second
+    // translation, which a launch made before.
+    reset_counters();
+    r = cuModuleLoadData(&module, image); if (r) return 1;
+    r = cuModuleGetFunction(&function, module, "k_fit_regs"); if (r) return 1;
+    r = cuLaunchKernel(function, 1,1,1, 1024,1,1, 0, NULL, NULL, NULL);
+    check("unload_during_own_setting_first_launch", r, 0, 2, 2);
+    *(_Atomic int*)dlsym(mock, "fit_mock_hold_second") = 1;
+    {
+        struct set_args a = { .handle = function, .kernel = 0, .value = 32768 };
+        struct unload_args b = { .module = module };
+        pthread_t ta, tb;
+        pthread_create(&ta, NULL, set_thread_fn, &a);
+        _Atomic int *held = dlsym(mock, "fit_mock_second_held");
+        for (int i = 0; i < 10000 && !*held; i++) usleep(1000);
+        if (!*held) { fprintf(stderr, "unload_during_own_setting: the setting was not held\n"); return 2; }
+        pthread_create(&tb, NULL, unload_thread_fn, &b);
+        int observed = 0;
+        for (int i = 0; i < 10000 && !observed; i++) {
+            observed = b.done || waiting_on_setter(b.tid);
+            if (!observed) usleep(1000);
+        }
+        *(_Atomic int*)dlsym(mock, "fit_mock_second_release") = 1;
+        pthread_join(ta, NULL);
+        pthread_join(tb, NULL);
+        if (!observed) { fprintf(stderr, "unload_during_own_setting: could not observe the unload\n"); return 2; }
+        int during = *(int*)dlsym(mock, "fit_mock_unloads_during_call");
+        checks++;
+        int ok = during == 0 && a.result == 0;
+        if (!ok) wrong++;
+        printf("%s  %-50s unloads during the setting=%d (want 0), setting=%d (want 0)\n",
+               ok ? "ok   " : "WRONG", "unload_during_own_setting_waits", during, a.result);
+    }
 
     printf("\n%d checks, %d wrong\n", checks, wrong);
     return wrong ? 1 : 0;
