@@ -1,0 +1,73 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry k(.param .u64 output) {
+.reg .u64 %out, %offset;
+.reg .b32 %lane, %a<8>, %b<4>, %d<16>, %sum, %expected, %other;
+.reg .pred %first, %row0;
+ld.param.u64 %out, [output];
+mov.u32 %lane, %laneid;
+mul.wide.u32 %offset, %lane, 16;
+add.u64 %out, %out, %offset;
+
+// Two A fragments filled with 1.5 and -1, two B fragments with 0.5 and 2.
+mov.b32 %a0, 0x3fc03fc0;
+mov.b32 %a1, 0x3fc03fc0;
+mov.b32 %a2, 0x3fc03fc0;
+mov.b32 %a3, 0x3fc03fc0;
+mov.b32 %a4, 0xbf80bf80;
+mov.b32 %a5, 0xbf80bf80;
+mov.b32 %a6, 0xbf80bf80;
+mov.b32 %a7, 0xbf80bf80;
+mov.b32 %b0, 0x3f003f00;
+mov.b32 %b1, 0x3f003f00;
+mov.b32 %b2, 0x40004000;
+mov.b32 %b3, 0x40004000;
+mov.b32 %d0, 0;
+mov.b32 %d1, 0;
+mov.b32 %d2, 0;
+mov.b32 %d3, 0;
+mov.b32 %d4, 0;
+mov.b32 %d5, 0;
+mov.b32 %d6, 0;
+mov.b32 %d7, 0;
+mov.b32 %d8, 0;
+mov.b32 %d9, 0;
+mov.b32 %d10, 0;
+mov.b32 %d11, 0;
+mov.b32 %d12, 0;
+mov.b32 %d13, 0;
+mov.b32 %d14, 0;
+mov.b32 %d15, 0;
+
+// The four independent products give 12, 48, -8 and -32 in every lane.
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a1,%a2,%a3}, {%b0,%b1}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d4,%d5,%d6,%d7}, {%a0,%a1,%a2,%a3}, {%b2,%b3}, {%d4,%d5,%d6,%d7};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d8,%d9,%d10,%d11}, {%a4,%a5,%a6,%a7}, {%b0,%b1}, {%d8,%d9,%d10,%d11};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d12,%d13,%d14,%d15}, {%a4,%a5,%a6,%a7}, {%b2,%b3}, {%d12,%d13,%d14,%d15};
+add.rn.f32 %sum, %d0, %d4;
+st.global.b32 [%out], %sum;
+add.rn.f32 %sum, %d8, %d12;
+st.global.b32 [%out+4], %sum;
+
+// Change just A[0,0] to 2^17 in one lane. The entire second group must fall back.
+setp.eq.u32 %first, %lane, 0;
+selp.b32 %a0, 0x3fc04800, %a0, %first;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a1,%a2,%a3}, {%b0,%b1}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d4,%d5,%d6,%d7}, {%a0,%a1,%a2,%a3}, {%b2,%b3}, {%d4,%d5,%d6,%d7};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d8,%d9,%d10,%d11}, {%a4,%a5,%a6,%a7}, {%b0,%b1}, {%d8,%d9,%d10,%d11};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d12,%d13,%d14,%d15}, {%a4,%a5,%a6,%a7}, {%b2,%b3}, {%d12,%d13,%d14,%d15};
+setp.lt.u32 %row0, %lane, 4;
+selp.b32 %expected, 0x47800ba0, 0x41c00000, %row0;
+xor.b32 %sum, %d0, %expected;
+xor.b32 %other, %d8, 0xc1800000;
+or.b32 %sum, %sum, %other;
+st.global.b32 [%out+8], %sum;
+selp.b32 %expected, 0x48800ba0, 0x42c00000, %row0;
+xor.b32 %sum, %d4, %expected;
+xor.b32 %other, %d12, 0xc2800000;
+or.b32 %sum, %sum, %other;
+st.global.b32 [%out+12], %sum;
+ret;
+}

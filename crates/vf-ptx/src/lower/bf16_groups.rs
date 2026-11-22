@@ -111,11 +111,31 @@ pub(super) fn rewrite(text: &str, items: &[Item], outside: &[String], options: O
     if !text.contains(MMA) || text.contains("bfgroup_") || outside.iter().any(|s| s.contains("bfgroup_")) {
         return None;
     }
-    if let Some((scheduled, starts)) = schedule::prepare(text, items) {
+    if (options.bf16_tc_groups || options.bf16_row != Bf16Row::Off)
+        && let Some((scheduled, starts)) = schedule::prepare(text, items)
+    {
         let scheduled_items = scan::items(scheduled.as_bytes(), 0..scheduled.len())?;
         return group(&scheduled, &scheduled_items, &starts, options);
     }
     group(text, items, &HashSet::new(), options)
+}
+
+// Each two-by-two tile reuses every A and B fragment in two different products.
+// Four independent FP32 destinations retain their original accumulation order.
+fn rectangular_tiles(products: &[(usize, Product<'_>)]) -> bool {
+    let (tiles, remainder) = products.as_chunks::<4>();
+    remainder.is_empty()
+        && tiles.iter().all(|tile| {
+            let [(_, top_left), (_, top_right), (_, bottom_left), (_, bottom_right)] = tile;
+            top_left.a == top_right.a
+                && bottom_left.a == bottom_right.a
+                && top_left.a != bottom_left.a
+                && top_left.b == bottom_left.b
+                && top_right.b == bottom_right.b
+                && top_left.b != top_right.b
+                && tile.iter().all(|(_, p)| p.d == p.c)
+                && tile.iter().flat_map(|(_, p)| &p.d).collect::<HashSet<_>>().len() == 16
+        })
 }
 
 fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Options) -> Option<(String, usize)> {
@@ -224,17 +244,15 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
             first += 1;
             continue;
         }
-        if !options.bf16_tc_groups {
-            first = last + 1;
-            continue;
-        }
         // In the V100 measurements, groups sharing a complete multiplicand amortized
         // the guard even with four outputs. For groups that change both fragments, small
         // accumulator sets were faster on the scalar path.
         let common_a = products.iter().all(|(_, p)| p.a == products[0].1.a);
         let common_b = products.iter().all(|(_, p)| p.b == products[0].1.b);
         let output_registers: HashSet<_> = products.iter().flat_map(|(_, p)| &p.d).collect();
-        if !common_a && !common_b && output_registers.len() < 32 {
+        let regular = options.bf16_tc_groups && (common_a || common_b || output_registers.len() >= 32);
+        let rectangular = options.bf16_tc_tiles && rectangular_tiles(&products);
+        if !regular && !rectangular {
             first = last + 1;
             continue;
         }
@@ -395,6 +413,63 @@ mod tests {
         assert!(scoped(&group(4, false, true, 4), &[]).is_some());
         assert!(scoped(&group(8, false, false, 8), &[]).is_some());
         assert!(scoped(&group(8, false, false, 4), &[]).is_none());
+    }
+
+    const RECTANGULAR: &str = r#"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a1,%a2,%a3}, {%b0,%b1}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d4,%d5,%d6,%d7}, {%a0,%a1,%a2,%a3}, {%b2,%b3}, {%d4,%d5,%d6,%d7};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d8,%d9,%d10,%d11}, {%a4,%a5,%a6,%a7}, {%b0,%b1}, {%d8,%d9,%d10,%d11};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d12,%d13,%d14,%d15}, {%a4,%a5,%a6,%a7}, {%b2,%b3}, {%d12,%d13,%d14,%d15};
+"#;
+
+    fn tiles_only(body: &str) -> Option<(String, usize)> {
+        let text = format!("{{\n{body}\n}}");
+        let items = scan::items(text.as_bytes(), 0..text.len()).unwrap();
+        rewrite(
+            &text,
+            &items,
+            &[],
+            Options {
+                bf16_tc_tiles: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn rectangular_tiles_share_a_guard_and_keep_the_original_fallback() {
+        let body = RECTANGULAR.trim();
+        let (text, count) = tiles_only(body).unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(text.matches("vote.sync.any.pred").count(), 1);
+        assert_eq!(text.matches("f32.f16.f16.f32").count(), 4);
+        assert_eq!(text.matches(MMA).count(), 4);
+        assert!(text.split_once("$bfgroup_slow_0:\n").unwrap().1.starts_with(body));
+        let (text, count) = tiles_only(&format!("{body}\n{body}")).unwrap();
+        assert_eq!(count, 8);
+        assert_eq!(text.matches("vote.sync.any.pred").count(), 1);
+        // Read-only inputs may alias across the two operands.
+        assert!(tiles_only(&body.replace("%b0", "%a0")).is_some());
+        let wrapped = format!("{{\n{body}\n}}");
+        let items = scan::items(wrapped.as_bytes(), 0..wrapped.len()).unwrap();
+        assert!(rewrite(&wrapped, &items, &[], Options::default()).is_none());
+    }
+
+    #[test]
+    fn rectangular_tiles_reject_dependencies_and_incomplete_rectangles() {
+        for body in [
+            // One output overlaps an earlier accumulator, one multiplicand or its own neighbor.
+            RECTANGULAR.replace("%d4", "%d0"),
+            RECTANGULAR.replace("%d4", "%a0"),
+            RECTANGULAR.replace("%d1,", "%d0,"),
+            // C and D differ, the bottom-right B fragment is incomplete, or a source changes.
+            RECTANGULAR.replacen("{%d0,%d1,%d2,%d3};", "{%d4,%d5,%d6,%d7};", 1),
+            RECTANGULAR.replace("{%b2,%b3}, {%d12", "{%b0,%b1}, {%d12"),
+            RECTANGULAR.replacen(";\n", ";\nmov.b32 %a0,%b0;\n", 1),
+            RECTANGULAR.replacen(";\n", ";\n@%p bra L;\n", 1),
+            RECTANGULAR.lines().take(3).collect::<Vec<_>>().join("\n"),
+        ] {
+            assert!(tiles_only(&body).is_none(), "{body}");
+        }
     }
 
     #[test]

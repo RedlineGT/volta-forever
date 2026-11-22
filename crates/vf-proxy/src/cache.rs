@@ -954,6 +954,10 @@ mod tests {
             cache_hash(img, &grouped),
             "changing BF16 lowering changes the cache key"
         );
+        let mut tiled = vf_adapt::Policy::default();
+        tiled.lowering.bf16_tc_tiles = true;
+        assert_ne!(cache_hash(img, &tiled), h1);
+        assert_ne!(cache_hash(img, &tiled), cache_hash(img, &grouped));
         // Same policy, same image: same hash.
         let h1b = cache_hash(img, &p1);
         assert_eq!(h1, h1b);

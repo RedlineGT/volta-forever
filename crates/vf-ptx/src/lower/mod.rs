@@ -276,6 +276,8 @@ pub struct Options {
     /// convert its multiplicands to normal half precision or signed zero. The FP32 accumulator
     /// may round differently from the scalar path.
     pub bf16_tc_groups: bool,
+    /// Guarded BF16 products covering a two-by-two tile of both input fragments.
+    pub bf16_tc_tiles: bool,
     /// Optimize products with one active row, after a uniform runtime check.
     pub bf16_row: Bf16Row,
 }
@@ -363,7 +365,7 @@ pub fn body_in(
         ),
         None => (text, items, Counts::default()),
     };
-    let grouped = if options.bf16_tc_groups || options.bf16_row != Bf16Row::Off {
+    let grouped = if options.bf16_tc_groups || options.bf16_tc_tiles || options.bf16_row != Bf16Row::Off {
         bf16_groups::rewrite(text, &items, outside, options)
     } else {
         None
