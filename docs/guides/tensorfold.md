@@ -85,16 +85,20 @@ curl -fsSLO "$base/tensorfold.py" && curl -fsSLO "$base/prompts.json"
 python3 tensorfold.py
 ```
 
-The official TensorFold 1.3.3 source build ran on the same Tesla V100-SXM2-32GB in both tests. For each VF build, restart the server from section 4 with `VF_BF16_TC_GROUPS=1` and `VF_BF16_ROW=tree`, then run the client. Each measured request read 227 uncached tokens and generated 64. TensorFold counts 63 decode steps after the first output token. [Two-product VF source](https://github.com/nbald/volta-forever/tree/e1544ea4bf05c3ff02fed9bcbccd3d71fa6528b5) · [Four-product operand check](https://github.com/nbald/volta-forever/blob/f34ecec7c7f0bb38098b90fe3d8d6e21b9d6426e/crates/vf-ptx/src/lower/known_bits/nibbles.rs)
+The official TensorFold 1.3.3 source build ran on the same Tesla V100-SXM2-32GB across the paired tests. For each VF build, restart the server from section 4 with `VF_BF16_TC_GROUPS=1` and `VF_BF16_ROW=tree`, then run the client. Each measured request read 227 uncached tokens and generated 64. TensorFold counts 63 decode steps after the first output token. [Two-product VF source](https://github.com/nbald/volta-forever/tree/e1544ea4bf05c3ff02fed9bcbccd3d71fa6528b5) · [Four-product operand check](https://github.com/nbald/volta-forever/blob/f34ecec7c7f0bb38098b90fe3d8d6e21b9d6426e/crates/vf-ptx/src/lower/known_bits/nibbles.rs)
 
 | TensorFold 1.3.3 on Qwen3.5 MLX Q4, three requests of 227 input / 64 output tokens | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
 | Single-row BF16 off, earlier run | 461.27 | 34.01 |
 | Two-product VF control, `tree` | 461.90 | 37.21 |
-| VF with four-product support, `tree` (section 4) | **462.85** | **46.63** |
+| Four-product VF, `tree`, in the earlier comparison | 462.85 | 46.63 |
+| Four-product VF, `tree`, repeated control | 463.11 | 46.67 |
+| Four-product VF reusing exact FP32 operands, `tree` (section 4) | **463.77** | **48.22** |
 | Native llama.cpp target on the same V100, Qwen3.5 GGUF Q4_K_M | 470.60 | 99.49 |
 
-The extension increased decode throughput by 25.33% over the paired two-product control. Both modes answered `Paris`, passed the stop and length checks, and reported `drafts=false`. The Lisbon warm-up and the Kyoto and Lyon replies had identical token hashes. Lima changed from “one volunteer” to “a designated volunteer”. Both phase rates remain below the native target. [Per-request timings, complete replies and hashes](./benchmarks/tensorfold-four-products.json) · [Earlier off, ordered and tree comparison](./benchmarks/tensorfold-bf16-row.json) · [Native reference](./benchmarks/ninfer-results.json)
+Reusing the two FP32 values from a packed BF16 cancellation raised median decode by 3.32% over the repeated four-product control. Both builds returned `Paris`, passed the stop and length checks, and produced identical token hashes for the warm-up and all three measured replies. In a separate profiled request, the routed experts’ gate/up and down projections fell from 7.721 to 7.235 and from 1.682 to 1.597 ms per decode step. [Timings, replies, hashes and kernel-family measurements](./benchmarks/tensorfold-bf16-forwarding.json)
+
+The earlier four-product extension increased decode throughput by 25.33% over the paired two-product control. Both modes answered `Paris`, passed the stop and length checks, and reported `drafts=false`. The Lisbon warm-up and the Kyoto and Lyon replies had identical token hashes. Lima changed from “one volunteer” to “a designated volunteer”. Both phase rates remain below the native target. [Per-request timings, complete replies and hashes](./benchmarks/tensorfold-four-products.json) · [Earlier off, ordered and tree comparison](./benchmarks/tensorfold-bf16-row.json) · [Native reference](./benchmarks/ninfer-results.json)
 
 CUPTI recorded all 37,422 decode kernel launches in a separate 227/64 request on each warmed server. The routed experts’ gate/up projections fell from 12.070 to 7.721 ms per step, and their down projections fell from 2.758 to 1.682 ms. Together they accounted for 5.424 of the 5.445 ms saved in GPU kernel time per step. [Kernel-family timings](./benchmarks/tensorfold-four-products.json)
 
