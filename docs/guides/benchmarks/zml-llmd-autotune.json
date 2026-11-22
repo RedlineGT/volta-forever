@@ -374,5 +374,277 @@
       "prefill_tokens_per_gpu_graph_s": 681.676205754203,
       "decode_tokens_per_gpu_graph_s": 49.264494642720216
     }
+  },
+  "guarded_bf16_tiles": {
+    "vf_commit": "e2437776d38ed3dde9e8cc67fd0ffe68c7f55bbf",
+    "flag": "VF_BF16_TC_TILES",
+    "comparison": "Separate cold compilation caches, default XLA autotuning, same official executable, checkpoint and physical V100. Both modes disable MTP. GPU graph phases and server counters come from separate runs.",
+    "modes": {
+      "off": {
+        "semantic_answer": "Paris",
+        "server_requests": [
+          {
+            "id": "warmup",
+            "city": "Lisbon",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "reply": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a blue folder on this table to document",
+            "server_ttft_s": 0.34299999999999997,
+            "server_decode_steps": 63,
+            "server_decode_s": 1.3659914429999997
+          },
+          {
+            "id": "run1",
+            "city": "Kyoto",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "reply": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors",
+            "server_ttft_s": 0.33699999999999997,
+            "server_decode_steps": 64,
+            "server_decode_s": 1.386746264999999
+          },
+          {
+            "id": "run2",
+            "city": "Lyon",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "reply": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in the shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another volunteer",
+            "server_ttft_s": 0.3360000000000001,
+            "server_decode_steps": 64,
+            "server_decode_s": 1.387557737000002
+          },
+          {
+            "id": "run3",
+            "city": "Lima",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "reply": "Lima, Peru, is the location where our volunteer group convenes daily in a shared room situated by the entrance. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any changes before the doors open. We meet after",
+            "server_ttft_s": 0.33799999999999986,
+            "server_decode_steps": 64,
+            "server_decode_s": 1.3846729400000015
+          }
+        ],
+        "gpu_phases": [
+          {
+            "id": "run1",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "prefill_graph_ms": 333.002675,
+            "expert_kernel_ms": 215.748889,
+            "complete_decode_graphs": 64,
+            "median_decode_graph_ms": 20.3049145
+          },
+          {
+            "id": "run2",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "prefill_graph_ms": 331.636897,
+            "expert_kernel_ms": 215.060192,
+            "complete_decode_graphs": 64,
+            "median_decode_graph_ms": 20.2985945
+          },
+          {
+            "id": "run3",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "prefill_graph_ms": 333.87082699999996,
+            "expert_kernel_ms": 216.95949099999999,
+            "complete_decode_graphs": 63,
+            "median_decode_graph_ms": 20.292306999999997
+          }
+        ],
+        "dropped_cupti_records": 0,
+        "medians": {
+          "gpu_prefill_tokens_per_s": 681.676205754203,
+          "server_prompt_tokens_per_ttft_s": 673.5905044510387,
+          "server_decode_steps_per_s": 46.15119695310666,
+          "gpu_decode_graphs_per_s": 49.264494642720216
+        },
+        "standalone_client_repeat": [
+          {
+            "id": "warmup",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "server_ttft_s": 0.3430000000000001,
+            "decode_steps": 63,
+            "decode_s": 1.375116508,
+            "prompt_tokens_per_ttft_s": 664.7230320699707,
+            "decode_steps_per_s": 45.8142998309493,
+            "reply": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another carefully inspects the signs by the stairs to report any changes before the"
+          },
+          {
+            "id": "run1",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "server_ttft_s": 0.34299999999999997,
+            "decode_steps": 64,
+            "decode_s": 1.3971459720000008,
+            "prompt_tokens_per_ttft_s": 661.8075801749271,
+            "decode_steps_per_s": 45.807668835336244,
+            "reply": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, a volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors open"
+          },
+          {
+            "id": "run2",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "server_ttft_s": 0.34399999999999986,
+            "decode_steps": 64,
+            "decode_s": 1.3977688470000005,
+            "prompt_tokens_per_ttft_s": 659.8837209302328,
+            "decode_steps_per_s": 45.787255981102845,
+            "reply": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another volunteer"
+          },
+          {
+            "id": "run3",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "server_ttft_s": 0.3460000000000001,
+            "decode_steps": 64,
+            "decode_s": 1.3961435250000003,
+            "prompt_tokens_per_ttft_s": 656.0693641618495,
+            "decode_steps_per_s": 45.84055926485065,
+            "reply": "Lima, Peru, is the location where our volunteer group convenes daily in a shared room situated by the main entrance. Each morning, one volunteer places a yellow envelope on the long table to signal the start of operations, while another checks the signs by the stairs to report any changes before the doors open. We meet"
+          },
+          {
+            "id": "median",
+            "prompt_tokens_per_ttft_s": 659.8837209302328,
+            "decode_steps_per_s": 45.807668835336244
+          }
+        ]
+      },
+      "on": {
+        "semantic_answer": "Paris",
+        "server_requests": [
+          {
+            "id": "warmup",
+            "city": "Lisbon",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "reply": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a blue folder on this table to document",
+            "server_ttft_s": 0.31099999999999994,
+            "server_decode_steps": 63,
+            "server_decode_s": 1.3689336920000008
+          },
+          {
+            "id": "run1",
+            "city": "Kyoto",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "reply": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to document our activities, while another checks the signs by the stairs to report any changes before the doors open. We write",
+            "server_ttft_s": 0.30700000000000005,
+            "server_decode_steps": 64,
+            "server_decode_s": 1.3910657589999988
+          },
+          {
+            "id": "run2",
+            "city": "Lyon",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "reply": "Lyon, France, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily materials, while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to",
+            "server_ttft_s": 0.30600000000000005,
+            "server_decode_steps": 64,
+            "server_decode_s": 1.3882588829999971
+          },
+          {
+            "id": "run3",
+            "city": "Lima",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "reply": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance functions as our daily hub. Each morning, one volunteer places a yellow envelope on the long table to signal the start of operations, while another checks the signs by the stairs to report any changes before the doors",
+            "server_ttft_s": 0.30800000000000005,
+            "server_decode_steps": 64,
+            "server_decode_s": 1.3892619499999999
+          }
+        ],
+        "gpu_phases": [
+          {
+            "id": "run1",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "prefill_graph_ms": 304.363527,
+            "expert_kernel_ms": 185.862363,
+            "complete_decode_graphs": 64,
+            "median_decode_graph_ms": 20.138211
+          },
+          {
+            "id": "run2",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "prefill_graph_ms": 304.409606,
+            "expert_kernel_ms": 185.76143499999998,
+            "complete_decode_graphs": 64,
+            "median_decode_graph_ms": 20.140067
+          },
+          {
+            "id": "run3",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "prefill_graph_ms": 305.305054,
+            "expert_kernel_ms": 187.02865699999998,
+            "complete_decode_graphs": 63,
+            "median_decode_graph_ms": 20.127892
+          }
+        ],
+        "dropped_cupti_records": 0,
+        "medians": {
+          "gpu_prefill_tokens_per_s": 745.7057711904138,
+          "server_prompt_tokens_per_ttft_s": 739.4136807817588,
+          "server_decode_steps_per_s": 46.0676260513721,
+          "gpu_decode_graphs_per_s": 49.65684389740479
+        },
+        "standalone_client_repeat": [
+          {
+            "id": "warmup",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "server_ttft_s": 0.31100000000000005,
+            "decode_steps": 63,
+            "decode_s": 1.3675764179999998,
+            "prompt_tokens_per_ttft_s": 733.1189710610931,
+            "decode_steps_per_s": 46.066895546600456,
+            "reply": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a blue folder on this table to document"
+          },
+          {
+            "id": "run1",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "server_ttft_s": 0.31499999999999995,
+            "decode_steps": 64,
+            "decode_s": 1.3933198519999999,
+            "prompt_tokens_per_ttft_s": 720.6349206349207,
+            "decode_steps_per_s": 45.933458787752926,
+            "reply": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors open"
+          },
+          {
+            "id": "run2",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "server_ttft_s": 0.31699999999999995,
+            "decode_steps": 64,
+            "decode_s": 1.4231663209999987,
+            "prompt_tokens_per_ttft_s": 716.0883280757099,
+            "decode_steps_per_s": 44.970147940986905,
+            "reply": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another volunteer"
+          },
+          {
+            "id": "run3",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "server_ttft_s": 0.31600000000000006,
+            "decode_steps": 64,
+            "decode_s": 1.4259107570000005,
+            "prompt_tokens_per_ttft_s": 718.3544303797466,
+            "decode_steps_per_s": 44.88359435246198,
+            "reply": "Lima, Peru, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a yellow envelope on this table to signal the"
+          },
+          {
+            "id": "median",
+            "prompt_tokens_per_ttft_s": 718.3544303797466,
+            "decode_steps_per_s": 44.970147940986905
+          }
+        ]
+      }
+    },
+    "numerics": "FP32 accumulation can round differently on the Volta FP16 tensor-core path. On the representable rounding test, 50 of 512 outputs per warp changed bits and the maximum absolute error against the double-precision reference was 3.82e-6. Ineligible input cases used the scalar path. Independently autotuned baseline runs also differed in wording."
   }
 }

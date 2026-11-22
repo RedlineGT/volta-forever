@@ -54,7 +54,7 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 ## ZML
 
-With a 256-token batch and prefill chunks of 256, default XLA autotuning raised the official LLMD server from **482.98 to 671.60 input tokens/s through the first token** and from **38.35 to 46.19 decode steps/s**. Three measured requests each read 227 uncached tokens and generated 64 with MTP disabled on one V100. The standalone client reproduced **654.18 / 46.04**. A separate CUPTI run measured **681.68 input tokens/s** across each full prefill graph and **49.26 tokens/s** within the decode graphs. LLMD measures time through the first token and provides separate decode counters. [Client and Ubuntu guide](../zml.md#5-benchmarks) · [Requests and XLA settings](zml-llmd-autotune.json) · [Chunk size comparison](zml-llmd-mxfp4.json)
+With 256-token batches and chunks, XLA autotuning and guarded BF16 tiles, the official LLMD server reached **745.71 tokens/s of GPU prefill** and **46.07 decode steps/s**. The paired control with tiles off reached **681.68 / 46.15**. The server also recorded **739.41** versus **673.59** input tokens/s through the first token. Each measured request processed 227 uncached input tokens and generated 64. [Ubuntu guide and client](../zml.md#5-benchmarks) · [Requests, GPU graph timings and independent repeat](zml-llmd-autotune.json)
 
 ## Strata
 

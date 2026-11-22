@@ -57,14 +57,14 @@ The official **LLMD** server also runs the full AMD MXFP4 Qwen3.5-35B-A3B checkp
 With the tested LLMD distribution installed, set `MODEL` to the local AMD checkpoint directory and run the following in the directory containing `llmd`. The defaults enable XLA autotuning. MTP is disabled. [Tested AMD checkpoint](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1)
 
 ```bash
-VF_CAPABILITY=8.0 XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 \
+VF_CAPABILITY=8.0 VF_BF16_TC_TILES=1 XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 \
   vf ./llmd --model="${MODEL:?Set MODEL to the local AMD checkpoint directory}" --model-name=qwen \
   --backend=triton --batch-size=1 --prefill-chunk-size=256 --token-batch-size=256 \
   --page-chunk-size=16 --max-context-len=512 --gpu-memory-fraction=0.94 \
   --cache-memory-fraction=0.97 --topk=1 --listen=127.0.0.1:8000
 ```
 
-Run the client from a second terminal while the server is idle. It streams four answers with `reasoning_effort="none"`, checks the expected city in each and reads the server counters before and after each request. The standalone client measured **654.18 input tokens/s through the first token** and **46.04 decode steps/s**. The paired autotuning experiment on the same V100 measured the following rates. [Reproduction and replies](./benchmarks/zml-llmd-autotune.json)
+Run the client from a second terminal while the server is idle. It streams four answers with `reasoning_effort="none"`, checks the expected city in each and reads the server counters before and after each request. Use a VF build containing the guarded BF16 tiles option. [VF change](https://github.com/nbald/volta-forever/commit/e2437776d38ed3dde9e8cc67fd0ffe68c7f55bbf)
 
 ```bash
 base=https://raw.githubusercontent.com/nbald/volta-forever/main/docs/guides/benchmarks
@@ -72,15 +72,14 @@ curl -fsSLO "$base/zml.py" && curl -fsSLO "$base/prompts.json"
 python3 zml.py
 ```
 
-| Prompt | Input / output tokens | Input tokens/s through first token | Decode steps/s |
-| --- | ---: | ---: | ---: |
-| Lisbon (warm-up) | 228 / 64 | 662.79 | 46.48 |
-| Kyoto | 227 / 64 | 671.60 | 46.19 |
-| Lyon | 227 / 64 | 673.59 | 46.19 |
-| Lima | 227 / 64 | 669.62 | 46.34 |
-| **Median after warm-up** | **227 / 64** | **671.60** | **46.19** |
+| Prompt | Input / output tokens | GPU prefill (tokens/s) | Server decode (steps/s) |
+|---|---:|---:|---:|
+| Kyoto | 227 / 64 | 745.82 | 46.01 |
+| Lyon | 227 / 64 | 745.71 | 46.10 |
+| Lima | 227 / 64 | 743.52 | 46.07 |
+| **Median** | **227 / 64** | **745.71** | **46.07** |
 
-In a separate CUPTI run on the same three requests, the prefill graph spans were **333.00, 331.64 and 333.87 ms**, a median of **681.68 input tokens/s on GPU**. The median single-token decode graph rate was **49.26 tokens/s on GPU**. These spans exclude time outside the graph. Expert projections accounted for 215–217 ms of summed GPU kernel time per prefill. [GPU phase measurements](./benchmarks/zml-llmd-autotune.json)
+On the same V100, enabling guarded BF16 tiles raised GPU prefill from **681.68 to 745.71 tokens/s**. Decode measured **46.15** with tiles off and **46.07** with tiles on. CUPTI timed all kernels in each prefill graph in a separate run. The server measured **673.59 / 739.41 prompt tokens/s through the first token** with tiles off / on. An independent run of the client above reproduced **659.88 / 718.35** through the first token and **45.81 / 44.97** in decode. Each run produced the expected city and handover. [Request timings and replies](./benchmarks/zml-llmd-autotune.json)
 
 With autotuning disabled, LLMD measured **482.98 / 38.35**. The input rate includes all server work through the first token. Native 1Cat-vLLM reached **1427.41 prefill / 76.13 decode** on the same GPU and prompts with QuantTrio AWQ. The checkpoint format and prompt timer differ. [Prior chunk size measurements](./benchmarks/zml-llmd-mxfp4.json) · [Native reference](./benchmarks/zml-awq-experimental.json)
 
