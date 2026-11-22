@@ -26,7 +26,9 @@
 //! for its own embedded code, or for that of the libraries loaded with it as a dependency (a CUDA
 //! runtime answers for the programs that use it; cuDNN's graph library for the library of its
 //! precompiled engines): 7.5 in this case (`vf_adapt::Policy::told_limit`), with a line at the
-//! default log level that says so.
+//! default log level that says so. `VF_CAPABILITY_ALL=1` tells such a caller what `VF_CAPABILITY`
+//! asks all the same, for a program that does not launch the kernels it would choose for it
+//! (SGLang with the settings of its guide selects its quantized experts from PyTorch's capability).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -392,13 +394,22 @@ fn caller(return_address: usize) -> Decision {
             } else {
                 format!("the code of {}", file.to_string_lossy())
             };
-            log::warn(format_args!(
-                "{name} is told compute capability {}.{}, not the {major}.{minor} that VF_CAPABILITY asks: {whose} \
-                 runs here as the translation of its machine code for sm_{sm}, in which the kernels that a program \
-                 told {major}.{minor} chooses are not the real ones",
-                sm / 10,
-                sm % 10
-            ))
+            if config().capability_all {
+                log::warn(format_args!(
+                    "{name} is told compute capability {major}.{minor}, as VF_CAPABILITY and VF_CAPABILITY_ALL ask, \
+                     although {whose} runs here as the translation of its machine code for sm_{sm}, in which the \
+                     kernels that a program told {major}.{minor} chooses are not the real ones"
+                ))
+            } else {
+                log::warn(format_args!(
+                    "{name} is told compute capability {}.{}, not the {major}.{minor} that VF_CAPABILITY asks: {whose} \
+                     runs here as the translation of its machine code for sm_{sm}, in which the kernels that a \
+                     program told {major}.{minor} chooses are not the real ones (VF_CAPABILITY_ALL=1 tells it \
+                     {major}.{minor} all the same)",
+                    sm / 10,
+                    sm % 10
+                ))
+            }
         }
         (_, Some((major, minor)), None) => log::info(format_args!(
             "{name} is told compute capability {major}.{minor}, as VF_CAPABILITY asks"
@@ -434,7 +445,8 @@ pub fn binary_capability(return_address: usize) -> Option<(i32, i32)> {
 
 fn capability(decision: Decision) -> Option<(i32, i32)> {
     let as_pair = |sm: u32| ((sm / 10) as i32, (sm % 10) as i32);
-    let told = config().capability.map(|asked| decision.limit.map_or(asked, as_pair));
+    let limit = decision.limit.filter(|_| !config().capability_all);
+    let told = config().capability.map(|asked| limit.map_or(asked, as_pair));
     let sm = match decision.caller {
         Caller::Native => return None,
         Caller::Direct => FIRST_SM_OF_THAT_RUNTIME,

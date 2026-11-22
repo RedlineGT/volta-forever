@@ -131,7 +131,9 @@ def machine_code(header, cubin, sm):
 
 def limited(given, code_sm):
     """What a caller whose code runs from machine code for `code_sm` is told when VF_CAPABILITY is
-    `given`: no later generation than that code's."""
+    `given`: no later generation than that code's, unless VF_CAPABILITY_ALL=1."""
+    if os.environ.get("VF_CAPABILITY_ALL") == "1":
+        return given
     return code_sm if given and code_sm and given // 10 > code_sm // 10 else given
 
 
@@ -296,10 +298,13 @@ if __name__ == "__main__":
             env = {k: v for k, v in os.environ.items() if k not in ("VOLTA_FOREVER", "VF_CAPABILITY")}
             env.update(VF_REAL_LIBCUDA=str(directory / "mock.so"), VF_LOG_LEVEL="0")
             for launched, override in ((True, None), (True, "7.0"), (True, "8.0"), (True, "12.0"), (False, None),
-                                       (False, "8.0"), (True, "8"), (True, "sm_80"), (True, "6.1"), (True, "0.0")):
+                                       (False, "8.0"), (True, "8"), (True, "sm_80"), (True, "6.1"), (True, "0.0"),
+                                       (True, "8.0 all"), (True, "12.0 all")):
                 settings = {"VOLTA_FOREVER": "test"} if launched else {}
                 if override:
-                    settings["VF_CAPABILITY"] = override
+                    settings["VF_CAPABILITY"], _, everyone = override.partition(" ")
+                    if everyone:
+                        settings["VF_CAPABILITY_ALL"] = "1"
                 for mode in ([], ["--runtimes"]):
                     subprocess.run([sys.executable, __file__, proxy, directory, *mode], env={**env, **settings},
                                    check=True)

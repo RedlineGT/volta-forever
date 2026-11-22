@@ -278,7 +278,10 @@ the default log level says so. PyTorch is such a program: in its sm_75 code, the
 kernels it chooses for 8.0 print an error and write nothing, and some of those it
 chooses for 9.0 stop the GPU. A program whose code is PTX is told what was asked and
 given its PTX for that capability. The decision is taken when a caller first asks; a
-library loaded after that is not looked at. The proxy checks the queried
+library loaded after that is not looked at. `VF_CAPABILITY_ALL=1` tells such callers
+what was asked all the same, for a program that does not launch the kernels it would
+choose for it (the SGLang guide: SGLang selects its quantized experts from PyTorch's
+capability). The proxy checks the queried
 device's physical major and minor before changing an answer. Other GPUs keep their
 physical values, including in a mixed-device process. A code-free client using the
 proxy without the launcher gets the physical capability by default.
@@ -533,6 +536,7 @@ placement restores the full size, the driver receives the default translation.
 | `VF_ADAPT` | `0`: forward images unchanged. |
 | `VF_LAZY` | `0`: compile whole modules when loaded, not each kernel when asked for. |
 | `VF_CAPABILITY` | Compute capability reported to callers without Volta code (e.g. `8.0`). The PTX taken from a program is then the PTX for that capability; a caller whose code runs from sm_75 machine code is still told 7.5 (section 4). |
+| `VF_CAPABILITY_ALL` | `1`: `VF_CAPABILITY` is told also to the callers whose code runs from machine code of an earlier generation (section 4). |
 | `VF_FIT` | `0`: a launch that the driver refuses for registers is refused to the program. |
 | `VF_FIT_SHARED` | `1`: if a V100 rejects an oversized dynamic shared-memory opt-in, retry the setter at the device limit minus the kernel’s static shared memory. Kernel launches still have to fit. |
 
