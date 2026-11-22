@@ -210,6 +210,8 @@ to code for later GPUs, which would be translated or emulated.
 - **PTX** (code that the driver compiles) is retargeted, and the instructions that Volta lacks
   are replaced by sequences that it has.
 - **Machine code for `sm_75`** is translated to machine code for `sm_70`, function by function.
+  If the default translation refuses every kernel, builds from `main` can compile the PTX retained
+  by NVIDIA's assembler in the same image.
 - **NVIDIA's CUDA 13 libraries** are served by their CUDA 12.9 builds.
 
 The documents:

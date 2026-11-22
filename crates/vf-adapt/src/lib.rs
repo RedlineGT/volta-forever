@@ -181,6 +181,10 @@ impl Adapted {
     fn unchanged(outcome: Outcome) -> Adapted {
         Adapted { outcome, image: None }
     }
+
+    fn complete_ptx(&self) -> bool {
+        matches!(&self.outcome, Outcome::Retargeted { trapped, refused, .. } if trapped.is_empty() && refused.is_empty())
+    }
 }
 
 /// A cubin translated for the device.
@@ -190,6 +194,16 @@ struct Translation {
     refused: Vec<Refused>,
     emulated: Vec<Emulated>,
     over_budget: bool,
+}
+
+impl Translation {
+    /// Replacing this image with PTX cannot discard a working machine-code entry point.
+    fn all_entries_refused(&self, cubin: &[u8]) -> bool {
+        !self.refused.is_empty()
+            && fatbin::cubin_entries(cubin).is_some_and(|names| {
+                !names.is_empty() && names.iter().all(|name| self.refused.iter().any(|r| r.kernel == *name))
+            })
+    }
 }
 
 /// Reconstruct the single PTX module kept as NUL-separated lines by ptxas. Match the
@@ -401,6 +415,15 @@ impl Policy {
         match fatbin::cubin_sm(cubin) {
             Some(sm) if self.runs(sm) => Adapted::unchanged(Outcome::Native),
             Some(sm) if self.translatable(sm) => match self.translate_cubin(cubin) {
+                Ok(translation)
+                    if self.translate == Translate::WithoutPtx
+                        && translation.all_entries_refused(cubin)
+                        && let Some(recovered) = embedded_ptx(cubin, sm)
+                            .map(|(text, _)| self.adapt_ptx(&text))
+                            .filter(Adapted::complete_ptx) =>
+                {
+                    recovered
+                }
                 Ok(translation) => Adapted {
                     outcome: Outcome::Translated {
                         entries: 1,
@@ -437,6 +460,7 @@ impl Policy {
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut translated, mut functions, mut refused, mut emulated) = (0, 0, Vec::new(), Vec::new());
         let mut over_budget = false;
+        let mut all_refused = self.translate == Translate::WithoutPtx;
         for entry in &fat.entries {
             if !ours(entry) {
                 // In Force mode, drop native sm_70 entries so the driver uses the translated ones.
@@ -446,8 +470,10 @@ impl Policy {
                 entries.push(NewEntry::copy_of(entry));
                 continue;
             }
-            match self.translate_cubin(&entry.payload()?) {
+            let payload = entry.payload()?;
+            match self.translate_cubin(&payload) {
                 Ok(translation) => {
+                    all_refused = all_refused && translation.all_entries_refused(&payload);
                     entries.push(NewEntry::replace(
                         entry,
                         translation.cubin,
@@ -466,6 +492,12 @@ impl Policy {
                         reason,
                     })));
                 }
+            }
+        }
+        if all_refused {
+            let recovered = self.retarget_fatbin(fat, KIND_ELF, TRANSLATED_FROM)?;
+            if recovered.complete_ptx() {
+                return Ok(Some(recovered));
             }
         }
         Ok(Some(Adapted {
@@ -532,6 +564,10 @@ impl Policy {
             };
             (KIND_ELF, source)
         };
+        self.retarget_fatbin(fat, kind, source)
+    }
+
+    fn retarget_fatbin(&self, fat: &FatBinary<'_>, kind: u16, source: u32) -> Result<Adapted, fatbin::Error> {
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut rewritten, mut tensor_rewritten, mut tanh_expanded, mut trapped) = (0, 0, 0, Vec::new());
         let (mut refused, mut emulated) = (Vec::new(), Vec::new());
@@ -1238,6 +1274,42 @@ mod tests {
             (KIND_PTX, 70, (7, 0))
         );
         assert_eq!(&*entry.payload().unwrap(), image.as_slice());
+    }
+
+    #[test]
+    fn recover_turing_ptx_only_when_no_translated_entry_can_run() {
+        // ptxas predicates the Turing HMMA, but the retained PTX branches around the MMA.
+        let cubin = include_bytes!("../../../tests/kernels/ptx-cases/guarded-mma.sm75.cubin");
+        let policy = Policy::default();
+        let machine = Policy {
+            translate: Translate::First,
+            ..policy
+        };
+        assert!(
+            matches!(machine.adapt_cubin(cubin).outcome, Outcome::Translated { ref refused, .. } if refused.len() == 1)
+        );
+        let recovered = policy.adapt_cubin(cubin);
+        assert!(recovered.complete_ptx());
+        let fixture = fatbin::parse(ELF75_PTX75).unwrap();
+        let good = fixture.entries[0];
+        let guarded = || NewEntry::replace(&good, cubin.to_vec(), 75, (1, 7));
+        let one = fatbin::build(&[guarded()]);
+        let one = fatbin::parse(&one).unwrap();
+        assert_eq!(policy.adapt_fatbin(&one).unwrap().outcome, recovered.outcome);
+        assert_eq!(
+            machine.adapt_fatbin(&one).unwrap().outcome,
+            machine.adapt_cubin(cubin).outcome
+        );
+        let mixed = fatbin::build(&[guarded(), NewEntry::copy_of(&good)]);
+        assert!(
+            matches!(policy.adapt_fatbin(&fatbin::parse(&mixed).unwrap()).unwrap().outcome,
+            Outcome::Translated { ref refused, entries: 2, .. } if refused.len() == 1)
+        );
+        let mut missing = cubin.to_vec();
+        let section = b".nv_debug_ptx_txt";
+        let offset = missing.windows(section.len()).position(|s| s == section).unwrap();
+        missing[offset] = b'_';
+        assert_eq!(policy.adapt_cubin(&missing).outcome, machine.adapt_cubin(cubin).outcome);
     }
 
     #[test]

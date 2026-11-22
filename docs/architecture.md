@@ -107,7 +107,9 @@ leads to:
 - **The image already has code for sm_70**: loaded as is (the `Native` outcome).
 - **The image has PTX for a later architecture**: the PTX is retargeted and lowered.
 - **The image has machine code for sm_75 only** (no PTX): the machine code is
-  translated to sm_70.
+  translated to sm_70. In the default mode, if the translator refuses every entry point, VF also checks
+  for complete PTX retained inside the same cubins. It retries from that source when the PTX path can
+  lower every function. Modules with a working machine-code entry keep their translation.
 - **The image has PTX and machine code for sm_75**: by default the PTX path is
   taken (PTX was written to be compiled for any target; machine code was written
   for one). `VF_TRANSLATE=first` reverses the preference.

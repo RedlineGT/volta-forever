@@ -71,7 +71,9 @@ have code for Volta, behind their names (`INSTALL.md`).
 **Cubins for sm_80 and later.** VF can use the PTX that NVIDIA's assembler retains in
 `.nv_debug_ptx_txt` with line information. It checks the architecture and the kernel names
 before compiling that PTX for Volta. This covers standalone cubins from Triton and cubins in
-fat binaries. Stripped cubins still need a separate PTX image or a supported machine-code target.
+fat binaries. For sm_75, VF also tries retained PTX when its default machine-code translation
+refuses every kernel in the image. Stripped cubins still need a separate PTX image or a
+supported machine-code target.
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of
 blocks, Hopper's barriers, tensor maps (`docs/emulations.md`, "Other instructions").
