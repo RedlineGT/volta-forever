@@ -87,6 +87,9 @@ px xla-sort-bounds "$G/ptx-cases/xla-sort-bounds.ptx" c0400000 80000000 00000000
 px packed-bf16-exact-sum "$G/ptx-cases/packed-bf16-exact-sum.ptx" 0 00018001 12345678 0
 px packed-bf16-convert "$G/ptx-cases/packed-bf16-convert.ptx" 40203f88 c13cc238 7fff0001 ff80ff80
 px packed-bf16-bounds "$G/ptx-cases/packed-bf16-bounds.ptx" 00000002 80008001 7fff0002 40007fff
+# An exactly representable BF16 tile and a tile with one out-of-range lane.
+VF_BF16_TC_GROUPS=0 px bf16-mma-group-off "$G/ptx-cases/bf16-group.ptx" 42400000 5aa55aa5 12345678 0
+VF_BF16_TC_GROUPS=1 px bf16-mma-group-on "$G/ptx-cases/bf16-group.ptx" 42400000 5aa55aa5 12345678 0
 
 # Kernels that exist as PTX text only (tests/kernels/ptx-cases): four products
 # on accumulators that hold 1.0, after a scope that declares their family again and sets its own

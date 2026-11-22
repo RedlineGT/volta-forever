@@ -945,7 +945,7 @@ fn plain_identifier(name: &str) -> bool {
 
 /// A complete PTX debug location line. An unrecognised extension or trailing text is
 /// kept intact, even if it starts with the same directive.
-fn debug_location(line: &str) -> bool {
+pub(crate) fn debug_location(line: &str) -> bool {
     let mut clauses = line.split(',');
     let position = |clause: &str, directive: &str| {
         let mut fields = clause.split_ascii_whitespace();

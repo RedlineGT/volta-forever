@@ -15,7 +15,7 @@ pub struct EmulatedCounts {
     /// Block-scaled tensor-core products (NVFP4, MXFP4, MXF8F6F4): E2M1 or FP8 operands with block
     /// scales, run on Volta's tensor cores after decoding to halves and applying the scales.
     pub fp4_tensor: usize,
-    /// Tensor-core products of bf16, tf32 or f64, which each thread computes without tensor cores.
+    /// Tensor-core products of bf16, tf32 or f64. Some BF16 groups can run on Volta Tensor Cores.
     pub thread_tensor: usize,
     /// `ldmatrix` instructions.
     pub ldmatrix: usize,
@@ -48,7 +48,7 @@ impl EmulatedCounts {
             (self.integer_tensor, "integer tensor-core products"),
             (self.fp8_tensor, "FP8 tensor-core products"),
             (self.fp4_tensor, "block-scaled tensor-core products"),
-            (self.thread_tensor, "tensor-core products computed without tensor cores"),
+            (self.thread_tensor, "BF16/TF32/FP64 tensor-core products"),
             (self.ldmatrix, "ldmatrix"),
             (self.movmatrix, "movmatrix"),
             (self.cp_async, "asynchronous copies"),
@@ -296,7 +296,7 @@ mod tests {
         );
         assert_eq!(
             counts.summary(),
-            "1 FP8 tensor-core products, 3 tensor-core products computed without tensor cores, \
+            "1 FP8 tensor-core products, 3 BF16/TF32/FP64 tensor-core products, \
              1 conversions to packed floats, 2 FP8 conversions, 2 other instructions of later GPUs"
         );
     }

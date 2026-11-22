@@ -11,7 +11,16 @@ fn lower(text: &str) -> String {
 
 /// Lowered for a program whose rows are where the manual wants them.
 fn lower_aligned(text: &str) -> String {
-    body(text, 64, Options { aligned_rows: true }).unwrap().0
+    body(
+        text,
+        64,
+        Options {
+            aligned_rows: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .0
 }
 
 fn refusal(text: &str) -> String {

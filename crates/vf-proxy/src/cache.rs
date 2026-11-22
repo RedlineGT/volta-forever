@@ -947,6 +947,13 @@ mod tests {
         let h1 = cache_hash(img, &p1);
         let h2 = cache_hash(img, &p2);
         assert_ne!(h1, h2, "different policy must give different hash");
+        let mut grouped = vf_adapt::Policy::default();
+        grouped.lowering.bf16_tc_groups = true;
+        assert_ne!(
+            h1,
+            cache_hash(img, &grouped),
+            "changing BF16 lowering changes the cache key"
+        );
         // Same policy, same image: same hash.
         let h1b = cache_hash(img, &p1);
         assert_eq!(h1, h1b);

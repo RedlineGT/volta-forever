@@ -96,7 +96,10 @@ impl Default for Policy {
         Policy {
             device_sm: 70,
             ptx_max: (9, 0),
-            lowering: vf_ptx::lower::Options { aligned_rows: true },
+            lowering: vf_ptx::lower::Options {
+                aligned_rows: true,
+                ..Default::default()
+            },
             told_sm: None,
             translate: Translate::WithoutPtx,
             pairs: true,
@@ -252,6 +255,7 @@ impl Policy {
     /// This policy with what the environment asks for. `VF_ALIGNED_ROWS=0`: do not take the rows
     /// that `ldmatrix` reads to be at multiples of 16; test their addresses when the code runs, for a
     /// program that does not follow the PTX manual there (slower: see `Policy::default`).
+    /// `VF_BF16_TC_GROUPS=1`: use guarded Volta FP16 Tensor Cores for groups of BF16 products.
     /// `VF_CAPABILITY=<major>.<minor>`: the compute capability the programs are told (`told_sm`).
     /// `VF_TRANSLATE=0`: do not translate machine code; `VF_TRANSLATE=first`: translate it also
     /// where an image has PTX (`Translate`).
@@ -264,6 +268,9 @@ impl Policy {
         }
         if let Ok(value) = std::env::var("VF_ALIGNED_ROWS") {
             self.lowering.aligned_rows = value != "0";
+        }
+        if let Ok(value) = std::env::var("VF_BF16_TC_GROUPS") {
+            self.lowering.bf16_tc_groups = value == "1";
         }
         if let Some(sm) = std::env::var("VF_CAPABILITY").ok().as_deref().and_then(capability_sm) {
             self.told_sm = Some(sm);

@@ -35,7 +35,7 @@
 //! columns that a thread holds (the two layouts spread k over the threads differently, but a thread
 //! holds the same k of A and of B, which is all a product needs).
 //!
-//! Products of what a half does not hold (bf16, tf32, f64) get no help from Volta's tensor cores: a
+//! By default, products of what a half does not hold (bf16, tf32, f64) use scalar arithmetic: a
 //! thread gathers its rows of A and its columns of B from the other lanes and computes its sums
 //! with `fma`, one term after the other.
 //!
@@ -107,6 +107,7 @@ macro_rules! emit {
 }
 
 mod barrier;
+mod bf16_groups;
 mod body;
 mod convert;
 mod known_bits;
@@ -259,6 +260,10 @@ pub struct Options {
     /// operands are loaded at each product instead of gathered from the other lanes and kept (see the
     /// module documentation). A program that breaks the rule stops with a misaligned-address fault.
     pub aligned_rows: bool,
+    /// Use Volta FP16 Tensor Cores for groups of BF16 products when every lane can exactly
+    /// convert its multiplicands to normal half precision or signed zero. The FP32 accumulator
+    /// may round differently from the scalar path.
+    pub bf16_tc_groups: bool,
 }
 
 /// The names of `text` that begin with `%`, without repetition: for the text of a module outside
@@ -331,6 +336,22 @@ pub fn body_in(
                 .ok_or_else(|| Unsupported("statements not recognised".to_string()))?,
         ),
         None => (text, items),
+    };
+    // This pass tracks dependencies by register name as the other lowering passes do.
+    // Only group products after names such as %d00 and %d0 have been canonicalized.
+    let grouped = if options.bf16_tc_groups {
+        bf16_groups::rewrite(text, &items, outside)
+    } else {
+        None
+    };
+    let (text, items, added_products) = match &grouped {
+        Some((text, added)) => (
+            text.as_str(),
+            scan::items(text.as_bytes(), 0..text.len())
+                .ok_or_else(|| Unsupported("generated statements not recognised".to_string()))?,
+            *added,
+        ),
+        None => (text, items, 0),
     };
     let mut body = Body {
         text,
@@ -430,6 +451,8 @@ pub fn body_in(
         return Err(not_loaded(&sources.join(", ")));
     }
     body.out.push_str(&text[body.copied..]);
+    // The fast and fallback paths implement the same group of source operations.
+    body.counts.tensor -= added_products;
     let prologue = body.prologue();
     let lowered = format!("{{{prologue}{}", body.out);
     if lowered == blanked {
