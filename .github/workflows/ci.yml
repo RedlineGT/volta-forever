@@ -27,6 +27,7 @@ jobs:
         run: |
           tests/proxy/fit_api.sh
           tests/proxy/marker.sh
+          tests/proxy/lifecycle.sh
       - name: The launcher, under dash and under bash
         run: |
           dash tests/launcher/launcher.sh
