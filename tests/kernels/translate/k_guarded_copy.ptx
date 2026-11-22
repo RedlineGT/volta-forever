@@ -1,0 +1,26 @@
+// ptxas -arch=sm_80 k_guarded_copy.ptx -o k_guarded_copy.sm80.cubin (CUDA 13.5)
+// A predicated copy can replace the first 16 bytes after its group completes.
+.version 8.6
+.target sm_80
+.address_size 64
+.visible .entry guarded_copy(.param .u64 input, .param .u64 output, .param .u32 active) {
+    .shared .align 16 .b8 area[32];
+    .reg .u32 %lane, %base, %limit, %r<4>;
+    .reg .u64 %src, %dst;
+    .reg .pred %p;
+    ld.param.u64 %src, [input];
+    ld.param.u64 %dst, [output];
+    ld.param.u32 %limit, [active];
+    mov.u32 %lane, %tid.x;
+    mov.u32 %base, area;
+    cp.async.ca.shared.global [%base+16], [%src+512], 16;
+    cp.async.commit_group;
+    cp.async.wait_group 0;
+    setp.lt.u32 %p, %lane, %limit;
+    @%p cp.async.ca.shared.global [%base+16], [%src+-16], 16;
+    cp.async.commit_group;
+    cp.async.wait_group 0;
+    ld.shared.v4.u32 {%r0,%r1,%r2,%r3}, [%base+16];
+    st.global.v4.u32 [%dst+16], {%r0,%r1,%r2,%r3};
+    ret;
+}

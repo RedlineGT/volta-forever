@@ -27,7 +27,9 @@ PTX path by default. `VF_TRANSLATE=first` gives machine code precedence.
 
 For sm_80, the generator checks the opcode, modifiers and positions of the variable
 operands against both architectures' instruction descriptions. The translator
-also lowers specific global loads and stores and a packed FP32-to-FP16 conversion.
+lowers supported global loads and stores, paired FP32-to-FP16 conversions, and
+16-byte asynchronous copies. Each copy uses a four-register temporary for a global
+load followed by a shared store. Both instructions preserve the original predicate.
 It verifies the system descriptor along every path to a memory access. Supported
 functions then pass through the existing register allocator and Volta scheduler.
 A function outside this subset is refused at lookup. The supported forms are

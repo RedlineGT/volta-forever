@@ -59,7 +59,7 @@ pub(super) struct FuncData {
     pub(super) needs_pool: bool,
     pub(super) uniform_predicates: Vec<u32>,
     pub(super) highest: u32,
-    /// How many scratch registers the sequences of matrix instructions need.
+    /// How many scratch registers the expanded instruction sequences need.
     pub(super) scratch_need: u32,
     /// Whether a register for the lane of the thread is needed.
     pub(super) needs_lane: bool,
@@ -68,6 +68,7 @@ pub(super) struct FuncData {
     /// A symbol of another function points into it: it can be entered elsewhere than at its start.
     pub(super) entered_inside: bool,
     pub(super) ampere: bool,
+    pub(super) ampere_ops: HashMap<usize, super::ampere::Operation>,
 }
 
 impl FuncData {
@@ -188,6 +189,7 @@ pub(super) fn parse_function(
         product_count,
         entered_inside: false,
         ampere: false,
+        ampere_ops: HashMap::new(),
     })
 }
 

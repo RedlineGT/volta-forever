@@ -1,7 +1,11 @@
 //! The sm_80 instruction forms that can enter the Turing-to-Volta translator.
 //! The table fixes all bits except explicitly identified operand fields. The forms with
 //! different encodings on Ampere and Turing are decoded before testing shared forms.
-use crate::generated::ampere::{LOAD16, PACK, SHARED_FORMS, STORE16, STORE32};
+use std::collections::HashMap;
+
+use crate::generated::ampere::{
+    COMMIT, COPY128, HALF_CONSTANT, LOAD16, LOAD128, PACK, SHARED_FORMS, STORE16, STORE32, STORE128,
+};
 
 use crate::assemble::{
     OpVal::{Int, Str},
@@ -12,8 +16,9 @@ use crate::field;
 use crate::generated::fields::*;
 use crate::generated::special::{READ_BARRIER, USCHED, WAIT, WRITE_BARRIER};
 
+use super::context::Ctx;
 use super::util::find_relative;
-use super::{ARRIVES, Item, Refused};
+use super::{ARRIVES, Item, Refused, SEQUENCE};
 
 const CONTROLS: u128 = 0x1ffff << USCHED;
 const BYTE: u128 = 0xff;
@@ -36,6 +41,18 @@ pub(super) fn source(header: &[u8]) -> Result<u8, String> {
     Ok(80)
 }
 
+#[derive(Debug)]
+pub(super) enum Operation {
+    Pack,
+    GlobalToShared { global_offset: i32, shared_offset: i32 },
+}
+
+#[derive(Debug)]
+pub(super) struct Normalized {
+    pub words: Vec<u8>,
+    pub operations: HashMap<usize, Operation>,
+}
+
 struct Step {
     killed: u64,
     initialized: u64,
@@ -47,12 +64,13 @@ struct Step {
 /// A binary has no textual descriptor on sm_80's default LDG/STG form. Even when
 /// the uniform register number is known, its contents must be the system descriptor
 /// on every path leading here before an ordinary Volta global pointer can replace it.
-pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Vec<u8>, Refused> {
+pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Normalized, Refused> {
     let (instructions, tail) = code.as_chunks::<16>();
     if instructions.is_empty() || !tail.is_empty() {
         return Err(Refused("sm_80 code is empty or contains a partial instruction".into()));
     }
     let mut result = Vec::with_capacity(code.len());
+    let mut operations = HashMap::new();
     let mut joins = [None; 16];
     let mut syncs = Vec::new();
     let mut steps = Vec::with_capacity(instructions.len());
@@ -67,23 +85,42 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Vec<u8>, R
         let addr = (w >> 24) & BYTE;
         let rd = (w >> 16) & BYTE;
         let rb = (w >> 32) & BYTE;
-        let (word, descriptor) = if matches_form(bits, LOAD16) {
+        let load128 = matches_form(bits, LOAD128);
+        let store128 = matches_form(bits, STORE128);
+        // Both encodings carry the signed byte displacement in the same 24 bits.
+        let offset = (w >> 40) as u32 & 0xff_ffff;
+        if load128 || store128 {
+            let vector = if load128 { rd } else { rb };
+            if !vector.is_multiple_of(4) || vector > 248 || !addr.is_multiple_of(2) || addr > 252 {
+                return Err(Refused(format!(
+                    "invalid register group for sm_80 vector access at 0x{at:x}"
+                )));
+            }
+        }
+        let (word, descriptor) = if matches_form(bits, LOAD16) || load128 {
             let load = assemble(
                 "ldg__sImmOffset",
                 &[
                     ("e", Str("E")),
-                    ("sz", Str("U16")),
-                    ("sem", Str("CONSTANT")),
+                    ("sz", Str(if load128 { "_128" } else { "U16" })),
+                    ("sem", Str(if load128 { "WEAK" } else { "CONSTANT" })),
                     ("sco", Str("SYS")),
                     ("cop", Str("EN")),
                     ("Rd", Int(rd as u32)),
                     ("Ra", Int(addr as u32)),
+                    ("Ra_offset", Int(offset)),
                     ("Pu", Int(7)),
                 ],
             );
             (load, Some((w >> 32) as u8 & 63))
-        } else if matches_form(bits, STORE16) || matches_form(bits, STORE32) {
-            let size = if matches_form(bits, STORE16) { "U16" } else { "_32" };
+        } else if matches_form(bits, STORE16) || matches_form(bits, STORE32) || store128 {
+            let size = if store128 {
+                "_128"
+            } else if matches_form(bits, STORE16) {
+                "U16"
+            } else {
+                "_32"
+            };
             let store = assemble(
                 "stg__sImmOffset",
                 &[
@@ -94,20 +131,79 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Vec<u8>, R
                     ("cop", Str("EN")),
                     ("Rb", Int(rb as u32)),
                     ("Ra", Int(addr as u32)),
+                    ("Ra_offset", Int(offset)),
                 ],
             );
             (store, Some((w >> 64) as u8 & 63))
-        } else if matches_form(bits, PACK) {
-            // Let ordinary register allocation see the input and the destination of the conversion.
-            let convert = assemble(
-                "f2f_f32_downconvert__RRR_RRR",
+        } else if matches_form(bits, HALF_CONSTANT) {
+            // RN(-0 * +0 + c) preserves a finite half, including the sign of zero.
+            let pair = (w >> 32) as u32;
+            if [pair, pair >> 16].iter().any(|&half| half & 0x7c00 == 0x7c00) {
+                return Err(Refused(format!("nonfinite sm_80 half constant at 0x{at:x}")));
+            }
+            (
+                assemble(
+                    "imad__RRsI_RRI",
+                    &[
+                        ("Rd", Int(rd as u32)),
+                        ("Ra", Int(255)),
+                        ("Rb", Int(255)),
+                        ("Sc", Int(pair)),
+                    ],
+                ),
+                None,
+            )
+        } else if matches_form(bits, COPY128) {
+            if addr > 252 || !addr.is_multiple_of(2) {
+                return Err(Refused(format!(
+                    "invalid address for sm_80 asynchronous copy at 0x{at:x}"
+                )));
+            }
+            let global_offset = ((w >> 32) as i32) << 20 >> 20;
+            let shared_offset = ((w >> 44) as i32) << 12 >> 12;
+            if rd == 255 && shared_offset < 0 {
+                return Err(Refused(format!("negative absolute shared address at 0x{at:x}")));
+            }
+            operations.insert(
+                i,
+                Operation::GlobalToShared {
+                    global_offset,
+                    shared_offset,
+                },
+            );
+            // Liveness must see the global address pair, shared address and guard.
+            // Emission replaces this store with the two Volta memory operations.
+            let store = assemble(
+                "stg__sImmOffset",
                 &[
-                    ("dstfmt.srcfmt", Str("F16.F32")),
-                    ("Rd", Int(rd as u32)),
-                    ("Rb", Int(rb as u32)),
+                    ("e", Str("E")),
+                    ("sz", Str("_32")),
+                    ("sem", Str("WEAK")),
+                    ("sco", Str("SYS")),
+                    ("cop", Str("EN")),
+                    ("Ra", Int(addr as u32)),
+                    ("Rb", Int(rd as u32)),
+                    ("Pg", Int((w >> 12) as u32 & 7)),
+                    ("Pg_not", Int((w >> 15) as u32 & 1)),
                 ],
             );
-            (convert, None)
+            (store, Some((w >> 64) as u8 & 63))
+        } else if matches_form(bits, COMMIT) {
+            // The group now consists of ordinary shared stores.
+            (assemble("membar_", &[("sem", Str("SC")), ("sco", Str("CTA"))]), None)
+        } else if matches_form(bits, PACK) {
+            // A single PRMT exposes both input registers and the output to liveness.
+            operations.insert(i, Operation::Pack);
+            let surrogate = assemble(
+                "prmt__RuIR_RIR",
+                &[
+                    ("Rd", Int(rd as u32)),
+                    ("Ra", Int(rb as u32)),
+                    ("Rc", Int(addr as u32)),
+                    ("Sb", Int(0x5410)),
+                ],
+            );
+            (surrogate, None)
         } else if SHARED_FORMS.iter().any(|&form| matches_form(bits, form)) {
             (Some(bits), None)
         } else {
@@ -117,7 +213,11 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Vec<u8>, R
             return Err(Refused(format!("unsupported sm_80 address register pair at 0x{at:x}")));
         }
         let word = word.ok_or_else(|| Refused(format!("cannot encode sm_80 instruction for Volta at 0x{at:x}")))?;
-        let word = (word & !CONTROLS) | control;
+        let word = if matches_form(bits, COMMIT) || matches_form(bits, COPY128) {
+            word | 63 << WAIT
+        } else {
+            (word & !CONTROLS) | control
+        };
         let d = decoder
             .decode(word)
             .ok_or_else(|| Refused(format!("no decoded instruction for the sm_80 form at 0x{at:x}")))?;
@@ -212,22 +312,117 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Vec<u8>, R
             )));
         }
     }
-    Ok(result)
+    Ok(Normalized {
+        words: result,
+        operations,
+    })
 }
 
-pub(super) fn pack(i: usize, d: &Decoded) -> Result<Vec<Item>, Refused> {
-    let rd = Int(d.op_or(OP_RD, 255));
-    // F2F converts the low half. PRMT selects its two low bytes and two bytes
-    // from RZ; an ordinary 32-bit consumer sees exactly PACK_AB RZ, Rb.
-    let convert = (d.word & !(7 << WRITE_BARRIER)) | (u128::from(ARRIVES) << WRITE_BARRIER) | (63 << WAIT);
-    let mut first = Item::new(convert, i, "sm80: convert low half", true);
-    first.then = Some(ARRIVES);
+pub(super) fn emit(ctx: &mut Ctx<'_>, i: usize, d: &Decoded, op: &Operation) -> Result<Vec<Item>, Refused> {
+    let (global_offset, shared_offset) = match op {
+        Operation::Pack => return pack(ctx, i, d),
+        Operation::GlobalToShared {
+            global_offset,
+            shared_offset,
+        } => (global_offset, shared_offset),
+    };
+    // Scratch starts at an even register. Six consecutive registers always contain
+    // a four-aligned group suitable for a 128-bit transaction.
+    let temp = ctx
+        .scratch_at_reg
+        .ok_or_else(|| Refused("no dedicated register group for an sm_80 asynchronous copy".into()))?
+        .next_multiple_of(4);
+    let pg = d.op_or(OP_PG, 7);
+    let invert = d.op_or(OP_PG_AT_NOT, 0);
+    let load = assemble(
+        "ldg__sImmOffset",
+        &[
+            ("e", Str("E")),
+            ("sz", Str("_128")),
+            ("sem", Str("WEAK")),
+            ("sco", Str("SYS")),
+            ("cop", Str("EN")),
+            ("Pu", Int(7)),
+            ("Rd", Int(temp)),
+            ("Ra", Int(d.op_or(OP_RA, 255))),
+            ("Ra_offset", Int(*global_offset as u32)),
+            ("Pg", Int(pg)),
+            ("Pg_not", Int(invert)),
+            ("dst_wr_sb", Int(ARRIVES)),
+        ],
+    )
+    .ok_or_else(|| Refused("cannot assemble the global load for an sm_80 copy".into()))?;
+    let store = assemble(
+        if d.op_or(OP_RB, 255) == 255 {
+            "sts__uImmOffset"
+        } else {
+            "sts__sImmOffset"
+        },
+        &[
+            ("sz", Str("_128")),
+            ("Ra", Int(d.op_or(OP_RB, 255))),
+            ("Ra_offset", Int(*shared_offset as u32)),
+            ("Rb", Int(temp)),
+            ("Pg", Int(pg)),
+            ("Pg_not", Int(invert)),
+            ("src_rel_sb", Int(SEQUENCE)),
+        ],
+    )
+    .ok_or_else(|| Refused("cannot assemble the shared store for an sm_80 copy".into()))?;
+    let mut a = Item::new(load | 63 << WAIT, i, "sm80: load asynchronous copy", true);
+    a.then = Some(ARRIVES);
+    let mut b = Item::new(store | 63 << WAIT, i, "sm80: store asynchronous copy", true);
+    b.then = Some(SEQUENCE);
+    Ok(vec![a, b])
+}
+
+pub(super) fn pack(ctx: &mut super::context::Ctx<'_>, i: usize, d: &Decoded) -> Result<Vec<Item>, Refused> {
+    let rd = d.op_or(OP_RD, 255);
+    let low = d.op_or(OP_RA, 255);
+    let high = d.op_or(OP_RC, 255);
+    let mut items = Vec::new();
+    let mut conversion = |dest, source, why| -> Result<(), Refused> {
+        let word = assemble(
+            "f2f_f32_downconvert__RRR_RRR",
+            &[
+                ("dstfmt.srcfmt", Str("F16.F32")),
+                ("Rd", Int(dest)),
+                ("Rb", Int(source)),
+            ],
+        )
+        .ok_or_else(|| Refused("cannot assemble F2F for a packed sm_80 conversion".into()))?;
+        let word = (word & !(7 << WRITE_BARRIER)) | (u128::from(ARRIVES) << WRITE_BARRIER) | (63 << WAIT);
+        let mut item = Item::new(word, i, why, true);
+        item.then = Some(ARRIVES);
+        items.push(item);
+        Ok(())
+    };
+    // Convert the high input before writing the destination, which can alias either input.
+    let upper = if high == 255 {
+        255
+    } else {
+        let temp = ctx.pool(1)?;
+        conversion(temp, high, "sm80: convert high half")?;
+        temp
+    };
+    conversion(rd, low, "sm80: convert low half")?;
     let permute = assemble(
         "prmt__RuIR_RIR",
-        &[("Rd", rd.clone()), ("Ra", rd), ("Sb", Int(0x5410)), ("Rc", Int(255))],
+        &[
+            ("Rd", Int(rd)),
+            ("Ra", Int(rd)),
+            ("Sb", Int(0x5410)),
+            ("Rc", Int(upper)),
+        ],
     )
     .ok_or_else(|| Refused("cannot assemble PRMT for a packed sm_80 conversion".into()))?;
-    Ok(vec![first, Item::new(permute, i, "sm80: zero high half", true)])
+    let why = if high == 255 {
+        "sm80: zero high half"
+    } else {
+        "sm80: pack both halves"
+    };
+    items.push(Item::new(permute, i, why, true));
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -290,6 +485,103 @@ mod tests {
     }
 
     #[test]
+    fn two_source_pack_preserves_both_inputs_under_destination_aliasing() {
+        let high = 2;
+        let low = 3;
+        for rd in [high, low, 0] {
+            let mut input = Elf::parse(IMAGE).unwrap();
+            let section = input.section(".text.memory_check").unwrap();
+            let word = &mut input.sections[section].data[0xc0..0xd0];
+            let source = u128::from_le_bytes(word.try_into().unwrap());
+            assert!(matches_form(source & !CONTROLS, PACK));
+            let operands = (u128::from(rd) << 16) | (u128::from(high) << 24) | (u128::from(low) << 32);
+            word.copy_from_slice(&((source & !(0xff_ffff << 16)) | operands).to_le_bytes());
+            let result = translate(&input.write(), false).unwrap();
+            assert!(
+                result
+                    .report
+                    .iter()
+                    .any(|r| r.name == "memory_check" && r.refused.is_none())
+            );
+            let target = Elf::parse(&result.bytes).unwrap();
+            let body = &target.sections[target.section(".text.memory_check").unwrap()].data;
+            let mut decoder = Decoder::new(70);
+            let ops: Vec<_> = body
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .map(|&w| decoder.decode(u128::from_le_bytes(w)).unwrap())
+                .collect();
+            let group = ops
+                .windows(3)
+                .find(|w| w[0].mnemonic == "F2F" && w[1].mnemonic == "F2F" && w[2].mnemonic == "PRMT")
+                .unwrap();
+            let temporary = group[0].op_or(OP_RD, 255);
+            assert!(![rd, low, high, 255].contains(&temporary));
+            assert_eq!(group[0].op_or(OP_RB, 255), high);
+            assert_eq!((group[1].op_or(OP_RD, 255), group[1].op_or(OP_RB, 255)), (rd, low));
+            assert_eq!(
+                (
+                    group[2].op_or(OP_RD, 255),
+                    group[2].op_or(OP_RA, 255),
+                    group[2].op_or(OP_RC, 255)
+                ),
+                (rd, rd, temporary)
+            );
+            assert_eq!(group[2].op_or(OP_SB, 0), 0x5410);
+            for pair in group.windows(2) {
+                let scoreboard = pair[0].word >> WRITE_BARRIER & 7;
+                assert!(scoreboard < 6 && pair[1].word >> WAIT & (1 << scoreboard) != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_copies_preserve_signed_offsets_and_refuse_unsupported_memory_forms() {
+        let e = Elf::parse(include_bytes!(
+            "../../../../tests/kernels/translate/k_guarded_copy.sm80.cubin"
+        ))
+        .unwrap();
+        let body = &e.sections[e.section(".text.guarded_copy").unwrap()].data;
+        let result = normalize(body, &mut Decoder::new(75)).unwrap();
+        let mut copies: Vec<_> = result
+            .operations
+            .iter()
+            .filter_map(|(&i, op)| match op {
+                Operation::GlobalToShared {
+                    global_offset,
+                    shared_offset,
+                } => Some((i, *global_offset, *shared_offset)),
+                _ => None,
+            })
+            .collect();
+        copies.sort_unstable();
+        // ptxas adjusted the second base by 512. Its signed displacement is now -528.
+        assert_eq!(copies.len(), 2);
+        assert_eq!((copies[0].1, copies[0].2), (512, 16));
+        assert_eq!((copies[1].1, copies[1].2), (-528, 16));
+        let words = body.as_chunks::<16>().0;
+        let at = copies[1].0;
+        let copy = u128::from_le_bytes(words[at]);
+        let store_at = words
+            .iter()
+            .position(|&bytes| matches_form(u128::from_le_bytes(bytes) & !CONTROLS, STORE128))
+            .unwrap();
+        let store = u128::from_le_bytes(words[store_at]);
+        for (i, wrong, why) in [
+            (at, copy | 1 << 24, "invalid address"),
+            (at, copy | 1 << 63, "negative absolute shared address"),
+            (at, copy ^ (1 << 64), "address register pair"),
+            (store_at, store | 1 << 32, "invalid register group"),
+        ] {
+            let mut input = body.clone();
+            input[16 * i..16 * i + 16].copy_from_slice(&wrong.to_le_bytes());
+            let error = normalize(&input, &mut Decoder::new(75)).unwrap_err();
+            assert!(error.0.contains(why), "{}", error.0);
+        }
+    }
+
+    #[test]
     fn descriptor_must_be_canonical_along_every_path() {
         let e = Elf::parse(IMAGE).unwrap();
         let body = &e.sections[e.section(".text.memory_check").unwrap()].data;
@@ -306,7 +598,7 @@ mod tests {
         let fadd = (word(0xa0) & !(u128::from(u32::MAX) << 32)) | (u128::from((-123.5f32).to_bits()) << 32);
         put(&mut code, 0xa0, fadd);
         let normalized = normalize(&code, &mut Decoder::new(75)).unwrap();
-        assert_eq!(&normalized[0xa0..0xb0], &fadd.to_le_bytes());
+        assert_eq!(&normalized.words[0xa0..0xb0], &fadd.to_le_bytes());
         code.copy_from_slice(body);
         put(&mut code, 0x30, word(0x30) ^ (8 << 38));
         check(&code, "descriptor UR4 is not established");

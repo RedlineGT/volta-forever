@@ -296,6 +296,7 @@ fn make_borrow_func(instrs: &[Uses], registers: u32, uniform: &[u32], pairs: &[u
         product_count: 0,
         entered_inside: false,
         ampere: false,
+        ampere_ops: HashMap::new(),
     }
 }
 
@@ -832,6 +833,7 @@ fn r1_depth_through_iadd3() {
         product_count: 0,
         entered_inside: false,
         ampere: false,
+        ampere_ops: HashMap::new(),
     };
     let b = Borrowed::new(&fd, false, None).unwrap();
     // After instruction 0 (which sets R1), depth at instruction 1 should be 0.

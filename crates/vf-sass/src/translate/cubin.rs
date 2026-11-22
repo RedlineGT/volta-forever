@@ -177,8 +177,17 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
             {
                 return Err(Refused("a relocation or secondary entry in sm_80 code".into()));
             }
-            let words = super::ampere::normalize(code, &mut dec75)?;
-            let mut fd = parse_function(&mut dec75, &name, &words, registers, tables)?;
+            let normalized = super::ampere::normalize(code, &mut dec75)?;
+            let mut fd = parse_function(&mut dec75, &name, &normalized.words, registers, tables)?;
+            fd.ampere_ops = normalized.operations;
+            for (i, op) in &fd.ampere_ops {
+                match op {
+                    super::ampere::Operation::GlobalToShared { .. } => fd.scratch_need = fd.scratch_need.max(6),
+                    super::ampere::Operation::Pack => {
+                        fd.needs_pool |= fd.src[*i].op_or(crate::generated::fields::OP_RC, 255) != 255
+                    }
+                }
+            }
             fd.ampere = true;
             Ok(fd)
         });

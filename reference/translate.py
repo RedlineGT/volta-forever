@@ -480,6 +480,7 @@ class Function:
     def __init__(self, mc, name, code, registers, tables=None):
         self.mc, self.name, self.registers = mc, name, registers
         self.ampere = False
+        self.ampere_ops = {}
         self.tables = tables or {}
         if len(code) % 16:
             raise Refused('code that is not a whole number of instructions')
@@ -782,13 +783,40 @@ class Function:
             # Level 3: the uniform registers of the frame that the instruction reads are loaded
             # before it, those it writes are stored after it.
             before = self.from_memory(i, d)
-            if self.ampere and d.mnemonic == 'F2F':
-                rd = d.ops['Rd']
-                first = Item((d.word & ~(7 << WRITE_BARRIER)) | (ARRIVES << WRITE_BARRIER) | (63 << WAIT),
-                             i, 'sm80: convert low half')
-                first.then = ARRIVES
-                permute = self.mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=rd, Sb=0x5410, Rc=255)
-                new = [first, Item(permute, i, 'sm80: zero high half')]
+            if isinstance(self.ampere_ops.get(i), tuple):
+                kind, global_offset, shared_offset = self.ampere_ops[i]
+                assert kind == 'copy128'
+                if self.matrix_at is None:
+                    raise Refused('no dedicated register group for an sm_80 asynchronous copy')
+                temp = (self.matrix_at + 3) & ~3
+                guard = {'Pg': d.ops['Pg'], 'Pg_not': d.ops['Pg@not']}
+                load = self.mc.assemble('ldg__sImmOffset', e='E', sz='_128', sem='WEAK', sco='SYS',
+                                        cop='EN', Pu=7, Rd=temp, Ra=d.ops['Ra'], Ra_offset=global_offset,
+                                        dst_wr_sb=ARRIVES, **guard)
+                form = 'sts__uImmOffset' if d.ops['Rb'] == 255 else 'sts__sImmOffset'
+                store = self.mc.assemble(form, sz='_128', Ra=d.ops['Rb'], Ra_offset=shared_offset,
+                                         Rb=temp, src_rel_sb=SEQUENCE, **guard)
+                a = Item(load | (63 << WAIT), i, 'sm80: load asynchronous copy')
+                a.then = ARRIVES
+                b = Item(store | (63 << WAIT), i, 'sm80: store asynchronous copy')
+                b.then = SEQUENCE
+                new = [a, b]
+            elif self.ampere_ops.get(i) == 'pack':
+                # Ra of the surrogate feeds the low half, Rc the high half.
+                rd, low, high = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
+                upper = self.pool(1) if high != 255 else 255
+                new = []
+                def convert(dest, source, description):
+                    word = self.mc.assemble('f2f_f32_downconvert__RRR_RRR', Rd=dest, Rb=source,
+                                            **{'dstfmt.srcfmt': 'F16.F32'})
+                    item = Item((word & ~(7 << WRITE_BARRIER)) | (ARRIVES << WRITE_BARRIER) | (63 << WAIT), i, description)
+                    item.then = ARRIVES
+                    new.append(item)
+                if high != 255:
+                    convert(upper, high, 'sm80: convert high half')
+                convert(rd, low, 'sm80: convert low half')
+                permute = self.mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=rd, Sb=0x5410, Rc=upper)
+                new.append(Item(permute, i, 'sm80: zero high half' if high == 255 else 'sm80: pack both halves'))
             else:
                 new = self.one(i, d)
             if self.ampere:
@@ -2583,9 +2611,17 @@ def translate(data, mc=None, listing=None, lives=None):
             if arch == 80:
                 if relocations.get(sec) or any(y[3] == sec and y[1] & 15 == 2 and y[4] for y in symbols):
                     raise Refused('a relocation or secondary entry in sm_80 code')
-                code = ampere.normalize(code, mc, relative, signed, Refused)
+                code, operations = ampere.normalize(code, mc, relative, signed, Refused)
             functions[sec] = Function(mc, name, code, s.info >> 24, tables_of(info.data) if info is not None else {})
             functions[sec].ampere = arch == 80
+            if arch == 80:
+                functions[sec].ampere_ops = operations
+                f = functions[sec]
+                for i, op in operations.items():
+                    if op == 'pack':
+                        f.needs_pool |= f.src[i].ops['Rc'] != 255
+                    else:
+                        f.scratch_need = max(f.scratch_need, 6)
             report[name] = None
         except Refused as why:
             report[name] = str(why)

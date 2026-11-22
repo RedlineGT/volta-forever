@@ -766,7 +766,8 @@ def emit_assembly(f, mc, fc, onc):
         if c.name.startswith('imad_wide__') and c.name not in ASM_CLASSES:
             ASM_CLASSES.append(c.name)
 
-    ASM_CLASSES.extend(['ldg__sImmOffset', 'stg__sImmOffset', 'f2f_f32_downconvert__RRR_RRR', 'prmt__RuIR_RIR'])
+    ASM_CLASSES.extend(['ldg__sImmOffset', 'stg__sImmOffset', 'f2f_f32_downconvert__RRR_RRR', 'prmt__RuIR_RIR',
+                        'imad__RRsI_RRI', 'sts__sImmOffset', 'sts__uImmOffset', 'membar_'])
 
     templates = []
     all_setters = []

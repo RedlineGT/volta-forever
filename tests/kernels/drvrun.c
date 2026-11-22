@@ -244,6 +244,28 @@ static void run_all(CUmodule mod) {
         CUresult refused = cuModuleGetFunction(&f, mod, "unsupported_atomic");
         printf("lookup unsupported_atomic -> %d %s\n", refused, ename(refused));
     }
+    if (want("guarded_copy") && !cuModuleGetFunction(&f, mod, "guarded_copy")) {
+        uint32_t input[136], result[12];
+        for (size_t i = 0; i < 136; i++) input[i] = 0x12348000u + i;
+        CK(cuMemcpyHtoD_v2(dx, input, sizeof input));
+        CUdeviceptr src = dx + 16;
+        long bad = 0;
+        for (uint32_t active = 0; active <= 1; active++) {
+            CK(cuMemsetD8_v2(dy, 0xa5, sizeof result));
+            void* args[] = {&src, &dy, &active};
+            CK(cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, NULL, args, NULL));
+            CK(cuCtxSynchronize());
+            CK(cuMemcpyDtoH_v2(result, dy, sizeof result));
+            // Offsets are relative to src. The unguarded copy reads dx+528,
+            // while the guarded copy reads dx. Both write only dy+16..31.
+            for (int i = 0; i < 12; i++) {
+                uint32_t expected = 0xa5a5a5a5u;
+                if (i >= 4 && i < 8) expected = input[(active ? 0 : 132) + i - 4];
+                bad += result[i] != expected;
+            }
+        }
+        verdict("guarded_copy", bad, 24, 0);
+    }
     CK(cuMemFree_v2(dx)); CK(cuMemFree_v2(dy)); CK(cuMemFree_v2(dz));
     free(x); free(y);
 }

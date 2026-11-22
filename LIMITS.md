@@ -75,9 +75,11 @@ fat binaries. For sm_75, VF also tries retained PTX when its default machine-cod
 refuses every kernel in the image.
 
 Builds from `main` also translate a subset of stripped `sm_80` executables. VF checks each function's
-instruction forms, branches and memory addressing. The FP16 loads and FP16/32-bit stores require
-the CUDA system descriptor on every path leading to the access. The subset runs SGLang's top-eight
-expert sum on a V100. Unsupported functions are refused individually. Other stripped targets above
+instruction forms, branches and memory addressing. Global loads and stores, including 128-bit
+accesses, require the CUDA system descriptor on every path. VF lowers the supported 16-byte
+global-to-shared copy to a guarded Volta load and store and waits for the completed group.
+This covers SGLang’s top-eight expert sum and FlashInfer’s 2D CuTe RMSNorm and fused residual
+RMSNorm kernels on V100. Unsupported functions are refused individually. Other stripped targets above
 `sm_75`, including `sm_86`, still require compatible PTX or a second supported image.
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of

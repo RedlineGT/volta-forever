@@ -2,7 +2,7 @@
 from functools import lru_cache
 from ampere_forms import canonical_forms, forms
 
-from machine import USCHED, WRITE_BARRIER, READ_BARRIER
+from machine import USCHED, WRITE_BARRIER, READ_BARRIER, WAIT
 
 CONTROLS = 0x1ffff << USCHED
 
@@ -20,7 +20,7 @@ def normalize(code, mc, relative, signed, refuse):
     if not code or len(code) % 16:
         raise refuse('sm_80 code is empty or contains a partial instruction')
     canonical, shared = supported()
-    result, steps, uses = bytearray(), [], {}
+    result, steps, uses, operations = bytearray(), [], {}, {}
     joins, syncs = {}, []
     for at in range(0, len(code), 16):
         source = int.from_bytes(code[at:at+16], 'little')
@@ -29,15 +29,50 @@ def normalize(code, mc, relative, signed, refuse):
         bits = source & ~CONTROLS
         rd, addr, rb = [(source >> shift) & 255 for shift in (16, 24, 32)]
         descriptor = None
-        if matches(bits, canonical['LOAD16']):
+        load128 = matches(bits, canonical['LOAD128'])
+        store128 = matches(bits, canonical['STORE128'])
+        offset = source >> 40 & 0xffffff
+        if load128 or store128:
+            vector = rd if load128 else rb
+            if vector % 4 or vector > 248 or addr % 2 or addr > 252:
+                raise refuse(f'invalid register group for sm_80 vector access at 0x{at:x}')
+        if matches(bits, canonical['LOAD16']) or load128:
             descriptor = rb & 63
-            word = mc.assemble('ldg__sImmOffset', e='E', sz='U16', sem='CONSTANT', sco='SYS', cop='EN', Pu=7, Rd=rd, Ra=addr)
-        elif matches(bits, canonical['STORE16']) or matches(bits, canonical['STORE32']):
+            word = mc.assemble('ldg__sImmOffset', e='E', sz='_128' if load128 else 'U16',
+                               sem='WEAK' if load128 else 'CONSTANT', sco='SYS', cop='EN',
+                               Pu=7, Rd=rd, Ra=addr, Ra_offset=offset)
+        elif matches(bits, canonical['STORE16']) or matches(bits, canonical['STORE32']) or store128:
             descriptor = source >> 64 & 63
-            word = mc.assemble('stg__sImmOffset', e='E', sz='U16' if matches(bits, canonical['STORE16']) else '_32', sem='WEAK',
-                               sco='SYS', cop='EN', Rb=rb, Ra=addr)
+            size = '_128' if store128 else 'U16' if matches(bits, canonical['STORE16']) else '_32'
+            word = mc.assemble('stg__sImmOffset', e='E', sz=size, sem='WEAK',
+                               sco='SYS', cop='EN', Rb=rb, Ra=addr, Ra_offset=offset)
+        elif matches(bits, canonical['HALF_CONSTANT']):
+            # RN(-0 * +0 + c) is c for finite FP16 operands, including signed zero.
+            pair = source >> 32 & 0xffffffff
+            if any((h & 0x7c00) == 0x7c00 for h in (pair, pair >> 16)):
+                raise refuse(f'nonfinite sm_80 half constant at 0x{at:x}')
+            word = mc.assemble('imad__RRsI_RRI', Rd=rd, Ra=255, Rb=255, Sc=pair)
+        elif matches(bits, canonical['COPY128']):
+            if addr > 252 or addr % 2:
+                raise refuse(f'invalid address for sm_80 asynchronous copy at 0x{at:x}')
+            descriptor = source >> 64 & 63
+            source_offset = source >> 32 & 0xfff
+            if source_offset & 0x800:
+                source_offset -= 0x1000
+            shared_offset = source >> 44 & 0xfffff
+            if shared_offset & 0x80000:
+                shared_offset -= 0x100000
+            if rd == 255 and shared_offset < 0:
+                raise refuse(f'negative absolute shared address at 0x{at:x}')
+            operations[at // 16] = ('copy128', source_offset, shared_offset)
+            # The scalar store represents the two input addresses and guard for liveness.
+            word = mc.assemble('stg__sImmOffset', e='E', sz='_32', sem='WEAK', sco='SYS',
+                               cop='EN', Ra=addr, Rb=rd, Pg=source >> 12 & 7, **{'Pg_not':source >> 15 & 1})
+        elif matches(bits, canonical['COMMIT']):
+            word = mc.assemble('membar_', sem='SC', sco='CTA')
         elif matches(bits, canonical['PACK']):
-            word = mc.assemble('f2f_f32_downconvert__RRR_RRR', Rd=rd, Rb=rb, **{'dstfmt.srcfmt': 'F16.F32'})
+            operations[at//16] = 'pack'
+            word = mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=rb, Sb=0x5410, Rc=addr)
         elif any(matches(bits, form) for form in shared):
             word = bits
         else:
@@ -46,7 +81,10 @@ def normalize(code, mc, relative, signed, refuse):
             if descriptor > 60 or descriptor % 2 or addr > 252 or addr % 2:
                 raise refuse(f'unsupported sm_80 address register pair at 0x{at:x}')
             uses[at//16] = descriptor
-        word = (word & ~CONTROLS) | (source & CONTROLS)
+        if matches(bits,canonical['COMMIT']) or matches(bits,canonical['COPY128']):
+            word |= 63 << WAIT
+        else:
+            word = (word & ~CONTROLS) | (source & CONTROLS)
         d = mc.decode(75, word)
         if d is None:
             raise refuse(f'no decoded instruction for the sm_80 form at 0x{at:x}')
@@ -95,4 +133,4 @@ def normalize(code, mc, relative, signed, refuse):
     for i, q in uses.items():
         if q not in state.get(i, set()):
             raise refuse(f'sm_80 global descriptor UR{q} is not established at 0x{16*i:x}')
-    return result
+    return result, operations

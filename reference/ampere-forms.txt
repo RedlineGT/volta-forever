@@ -43,3 +43,29 @@ uldc_const__RCR URd Sa_addr | UPg=UPT sz=_64
 umov__UI URd Sb | UPg=UPT
 ushf__URuIUR_URIR URd URa Sb | UPg=UPT fmt=U32 URc=URZ
 ushf__URURUR_URURUR URd URa URb URc | UPg=UPT fmt=U64 hilo=HI
+bar__SYNC_dfrBlk_II_optionalCount_II | Pg=PT defer_blocking=DEFER_BLOCKING
+depbar__LE | Pg=PT le=LE
+fadd__RRI_RI Rd Ra Sc | Pg=PT
+ffma__RRC_RRC Rd Ra Rb Sc_addr | Pg=PT
+ffma__RRR_RRR Rd Ra Rb Rc | Pg=PT
+fmul__RRR_RR Rd Ra Rb | Pg=PT scale=noscale
+fmul__RRR_RR Rd Ra Rb | Pg=PT scale=noscale reuse_src_a=reuse
+hadd2__RR Rd Rc | Pg=PT ofmt=F32 Ra=RZ Ra.negate=1 iswzB_as_C=H0_H0 reuse_src_c=reuse
+hadd2__RR Rd Rc | Pg=PT ofmt=F32 Ra=RZ Ra.negate=1 iswzB_as_C=H1_H1
+hadd2__RR Rd Rc | Pg=PT ofmt=F32 Ra=RZ Ra.negate=1 iswzB_as_C=H1_H1 reuse_src_c=reuse
+iadd3_imm__RsIR_RIR Pg Rd Pu Ra Sb | Pg.not=1 Pv=PT Rc=RZ
+iadd3_noimm__RCR_RCR Rd Pu Ra Sb_addr | Pg=PT Pv=PT Rc=RZ
+iadd3_x_noimm__RCR_RCR Rd Sb_addr Pp | Pg=PT X=X Pu=PT Pv=PT Ra=RZ Rc=RZ Pq=PT Pq.not=1
+iadd3_x_noimm__RRR_RRR Pg Rd Rb Pp | Pg.not=1 X=X Pu=PT Pv=PT Ra=RZ Rc=RZ Pq=PT Pq.not=1
+lds__sImmOffset Rd Ra Ra_offset | Pg=PT sz=128
+lea_lo_noimm__RRR_RRR Rd Ra Rb scaleU5 | Pg=PT Pu=PT
+mufu__RRR_RR Rd Rb | Pg=PT mufuop=RSQ
+shf__RuIR_RIR Rd Ra Sb | Pg=PT fmt=U32 Rc=RZ
+shfl__RII Rd Ra Sb Sc | Pg=PT shflmd=BFLY Pu=PT
+fmul__RRR_RR Rd Ra Rb | Pg=PT reuse_src_b=reuse scale=noscale
+iadd3_imm__RsIR_RIR Rd Pu Ra Sb | Pg=PT Pv=PT Rc=RZ
+iadd3_x_noimm__RRR_RRR Rd Ra Rb Pp | Pg=PT Pq=PT Pq.not=1 Pu=PT Pv=PT Rc=RZ X=X
+imad__RRU_RRU Rd URc | Pg=PT Ra=RZ Rb=RZ
+mov__RU Rd URb | Pg=PT PixMaskU04=15
+uiadd3__URsIUR_RIR URd UPu URa Sb | UPg=UPT UPv=UPT URc=URZ
+uiadd3_x__URURUR_URURUR URd URb UPp | UPg=UPT UPq=UPT UPq.not=1 UPu=UPT UPv=UPT URa=URZ URc=URZ X=X

@@ -9,12 +9,17 @@ import md
 
 HERE = Path(__file__).resolve().parent
 CONTROL = ((1 << 17) - 1) << 105
-# These four forms have different encodings on Ampere and Turing.
+# These forms have different encodings on Ampere and Turing.
 CANONICAL = {
     "LOAD16": "ldg_memdesc__Ra64 Rd Ra Ra_URb | Pg=PT e=E cop=EN sz=U16 Pu=PT Pnz=PT input_reg_sz_64_dist=64 sem=CONSTANT",
+    "LOAD128": "ldg_memdesc__Ra64 Rd Ra Ra_URb Ra_offset | Pg=PT e=E cop=EN sz=128 Pu=PT Pnz=PT input_reg_sz_64_dist=64 sem=WEAK",
+    "STORE128": "stg_memdesc__Ra64 Ra Rb Ra_URc Ra_offset | Pg=PT e=E cop=EN sz=128 input_reg_sz_64_dist=64 sem=WEAK",
     "STORE16": "stg_memdesc__Ra64 Ra Rb Ra_URc | Pg=PT e=E cop=EN sz=U16 input_reg_sz_64_dist=64 sem=WEAK",
     "STORE32": "stg_memdesc__Ra64 Ra Rb Ra_URc | Pg=PT e=E cop=EN sz=32 input_reg_sz_64_dist=64 sem=WEAK",
-    "PACK": "f2fp__RRR Rd Rb | Pg=PT Ra=RZ dstfmt=F16 merge=PACK_AB rndMode=RN",
+    "COPY128": "ldgsts__desc_RRU Pg Pg.not Rb Rb_offset Ra_URc Ra Ra_offset | loc=ACCESS cop=EN sz=128 input_reg_sz_64_dist=64 Pnz=PT sem=WEAK",
+    "COMMIT": "ldgdepbar_ | Pg=PT",
+    "HALF_CONSTANT": "hfma2_mma__RRI_norelu Rd Sc Sc1 | Pg=PT Ra=RZ Ra.negate=1 Rb=RZ",
+    "PACK": "f2fp__RRR Rd Ra Rb | Pg=PT dstfmt=F16 merge=PACK_AB rndMode=RN",
 }
 
 

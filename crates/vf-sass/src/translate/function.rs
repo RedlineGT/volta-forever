@@ -121,8 +121,8 @@ pub(super) fn translate_function(
         }
         // Level 3: load from memory before the instruction.
         let before_mem = ctx.loads_before(i, d)?;
-        let mut new_items = if fd.ampere && d.mnemonic == "F2F" {
-            super::ampere::pack(i, d)?
+        let mut new_items = if let Some(op) = fd.ampere_ops.get(&i) {
+            super::ampere::emit(&mut ctx, i, d, op)?
         } else {
             translate_one(&mut ctx, i, d)?
         };
