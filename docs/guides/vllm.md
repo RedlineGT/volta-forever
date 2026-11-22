@@ -31,17 +31,19 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-The installer fetches the CUDA 12.9.2 cuBLAS libraries used by `vf`. If an existing installation lacks them, run `vf fetch`.
+Use VF from the main branch for this 35B configuration. The released VF 0.1.1 stops when vLLM compiles its unified-attention kernel. Main includes the required GPU instruction translation. [VF correction](https://github.com/nbald/volta-forever/commit/cc36e4e)
 
 ```sh
-sudo apt update
-sudo apt install -y ca-certificates curl python3 python3-venv xz-utils
-curl -fsSLo /tmp/vf-install.sh https://raw.githubusercontent.com/nbald/volta-forever/main/install.sh
-bash /tmp/vf-install.sh
-export PATH="$HOME/.local/bin:$PATH"
+sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils
+if ! command -v rustup >/dev/null; then
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+. "$HOME/.cargo/env"
+git clone --depth 1 https://github.com/nbald/volta-forever.git ~/volta-forever
+(cd ~/volta-forever && scripts/build.sh && scripts/fetch-all.sh redist && scripts/build-forwarders.sh)
+export PATH="$HOME/volta-forever/scripts:$PATH"
+vf doctor
 ```
-
-The procedure below uses the released installer. The graph benchmark used the VF main-branch build linked in step 4. To reproduce that build, follow the [VF source build](../../README.md#build) and activate its launcher before creating the venv.
 
 ## 3. Engine
 
