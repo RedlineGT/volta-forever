@@ -4,7 +4,8 @@ pub(super) fn write(t: &Transfer<'_>) -> String {
     let b = &t.inputs;
     let p = &t.params;
     let mut out = String::from("\n{\n");
-    out.push_str(r#".reg .b32 %q4affine_lane,%q4affine_a,%q4affine_q,%q4affine_tmp,%q4affine_lane4,%q4affine_bit,%q4affine_i,%q4affine_g,%q4affine_y,%q4affine_z,%q4affine_flags,%q4affine_word,%q4affine_x,%q4affine_lo,%q4affine_hi,%q4affine_meta,%q4affine_v<4>,%q4affine_A<64>,%q4affine_s<2>,%q4affine_b<2>;
+    out.push_str(r#".reg .f32 %q4affine_lut;
+.reg .b32 %q4affine_lane,%q4affine_a,%q4affine_q,%q4affine_tmp,%q4affine_lane4,%q4affine_bit,%q4affine_i,%q4affine_g,%q4affine_y,%q4affine_z,%q4affine_flags,%q4affine_word,%q4affine_x,%q4affine_lo,%q4affine_hi,%q4affine_meta,%q4affine_v<4>,%q4affine_A<64>,%q4affine_s<2>,%q4affine_b<2>;
 .reg .f32 %q4affine_val,%q4affine_sum,%q4affine_gate,%q4affine_up,%q4affine_dot,%q4affine_part<4>,%q4affine_g0,%q4affine_g1,%q4affine_co;
 .reg .b64 %q4affine_X,%q4affine_W,%q4affine_meta_addr,%q4affine_off,%q4affine_Xg,%q4affine_Wg;
 .reg .pred %q4affine_p,%q4affine_bad,%q4affine_odd;
@@ -60,6 +61,7 @@ mul.wide.u32 %q4affine_off,%q4affine_tmp,4; add.u64 %q4affine_Wg,%q4affine_W,%q4
 and.b32 %q4affine_i,%q4affine_lane,6; shl.b32 %q4affine_i,%q4affine_i,2; shr.u32 %q4affine_tmp,%q4affine_lane,3; or.b32 %q4affine_i,%q4affine_i,%q4affine_tmp;
 mul.wide.u32 %q4affine_off,%q4affine_i,4; add.u64 %q4affine_meta_addr,%q4affine_W,%q4affine_off;
 mov.b32 %q4affine_gate,0; mov.b32 %q4affine_up,0; mov.b32 %q4affine_flags,0; mov.u32 %q4affine_g,0;
+and.b32 %q4affine_tmp,%q4affine_lane,15; cvt.rn.f32.u32 %q4affine_lut,%q4affine_tmp;
 $q4affine_GROUP:
 ld.global.nc.u32 %q4affine_word,[%q4affine_Xg];
 and.b32 %q4affine_x,%q4affine_word,0x7fff7fff; add.u32 %q4affine_y,%q4affine_x,0x7fff7fff;
@@ -100,7 +102,11 @@ mov.b32 %q4affine_sum,0; shl.b32 %q4affine_i,%q4affine_lane4,3;
                     for h in 0..4 {
                         let shift = 4 * (2 * pair + h / 2) + 16 * (h % 2);
                         let k = 16 * q + 8 * half + 4 * pair + h;
-                        writeln!(out,"bfe.u32 %q4affine_q,%q4affine_v{q},{shift},4; cvt.rn.f32.u32 %q4affine_val,%q4affine_q; fma.rn.f32 %q4affine_part{q},%q4affine_A{k},%q4affine_val,%q4affine_part{q};").unwrap();
+                        // SHFL.IDX uses the low five bits of the source lane. Each
+                        // half warp holds float(0)..float(15), so the fifth bit
+                        // may come from the adjacent packed code. The full-warp
+                        // guard above ensures every selected lane participates.
+                        writeln!(out,"shr.u32 %q4affine_q,%q4affine_v{q},{shift}; shfl.sync.idx.b32 %q4affine_val,%q4affine_lut,%q4affine_q,31,0xffffffff; fma.rn.f32 %q4affine_part{q},%q4affine_A{k},%q4affine_val,%q4affine_part{q};").unwrap();
                     }
                 }
                 out.push_str("add.rn.f32 %q4affine_g0,%q4affine_part0,%q4affine_part1; add.rn.f32 %q4affine_g1,%q4affine_part2,%q4affine_part3; add.rn.f32 %q4affine_co,%q4affine_g0,%q4affine_g1; add.rn.f32 %q4affine_dot,%q4affine_co,%q4affine_dot;\n");
