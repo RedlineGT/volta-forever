@@ -1,0 +1,292 @@
+{
+  "engine": "TensorFold 1.3.3 (official unmodified source, sm80 with embedded PTX, x86-64-v2)",
+  "engine_sha256": "6ce4ee3108b3b67246ab1b82f59a7edf07f8f17d1d74675e04b5c5a92f45ab84",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+  "driver": "580.178.04",
+  "os": "Ubuntu 24.04",
+  "checkpoint": {
+    "repo": "henrybravo/Qwen3.5-35B-A3B-4bit",
+    "revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "quantization": "MLX affine 4-bit expert weights, group size 64, 8-bit routers",
+    "shard_sha256": {
+      "model-00001-of-00004.safetensors": "2f0b46971988739b06ab2f6e1e9a817068f5641570556385043f0d7cebd09451",
+      "model-00002-of-00004.safetensors": "1a53c8753b7a3314980f77aeca8f2a4736a0986451fee9059b2b54d54713950b",
+      "model-00003-of-00004.safetensors": "b813fcb8159dc7b008000f3c69970d42b328a4ca0f4898a05afb423b5fd60991",
+      "model-00004-of-00004.safetensors": "a863ceefd68bb5a81522cd9c7063fed2a3c14d7dc65c3a0c80b0923617548b88"
+    }
+  },
+  "sources": {
+    "engine": "https://github.com/ashhart/TensorFold/tree/1e4a32cb5e80f2908e4642f9e7ffe71ae63792cc",
+    "checkpoint": "https://huggingface.co/henrybravo/Qwen3.5-35B-A3B-4bit/tree/e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "two_product_vf": "https://github.com/nbald/volta-forever/tree/e1544ea4bf05c3ff02fed9bcbccd3d71fa6528b5",
+    "four_product_proof": "https://github.com/nbald/volta-forever/blob/f34ecec7c7f0bb38098b90fe3d8d6e21b9d6426e/crates/vf-ptx/src/lower/known_bits/nibbles.rs",
+    "measured_client": "https://github.com/nbald/volta-forever/blob/428354713cb0640c57ee688ae77b8585efbdb06d/docs/guides/benchmarks/tensorfold.py",
+    "measured_client_sha256": "8d0eabf0013da13e0c0b0ed9e612cd3951dbda4747f582a6a397656991d7ef74",
+    "measured_prompts": "https://github.com/nbald/volta-forever/blob/428354713cb0640c57ee688ae77b8585efbdb06d/docs/guides/benchmarks/prompts.json",
+    "prompts_sha256": "c40ce4a6b25ec6821587480eb3e13bf0ba0186106c4a960e4f69d5c8ede3f4a9",
+    "cupti_kernel_record": "https://docs.nvidia.com/cupti/api/structCUpti__ActivityKernel9.html"
+  },
+  "reproduce": "../tensorfold.md#5-benchmarks",
+  "method": "Three different requests after a 228/64 warm-up, one request at a time, temperature zero. Both builds ran the same TensorFold binary with the same local weights on the same reserved V100. Each run used a fresh process and private empty driver and VF caches. All benchmark timings precede CUPTI activation. Phase medians are computed from the three native per-request rates.",
+  "environment": {
+    "VF_CAPABILITY": "8.0",
+    "VF_FIT_SHARED": "1",
+    "VF_BF16_TC_GROUPS": "1",
+    "VF_BF16_ROW": "tree",
+    "TF_QWEN_KV_PAGES": "0"
+  },
+  "server_options": [
+    "--backend",
+    "cuda",
+    "--context",
+    "512",
+    "--parallel",
+    "1",
+    "--prompt-cache-gib",
+    "0",
+    "--no-thinking",
+    "--no-update-check",
+    "--no-drafts",
+    "--prompt-precision",
+    "int8"
+  ],
+  "drafts": false,
+  "prefix_cache": false,
+  "phase_counts": "227 uncached prompt tokens and 64 output tokens per timed request. Prefill uses 227 / prefill_seconds. Decode uses 63 / decode_seconds because prefill produces the first output token.",
+  "model_checks": {
+    "capital_reply": "Paris",
+    "finish_reason": "stop",
+    "stop_sequence_Paris_reply": "",
+    "stop_sequence_finish_reason": "stop",
+    "one_token_reply": "one",
+    "one_token_finish_reason": "length",
+    "passed_in_all_modes": true
+  },
+  "modes": {
+    "two": {
+      "description": "Pairs sharing one left fragment",
+      "binaries_sha256": {
+        "vf-translate": "664194c302fe7a6757ea5595435e8dccfd5deb9a2f0612b39a973a8f26778d4b",
+        "libcuda.so": "799222fe96afbe88d8e25be5e8c6e2e1dbb420f79490ea339b1688d86e88b72d",
+        "libnvJitLink.so": "670420365c124123a679748dca5bf55fff0388ee6ecfb69664469cb5ef9ed91d"
+      },
+      "requests": [
+        {
+          "id": "warmup",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+          "prefill_seconds": 0.494820562,
+          "decode_seconds": 1.693085696,
+          "prefill_tokens_per_s": 460.7730913170904,
+          "decode_tokens_per_s": 37.210166117899796
+        },
+        {
+          "id": "run1",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+          "prefill_seconds": 0.490569246,
+          "decode_seconds": 1.693155291,
+          "prefill_tokens_per_s": 462.72774302692426,
+          "decode_tokens_per_s": 37.20863664123293
+        },
+        {
+          "id": "run2",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+          "prefill_seconds": 0.493141952,
+          "decode_seconds": 1.693195564,
+          "prefill_tokens_per_s": 460.3137069952629,
+          "decode_tokens_per_s": 37.20775162626164
+        },
+        {
+          "id": "run3",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "92aa9acde696e1e6900264021881ecee40249bd4850bcb4aa9a6298e958ce8fd",
+          "prefill_seconds": 0.491446721,
+          "decode_seconds": 1.692384173,
+          "prefill_tokens_per_s": 461.90154557974967,
+          "decode_tokens_per_s": 37.22559038609019
+        }
+      ],
+      "median": {
+        "prefill_tokens_per_s": 461.90154557974967,
+        "decode_tokens_per_s": 37.20863664123293
+      }
+    },
+    "four": {
+      "description": "Pairs plus four-product groups with statically proven BF16 integer right operands from 0 to 15",
+      "binaries_sha256": {
+        "vf-translate": "f563f1626de64c14dbadd085b22b24749bcb694d926f90e320cf7292f9c68324",
+        "libcuda.so": "4faf4087440e9d07f9b37c1da03d03804ab4353c43085747772e3667ba769480",
+        "libnvJitLink.so": "461647bec7e0c9f2c6c63e46855691db84fa9410f049cfbe294fd8406baa7007"
+      },
+      "requests": [
+        {
+          "id": "warmup",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+          "prefill_seconds": 0.494843055,
+          "decode_seconds": 1.349953722,
+          "prefill_tokens_per_s": 460.75214696101983,
+          "decode_tokens_per_s": 46.66826645484074
+        },
+        {
+          "id": "run1",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+          "prefill_seconds": 0.490282896,
+          "decode_seconds": 1.351726989,
+          "prefill_tokens_per_s": 462.9979994243976,
+          "decode_tokens_per_s": 46.60704455313646
+        },
+        {
+          "id": "run2",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+          "prefill_seconds": 0.491285396,
+          "decode_seconds": 1.349918272,
+          "prefill_tokens_per_s": 462.05322170822274,
+          "decode_tokens_per_s": 46.669492003142544
+        },
+        {
+          "id": "run3",
+          "finish_reason": "length",
+          "cached_tokens": 0,
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "decode_steps": 63,
+          "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+          "prefill_seconds": 0.490441608,
+          "decode_seconds": 1.350980411,
+          "prefill_tokens_per_s": 462.8481684612697,
+          "decode_tokens_per_s": 46.63280051068038
+        }
+      ],
+      "median": {
+        "prefill_tokens_per_s": 462.8481684612697,
+        "decode_tokens_per_s": 46.63280051068038
+      }
+    }
+  },
+  "response_text_by_token_sha256": {
+    "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open",
+    "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, a designated volunteer places a red notebook on the long table to document daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+    "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863": "Lyon, France, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+    "92aa9acde696e1e6900264021881ecee40249bd4850bcb4aa9a6298e958ce8fd": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, one volunteer places a yellow envelope on the long table to signal the",
+    "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, a designated volunteer places a yellow envelope on the long table to signal"
+  },
+  "comparison": {
+    "prefill_change_percent": 0.20494040138616665,
+    "decode_change_percent": 25.32789352191427,
+    "same_token_hashes_by_request": {
+      "warmup_Lisbon": true,
+      "run1_Kyoto": true,
+      "run2_Lyon": true,
+      "run3_Lima": false
+    }
+  },
+  "native_target": {
+    "engine": "llama.cpp native sm70",
+    "checkpoint": "Qwen3.5-35B-A3B GGUF Q4_K_M",
+    "reference": "ninfer-results.json",
+    "prefill_tokens_per_s": 470.6038448541439,
+    "decode_tokens_per_s": 99.49038812305857,
+    "reached": false
+  },
+  "profile": {
+    "request": "A second Kyoto 227/64 request in each warmed server, with CUPTI concurrent-kernel activity enabled only after the timing benchmark. Its token hash matched the uninstrumented Kyoto reply in each build.",
+    "device_time": "For each of the 63 decode graph replays, sum end minus start across events of each family. Means below are over all 63 replays on one stream.",
+    "kernel_events_per_request": 38502,
+    "kernel_events_in_decode_graph": 37422,
+    "other_request_kernel_events": 1080,
+    "kernel_nodes_per_replay": 594,
+    "decode_replays": 63,
+    "dropped_events": 0,
+    "invalid_records": 0,
+    "families": {
+      "routed experts gate/up": {
+        "calls_per_step": 40,
+        "two_mean_ms_per_step": 12.069919603174602,
+        "four_mean_ms_per_step": 7.721337174603175
+      },
+      "dense projections": {
+        "calls_per_step": 80,
+        "two_mean_ms_per_step": 4.36144853968254,
+        "four_mean_ms_per_step": 4.345382920634921
+      },
+      "routed experts down": {
+        "calls_per_step": 40,
+        "two_mean_ms_per_step": 2.7577663174603178,
+        "four_mean_ms_per_step": 1.6822811587301587
+      },
+      "MoE routing and top-k": {
+        "calls_per_step": 80,
+        "two_mean_ms_per_step": 2.424901095238095,
+        "four_mean_ms_per_step": 2.4252809365079364
+      },
+      "grouped dense projection": {
+        "calls_per_step": 1,
+        "two_mean_ms_per_step": 1.6131605714285713,
+        "four_mean_ms_per_step": 1.6062380158730158
+      },
+      "attention": {
+        "calls_per_step": 40,
+        "two_mean_ms_per_step": 1.433121095238095,
+        "four_mean_ms_per_step": 1.4284508253968253
+      },
+      "gated delta net": {
+        "calls_per_step": 90,
+        "two_mean_ms_per_step": 0.9202387777777777,
+        "four_mean_ms_per_step": 0.9261358412698413
+      },
+      "other": {
+        "calls_per_step": 122,
+        "two_mean_ms_per_step": 0.6232601587301587,
+        "four_mean_ms_per_step": 0.6238730634920635
+      },
+      "normalization": {
+        "calls_per_step": 101,
+        "two_mean_ms_per_step": 0.5870836190476191,
+        "four_mean_ms_per_step": 0.5868489206349206
+      }
+    },
+    "two_kernel_ms_per_step": 26.790899777777778,
+    "four_kernel_ms_per_step": 21.345828857142855,
+    "two_profiled_step_ms": 27.22717538095238,
+    "four_profiled_step_ms": 21.780761793650793,
+    "two_uninstrumented_step_ms": 26.875480809523808,
+    "four_uninstrumented_step_ms": 21.44413350793651,
+    "native_comparison": "The native llama.cpp measurement used GGUF Q4_K_M. This profile measures TensorFold kernel families only."
+  },
+  "build_provenance": "The measured two-product binary was built from the source subsequently published at e1544ea. The four-product binary was built from the same base with a local change. Its reviewed version later tightened the handling of uncertain register declarations and debug directives. The expert and dense PTX and cubins checked were identical for these workloads. The binary hashes identify the actual timed builds.",
+  "new_xid": false
+}
