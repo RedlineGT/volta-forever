@@ -12,15 +12,22 @@ fi
 
 If you installed the driver, reboot and repeat the check. It should print your V100 and driver version.
 
-Bazel downloads the CUDA 13 libraries for ZML, so this build needs no separate system toolkit.
+Bazel downloads the CUDA 13 libraries for the source example. The 35B LLMD server also needs CUDA 12.9.2 `ptxas`, included in the VF source setup below.
 
 ## 2. VF
 
-```sh
-sudo apt update && sudo apt install -y curl python3 xz-utils
-curl -fsSL https://raw.githubusercontent.com/nbald/volta-forever/main/install.sh | bash
-export PATH="$HOME/.local/bin:$PATH"
-vf fetch --all
+For the 35B server, build VF with support for XLA’s external assembler. The source setup includes the CUDA libraries and the CUDA 12.9.2 assembler. [VF compiler support](https://github.com/nbald/volta-forever/commit/9013f262ee3866d999013736f6886429eb4803c4)
+
+```bash
+sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3 xz-utils
+if ! command -v rustup >/dev/null; then
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+. "$HOME/.cargo/env"
+git clone --depth 1 https://github.com/nbald/volta-forever.git ~/volta-forever
+(cd ~/volta-forever && scripts/build.sh && scripts/fetch-all.sh redist && scripts/build-forwarders.sh)
+export PATH="$HOME/volta-forever/scripts:$PATH"
+vf doctor
 ```
 
 ## 3. Engine
@@ -45,17 +52,37 @@ Look for `platform: cuda` and `Tesla V100` in the device listing. The tested mod
 
 Read the final `decode` line after running the command above. On one Tesla V100-SXM2-32GB with driver 580.178.04 and VF 0.1.0, Qwen3.5-0.8B decoded at **96.1 tokens/s** over 0.458 seconds. This is a single run of the upstream example. [Tested ZML revision](https://github.com/zml/zml/commit/f430c3530fbc6d99f734b641eb8f3fd699868843)
 
-The official **LLMD** server generated with the full AMD MXFP4 Qwen3.5-35B-A3B checkpoint on one V100. This test used the VF launcher and its external PTX assembler with CUDA 12.9.2. LLMD ran with the Triton backend, one request at a time, a 256-token batch, 256-token prefill chunks and MTP disabled. Setting `reasoning_effort` to `"none"` produced a visible **Paris** and the expected answer on all four benchmark prompts.
+The official **LLMD** server also runs the full AMD MXFP4 Qwen3.5-35B-A3B checkpoint on one V100. The measured September distribution includes an `llmd` executable and its adjacent `llmd.runfiles` directory. The 35B run uses a VF build from the main branch with external assembler support. Sections 3 and 4 install and run the separate open-source ZML example. [LLMD distribution](https://zml.ai/llmd/) · [VF compiler support](https://github.com/nbald/volta-forever/commit/9013f262ee3866d999013736f6886429eb4803c4)
 
-| Prompt | Input / output tokens | Input tokens/s through first token | Decode (tokens/s) |
+With the tested LLMD distribution installed, set `MODEL` to the local AMD checkpoint directory and run the following in the directory containing `llmd`. The defaults enable XLA autotuning. MTP is disabled. [Tested AMD checkpoint](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1)
+
+```bash
+VF_CAPABILITY=8.0 XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 \
+  vf ./llmd --model="${MODEL:?Set MODEL to the local AMD checkpoint directory}" --model-name=qwen \
+  --backend=triton --batch-size=1 --prefill-chunk-size=256 --token-batch-size=256 \
+  --page-chunk-size=16 --max-context-len=512 --gpu-memory-fraction=0.94 \
+  --cache-memory-fraction=0.97 --topk=1 --listen=127.0.0.1:8000
+```
+
+Run the client from a second terminal while the server is idle. It streams four answers with `reasoning_effort="none"`, checks the expected city in each and reads the server counters before and after each request. The standalone client measured **654.18 input tokens/s through the first token** and **46.04 decode steps/s**. The paired autotuning experiment on the same V100 measured the following rates. [Reproduction and replies](./benchmarks/zml-llmd-autotune.json)
+
+```bash
+base=https://raw.githubusercontent.com/nbald/volta-forever/main/docs/guides/benchmarks
+curl -fsSLO "$base/zml.py" && curl -fsSLO "$base/prompts.json"
+python3 zml.py
+```
+
+| Prompt | Input / output tokens | Input tokens/s through first token | Decode steps/s |
 | --- | ---: | ---: | ---: |
-| Lisbon (warm-up) | 228 / 64 | 478.99 | 38.31 |
-| Kyoto | 227 / 64 | 482.98 | 38.35 |
-| Lyon | 227 / 64 | 484.01 | 38.32 |
-| Lima | 227 / 64 | 482.98 | 38.38 |
-| **Median after warm-up** | **227 / 64** | **482.98** | **38.35** |
+| Lisbon (warm-up) | 228 / 64 | 662.79 | 46.48 |
+| Kyoto | 227 / 64 | 671.60 | 46.19 |
+| Lyon | 227 / 64 | 673.59 | 46.19 |
+| Lima | 227 / 64 | 669.62 | 46.34 |
+| **Median after warm-up** | **227 / 64** | **671.60** | **46.19** |
 
-The input rate includes all server work through the first token. LLMD exposes separate decode time and step counters. With the same VF compiler, raising both the token batch and prefill chunk from 64 to 256 raised prompt throughput from 309.69 to 482.98 tokens/s. With the batch at 256 and chunks at 64, the rate was 123.10. Native 1Cat-vLLM reached **1427.41 prefill / 76.13 decode** on the same GPU and prompts using QuantTrio AWQ. The checkpoint format and prefill timer differ. [LLMD settings, counters and replies](./benchmarks/zml-llmd-mxfp4.json) · [Native reference](./benchmarks/zml-awq-experimental.json)
+In a separate CUPTI run on the same three requests, the prefill graph spans were **333.00, 331.64 and 333.87 ms**, a median of **681.68 input tokens/s on GPU**. The median single-token decode graph rate was **49.26 tokens/s on GPU**. These spans exclude time outside the graph. Expert projections accounted for 215–217 ms of summed GPU kernel time per prefill. [GPU phase measurements](./benchmarks/zml-llmd-autotune.json)
+
+With autotuning disabled, LLMD measured **482.98 / 38.35**. The input rate includes all server work through the first token. Native 1Cat-vLLM reached **1427.41 prefill / 76.13 decode** on the same GPU and prompts with QuantTrio AWQ. The checkpoint format and prompt timer differ. [Prior chunk size measurements](./benchmarks/zml-llmd-mxfp4.json) · [Native reference](./benchmarks/zml-awq-experimental.json)
 
 ## 6. Additional notes
 

@@ -85,17 +85,17 @@ curl -fsSLO "$base/tensorfold.py" && curl -fsSLO "$base/prompts.json"
 python3 tensorfold.py
 ```
 
-The three measured requests each read 227 uncached tokens and generated 64. The rates below use TensorFold’s own phase timers. Decode counts the 63 tokens after the first. Both VF runs used the same official TensorFold 1.3.3 executable, MLX weights and Tesla V100-SXM2-32GB, with drafting off.
+The three measured requests each read 227 uncached tokens and generated 64. The medians use TensorFold’s native phase timers and exclude the warm-up. Decode counts the 63 tokens after the first. Both TensorFold runs used the same official 1.3.3 executable, MLX checkpoint and V100-SXM2-32GB with drafting disabled.
 
 | Build | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| TensorFold with the previous VF build | 463.00 | 50.57 |
-| TensorFold with VF from section 4 | **462.45** | **55.10** |
-| Native llama.cpp target on the same V100, Qwen3.5-35B-A3B GGUF Q4_K_M | 470.60 | 99.49 |
+| TensorFold with the previous VF build | 464.29 | 55.22 |
+| TensorFold with VF from section 4 | **464.25** | **57.67** |
+| Native llama.cpp reference, Qwen3.5-35B-A3B GGUF Q4_K_M | 468.67 | 99.67 |
 
-VF now checks operand bounds once for consecutive expert matrix operations that can share the check. Median decode rose by 8.97%. All four responses had identical output token hashes. In a separate profiled request, the experts’ gate/up projections fell from 7.245 to 5.875 ms per decode step and their down projections from 1.597 to 1.308 ms. [Per-request timings, answers, VF revisions and GPU profile](./benchmarks/tensorfold-expert-checks.json) · [Native reference](./benchmarks/ninfer-results.json)
+With the same `VF_BF16_ROW=tree` setting, VF keeps expert projection accumulators in the lanes that update them across consecutive matrix operations. Median decode rose by 4.43%. Native llama.cpp used the same physical V100 and the same three 227/64-token requests with its GGUF Q4_K_M checkpoint. [VF accumulator change](https://github.com/nbald/volta-forever/commit/f1995c4) · [Same-card native reference](./benchmarks/llamacpp-reference.json)
 
-Earlier measurements cover the dense projections, FP32 operand forwarding and two- and four-product groups. [Dense projections](./benchmarks/tensorfold-dense-bf16.json) · [Operand forwarding](./benchmarks/tensorfold-bf16-forwarding.json) · [Four-product groups](./benchmarks/tensorfold-four-products.json) · [Two-product groups](./benchmarks/tensorfold-bf16-row.json)
+Earlier measurements cover shared operand checks, dense projections, FP32 operand forwarding and two- and four-product groups. [Shared operand checks](./benchmarks/tensorfold-expert-checks.json) · [Dense projections](./benchmarks/tensorfold-dense-bf16.json) · [Operand forwarding](./benchmarks/tensorfold-bf16-forwarding.json) · [Four-product groups](./benchmarks/tensorfold-four-products.json) · [Two-product groups](./benchmarks/tensorfold-bf16-row.json)
 
 ## 6. Additional notes
 

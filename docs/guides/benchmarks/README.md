@@ -54,7 +54,7 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 ## ZML
 
-The official LLMD server generated with AMD MXFP4 and the VF development compiler on one V100. With MTP disabled, each measured request read 227 uncached tokens and generated 64. With a 256-token batch and 256-token prefill chunks, the VF launcher measured **38.35 decode tokens/s** on LLMD’s step timer and **482.98 input tokens/s** through the first token. At batch and chunk size 64, the corresponding development compiler measured **38.15** and **309.69**. The earlier **536.38 prefill / 66.85 decode** measurement used a locally modified ZML example and QuantTrio AWQ. [LLMD counters and replies](zml-llmd-mxfp4.json) · [Experimental AWQ results](zml-awq-experimental.json) · [Ubuntu guide](../zml.md)
+With a 256-token batch and prefill chunks of 256, default XLA autotuning raised the official LLMD server from **482.98 to 671.60 input tokens/s through the first token** and from **38.35 to 46.19 decode steps/s**. Three measured requests each read 227 uncached tokens and generated 64 with MTP disabled on one V100. The standalone client reproduced **654.18 / 46.04**. A separate CUPTI run measured **681.68 input tokens/s** across each full prefill graph and **49.26 tokens/s** within the decode graphs. LLMD measures time through the first token and provides separate decode counters. [Client and Ubuntu guide](../zml.md#5-benchmarks) · [Requests and XLA settings](zml-llmd-autotune.json) · [Chunk size comparison](zml-llmd-mxfp4.json)
 
 ## Strata
 
@@ -66,4 +66,8 @@ The official NInfer server processed each 227-token prompt without a prefix-cach
 
 ## TensorFold
 
-The official TensorFold 1.3.3 source build answered Paris and reported `drafts=false`. On Qwen3.5 MLX Q4, a paired test of three 227/64 requests measured 461.90/37.21 tokens/s prefill/decode with two-product VF and 462.85/46.63 with four-product support. Both ran with `VF_BF16_ROW=tree` and grouped BF16 Tensor Cores enabled. The Lisbon warm-up and the Kyoto and Lyon replies matched token for token. Lima’s continuation changed. Native llama.cpp reached 470.60/99.49 on the same V100 with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [Paired requests and kernel timings](tensorfold-four-products.json) · [Earlier off/ordered/tree measurements](tensorfold-bf16-row.json)
+The official TensorFold 1.3.3 server read 227 uncached input tokens and produced 64 output tokens on each measured prompt with drafting disabled. Carrying expert accumulators between bounded BF16 updates brought its median decode rate from **55.22 to 57.67 tokens/s**, with identical output tokens and a median prefill rate of **464.25 tokens/s**. Native llama.cpp on the same V100 measured **468.67 / 99.67** with GGUF Q4_K_M. [Ubuntu guide and reproduction](../tensorfold.md#5-benchmarks) · [Native reference](llamacpp-reference.json) · [Earlier expert checks](tensorfold-expert-checks.json)
+
+## llama.cpp
+
+At upstream b12418, native CUDA 12.9.2 on sm_70 processed **497.33 prefill / 100.43 decode tokens/s**. The official CUDA 13.5 archive with VF 0.1.1 reached **1076.51 / 99.12**. Both used the same V100, Q4_K_M checkpoint, three uncached 227-token prompts and 64-token outputs. Flash attention was enabled and MTP disabled. [Ubuntu guide](../llamacpp.md) · [Paired timings and replies](llamacpp-cuda12-cuda13.json)
