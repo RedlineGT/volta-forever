@@ -48,6 +48,8 @@ It installs no package of the system, asks for no password and writes nowhere el
 | `VF_INSTALL_FETCH=0` | do not run `vf fetch` |
 | `VF_INSTALL_BASE` | where the archive and `SHA256SUMS` are taken from (a mirror, a directory served locally) |
 
+Reinstalling or switching releases keeps existing `vf venv` environments pinned to their installed launcher. Releases share one `cuda-12.9.2` directory under `VF_PREFIX`. When upgrading an older installation, this path points to its existing CUDA directory so manual `vf fetch` commands share the same downloads. Keep that directory when removing individual old versions.
+
 To remove it: delete the directory of `VF_PREFIX` and the two links.
 
 By hand, from a release's archive:

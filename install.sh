@@ -29,6 +29,7 @@ fail() { printf 'volta-forever: %s\n' "$*" >&2; exit 1; }
 # was being downloaded runs nothing.)
 main() {
     version=${VF_VERSION:-0.1.1}
+    case $version in *[!a-zA-Z0-9._+-]*) fail "invalid release version: $version" ;; esac
     name=volta-forever-$version-linux-x86_64
     archive=$name.tar.gz
     base=${VF_INSTALL_BASE:-https://github.com/nbald/volta-forever/releases/download/v$version}
@@ -44,7 +45,7 @@ main() {
     if [ "$libc_major" -lt 2 ] || { [ "$libc_major" -eq 2 ] && [ "$libc_minor" -lt 34 ]; }; then
         fail "glibc $libc is too old: the binaries need 2.34 or later (Ubuntu 22.04, Debian 12, RHEL 9)"
     fi
-    for tool in tar gzip sha256sum mktemp; do
+    for tool in tar gzip sha256sum mktemp flock; do
         command -v "$tool" >/dev/null 2>&1 || fail "$tool is needed and was not found"
     done
     if command -v curl >/dev/null 2>&1; then
@@ -65,39 +66,92 @@ main() {
 
     # --- download and check ---
     work=$(mktemp -d "${TMPDIR:-/tmp}/volta-forever-install.XXXXXX") || fail "no temporary directory"
-    trap 'rm -rf "$work"' EXIT
+    stage=
+    links=
+    trap 'rm -rf -- "$work"
+          [ -z "$stage" ] || rm -rf -- "$stage"
+          [ -z "$links" ] || rm -rf -- "$links"' EXIT
+    trap 'exit 1' HUP INT TERM
     say "downloading $archive from $base"
     download "$base/$archive" "$work/$archive" || fail "could not download $base/$archive"
     download "$base/SHA256SUMS" "$work/SHA256SUMS" || fail "could not download $base/SHA256SUMS"
-    expected=$(sed -n "s/^\([0-9a-f]\{64\}\)[ *]*$archive\$/\1/p" "$work/SHA256SUMS" | head -1)
+    expected=$(awk -v file="$archive" '$2 == file || $2 == "*" file { print $1; exit }' "$work/SHA256SUMS")
     [ -n "$expected" ] || fail "SHA256SUMS of the release does not name $archive"
     got=$(sha256sum "$work/$archive" | cut -d' ' -f1)
     [ "$got" = "$expected" ] || fail "the SHA-256 of $archive is $got, and the release says $expected: nothing was installed"
 
-    # --- unpack, beside what is there, then put it in place ---
-    tar -xzf "$work/$archive" -C "$work" || fail "could not unpack $archive"
-    [ -x "$work/$name/bin/vf" ] || fail "$archive does not hold $name/bin/vf"
-    mkdir -p "$prefix" "$bin" || fail "cannot write in $prefix or $bin (VF_PREFIX and VF_BIN name other places)"
-    rm -rf "$prefix/$name.new"
-    mv "$work/$name" "$prefix/$name.new" || fail "cannot write in $prefix"
-    # NVIDIA's libraries that an installation already downloaded are kept: this version's own
-    # first, else those of another version.
-    for old in "$prefix/$name" "$prefix"/volta-forever-*-linux-x86_64; do
-        if [ -d "$old/cuda-12.9.2" ] && [ ! -e "$prefix/$name.new/cuda-12.9.2" ] && [ "$old" != "$prefix/$name.new" ]; then
-            mv "$old/cuda-12.9.2" "$prefix/$name.new/cuda-12.9.2"
-            say "kept the CUDA 12.9.2 libraries of $old"
+    mkdir -p -- "$prefix" "$bin" || fail "cannot write in $prefix or $bin (VF_PREFIX and VF_BIN name other places)"
+    prefix=$(CDPATH= cd -P -- "$prefix" && pwd)
+    bin=$(CDPATH= cd -P -- "$bin" && pwd)
+    stage=$(mktemp -d "$prefix/.vf-install.XXXXXXXX")
+    links=$(mktemp -d "$bin/.vf-links.XXXXXXXX")
+    tar -xzf "$work/$archive" -C "$stage" || fail "could not unpack $archive"
+    pkg=$stage/$name
+    [ -x "$pkg/bin/vf" ] || fail "$archive does not hold $name/bin/vf"
+
+    # Extract independently. Serialize publication and share the CUDA payload across versions.
+    exec 9>>"$prefix/.vf-install.lock"
+    flock -x 9 || fail "cannot lock $prefix"
+    mkdir -p -- "$prefix/.releases"
+    release=$prefix/.releases/$name-$got
+    if [ ! -e "$pkg/cuda-12.9.2" ] && [ ! -L "$pkg/cuda-12.9.2" ]; then
+        cuda=$prefix/cuda-12.9.2
+        if [ ! -d "$cuda" ]; then
+            # A manually removed legacy cache may have left a dangling link.
+            if [ -L "$cuda" ] && [ ! -e "$cuda" ]; then rm -- "$cuda"; fi
+            legacy=
+            for old in "$prefix/$name" "$prefix"/volta-forever-*-linux-x86_64; do
+                [ -d "$old/cuda-12.9.2" ] || continue
+                [ -n "$legacy" ] || legacy=$old/cuda-12.9.2
+                if [ -f "$old/cuda-12.9.2/lib/libcublas.so.12" ]; then
+                    legacy=$old/cuda-12.9.2
+                    break
+                fi
+            done
+            if [ -n "$legacy" ]; then
+                # An older fetcher may still be writing here. Share the directory
+                # itself so all versions use the same files and download locks.
+                legacy=$(CDPATH= cd -P -- "$legacy" && pwd)
+                ln -s -- "$legacy" "$stage/cuda"
+            else
+                mkdir -- "$stage/cuda"
+            fi
+            mv -T -- "$stage/cuda" "$cuda"
         fi
-    done
-    rm -rf "$prefix/$name"
-    mv "$prefix/$name.new" "$prefix/$name"
-    ln -sfn "$prefix/$name/bin/vf" "$bin/vf"
-    ln -sfn "$prefix/$name/bin/volta-forever" "$bin/volta-forever"
-    say "installed $(cat "$prefix/$name/VERSION" 2>/dev/null || echo "$version") in $prefix/$name"
+        # Older versions installed without a toolkit should also see later fetches.
+        for old in "$prefix"/volta-forever-*-linux-x86_64; do
+            if [ -d "$old" ] && [ ! -e "$old/cuda-12.9.2" ] && [ ! -L "$old/cuda-12.9.2" ]; then
+                ln -sT -- "$cuda" "$old/cuda-12.9.2" || [ -d "$old/cuda-12.9.2" ]
+            fi
+        done
+        ln -s -- ../../cuda-12.9.2 "$pkg/cuda-12.9.2"
+    fi
+    if [ ! -d "$release" ]; then
+        mv -T -- "$pkg" "$release"
+    fi
+    # A legacy version directory can still be referenced by an existing venv.
+    # New aliases and the active command switch by rename on their own filesystem.
+    if [ ! -e "$prefix/$name" ] || [ -L "$prefix/$name" ]; then
+        ln -s -- ".releases/$name-$got" "$stage/version"
+        mv -Tf -- "$stage/version" "$prefix/$name"
+    fi
+    ln -s -- "$release/bin/vf" "$links/vf"
+    ln -s -- vf "$links/volta-forever"
+    if [ -e "$bin/vf" ]; then
+        mv -Tf -- "$links/volta-forever" "$bin/volta-forever"
+        mv -Tf -- "$links/vf" "$bin/vf"
+    else
+        mv -Tf -- "$links/vf" "$bin/vf"
+        mv -Tf -- "$links/volta-forever" "$bin/volta-forever"
+    fi
+    flock -u 9
+    exec 9<&-
+    say "installed $(cat "$release/VERSION" 2>/dev/null || echo "$version") in $release"
     say "commands: $bin/vf, $bin/volta-forever"
 
     # --- NVIDIA's cuBLAS for CUDA 12.9.2 ---
     if [ "${VF_INSTALL_FETCH:-1}" != 0 ]; then
-        if [ -f "$prefix/$name/cuda-12.9.2/lib/libcublas.so.12" ]; then
+        if [ -f "$release/cuda-12.9.2/lib/libcublas.so.12" ]; then
             say "NVIDIA's cuBLAS 12.9.2 is there already"
         elif ! command -v python3 >/dev/null 2>&1; then
             say "python3 was not found: install it, then run: $bin/vf fetch"
@@ -105,8 +159,8 @@ main() {
             say "xz was not found (package xz-utils, or xz): install it, then run: $bin/vf fetch"
         else
             say "downloading NVIDIA's cuBLAS for CUDA 12.9.2 from NVIDIA's servers (1 GB), under NVIDIA's licence"
-            if "$bin/vf" fetch; then
-                say "NVIDIA's licence is in $prefix/$name/cuda-12.9.2/LICENSE"
+            if "$release/bin/vf" fetch; then
+                say "NVIDIA's licence is in $release/cuda-12.9.2/LICENSE"
             else
                 say "vf fetch did not end well: run it again with: $bin/vf fetch"
             fi
@@ -115,7 +169,7 @@ main() {
 
     # --- what is there ---
     echo
-    "$bin/vf" doctor || true
+    "$release/bin/vf" doctor || true
     echo
     case ":$PATH:" in
         *":$bin:"*) ;;
