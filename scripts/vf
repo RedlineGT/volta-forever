@@ -99,6 +99,29 @@ get_version() {
     fi
 }
 
+# --- the release that an environment made by vf venv runs ------------------------
+# Such an environment keeps the launcher that made it: an upgrade does not change the release
+# that its Pythons run. For the one activated in this shell ($VIRTUAL_ENV), sets $_venv_note
+# when that launcher is not this one (empty otherwise).
+
+venv_release() {
+    _venv_note=
+    [ -n "${VIRTUAL_ENV:-}" ] || return 0
+    for _path in "$VIRTUAL_ENV"/lib/python*/site-packages/volta_forever_venv.path; do
+        [ -f "$_path" ] || continue
+        _venv_launcher=
+        IFS= read -r _venv_launcher <"$_path" || [ -n "$_venv_launcher" ] || continue
+        if [ ! -x "$_venv_launcher" ]; then
+            _venv_note="the environment $VIRTUAL_ENV was made by $_venv_launcher, which is no longer there: its Pythons start without the layer (vf venv $VIRTUAL_ENV makes them run through this release)"
+        elif [ "$(cd "$(dirname "$_venv_launcher")" && pwd -P)/${_venv_launcher##*/}" != "$(cd "$self_dir" && pwd -P)/vf" ]; then
+            # (Its own launcher, told of no environment, says its version.)
+            _venv_version=$(VIRTUAL_ENV= "$_venv_launcher" version 2>/dev/null) || _venv_version=unknown
+            _venv_note="the environment $VIRTUAL_ENV runs through the release $_venv_version ($_venv_launcher), not this one (vf venv $VIRTUAL_ENV makes it run through this one)"
+        fi
+        return 0
+    done
+}
+
 # --- find the CUDA 12.9.2 libraries, in order ----------------------------------
 
 # Whether a file name is that of a shared library: NAME.so, or NAME.so.VERSION with a VERSION
@@ -643,6 +666,8 @@ cmd_doctor() {
             echo "       (the layer's audit library first, then those that were in LD_AUDIT: they see the names that it chose, and have the last word)"
         fi
     fi
+    venv_release
+    [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
 
     if [ "$_ok" = 0 ]; then
         exit 1
@@ -953,6 +978,8 @@ case $subcmd in
         ;;
     version)
         get_version
+        venv_release
+        [ -z "$_venv_note" ] || echo "vf: $_venv_note" >&2
         ;;
     *)
         echo "vf: unknown subcommand: $subcmd" >&2

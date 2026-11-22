@@ -985,6 +985,29 @@ if python3 -c 'import sys, venv; sys.exit(0 if hasattr(sys, "orig_argv") else 1)
         fail "$name" "a second vf venv on the same directory"
     fi
 
+    # Activated in a shell, an environment that runs another installation's launcher is named
+    # by vf version (on standard error) and vf doctor of this one, with the release it runs.
+    name="venv-release-named"
+    mk_archive "$tmp/arch-newer" cuda12
+    echo "0.2.0 test" >"$tmp/arch-newer/VERSION"
+    _st=0
+    err=$(VIRTUAL_ENV="$ve" "$tmp/arch-newer/bin/vf" version 2>&1 >"$tmp/version.out") || _st=$?
+    doc=$(VIRTUAL_ENV="$ve" "$tmp/arch-newer/bin/vf" doctor 2>&1) || true
+    own=$(VIRTUAL_ENV="$ve" "$vfv" version 2>&1)
+    said="the environment $ve runs through the release 0.1.0 test ($vfv), not this one"
+    if [ "$_st" = 0 ] && [ "$(cat "$tmp/version.out")" = "0.2.0 test" ] && [ "$own" = "0.1.0 test" ]; then
+        case "$err" in
+            "vf: $said"*)
+                case $doc in
+                    *"NOTICE $said"*) pass "$name" ;;
+                    *) fail "$name" "doctor said: $doc" ;;
+                esac ;;
+            *) fail "$name" "vf version said: $err" ;;
+        esac
+    else
+        fail "$name" "status $_st, version $(cat "$tmp/version.out"), its own launcher said: $own"
+    fi
+
     # Not a virtual environment: a Python with no pyvenv.cfg; a directory that holds something.
     name="venv-refuses-another-python"
     mkdir -p "$tmp/not-venv/bin" "$tmp/not-venv/lib"
@@ -1023,6 +1046,12 @@ if python3 -c 'import sys, venv; sys.exit(0 if hasattr(sys, "orig_argv") else 1)
     mv "$tmp/arch-venv" "$tmp/arch-gone"
     got=$("$ve/bin/python" -c 'import os; print(os.environ.get("VOLTA_FOREVER"))')
     if [ "$got" = None ]; then pass "$name"; else fail "$name" "with the launcher gone: $got"; fi
+    name="venv-release-gone"
+    err=$(VIRTUAL_ENV="$ve" "$tmp/arch-newer/bin/vf" version 2>&1 >/dev/null)
+    case $err in
+        *"$ve was made by $vfv, which is no longer there"*) pass "$name" ;;
+        *) fail "$name" "vf version said: $err" ;;
+    esac
 else
     echo "SKIP  venv (no python3 of 3.10 or later with the venv module)"
 fi

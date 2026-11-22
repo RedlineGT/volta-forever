@@ -177,6 +177,13 @@ sys.exit(rc)
         self.assertTrue(os.path.samefile(legacy / "cuda-12.9.2", new / "cuda-12.9.2"),
                         "manual fetches must share one directory and the same download lock")
         self.check_venv(venv_old, "1.0.0")
+        # Activated, the old environment is named by vf version and vf doctor of the new release.
+        activated = dict(self.env, VIRTUAL_ENV=str(venv_old))
+        shown = subprocess.run([self.bin / "vf", "version"], env=activated, capture_output=True, text=True)
+        self.assertIn("1.1.0", shown.stdout)
+        self.assertIn(f"{venv_old} runs through the release 1.0.0", shown.stderr)
+        doctor = subprocess.run([self.bin / "vf", "doctor"], env=activated, capture_output=True, text=True)
+        self.assertIn(f"NOTICE the environment {venv_old} runs through the release 1.0.0", doctor.stdout)
         subprocess.run([self.bin / "vf", "venv", venv_new, "--", "--without-pip"], env=self.env,
                        check=True, stdout=subprocess.DEVNULL)
         self.success(self.install("1.1.0"))
