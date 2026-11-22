@@ -89,11 +89,11 @@ The three measured requests each read 227 uncached tokens and generated 64. The 
 
 | Build | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| TensorFold with VF before the Q4 projection change | 463.54 | 57.69 |
-| TensorFold with VF from section 4 | **464.88** | **69.18** |
-| Native llama.cpp reference, Qwen3.5-35B-A3B GGUF Q4_K_M | 468.67 | 99.67 |
+| TensorFold before the Q4 weight conversion change | 460.51 | 69.26 |
+| TensorFold with VF from section 4 | **461.94** | **70.31** |
+| Native llama.cpp with GGUF Q4_K_M on the same card | 470.60 | 99.49 |
 
-VF recognizes a pair of one-row affine Q4 expert projections and keeps one output column in each warp lane when the shape and inputs satisfy its checks. On the same V100 this raised decode by **19.9%**. All four replies matched byte for byte. The llama.cpp reference used the same GPU and prompts with GGUF Q4_K_M. [Per-request timings and validation](./benchmarks/tensorfold-affine-q4.json) · [VF change](https://github.com/nbald/volta-forever/commit/ecd927d7f6a43225f60a086c6f8fdb654df3462a) · [Same-card native reference](./benchmarks/llamacpp-reference.json)
+VF keeps the 16 possible Q4 values in warp registers for the expert projections. This raised decode by 1.53% on the same card with four byte-identical replies. In an earlier comparison on another V100, specializing the single-row expert projections raised decode from 57.69 to 69.18 tokens/s. [Both paired comparisons](./benchmarks/tensorfold-affine-q4.json) · [VF change](https://github.com/nbald/volta-forever/commit/777bff37491991d50f8e03f4bf0e34c5b283895d) · [Native reference](./benchmarks/tensorfold-stock-vf.json)
 
 Earlier measurements cover shared operand checks, dense projections, FP32 operand forwarding and two- and four-product groups. [Shared operand checks](./benchmarks/tensorfold-expert-checks.json) · [Dense projections](./benchmarks/tensorfold-dense-bf16.json) · [Operand forwarding](./benchmarks/tensorfold-bf16-forwarding.json) · [Four-product groups](./benchmarks/tensorfold-four-products.json) · [Two-product groups](./benchmarks/tensorfold-bf16-row.json)
 

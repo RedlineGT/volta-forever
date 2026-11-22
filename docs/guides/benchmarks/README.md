@@ -66,7 +66,7 @@ The official NInfer server processed each 227-token prompt without a prefix-cach
 
 ## TensorFold
 
-The official TensorFold 1.3.3 server generated 64 tokens from each 227-token uncached prompt with drafting disabled. VF’s single-row affine Q4 projection raised decode from **57.69 to 69.18 tokens/s (+19.9%)** and prefill from **463.54 to 464.88 tokens/s**. All four replies matched the control byte for byte. Native llama.cpp measured **468.67 / 99.67** on the same V100 using GGUF Q4_K_M. [Ubuntu guide and reproduction](../tensorfold.md#5-benchmarks) · [Paired results and kernel profile](tensorfold-affine-q4.json) · [Native reference](llamacpp-reference.json)
+On the official TensorFold 1.3.3 server, each measured request read 227 uncached tokens and generated 64 with drafting disabled. Looking up Q4 weights in warp registers raised decode from **69.26 to 70.31 tokens/s** on the same V100, with **460.51 / 461.94 tokens/s prefill** and identical replies. Native llama.cpp measured **470.60 / 99.49** on that card with GGUF Q4_K_M. The previous optimization of the single-row projection raised decode from 57.69 to 69.18 on a second V100. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [Per-request results and profiles](tensorfold-affine-q4.json) · [Native reference](tensorfold-stock-vf.json)
 
 ## llama.cpp
 

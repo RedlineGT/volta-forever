@@ -195,5 +195,198 @@
     "canary_bytes_per_case": 128,
     "scope": "The server comparison used the initial verifier. Hardening the shape and control-flow checks preserved the entire 12-entry CUDA binary. The integrated translator reproduced its PTX byte for byte, and the hardware regression suite passed with the options off and on."
   },
-  "native_reference": "llamacpp-reference.json"
+  "native_reference": "llamacpp-reference.json",
+  "q4_weight_conversion": {
+    "control_vf_commit": "ecd927d7f6a43225f60a086c6f8fdb654df3462a",
+    "candidate_vf_commit": "777bff37491991d50f8e03f4bf0e34c5b283895d",
+    "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "same_gpu_native_reference": {
+      "source": "ninfer-results.json",
+      "engine": "llama.cpp native sm70, GGUF Q4_K_M for Qwen3.5-35B-A3B",
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "prefill_tokens_per_s": 470.6038448541439,
+      "decode_tokens_per_s": 99.49038812305857
+    },
+    "runs": {
+      "control": {
+        "semantic_checks": [
+          [
+            "Paris",
+            "stop"
+          ],
+          [
+            "",
+            "stop"
+          ],
+          [
+            "one",
+            "length"
+          ]
+        ],
+        "requests": [
+          {
+            "id": "warmup",
+            "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 459.04506626617535,
+            "decode_tokens_per_s": 69.19660139376519
+          },
+          {
+            "id": "run1",
+            "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 461.7902397174494,
+            "decode_tokens_per_s": 69.25297127674756
+          },
+          {
+            "id": "run2",
+            "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 460.51145140234013,
+            "decode_tokens_per_s": 69.28373459019218
+          },
+          {
+            "id": "run3",
+            "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 458.1163134272707,
+            "decode_tokens_per_s": 69.2561208523882
+          }
+        ],
+        "server_phase_medians": {
+          "prefill_tokens_per_s": 460.51145140234013,
+          "decode_tokens_per_s": 69.2561208523882
+        },
+        "gpu_profile": {
+          "activity": {
+            "decode_graph_id": 2,
+            "graph_replays": 63,
+            "nodes_per_decode_graph": 594,
+            "decode_kernel_events": 37422,
+            "dropped": 0,
+            "invalid_events": 0,
+            "decode_stream_ids": [
+              13
+            ],
+            "union_kernel_ms_per_decode_step": 14.941524666666666,
+            "sum_kernel_ms_per_decode_step": 14.941667396825398
+          },
+          "families_ms_per_decode_step": {
+            "dense projections": 3.571290984126984,
+            "routed experts gate/up": 2.6985247460317456,
+            "MoE routing and top-k": 2.427638285714286,
+            "attention": 1.4315201904761905,
+            "grouped dense projection": 1.3840328730158729,
+            "routed experts down": 1.2079125714285714,
+            "gated delta net": 0.923864380952381,
+            "normalization": 0.6673350317460317,
+            "other": 0.6295483333333334
+          }
+        }
+      },
+      "exact": {
+        "semantic_checks": [
+          [
+            "Paris",
+            "stop"
+          ],
+          [
+            "",
+            "stop"
+          ],
+          [
+            "one",
+            "length"
+          ]
+        ],
+        "requests": [
+          {
+            "id": "warmup",
+            "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 460.4706338670311,
+            "decode_tokens_per_s": 70.25348566070267
+          },
+          {
+            "id": "run1",
+            "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 461.14389457093444,
+            "decode_tokens_per_s": 70.23515588620384
+          },
+          {
+            "id": "run2",
+            "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 461.93694233921775,
+            "decode_tokens_per_s": 70.31385895657986
+          },
+          {
+            "id": "run3",
+            "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 463.23573466575436,
+            "decode_tokens_per_s": 70.35617375190152
+          }
+        ],
+        "server_phase_medians": {
+          "prefill_tokens_per_s": 461.93694233921775,
+          "decode_tokens_per_s": 70.31385895657986
+        },
+        "gpu_profile": {
+          "activity": {
+            "decode_graph_id": 2,
+            "graph_replays": 63,
+            "nodes_per_decode_graph": 594,
+            "decode_kernel_events": 37422,
+            "dropped": 0,
+            "invalid_events": 0,
+            "decode_stream_ids": [
+              13
+            ],
+            "union_kernel_ms_per_decode_step": 14.717029619047619,
+            "sum_kernel_ms_per_decode_step": 14.717029619047619
+          },
+          "families_ms_per_decode_step": {
+            "dense projections": 3.570099,
+            "routed experts gate/up": 2.476315904761905,
+            "MoE routing and top-k": 2.426804238095238,
+            "attention": 1.4325975873015873,
+            "grouped dense projection": 1.383999904761905,
+            "routed experts down": 1.208715841269841,
+            "gated delta net": 0.9238348412698413,
+            "normalization": 0.6662943174603175,
+            "other": 0.6283679841269841
+          }
+        }
+      }
+    },
+    "all_visible_replies_identical": true,
+    "hardware_checks": {
+      "checkpoint_expert_outputs": 4608,
+      "tested_dynamic_configurations": 20,
+      "output_slots_per_configuration": 9216,
+      "canaries_bytes_per_launch": 128,
+      "gpu_tests": 106,
+      "release_rust_tests": 373,
+      "clippy_all_targets_deny_warnings": true,
+      "new_xid": false
+    }
+  }
 }
