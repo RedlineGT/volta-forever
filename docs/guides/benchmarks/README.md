@@ -58,7 +58,7 @@ An experimental ZML build loaded the same QuantTrio AWQ checkpoint as vLLM and S
 
 ## Strata
 
-With **MTP and all other drafting disabled**, Strata CUDA 13 with VF reached **1943.5 prefill and 104.55 decode tokens/s**. Native Strata CUDA 12 reached 1950.2 and 99.04 on the same V100, with the same checkpoint and cuBLAS setting. Each measured request read 227 uncached tokens and generated 64, with zero draft proposals and acceptances. The common decode numerator is 63. [Ubuntu guide](../strata.md#5-benchmarks) · [Non-speculative measurements](strata-no-drafts.json) · [Historical MTP experiment](strata-results.json)
+With **MTP and all other drafting disabled**, Strata CUDA 13 with VF reached **1982.5 prefill and 104.25 decode tokens/s**. Native Strata CUDA 12 reached 1948.5 and 99.07 on the same V100, with the same checkpoint and cuBLAS setting. Each measured request read 227 uncached tokens and generated 64, with zero draft proposals and acceptances. The common decode numerator is 63. [Ubuntu guide](../strata.md#5-benchmarks) · [Non-speculative measurements](strata-uniform-divisor.json) · [Historical MTP experiment](strata-results.json)
 
 ## NInfer
 
