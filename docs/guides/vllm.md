@@ -63,7 +63,6 @@ Start the official vLLM server in the active environment. It downloads the 4-bit
 ```sh
 export PATH="$CUDA_HOME/bin:$PATH"
 export VLLM_TUNED_CONFIG_FOLDER="$HOME/volta-forever/tuning/vllm"
-export PTXAS_OPTIONS='--override-directive-values --maxrregcount=192 --opt-level=3'
 vllm serve QuantTrio/Qwen3.5-35B-A3B-AWQ --served-model-name qwen \
   --dtype float16 --language-model-only --safetensors-load-strategy lazy -cc.mode=3 \
   --max-model-len 512 --max-num-seqs 1 --gpu-memory-utilization 0.9 \
@@ -86,16 +85,16 @@ cd ~/volta-forever
 python3 docs/guides/benchmarks/vllm.py
 ```
 
-Each measured request processed 227 prompt tokens and generated 64 tokens. The client reads vLLM’s phase timers. Prefill counts all 227 prompt tokens and decode counts the 63 output tokens after the first. Both configurations captured full and piecewise CUDA graphs on the same V100. [Benchmark client](./benchmarks/vllm.py)
+Each measured request processed 227 uncached prompt tokens and generated 64 output tokens. The client reads vLLM’s phase timers. Decode counts the 63 tokens after the first. The official server used Marlin, the V100 expert tiles and both full and piecewise CUDA graphs. [Benchmark client](./benchmarks/vllm.py)
 
-| Expert configuration | Median prefill (tokens/s) | Median decode (tokens/s) |
+| Server on the same Tesla V100 | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Default vLLM tiles | 991.50 | 72.18 |
-| V100 tiles from the command above | **1468.21** | **80.16** |
+| Official vLLM with the command above | **1449.98** | **80.23** |
+| Native 1Cat-vLLM reference | 1443.33 | 76.09 |
 
-To reproduce the default run, stop the server, run `unset VLLM_TUNED_CONFIG_FOLDER` and repeat the same launch and benchmark. Both configurations used vLLM 0.34.0, PyTorch 2.14.0+cu130, VF at `c5e6295` and the same nine AWQ shards. [Per-request measurements and generated text](./benchmarks/vllm-expert-tiles.json)
+Both runs used the same nine AWQ shards and the same prompts. The guide run used vLLM 0.34.0, PyTorch 2.14.0+cu130, VF’s retained-PTX fix and the default assembler settings. [Commands, timings and responses](./benchmarks/vllm-default-assembler.json) · [Native reference](./benchmarks/vllm-graphs.json)
 
-Native 1Cat-vLLM on the same physical GPU reached **1427.41 prefill** and **76.13 decode** tokens/s with the same checkpoint and prompts. Both servers returned Paris and the three requested cities. An earlier run on another V100 set the targets at 1443.33 and 76.09. [Same-GPU results](./benchmarks/vllm-expert-tiles.json) · [Earlier native reference](./benchmarks/vllm-graphs.json)
+An earlier comparison isolated the expert tile settings on another V100. With the assembler capped at 192 registers in both runs, the V100 tiles reached 1468.21 prefill and 80.16 decode, compared with 991.50 and 72.18 for vLLM’s default tiles. [Tile comparison](./benchmarks/vllm-expert-tiles.json)
 
 ## 6. Additional notes
 

@@ -17,12 +17,14 @@ Each request produces one new observation in each vLLM phase histogram. The clie
 
 | Prompt | Input tokens | Output tokens | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: | ---: | ---: |
-| Kyoto | 227 | 64 | 1458.73 | 80.16 |
-| Lyon | 227 | 64 | 1473.00 | 79.71 |
-| Lima | 227 | 64 | 1468.21 | 80.24 |
-| **Median** | **227** | **64** | **1468.21** | **80.16** |
+| Kyoto | 227 | 64 | 1494.19 | 80.23 |
+| Lyon | 227 | 64 | 1449.98 | 80.30 |
+| Lima | 227 | 64 | 1428.45 | 80.23 |
+| **Median** | **227** | **64** | **1449.98** | **80.23** |
 
-The official server used the V100 FP16 expert tiles, Marlin and full and piecewise CUDA graphs. Its default tiles reached 991.50 prefill and 72.18 decode tokens/s on the same GPU. The original diagnostic run using eager execution and disabled assembler optimization measured 211.52 and 9.23. [Paired results](vllm-expert-tiles.json) · [Earlier graph comparison](vllm-graphs.json) · [Diagnostic baseline](vllm-results.json)
+The official server used V100 expert tiles, Marlin, the default assembler settings and full and piecewise CUDA graphs. Native 1Cat-vLLM measured 1443.33 prefill and 76.09 decode tokens/s on the same GPU. [Per-request results](vllm-default-assembler.json) · [Native reference](vllm-graphs.json)
+
+On another V100, a paired comparison with a 192-register cap measured 1468.21 prefill and 80.16 decode with V100 tiles and 991.50 and 72.18 with default tiles. [Tile comparison](vllm-expert-tiles.json)
 
 ## SGLang
 

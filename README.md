@@ -105,7 +105,7 @@ Start with Ubuntu 24.04 and a Tesla V100. Each guide checks for the NVIDIA R580 
 
 | Ubuntu guide | Model in the example | V100 result |
 |---|---|---|
-| [vLLM](docs/guides/vllm.md) | Qwen3.5-35B-A3B, 4-bit AWQ | The official server answered “Paris”. With V100 expert tiles, Marlin and CUDA graphs, **1468.21 tokens/s** prefill and **80.16 tokens/s** decode. [Paired results](docs/guides/benchmarks/vllm-expert-tiles.json) |
+| [vLLM](docs/guides/vllm.md) | Qwen3.5-35B-A3B, 4-bit AWQ | The official server answered “Paris”. With V100 expert tiles, Marlin and CUDA graphs, **1449.98 tokens/s** prefill and **80.23 tokens/s** decode with the default assembler settings. [Per-request results](docs/guides/benchmarks/vllm-default-assembler.json) |
 | [SGLang](docs/guides/sglang.md) | Qwen3.5-35B-A3B-AWQ | The official server answered “Paris”. With V100 expert tiles and CUDA graphs for prefill and decode, **311.97 tokens/s** prefill and **52.68 tokens/s** decode using Triton's default assembler options. [Paired results](docs/guides/benchmarks/sglang-stock-sm80.json) |
 | [FreeToken](docs/guides/freetoken.md) | Qwen3.5-35B-A3B, GGUF Q4_K_M | The server answered “Paris”. Batch-one CUDA graphs reached **884.56 tokens/s** prefill and **109.26 tokens/s** decode. [Benchmark](docs/guides/benchmarks/freetoken-graphs.json) |
 | [ZML](docs/guides/zml.md) | Qwen3.5-0.8B | The CUDA example answered “Paris”. The 35B AWQ loader stopped on a missing expert tensor. |
