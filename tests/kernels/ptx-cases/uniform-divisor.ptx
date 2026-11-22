@@ -1,0 +1,31 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+// Two rounds cover truncation towards zero, signed limits, and in-place division.
+.visible .entry k(.param .u64 output, .param .s32 divisor)
+{
+    .reg .s32 %r<6>;
+    .reg .u64 %out, %offset;
+    .reg .pred %again;
+    ld.param.u64 %out, [output];
+    ld.param.s32 %r0, [divisor];
+    mov.u32 %r1, %tid.x;
+    mul.wide.u32 %offset, %r1, 16;
+    add.u64 %out, %out, %offset;
+    mov.s32 %r1, -257;
+    mov.s32 %r2, -16;
+    mov.s32 %r3, 0x80000000;
+    mov.s32 %r4, 0x7fffffff;
+    mov.u32 %r5, 2;
+again:
+    div.s32 %r1, %r1, %r0;
+    div.s32 %r2, %r2, %r0;
+    div.s32 %r3, %r3, %r0;
+    div.s32 %r4, %r4, %r0;
+    sub.u32 %r5, %r5, 1;
+    setp.ne.u32 %again, %r5, 0;
+    @%again bra again;
+    st.global.v4.b32 [%out], {%r1,%r2,%r3,%r4};
+    ret;
+}

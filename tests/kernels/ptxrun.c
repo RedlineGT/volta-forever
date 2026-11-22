@@ -1,10 +1,11 @@
 // ptxrun: load one PTX module through the CUDA driver API, launch one kernel of it with one block,
 // and compare what each lane stored with the words given.
 //
-// usage: ptxrun [-d ORDINAL] [-t THREADS] MODULE.ptx KERNEL WORD0 [WORD1 [WORD2 [WORD3]]]
+// usage: ptxrun [-d ORDINAL] [-t THREADS] [-i INT32] MODULE.ptx KERNEL WORD0 [WORD1 [WORD2 [WORD3]]]
 //
-// The kernel takes one parameter, the address of THREADS * 16 bytes (zero when it starts), of which
-// each lane writes its own 16 (lane * 16). WORDn: what every lane must have as its word n, in
+// The first kernel parameter is the address of THREADS * 16 bytes (zero when it starts), of which
+// each lane writes its own 16 (lane * 16). With -i the second parameter is a signed integer.
+// WORDn: what every lane must have as its word n, in
 // hexadecimal, or `-` for a word that is not looked at. Environment: DRVRUN_LIBCUDA (library to
 // load, default libcuda.so.1).
 //
@@ -13,6 +14,7 @@
 // writes.
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,8 +71,20 @@ int main(int argc, char** argv) {
         threads = (int)n;
         arg += 2;
     }
+    int32_t integer = 0;
+    if (arg + 1 < argc && !strcmp(argv[arg], "-i")) {
+        char* end;
+        errno = 0;
+        long long n = strtoll(argv[arg + 1], &end, 10);
+        if (errno || end == argv[arg + 1] || *end || n < INT32_MIN || n > INT32_MAX) {
+            fprintf(stderr, "invalid signed integer\n");
+            return 2;
+        }
+        integer = (int32_t)n;
+        arg += 2;
+    }
     if (argc - arg < 3 || argc - arg > 2 + WORDS) {
-        fprintf(stderr, "usage: ptxrun [-d ORDINAL] [-t THREADS] MODULE.ptx KERNEL WORD0 [WORD1 [WORD2 [WORD3]]]\n");
+        fprintf(stderr, "usage: ptxrun [-d ORDINAL] [-t THREADS] [-i INT32] MODULE.ptx KERNEL WORD0 [WORD1 [WORD2 [WORD3]]]\n");
         return 2;
     }
     const char *path = argv[arg], *kernel = argv[arg + 1];
@@ -116,7 +130,7 @@ int main(int argc, char** argv) {
     CUdeviceptr out;
     CK(cuMemAlloc_v2(&out, threads * WORDS * 4));
     CK(cuMemsetD8_v2(out, 0, threads * WORDS * 4));
-    void* args[1] = {&out};
+    void* args[] = {&out, &integer};
     CK(cuLaunchKernel(function, 1, 1, 1, threads, 1, 1, 0, NULL, args, NULL));
     CK(cuCtxSynchronize());
     uint32_t got[threads][WORDS];

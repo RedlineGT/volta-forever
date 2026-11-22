@@ -350,6 +350,9 @@ impl Policy {
         } else {
             vf_ptx::lower_to_volta_with(text, self.lowering)
         };
+        if self.device_sm == 70 {
+            vf_ptx::division::specialize(&mut lowered);
+        }
         vf_ptx::retarget(&mut lowered, self.ptx_max, self.device_sm);
         (lowered, lowering)
     }

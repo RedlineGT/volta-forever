@@ -77,6 +77,19 @@ DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -t 256 "$G/p
 DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -t 1 "$G/ptx-cases/cta-mbarrier.ptx" counts 0 108 >>"$log" 2>&1
 check cta-mbarrier "256 of 256 lanes as expected" "1 of 1 lanes as expected"
 
+# Positive powers of two take the shifted loop. The other divisors keep native signed division.
+while read -r divisor w0 w1 w2 w3; do
+    name=uniform-divisor-$divisor
+    log=$out/logs/$name.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/ptxrun" -i "$divisor" "$G/ptx-cases/uniform-divisor.ptx" k "$w0" "$w1" "$w2" "$w3" >"$log" 2>&1
+    check "$name" "^PASS k of .*: 32 of 32 lanes as expected"
+done <<'DIVISORS'
+8 fffffffc 00000000 fe000000 01ffffff
+3 ffffffe4 ffffffff f1c71c72 0e38e38e
+-3 ffffffe4 ffffffff f1c71c72 0e38e38e
+1 fffffeff fffffff0 80000000 7fffffff
+DIVISORS
+
 # The x1 warp store uses eight independent row addresses and leaves the padding intact.
 px stmatrix-x1 "$G/ptx-cases/stmatrix-x1.ptx" a9c31357 a9c31357 0
 px stmatrix-multi "$G/ptx-cases/stmatrix-multi.ptx" 0 0

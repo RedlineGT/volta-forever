@@ -7,6 +7,7 @@
 //! instructions Turing added is rewritten with what Volta has (`lower_to_volta`).
 
 pub mod deps;
+pub mod division;
 pub mod emulated;
 pub mod lower;
 pub mod refused;
