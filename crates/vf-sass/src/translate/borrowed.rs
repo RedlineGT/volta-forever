@@ -43,6 +43,8 @@ pub(super) struct Borrowed {
     pub(super) everything: bool,
     /// {uniform register: its word in the frame}.
     pub(super) slots: HashMap<u32, u32>,
+    /// Held uniform predicates whose value must survive an interval with every register busy.
+    pub(super) predicate_slots: HashMap<u32, u32>,
     /// The frame size in bytes (a multiple of 16).
     pub(super) frame_bytes: u32,
     /// Where the stack pointer is at each instruction: `depth[i]` is how far R1 is, before
@@ -352,6 +354,7 @@ impl Borrowed {
             used,
             everything: false,
             slots: HashMap::new(),
+            predicate_slots: HashMap::new(),
             frame_bytes: 0,
             depth,
             r1_fixed,
@@ -456,9 +459,7 @@ impl Borrowed {
         self.frame_bytes
     }
 
-    /// Where uniform register `u` is, from the top of the thread's local memory:
-    /// the frame is right under it. Returns a negative offset.
-    pub(super) fn slot_offset(&self, u: u32) -> i32 {
-        -(self.frame_bytes as i32) + 4 * self.slots[&u] as i32
+    pub(super) fn slot_count(&self) -> u32 {
+        (self.slots.len() + self.predicate_slots.len()) as u32
     }
 }

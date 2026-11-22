@@ -641,6 +641,7 @@ fn free_at_skips_given() {
         used: HashSet::new(),
         everything: false,
         slots: HashMap::new(),
+        predicate_slots: HashMap::new(),
         frame_bytes: 0,
         depth: vec![None],
         r1_fixed: true,
@@ -683,6 +684,7 @@ fn free_at_returns_none_when_full() {
         used: HashSet::new(),
         everything: false,
         slots: HashMap::new(),
+        predicate_slots: HashMap::new(),
         frame_bytes: 0,
         depth: vec![None],
         r1_fixed: true,
@@ -931,4 +933,86 @@ fn a_store_to_the_frame_has_no_guard() {
         }
     }
     assert!(under_the_guard >= 28, "{under_the_guard} of {stores}");
+}
+
+/// UP0 spans seven writes to ordinary predicates. Every possible general-register holder
+/// is live when UP0 is born. Its local word and the temporary save of R2 must be distinct.
+#[test]
+fn held_predicate_survives_in_the_frame_under_register_pressure() {
+    let template = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/kernels/translate/triton_add.sm_75.cubin"
+    ));
+    let mut input = crate::elf::Elf::parse(template).unwrap();
+    let section = input.section(".text.add_kernel").unwrap();
+    let code = &mut input.sections[section].data;
+    // Keep the existing stack prologue, exit offsets and padding. Replace instructions 1..16.
+    let exit = u128::from_le_bytes(code[19 * 16..20 * 16].try_into().unwrap());
+    let mut set = |i: usize, word: u128| code[16 * i..16 * (i + 1)].copy_from_slice(&word.to_le_bytes());
+    for p in 0..7 {
+        let r = p + 2;
+        set(
+            p as usize + 1,
+            assemble::assemble_int("mov__RCR_RC", &[("Rd", r)]).unwrap(),
+        );
+        set(
+            p as usize + 9,
+            assemble::assemble_int("isetp__RRR_RR", &[("Pu", p), ("Ra", r), ("Rb", 255)]).unwrap(),
+        );
+    }
+    // UPLOP3.LUT UP0, UPT, UPT, UPT, UPT, 0x80, 0x0
+    set(8, 0x000fe20003f0f070_000000000000789c);
+    // PLOP3.LUT P4, PT, PT, PT, UP0, 0x80, 0x0
+    set(16, 0x000fe40003f8f008_000000000000781c);
+    // Use unconditional exits and leave no original use of other general-purpose registers.
+    set(17, exit);
+    set(18, NOP);
+
+    let options = Options {
+        borrow: 8,
+        ..Options::default()
+    };
+    let result = translate_with_options(&input.write(), true, &options).unwrap();
+    assert!(result.report.iter().all(|function| function.refused.is_none()));
+    let out = crate::elf::Elf::parse(&result.bytes).unwrap();
+    let code = &out.sections[out.section(".text.add_kernel").unwrap()].data;
+    let mut decoder = Decoder::new(70);
+    let map = result.map.unwrap();
+    let frame_steps = |origin: u64| {
+        map.iter()
+            .filter(|(_, _, old, what)| {
+                *old == 16 * origin
+                    && (what.starts_with("room:") || what.starts_with("mem:") || what.starts_with("held:"))
+            })
+            .map(|(_, _, _, what)| what.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        frame_steps(8),
+        ["room: R2 away", "held: kept", "mem: store UP0", "room: R2 back"]
+    );
+    assert_eq!(frame_steps(16), ["mem: load UP0", "held: back"]);
+    let mut instruction = |origin: u64, label: &str| {
+        let (_, offset, _, _) = map
+            .iter()
+            .find(|(_, _, old, what)| *old == origin * 16 && what == label)
+            .unwrap_or_else(|| panic!("missing {label} at instruction {origin}"));
+        let at = *offset as usize;
+        decoder
+            .decode(u128::from_le_bytes(code[at..at + 16].try_into().unwrap()))
+            .unwrap()
+    };
+    let away = instruction(8, "room: R2 away");
+    let keep = instruction(8, "held: kept");
+    let store = instruction(8, "mem: store UP0");
+    let back = instruction(8, "room: R2 back");
+    let load = instruction(16, "mem: load UP0");
+    let test = instruction(16, "held: back");
+    for (op, expected_offset) in [(&store, 0), (&load, 0), (&away, 4), (&back, 4)] {
+        assert_eq!(op.op_or_name("Ra", 255), 1);
+        assert_eq!(op.op_or_name("Ra_offset", u32::MAX), expected_offset);
+    }
+    assert_eq!(keep.op_or_name("Rd", 255), store.op_or_name("Rb", 254));
+    assert_eq!(load.op_or_name("Rd", 255), test.op_or_name("Ra", 254));
+    assert_eq!((away.op_or_name("Rb", 255), back.op_or_name("Rd", 255)), (2, 2));
 }

@@ -352,13 +352,15 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                         let mut held_at: HashMap<u32, u32> = HashMap::new();
                         for (&q, span_set) in &spans_by_q {
                             let span_sorted: Vec<usize> = span_set.iter().copied().collect();
-                            let r = b.kept(&span_sorted).ok_or_else(|| {
-                                Refused(format!(
-                                    "no register holds nothing through the lives of uniform predicate UP{}",
-                                    q
-                                ))
-                            })?;
-                            held_at.insert(q, r);
+                            if let Some(r) = b.kept(&span_sorted) {
+                                held_at.insert(q, r);
+                            } else if b.from_r1 {
+                                let slot = b.slot_count();
+                                b.predicate_slots.insert(q, slot);
+                                b.frame_bytes = (4 * b.slot_count()).next_multiple_of(16);
+                            } else {
+                                return Err(Refused(format!("no register holds nothing through the lives of uniform predicate UP{q}")));
+                            }
                         }
                         // Above the registers that may be taken: saved predicates only.
                         let placed = placement(

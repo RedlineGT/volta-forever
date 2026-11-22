@@ -319,6 +319,7 @@ class Borrowed:
         # instruction needs is taken at that instruction (`Function.take`).
         self.everything = False
         self.slots = {}           # {uniform register: its word in the frame}
+        self.predicate_slots = {} # {held uniform predicate: its word in the frame}
         self.frame_bytes = 0      # the frame: 4 bytes a register, a multiple of 16
 
     def free_at(self, i, width=1, given=0):
@@ -380,10 +381,13 @@ class Borrowed:
             self.frame_bytes = (self.frame_bytes + 15) & ~15
         return self.frame_bytes
 
-    def slot_offset(self, u):
-        """Where uniform register `u` is, from the top of the thread's local memory
+    def slot_count(self):
+        return len(self.slots) + len(self.predicate_slots)
+
+    def slot_offset(self, word):
+        """Where frame word `word` is, from the top of the thread's local memory
         (c[0x0][0x28], what the stack pointer starts at): the frame is right under it."""
-        return -self.frame_bytes + 4 * self.slots[u]
+        return -self.frame_bytes + 4 * word
 
 
 def placement(base, uniform, pairs, pool, saves, lane=False, scratch=0, product=False, rows=None, row_kept=(), companions=None, held=()):
@@ -778,7 +782,24 @@ class Function:
                 lane = Item(mc.assemble('s2r_', Rd=self._lane_taken[i], SRa='SR_LANEID', dst_wr_sb=SEQUENCE), i, 'lane')
                 lane.then = SEQUENCE
                 new = [lane] + new
-            new = before + new + self.to_memory(i, d)
+            # A frame-backed predicate uses a temporary only while named by this instruction.
+            # Its conversion must stay between the save and restore of any borrowed register.
+            after = []
+            held_in_register = []
+            for q, p, reads, writes in self.held.get(i, ()):
+                if self.borrow is None or q not in self.borrow.predicate_slots:
+                    held_in_register.append((q, p, reads, writes))
+                    continue
+                word = self.borrow.predicate_slots[q]
+                temp = self.take(1)
+                if reads:
+                    self.load_word(word, temp, i, before, 'mem: load UP%d' % q)
+                    before[-1].then = ARRIVES
+                    before.append(self.read_back(temp, p, i))
+                if writes:
+                    after.append(self.written_down(temp, p, i))
+                    self.store_word(word, temp, i, after, 'mem: store UP%d' % q)
+            new = before + new + after + self.to_memory(i, d)
             if i in self.spilled:
                 # Room made (`make_room`): the registers taken from the program are put in the
                 # frame before everything the instruction became, and brought back after it.
@@ -786,7 +807,7 @@ class Function:
                 # is brought back arrives on a scoreboard, and what follows the last waits.
                 b, stl, saves, back = self.borrow, mc.md70.by_name['stl__sImmOffset'], [], []
                 for k, r in enumerate(self.spilled[i]):
-                    offset = b.depth[i] + 4 * (len(b.slots) + k)
+                    offset = b.depth[i] + 4 * (b.slot_count() + k)
                     saves.append(self.late(stl, mc.assemble('stl__sImmOffset', Ra=1, Rb=r, Ra_offset=offset), i, 'room: R%d away' % r))
                     back.append(Item(mc.assemble('ldl__sImmOffset', Rd=r, Ra=1, Ra_offset=offset, dst_wr_sb=ARRIVES), i, 'room: R%d back' % r))
                 back[-1].then = ARRIVES
@@ -802,8 +823,8 @@ class Function:
                 targets.add(target)
             # The predicates saved for a life that starts here, and given back after one that ends here.
             # The uniform predicates held in a register: read back for the instruction, written after it.
-            new = ([self.read_back(q, p, i) for q, p, reads, writes in self.held.get(i, ()) if reads] + new
-                   + [self.written_down(q, p, i) for q, p, reads, writes in self.held.get(i, ()) if writes])
+            new = ([self.read_back(self.holder(q), p, i) for q, p, reads, writes in held_in_register if reads] + new
+                   + [self.written_down(self.holder(q), p, i) for q, p, reads, writes in held_in_register if writes])
             new = [self.saved(k, p, i) for k, p in self.saves.get(i, ())] + new + [self.given_back(k, p, i) for k, p in self.restores.get(i, ())]
             if self.q is not None:
                 # The accumulators of pairs brought to the state the instruction, or what follows it, takes them in.
@@ -868,7 +889,7 @@ class Function:
             # The frame with the room made: the uniform registers, then as many words as an
             # instruction put away at once.
             b = self.borrow
-            b.frame_bytes = (4 * (len(b.slots) + b.spill) + 15) & ~15
+            b.frame_bytes = (4 * (b.slot_count() + b.spill) + 15) & ~15
             if b.frame_bytes and self._top_again is not None:
                 raise Refused('a frame for the translation, and the top of the stack is read again at 0x%x' % (16 * self._top_again))
             if self._lower is not None:
@@ -1023,14 +1044,13 @@ class Function:
             raise Refused('a uniform predicate to hold in a function that was not given a register for it')
         return self.hold_at[q]
 
-    def read_back(self, q, p, i):
-        """The item that puts the held uniform predicate `q` in predicate `p`: whether its register is not zero."""
-        return Item(self.mc.assemble('isetp__RRR_RR', Pu=p, Ra=self.holder(q), Rb=255, icmp='NE', fmt='U32', bop='AND'), i, 'held: back')
+    def read_back(self, holder, p, i):
+        """Put the held value in predicate `p`: whether its register is not zero."""
+        return Item(self.mc.assemble('isetp__RRR_RR', Pu=p, Ra=holder, Rb=255, icmp='NE', fmt='U32', bop='AND'), i, 'held: back')
 
-    def written_down(self, q, p, i):
-        """The item that writes predicate `p`, which an instruction just gave the held uniform
-        predicate `q` in, to the register that holds it: its bit, alone."""
-        item = Item(self.mc.assemble('p2r__RsIR_RIR', Rd=self.holder(q), Ra=255, Sb=1 << p), i, 'held: kept')
+    def written_down(self, holder, p, i):
+        """Write predicate `p` to the register that holds it: its bit, alone."""
+        item = Item(self.mc.assemble('p2r__RsIR_RIR', Rd=holder, Ra=255, Sb=1 << p), i, 'held: kept')
         item.more_reads = [('P', p, 'data')]
         return item
 
@@ -1147,7 +1167,7 @@ class Function:
             read = read | written
         if not (read or written):
             return []
-        mc, items = self.mc, []
+        items = []
         for u in sorted(read | written):
             if u in self._mem_regs:
                 continue
@@ -1158,13 +1178,12 @@ class Function:
                 self._mem_regs[u] = self.take(1)
         if read:
             for u in sorted(read):
-                top, offset = self.slot(u, i, items)
-                items.append(Item(mc.assemble('ldl__sImmOffset', Rd=self._mem_regs[u], Ra=top, Ra_offset=offset, dst_wr_sb=ARRIVES), i, 'mem: load UR%d' % u))
+                self.load_word(self.borrow.slots[u], self._mem_regs[u], i, items, 'mem: load UR%d' % u)
             items[-1].then = ARRIVES
         return items
 
-    def slot(self, u, i, items):
-        """Where uniform register `u` is in the frame, for the instruction at hand: the register
+    def slot(self, word, i, items):
+        """Where word `word` is in the frame, for the instruction at hand: the register
         to address it from and the offset. From the top of the thread's local memory, loaded in
         a register (`frame_top`); or, where it is known how far the program has moved its stack
         pointer at each instruction and room is made (`Borrowed.from_r1`, `depth`), from the
@@ -1172,8 +1191,17 @@ class Function:
         if self.borrow.from_r1:
             if self.borrow.depth[i] is None:
                 raise Refused('a uniform register in memory at 0x%x, where the stack pointer is not known' % (16 * i))
-            return 1, self.borrow.depth[i] + 4 * self.borrow.slots[u]
-        return self.frame_top(i, items), self.borrow.slot_offset(u) & 0xFFFFFF
+            return 1, self.borrow.depth[i] + 4 * word
+        return self.frame_top(i, items), self.borrow.slot_offset(word) & 0xFFFFFF
+
+    def load_word(self, word, rd, i, items, what):
+        top, offset = self.slot(word, i, items)
+        items.append(Item(self.mc.assemble('ldl__sImmOffset', Rd=rd, Ra=top, Ra_offset=offset, dst_wr_sb=ARRIVES), i, what))
+
+    def store_word(self, word, rb, i, items, what):
+        top, offset = self.slot(word, i, items)
+        stl = self.mc.md70.by_name['stl__sImmOffset']
+        items.append(self.late(stl, self.mc.assemble('stl__sImmOffset', Ra=top, Rb=rb, Ra_offset=offset), i, what))
 
     def to_memory(self, i, d):
         """Level 3, after the instruction at `i`: the uniform registers of the frame that it
@@ -1188,12 +1216,9 @@ class Function:
         read, written, together = self.in_frame(d)
         if not written:
             return []
-        mc, items = self.mc, []
-        c = mc.md70.by_name['stl__sImmOffset']
+        items = []
         for u in sorted(written):
-            top, offset = self.slot(u, i, items)
-            word = mc.assemble('stl__sImmOffset', Ra=top, Rb=self._mem_regs[u], Ra_offset=offset)
-            items.append(self.late(c, word, i, 'mem: store UR%d' % u))
+            self.store_word(self.borrow.slots[u], self._mem_regs[u], i, items, 'mem: store UR%d' % u)
         return items
 
     def entries(self):
@@ -2606,8 +2631,13 @@ def translate(data, mc=None, listing=None, lives=None):
                         spans[q].update(part)
                     held_at = {}
                     for q, span in sorted(spans.items()):
-                        held_at[q] = b.kept(sorted(span))
-                        if held_at[q] is None:
+                        r = b.kept(sorted(span))
+                        if r is not None:
+                            held_at[q] = r
+                        elif b.from_r1:
+                            b.predicate_slots[q] = b.slot_count()
+                            b.frame_bytes = (4 * b.slot_count() + 15) & ~15
+                        else:
                             raise Refused('no register holds nothing through the lives of uniform predicate UP%d' % q)
                     # Above the registers that may be taken: those the predicates are saved in, only.
                     where = placement(b.top + 1, [], set(), False, f.save_slots, False, 0, False, {}, [], {}, [])
@@ -2848,8 +2878,14 @@ def translate(data, mc=None, listing=None, lives=None):
                 for k, item in enumerate(f.items):
                     listing.append((name, 16 * k, 16 * item.origin, item.what))
             if lives is not None:
-                lives += [(name, q, p, saved, [16 * at for at in part]) for q, p, saved, part in functions[i].lives]
-                lives += [(name, q, functions[i].hold_at[q], 'held', [16 * at for at in part]) for q, part in functions[i].held_lives]
+                f = functions[i]
+                lives += [(name, q, p, saved, [16 * at for at in part]) for q, p, saved, part in f.lives]
+                for q, part in f.held_lives:
+                    if q in f.hold_at:
+                        location, kind = f.hold_at[q], 'held'
+                    else:
+                        location, kind = -f.borrow.slot_offset(f.borrow.predicate_slots[q]), 'held-slot'
+                    lives.append((name, q, location, kind, [16 * at for at in part]))
                 if functions[i].borrow is not None:
                     # What was borrowed, for validate.py to check by its own lives: `home`, a
                     # uniform register (first number) in a register of the program (second)
@@ -2865,7 +2901,7 @@ def translate(data, mc=None, listing=None, lives=None):
                     # (`room`: a register of the program (second number) put in the frame for
                     # the time of one instruction's sequence, and brought back.)
                     lives += [(name, 1, r, 'room', [16 * at]) for at, registers in sorted(functions[i].spilled.items()) for r in registers]
-                    lives += [(name, u, -b.slot_offset(u), 'slot', []) for u in sorted(b.slots)]
+                    lives += [(name, u, -b.slot_offset(word), 'slot', []) for u, word in sorted(b.slots.items())]
                     if b.frame_bytes:
                         lives.append((name, b.frame_bytes, 0, 'frame', []))
             s.data = code

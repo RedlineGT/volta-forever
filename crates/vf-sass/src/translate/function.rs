@@ -137,11 +137,31 @@ pub(super) fn translate_function(
             lane_item.then = Some(SEQUENCE);
             new_items.insert(0, lane_item);
         }
+        // A held predicate in the frame only needs a register while this instruction uses
+        // its value. Keep the conversion inside the saves/restores of any borrowed register.
+        let mut frame_before = Vec::new();
+        let mut frame_after = Vec::new();
+        for &(q, p, reads, writes) in predicates.held.get(&i).into_iter().flatten() {
+            if let Some(slot) = ctx.borrow.as_ref().and_then(|b| b.predicate_slots.get(&q)).copied() {
+                let r = ctx.take(1, None)?;
+                if reads {
+                    ctx.load_frame_word(slot, r, i, format!("mem: load UP{q}"), &mut frame_before)?;
+                    frame_before.last_mut().unwrap().then = Some(ARRIVES);
+                    frame_before.push(ctx.read_back(r, p, i)?);
+                }
+                if writes {
+                    frame_after.push(ctx.written_down(r, p, i)?);
+                    ctx.store_frame_word(slot, r, i, format!("mem: store UP{q}"), &mut frame_after)?;
+                }
+            }
+        }
         // Level 3: store to memory after the instruction.
         let after_mem = ctx.stores_after(i, d)?;
         {
             let mut combined = before_mem;
+            combined.extend(frame_before);
             combined.extend(new_items);
+            combined.extend(frame_after);
             combined.extend(after_mem);
             new_items = combined;
         }
@@ -152,7 +172,7 @@ pub(super) fn translate_function(
         if let Some(spill_regs) = ctx.spilled.get(&i).cloned() {
             let borrow = ctx.borrow.as_ref().unwrap();
             let depth_at_i = borrow.depth[i].unwrap();
-            let n_slots = borrow.slots.len() as i32;
+            let n_slots = borrow.slot_count() as i32;
             let mut saves: Vec<Item> = Vec::new();
             let mut backs: Vec<Item> = Vec::new();
             for (k, &r) in spill_regs.iter().enumerate() {
@@ -216,11 +236,15 @@ pub(super) fn translate_function(
             let mut held_before: Vec<Item> = Vec::new();
             let mut held_after: Vec<Item> = Vec::new();
             for &(q, p, reads, writes) in predicates.held.get(&i).into_iter().flatten() {
+                if ctx.borrow.as_ref().is_some_and(|b| b.predicate_slots.contains_key(&q)) {
+                    continue;
+                }
+                let holder = ctx.holder(q)?;
                 if reads {
-                    held_before.push(ctx.read_back(q, p, i)?);
+                    held_before.push(ctx.read_back(holder, p, i)?);
                 }
                 if writes {
-                    held_after.push(ctx.written_down(q, p, i)?);
+                    held_after.push(ctx.written_down(holder, p, i)?);
                 }
             }
             new_items.splice(0..0, held_before);
@@ -367,7 +391,7 @@ pub(super) fn translate_function(
         let borrow = ctx.borrow.as_mut().unwrap();
         // The frame with the room made: the uniform registers, then as many words as an
         // instruction put away at once.
-        borrow.frame_bytes = (4 * (borrow.slots.len() as u32 + borrow.spill) + 15) & !15;
+        borrow.frame_bytes = (4 * (borrow.slot_count() + borrow.spill) + 15) & !15;
         if borrow.frame_bytes > 0
             && let Some(ta) = ctx.top_again
         {

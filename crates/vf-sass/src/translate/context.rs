@@ -261,18 +261,9 @@ impl Ctx<'_> {
             "a sequence that needs registers of its own in a function that was not given them".into(),
         ))
     }
-    /// Whether the product at `i`, on the register `rb` of B, finds in the registers kept for
-    /// that what it would gather: the last product that gathered did it from the same
-    /// register; every way to this one goes through that one and straight on from it (nothing
-    /// after it up to this one is entered otherwise than from the instruction before:
-    /// `entries`); no call between them (the function called may gather for a product of its
-    /// own, or write the register); and nothing from that product on, itself included, writes
-    /// the register, under a guard or not.
-    /// Where uniform register `u` is in the frame, for the instruction at hand: the register
-    /// to address it from and the offset. From the stack pointer itself when `from_r1` is set
-    /// and the depth is known (no register, no load); otherwise from the top of the thread's
-    /// local memory, loaded in a register (`frame_top`).
-    pub(super) fn slot(&mut self, u: u32, i: usize, items: &mut Vec<Item>) -> Result<(u32, u32), Refused> {
+    /// Base register and byte offset of a uniform value's frame word at instruction `i`.
+    /// Use R1 at a known stack depth, or load the frame top when there is no R1-relative address.
+    pub(super) fn slot(&mut self, slot_word: u32, i: usize, items: &mut Vec<Item>) -> Result<(u32, u32), Refused> {
         let borrow = self.borrow.as_ref().unwrap();
         if borrow.from_r1 {
             let depth = borrow.depth[i].ok_or_else(|| {
@@ -281,13 +272,12 @@ impl Ctx<'_> {
                     16 * i
                 ))
             })?;
-            let slot_word = borrow.slots[&u];
             let offset = (depth + 4 * slot_word as i32) as u32;
             Ok((1, offset))
         } else {
             let top = self.frame_top(i, items)?;
             let borrow = self.borrow.as_ref().unwrap();
-            let offset = (borrow.slot_offset(u) as u32) & 0xFFFFFF;
+            let offset = (4 * slot_word).wrapping_sub(borrow.frame_bytes) & 0xFFFFFF;
             Ok((top, offset))
         }
     }
@@ -397,20 +387,8 @@ impl Ctx<'_> {
         if !read.is_empty() {
             for &u in &read {
                 let rd = self.mem_regs[&u];
-                let (top, offset) = self.slot(u, i, &mut items)?;
-                let word = assemble::assemble(
-                    "ldl__sImmOffset",
-                    &[
-                        ("Rd", assemble::OpVal::Int(rd)),
-                        ("Ra", assemble::OpVal::Int(top)),
-                        ("Ra_offset", assemble::OpVal::Int(offset)),
-                        ("dst_wr_sb", assemble::OpVal::Int(ARRIVES)),
-                    ],
-                )
-                .ok_or_else(|| Refused("cannot assemble LDL for frame load".into()))?;
-                let mut item = Item::new(word, i, "mem: load", true);
-                item.what_detail = Some(format!("mem: load UR{}", u));
-                items.push(item);
+                let slot = self.borrow.as_ref().unwrap().slots[&u];
+                self.load_frame_word(slot, rd, i, format!("mem: load UR{u}"), &mut items)?;
             }
             items.last_mut().unwrap().then = Some(ARRIVES);
         }
@@ -433,25 +411,68 @@ impl Ctx<'_> {
         // instruction did not run.
         for &u in &written {
             let rb = self.mem_regs[&u];
-            let (top, offset) = self.slot(u, i, &mut items)?;
-            let word = assemble::assemble(
-                "stl__sImmOffset",
-                &[
-                    ("Ra", assemble::OpVal::Int(top)),
-                    ("Rb", assemble::OpVal::Int(rb)),
-                    ("Ra_offset", assemble::OpVal::Int(offset)),
-                ],
-            )
-            .ok_or_else(|| Refused("cannot assemble STL for frame store".into()))?;
-            // A store reads its operands late: it says when, and what follows waits.
-            let word = read_announced("stl__sImmOffset", word & !REUSE, i)?;
-            let mut item = Item::new(word, i, "mem: store", true);
-            item.what_detail = Some(format!("mem: store UR{}", u));
-            item.late = true;
-            items.push(item);
+            let slot = self.borrow.as_ref().unwrap().slots[&u];
+            self.store_frame_word(slot, rb, i, format!("mem: store UR{u}"), &mut items)?;
         }
         Ok(items)
     }
+    pub(super) fn load_frame_word(
+        &mut self,
+        slot: u32,
+        rd: u32,
+        i: usize,
+        detail: String,
+        items: &mut Vec<Item>,
+    ) -> Result<(), Refused> {
+        let (top, offset) = self.slot(slot, i, items)?;
+        let word = assemble::assemble(
+            "ldl__sImmOffset",
+            &[
+                ("Rd", assemble::OpVal::Int(rd)),
+                ("Ra", assemble::OpVal::Int(top)),
+                ("Ra_offset", assemble::OpVal::Int(offset)),
+                ("dst_wr_sb", assemble::OpVal::Int(ARRIVES)),
+            ],
+        )
+        .ok_or_else(|| Refused("cannot assemble LDL for frame load".into()))?;
+        let mut item = Item::new(word, i, "mem: load", true);
+        item.what_detail = Some(detail);
+        items.push(item);
+        Ok(())
+    }
+    pub(super) fn store_frame_word(
+        &mut self,
+        slot: u32,
+        rb: u32,
+        i: usize,
+        detail: String,
+        items: &mut Vec<Item>,
+    ) -> Result<(), Refused> {
+        let (top, offset) = self.slot(slot, i, items)?;
+        let word = assemble::assemble(
+            "stl__sImmOffset",
+            &[
+                ("Ra", assemble::OpVal::Int(top)),
+                ("Rb", assemble::OpVal::Int(rb)),
+                ("Ra_offset", assemble::OpVal::Int(offset)),
+            ],
+        )
+        .ok_or_else(|| Refused("cannot assemble STL for frame store".into()))?;
+        // A store reads its operands late: it says when, and what follows waits.
+        let word = read_announced("stl__sImmOffset", word & !REUSE, i)?;
+        let mut item = Item::new(word, i, "mem: store", true);
+        item.what_detail = Some(detail);
+        item.late = true;
+        items.push(item);
+        Ok(())
+    }
+    /// Whether the product at `i`, on the register `rb` of B, finds in the registers kept for
+    /// that what it would gather: the last product that gathered did it from the same
+    /// register; every way to this one goes through that one and straight on from it (nothing
+    /// after it up to this one is entered otherwise than from the instruction before:
+    /// `entries`); no call between them (the function called may gather for a product of its
+    /// own, or write the register); and nothing from that product on, itself included, writes
+    /// the register, under a guard or not.
     pub(super) fn kept_gathering(&self, i: usize, rb: u32) -> bool {
         // At level 3 (everything at the instruction): always no. Nothing is kept between
         // instructions; every product gathers for itself.
@@ -566,10 +587,8 @@ impl Ctx<'_> {
         })
     }
 
-    /// The item that puts the held uniform predicate `q` in predicate `p`: whether its register
-    /// is not zero.
-    pub(super) fn read_back(&self, q: u32, p: u32, i: usize) -> Result<Item, Refused> {
-        let holder = self.holder(q)?;
+    /// Restore predicate `p` from the nonzero value in general register `holder`.
+    pub(super) fn read_back(&self, holder: u32, p: u32, i: usize) -> Result<Item, Refused> {
         let word = assemble::assemble(
             "isetp__RRR_RR",
             &[
@@ -585,10 +604,8 @@ impl Ctx<'_> {
         Ok(Item::new(word, i, "held: back", true))
     }
 
-    /// The item that writes predicate `p`, which an instruction just gave the held uniform
-    /// predicate `q` in, to the register that holds it: its bit, alone.
-    pub(super) fn written_down(&self, q: u32, p: u32, i: usize) -> Result<Item, Refused> {
-        let holder = self.holder(q)?;
+    /// Save the bit for predicate `p` in general register `holder`.
+    pub(super) fn written_down(&self, holder: u32, p: u32, i: usize) -> Result<Item, Refused> {
         let word = assemble::assemble(
             "p2r__RsIR_RIR",
             &[

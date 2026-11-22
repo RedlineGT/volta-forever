@@ -2354,6 +2354,49 @@ LDL_RE = re.compile(r'LDL(?:\.LU)? (R\d+), \[(R\d+)(?:\+?(-?0x[0-9a-f]+))?\]$')
 STL_RE = re.compile(r'(@!?P\d )?STL \[(R\d+)(?:\+?(-?0x[0-9a-f]+))?\], (R\d+)$')
 
 
+def predicate_frame_moves(parts, tb, code, old, live_slots, depth, frame_bytes, temps, say):
+    """Connect an actual frame load/store to its adjacent predicate conversion. Check the
+    persistent address, transient register, direction, scoreboard and position around the core."""
+    moves, converted, seen = set(), {}, set()
+    core = [new for new, what in parts if not is_mem(what) and what not in AROUND and not is_room(what)]
+    for i, (new, what) in enumerate(parts):
+        action = re.fullmatch(r'mem: (load|store) UP(\d+)', what)
+        if not action:
+            continue
+        load, q = action[1] == 'load', int(action[2])
+        moves.add(new)
+        slot = live_slots.get(q)
+        if slot is None or depth is None:
+            say(new, old, what, 'no live predicate frame slot or known R1 depth')
+            continue
+        pair = i + 1 if load else i - 1
+        if (not 0 <= pair < len(parts) or parts[pair][1] != ('held: back' if load else 'held: kept')
+                or not core or (parts[pair][0] >= min(core) if load else parts[pair][0] <= max(core))):
+            say(new, old, what, 'predicate frame move is not paired with its conversion on the proper side of the instruction')
+            continue
+        conv = parts[pair][0]
+        mem = (LDL_RE if load else STL_RE).fullmatch(tb[new // 16] or '')
+        if not mem or mem[2] != 'R1' or (not load and mem[1]) or int(mem[3] or '0', 0) != depth + frame_bytes - slot:
+            say(new, old, what, 'predicate frame move must access its own word through R1 without a guard')
+            continue
+        temp = mem[1] if load else mem[4]
+        if int(temp[1:]) not in temps:
+            say(new, old, what, 'predicate temporary %s was neither borrowed nor put away here' % temp)
+        conversion = tb[conv // 16] or ''
+        if not (re.fullmatch(r'ISETP\.NE\.U32\.AND P[0-6], PT, %s, RZ, PT' % temp, conversion) if load
+                else re.fullmatch(r'P2R %s, PR, RZ, 0x[0-9a-f]+' % temp, conversion)):
+            say(new, old, what, 'predicate frame move and conversion use different registers')
+        if (q, load) in seen:
+            say(new, old, what, 'repeated predicate frame move')
+        seen.add((q, load))
+        word = int.from_bytes(code[new:new + 16], 'little')
+        board = (word >> (WRITE_BARRIER if load else READ_BARRIER)) & 7
+        if board >= 6 or not waited_after(code, new, board)[0]:
+            say(new, old, what, 'predicate frame move requires a scoreboard and a following wait')
+        converted[conv] = 'frame-%d' % slot
+    return moves, converted
+
+
 def check_frame_values(mc, name, old, parts, tb, result_code, original_code, homes_here, held_here, say):
     """Rule V: what the moves of the frame carry. Rules B, P and R say what each load, store,
     register put away and register brought back is by itself: the word, the register, the
@@ -2979,6 +3022,7 @@ def main():
     # (`held`: the lives that the translator keeps in a register between the instructions that
     # name the uniform predicate: {function: [(uniform predicate, register, offsets)]}.)
     claims, helds = collections.defaultdict(list), collections.defaultdict(list)
+    held_slots = collections.defaultdict(list)
     borrow_homes, borrow_pools = collections.defaultdict(list), collections.defaultdict(list)
     # Level 3: slots and frame from .lives.
     borrow_slots = collections.defaultdict(dict)   # {function: {uniform register: bytes under top}}
@@ -2992,6 +3036,8 @@ def main():
             off_list = [int(x, 16) for x in offsets.split(',') if x] if offsets else []
             if how == 'held':
                 helds[name].append((int(q), 'R%s' % p, off_list))
+            elif how == 'held-slot':
+                held_slots[name].append((int(q), int(p), off_list))
             elif how == 'home':
                 borrow_homes[name].append((int(q), int(p), off_list))
             elif how == 'pool':
@@ -3139,6 +3185,27 @@ def main():
         # ---- level 3: per-function frame checks (rules A1, A2) ----
         frame_slots = borrow_slots.get(name, {})
         frame_bytes = borrow_frames.get(name, 0)
+        predicate_words, slots_at = {}, collections.defaultdict(dict)
+        for q, word, offsets in held_slots.get(name, []):
+            if not 0 <= q < 7 or not 0 < word <= frame_bytes or word % 4:
+                problems.append('%s: UP%d has invalid frame location %d' % (name[:40], q, word))
+            if predicate_words.setdefault(q, word) != word:
+                problems.append('%s: UP%d has inconsistent frame locations' % (name[:40], q))
+            for at in offsets:
+                slots_at[at][q] = word
+        all_words = list(frame_slots.values()) + list(predicate_words.values())
+        if len(set(all_words)) != len(all_words):
+            problems.append('%s: uniform registers or predicates occupy the same frame word' % name[:40])
+        if predicate_words and set(all_words) != {frame_bytes - 4 * k for k in range(len(all_words))}:
+            problems.append('%s: named frame words must precede the space for temporarily saved registers' % name[:40])
+        temps_at = collections.defaultdict(set)
+        if predicate_words:
+            for width, first, offsets in borrow_pools.get(name, []):
+                for at in offsets:
+                    temps_at[at].update(range(first, first + width))
+            for r, offsets in borrow_rooms.get(name, []):
+                for at in offsets:
+                    temps_at[at].add(r)
         # ---- R1 depth and room (rules P, Q, R, S, T, U) ----
         rooms_declared = borrow_rooms.get(name, [])
         room_made = {}          # {offset in the original: the registers that its sequence puts away}
@@ -3154,7 +3221,7 @@ def main():
             kinds['(level3) uniform registers in the frame'] += len(frame_slots)
         # ---- rule Q supplement: frame holds slots and room ----
         if rooms_declared and frame_bytes > 0:
-            check_frame_room_size(frame_slots, frame_bytes, rooms_declared, name, problems)
+            check_frame_room_size(all_words, frame_bytes, rooms_declared, name, problems)
             kinds['(room) functions with room made'] += 1
             kinds['(room) room lines'] += len(rooms_declared)
         original_code = a.data         # saved before `a` and `b` are overwritten by the return-address code
@@ -3242,7 +3309,7 @@ def main():
                 if reg_lives is not None:
                     borrow_never_mask = reg_lives[4]
                 room_regs_here = check_room(mc, name, old, room_parts, tb, result_code, original_code,
-                               frame_slots, frame_bytes, highest, reg_lives, r1_depths,
+                               all_words, frame_bytes, highest, reg_lives, r1_depths,
                                rooms_declared, borrow_homes.get(name, []), helds.get(name, []),
                                borrow_never_mask, problems, kinds, say)
                 check_room_declared(rooms_declared, name, old, room_regs_here, problems, say)
@@ -3392,6 +3459,11 @@ def main():
                 say(parts[0][0], old, ' + '.join(kept), 'predicates saved and given back elsewhere than around the instruction')
                 continue
             parts = [(new, w) for new, w in parts if w not in ('wait', 'save', 'restore', 'late predicate')]
+            frame_moves, frame_conversions = predicate_frame_moves(
+                parts, tb, result_code, old, slots_at.get(old, {}), r1_depths.get(old // 16),
+                frame_bytes, temps_at.get(old, ()), say) if any(
+                    w.startswith(('mem: load UP', 'mem: store UP')) for _, w in parts) else (set(), {})
+            sequences.update(frame_moves)
             # A uniform predicate held in a register: read back into a predicate before what the
             # instruction became (whether the register is not zero), written down after it (the
             # bit of that predicate, alone), in a register above the program's.
@@ -3407,7 +3479,7 @@ def main():
                     if not m or rn_back < 2:
                         say(new, old, w, 'not a predicate read back from a new register')
                     else:
-                        backs[old].append((m.group(2), int(m.group(1))))
+                        backs[old].append((frame_conversions.get(new, m.group(2)), int(m.group(1))))
                         holders.add(m.group(2))
                         if rn_back <= highest and rn_back >= 2:
                             borrowed_regs.add(rn_back)
@@ -3417,10 +3489,11 @@ def main():
                     if not m or rn_kept < 2 or bin(int(m.group(2), 16)).count('1') != 1 or int(m.group(2), 16) > 0x40:
                         say(new, old, w, 'not one predicate written down in a new register')
                     else:
-                        downs[old].append((m.group(1), int(m.group(2), 16).bit_length() - 1))
+                        downs[old].append((frame_conversions.get(new, m.group(1)), int(m.group(2), 16).bit_length() - 1))
                         holders.add(m.group(1))
                         if rn_kept <= highest and rn_kept >= 2:
                             borrowed_regs.add(rn_kept)
+            parts = [(new, w) for new, w in parts if new not in frame_moves and new not in frame_conversions]
             names = [w for _, w in parts]
             first = next((k for k, w in enumerate(names) if w != 'held: back'), len(names))
             last = next((k for k, w in enumerate(reversed(names)) if w != 'held: kept'), len(names))
@@ -4222,7 +4295,9 @@ def main():
         # held in it anywhere in the function: what read back or wrote down a second one was
         # objected to.)
         held_at, holder_of, holds = {}, {}, {}
-        for k, (q, register, offsets) in enumerate(helds.get(name, [])):
+        held_locations = helds.get(name, []) + [(q, 'frame-%d' % word, offsets)
+                                              for q, word, offsets in held_slots.get(name, [])]
+        for k, (q, register, offsets) in enumerate(held_locations):
             if holder_of.setdefault(q, register) != register:
                 tell(offsets[0], 'UP%d is held in two registers' % q)
             for at in offsets:
