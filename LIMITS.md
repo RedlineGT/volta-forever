@@ -19,8 +19,8 @@ where it is not from the build of this release. `docs/` says how each figure was
 - **vLLM** (Qwen2.5-0.5B, three prompts): every stage of the test; greedy generation at 84 to 99
   tokens a second over the runs of 2026-11-20 and 21 (83 to 97 with sampling); the HTTP server
   (the OpenAI API) with the model's repetition penalty gives the CPU's text. Its sampling kernel
-  by itself against a computation on the CPU: 16 of 18 cases equal; two top-p cases differ at
-  the cut by a few positions.
+  by itself against the same kernel run on the CPU by Triton's interpreter: 18 of 18 cases keep
+  the same positions with the same values.
 - **SGLang** (Qwen2.5-0.5B, three prompts; it makes the model float16 on a GPU that reports a
   capability under 8, whatever it is asked). With its default attention (FlashInfer): its
   engine's greedy text is the CPU's (float32) token for token, 150 of 150, at 45 to 52 tokens a

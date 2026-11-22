@@ -7,15 +7,20 @@ The kernel applies combined top-k and top-p filtering to logits in-place:
     softmax probabilities sum to at least p, mask the rest to -inf
   - When both are active, top-k is applied first, then top-p within the survivors.
 
-This script compares the Triton kernel (through the layer on a V100) with a
-PyTorch CPU reference for several batch sizes, vocabulary sizes, k and p values.
+This script compares the Triton kernel (through the layer on a V100) with the SAME kernel
+run on the CPU by Triton's interpreter (TRITON_INTERPRET=1, in a child process), for several
+batch sizes, vocabulary sizes, k and p values: the two must keep the same positions with the
+same values. A second computation on the CPU, written here with a sort and a cumulative sum,
+is printed beside it and decides nothing: it is another algorithm than the kernel's, and at
+the cut of a top-p it keeps a few positions more or fewer than the kernel does on any
+machine (2 of 32,000 at p=0.99; 7 of 128,000 at p=0.9 over four rows).
 
 Environment:
   VF_PROXY must be set (the proxy's lib directory).
   PYTHONPATH must include vllm and torch sites.
 Prints PASS or FAIL per case, and a summary; the exit status is 1 when a case fails.
 """
-import os, sys, torch, math
+import importlib.util, os, subprocess, sys, tempfile, torch, math
 
 # --- CPU reference ---
 
@@ -124,11 +129,29 @@ def _apply_topp_standalone(row_logits, p, mask_value):
 
 # --- Run the Triton kernel ---
 
-def run_triton_topk_topp(logits_gpu, k_gpu, p_gpu, mask_value, vocab_size):
-    """Run the actual vLLM Triton kernel on GPU."""
-    from vllm.v1.sample.ops.topk_topp_triton import _topk_topp_kernel
-    from vllm.platforms import current_platform
-    from vllm.utils.platform_utils import num_compute_units
+def interpreted_kernel():
+    """The kernel for Triton's interpreter: its source with one cast removed. The interpreter
+    gives the loop variable as a Python int, which has no `.to`; nothing else changes."""
+    import vllm.v1.sample.ops.topk_topp_triton as module
+    source = open(module.__file__).read()
+    assert source.count('row_id.to(tl.int64)') == 1, 'the kernel changed: look at its loop'
+    # In a file of its own: the interpreter reads a kernel's source again from its file.
+    path = os.path.join(tempfile.mkdtemp(), 'topk_topp_interpreted.py')
+    with open(path, 'w') as f:
+        f.write(source.replace('row_id.to(tl.int64)', 'row_id'))
+    spec = importlib.util.spec_from_file_location('topk_topp_interpreted', path)
+    copy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copy)
+    return copy._topk_topp_kernel
+
+
+def run_triton_topk_topp(logits_gpu, k_gpu, p_gpu, mask_value, vocab_size, on_cpu=False):
+    """Run the actual vLLM Triton kernel: on the GPU, or on the CPU under the interpreter."""
+    if on_cpu:
+        _topk_topp_kernel = interpreted_kernel()
+    else:
+        from vllm.v1.sample.ops.topk_topp_triton import _topk_topp_kernel
+    device = logits_gpu.device
 
     batch_size = logits_gpu.shape[0]
 
@@ -140,23 +163,23 @@ def run_triton_topk_topp(logits_gpu, k_gpu, p_gpu, mask_value, vocab_size):
     block_size = 8192
     block_size_trunc = 4096
     num_warps = 8
-    num_sm = num_compute_units()
-    num_programs = min(num_sm, batch_size)
+    if on_cpu:
+        num_programs = batch_size
+    else:
+        from vllm.utils.platform_utils import num_compute_units
+        num_programs = min(num_compute_units(), batch_size)
 
-    buffer = torch.empty((num_programs, vocab_size), dtype=torch.float32, device='cuda')
+    buffer = torch.empty((num_programs, vocab_size), dtype=torch.float32, device=device)
 
     # Build the lookup tables
     from vllm.v1.sample.ops.topk_topp_triton import (
         _PERCENTILE_TO_STD_TABLE, _NORMAL_CDF_TO_SIGMA_TABLE
     )
-    pct_table = torch.tensor(_PERCENTILE_TO_STD_TABLE, dtype=torch.float32, device='cuda')
-    cdf_table = torch.tensor(_NORMAL_CDF_TO_SIGMA_TABLE, dtype=torch.float32, device='cuda')
+    pct_table = torch.tensor(_PERCENTILE_TO_STD_TABLE, dtype=torch.float32, device=device)
+    cdf_table = torch.tensor(_NORMAL_CDF_TO_SIGMA_TABLE, dtype=torch.float32, device=device)
 
-    split_covers_ponly = (
-        current_platform.is_cuda_alike()
-        and topp_enabled
-        and batch_size <= 64
-    )
+    # What vLLM passes on a CUDA device; the same on the CPU, so that both run one kernel.
+    split_covers_ponly = topp_enabled and batch_size <= 64
 
     grid = (num_programs,)
     _topk_topp_kernel[grid](
@@ -177,7 +200,8 @@ def run_triton_topk_topp(logits_gpu, k_gpu, p_gpu, mask_value, vocab_size):
         SPLIT_COVERS_PONLY=split_covers_ponly,
         num_warps=num_warps,
     )
-    torch.cuda.synchronize()
+    if not on_cpu:
+        torch.cuda.synchronize()
     return logits_gpu
 
 
@@ -209,112 +233,122 @@ def compare_results(gpu_logits, cpu_logits, label):
     return False, f'{label}: values differ, max_diff={max_diff:.6e} ({both_alive.sum().item()} alive)'
 
 
-def run_test_case(batch_size, vocab_size, k_val, p_val, seed=42):
-    """Run one test case. Returns (pass, message)."""
-    torch.manual_seed(seed)
-    logits_cpu = torch.randn(batch_size, vocab_size, dtype=torch.float32)
+# Test cases: (batch_size, vocab_size, k, p, description)
+CASES = [
+    # top-k only
+    (1, 32000, 50, None, 'top-k only, small k'),
+    (1, 32000, 1, None, 'top-k=1 (argmax)'),
+    (1, 32000, 31999, None, 'top-k nearly all'),
+    (4, 32000, 50, None, 'top-k, batch=4'),
+    (1, 151936, 50, None, 'top-k, Qwen vocab'),
 
-    # Prepare k and p
-    k_cpu = None
-    p_cpu = None
-    if k_val is not None:
-        if isinstance(k_val, int):
-            k_cpu = torch.full((batch_size,), k_val, dtype=torch.int32)
-        else:
-            k_cpu = torch.tensor(k_val, dtype=torch.int32)
-    if p_val is not None:
-        if isinstance(p_val, (int, float)):
-            p_cpu = torch.full((batch_size,), p_val, dtype=torch.float32)
-        else:
-            p_cpu = torch.tensor(p_val, dtype=torch.float32)
+    # top-p only
+    (1, 32000, None, 0.9, 'top-p=0.9'),
+    (1, 32000, None, 0.1, 'top-p=0.1 (very selective)'),
+    (1, 32000, None, 0.99, 'top-p=0.99 (nearly all)'),
+    (1, 32000, None, 0.01, 'top-p near 0'),
+    (4, 32000, None, 0.9, 'top-p, batch=4'),
 
-    # CPU reference: account for the kernel's SPLIT_COVERS_PONLY behavior.
-    # When TOPK_ENABLED, TOPP_ENABLED, batch_size <= 64 (on CUDA), and k >= vocab_size
-    # for a given row, the kernel skips that row (the split pipeline handles it).
-    # Our test does not run the split pipeline, so the GPU leaves all logits alive.
-    topk_enabled = k_cpu is not None
-    topp_enabled = p_cpu is not None
-    split_covers_ponly = topk_enabled and topp_enabled and batch_size <= 64
+    # combined top-k + top-p
+    (1, 32000, 50, 0.9, 'top-k=50 + top-p=0.9'),
+    (1, 32000, 50, 0.1, 'top-k=50 + top-p=0.1'),
+    (1, 32000, 10, 0.9, 'top-k=10 + top-p=0.9'),
+    (4, 32000, 50, 0.9, 'combined, batch=4'),
+    (1, 151936, 50, 0.9, 'combined, Qwen vocab'),
 
-    logits_ref = logits_cpu.clone()
-    if split_covers_ponly and k_cpu is not None:
-        # For rows where k >= vocab_size, the kernel does nothing (split covers them)
-        # For rows where k < vocab_size, the kernel applies top-k + top-p as normal
-        for row in range(batch_size):
-            if k_cpu[row].item() >= vocab_size:
-                # kernel does nothing for this row: logits stay as-is
-                pass
-            else:
-                row_logits = logits_ref[row:row+1]
-                topk_topp_cpu(row_logits,
-                              k=k_cpu[row:row+1].clone() if k_cpu is not None else None,
-                              p=p_cpu[row:row+1].clone() if p_cpu is not None else None)
+    # edge: k disabled (k >= vocab_size), p active.  With top-k enabled and a batch of 64 rows
+    # or fewer, the kernel leaves the rows whose k >= VOCAB_SIZE to vLLM's split pipeline
+    # (_topp_split_* kernels), which this test does not run: all their logits stay alive.
+    (1, 32000, 32000, 0.9, 'k=vocab (split covers, no-op expected)'),
+    (1, 32000, 100000, 0.9, 'k>vocab (split covers, no-op expected)'),
+
+    # ties: many equal values, k=50 from 100 equal top values
+    (1, 1000, 50, None, 'ties'),
+]
+
+
+def inputs(batch_size, vocab_size, k_val, p_val, desc, seed=42):
+    """The logits, k and p of a case, on the CPU."""
+    if desc == 'ties':
+        logits = torch.zeros(batch_size, vocab_size, dtype=torch.float32)
+        logits[0, :100] = 1.0
+        logits[0, 100:200] = 0.5
+        logits[0, 200:300] = 0.0
     else:
-        topk_topp_cpu(logits_ref, k=k_cpu.clone() if k_cpu is not None else None,
-                      p=p_cpu.clone() if p_cpu is not None else None)
+        torch.manual_seed(seed)
+        logits = torch.randn(batch_size, vocab_size, dtype=torch.float32)
+    k = None if k_val is None else torch.full((batch_size,), k_val, dtype=torch.int32)
+    p = None if p_val is None else torch.full((batch_size,), p_val, dtype=torch.float32)
+    return logits, k, p
 
-    # GPU
-    logits_gpu = logits_cpu.clone().cuda()
-    k_gpu = k_cpu.cuda() if k_cpu is not None else None
-    p_gpu = p_cpu.cuda() if p_cpu is not None else None
 
-    try:
-        run_triton_topk_topp(logits_gpu, k_gpu, p_gpu, float('-inf'), vocab_size)
-    except Exception as e:
-        return False, f'batch={batch_size} vocab={vocab_size} k={k_val} p={p_val}: GPU error: {e}'
+def kernel_result(case, device):
+    """What the kernel leaves of a case's logits, run on `device`; on the CPU, interpreted."""
+    batch_size, vocab_size, k_val, p_val, desc = case
+    logits, k, p = inputs(*case)
+    x = logits.clone().to(device)
+    run_triton_topk_topp(x, None if k is None else k.to(device), None if p is None else p.to(device),
+                         float('-inf'), vocab_size, on_cpu=device == 'cpu')
+    return x.cpu()
 
-    gpu_result = logits_gpu.cpu()
-    label = f'batch={batch_size} vocab={vocab_size} k={k_val} p={p_val}'
-    return compare_results(gpu_result, logits_ref, label)
+
+def sorted_reference(case):
+    """The other computation on the CPU (a sort and a cumulative sum): printed, decides nothing."""
+    batch_size, vocab_size, k_val, p_val, desc = case
+    logits, k, p = inputs(*case)
+    ref = logits.clone()
+    if k is not None and p is not None and batch_size <= 64:
+        for row in range(batch_size):
+            if k[row].item() < vocab_size:
+                topk_topp_cpu(ref[row:row + 1], k=k[row:row + 1].clone(), p=p[row:row + 1].clone())
+    else:
+        topk_topp_cpu(ref, k=None if k is None else k.clone(), p=None if p is None else p.clone())
+    return ref
+
+
+def interpreted(path):
+    """Child process (TRITON_INTERPRET=1, no GPU): the kernel's result for every case, saved."""
+    torch.save([kernel_result(case, 'cpu') for case in CASES], path)
+    return 0
 
 
 def main():
-    mask_value = float('-inf')
-    total = 0
+    if len(sys.argv) == 3 and sys.argv[1] == '--interpreted':
+        return interpreted(sys.argv[2])
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, 'interpreted.pt')
+        env = dict(os.environ, TRITON_INTERPRET='1', CUDA_VISIBLE_DEVICES='')
+        for name in ('LD_AUDIT', 'LD_PRELOAD'):
+            env.pop(name, None)
+        child = subprocess.run([sys.executable, '-s', os.path.abspath(__file__), '--interpreted', path],
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if child.returncode != 0 or not os.path.exists(path):
+            print(child.stdout[-4000:])
+            print(f'FAIL: the kernel could not be run on the CPU by Triton\'s interpreter (status {child.returncode})')
+            return 1
+        on_cpu = torch.load(path)
+
     passed = 0
     failed_cases = []
-
-    # Test cases: (batch_size, vocab_size, k, p, description)
-    cases = [
-        # top-k only
-        (1, 32000, 50, None, 'top-k only, small k'),
-        (1, 32000, 1, None, 'top-k=1 (argmax)'),
-        (1, 32000, 31999, None, 'top-k nearly all'),
-        (4, 32000, 50, None, 'top-k, batch=4'),
-        (1, 151936, 50, None, 'top-k, Qwen vocab'),
-
-        # top-p only
-        (1, 32000, None, 0.9, 'top-p=0.9'),
-        (1, 32000, None, 0.1, 'top-p=0.1 (very selective)'),
-        (1, 32000, None, 0.99, 'top-p=0.99 (nearly all)'),
-        (1, 32000, None, 0.01, 'top-p near 0'),
-        (4, 32000, None, 0.9, 'top-p, batch=4'),
-
-        # combined top-k + top-p
-        (1, 32000, 50, 0.9, 'top-k=50 + top-p=0.9'),
-        (1, 32000, 50, 0.1, 'top-k=50 + top-p=0.1'),
-        (1, 32000, 10, 0.9, 'top-k=10 + top-p=0.9'),
-        (4, 32000, 50, 0.9, 'combined, batch=4'),
-        (1, 151936, 50, 0.9, 'combined, Qwen vocab'),
-
-        # edge: k disabled (k >= vocab_size), p active
-        # NOTE: when TOPK_ENABLED=True and SPLIT_COVERS_PONLY=True (batch <= 64 on CUDA),
-        # the kernel skips standalone top-p for rows where k >= VOCAB_SIZE, because those
-        # rows are handled by the split pipeline (_topp_split_* kernels). So the kernel
-        # intentionally leaves all logits alive. We test this as the kernel's correct behavior.
-        (1, 32000, 32000, 0.9, 'k=vocab (split covers, no-op expected)'),
-        (1, 32000, 100000, 0.9, 'k>vocab (split covers, no-op expected)'),
-
-        # ties: logits with many equal values
-    ]
-
-    # Add a ties case
-    torch.manual_seed(99)
-    # We'll handle this specially below
-
-    for batch_size, vocab_size, k_val, p_val, desc in cases:
-        ok, msg = run_test_case(batch_size, vocab_size, k_val, p_val)
-        total += 1
+    for case, cpu_result in zip(CASES, on_cpu):
+        batch_size, vocab_size, k_val, p_val, desc = case
+        label = f'batch={batch_size} vocab={vocab_size} k={k_val} p={p_val}'
+        try:
+            gpu_result = kernel_result(case, 'cuda')
+        except Exception as e:
+            ok, msg = False, f'{label}: GPU error: {e}'
+        else:
+            ok, msg = compare_results(gpu_result, cpu_result, label)
+            if desc == 'ties':
+                # Which of the equal values the reference keeps is its own choice: count them.
+                other = f'the sorted reference keeps {int((sorted_reference(case) > float("-inf")).sum())}'
+            else:
+                same, _ = compare_results(gpu_result, sorted_reference(case), label)
+                other = 'the sorted reference agrees' if same else (
+                    'the sorted reference keeps %d (another algorithm: see the head of this file)'
+                    % int((sorted_reference(case) > float('-inf')).sum()))
+            msg = f'{msg}; {other}'
         if ok:
             passed += 1
             print(f'  PASS: {desc} -- {msg}')
@@ -322,43 +356,7 @@ def main():
             failed_cases.append(msg)
             print(f'  FAIL: {desc} -- {msg}')
 
-    # Ties case: many duplicates
-    torch.manual_seed(99)
-    batch_size, vocab_size = 1, 1000
-    logits_cpu = torch.zeros(batch_size, vocab_size, dtype=torch.float32)
-    # Only 10 distinct values
-    logits_cpu[0, :100] = 1.0
-    logits_cpu[0, 100:200] = 0.5
-    logits_cpu[0, 200:300] = 0.0
-    k_cpu = torch.tensor([50], dtype=torch.int32)
-
-    logits_ref = logits_cpu.clone()
-    topk_topp_cpu(logits_ref, k=k_cpu.clone())
-
-    logits_gpu = logits_cpu.clone().cuda()
-    k_gpu = k_cpu.cuda()
-    try:
-        run_triton_topk_topp(logits_gpu, k_gpu, None, float('-inf'), vocab_size)
-        torch.cuda.synchronize()
-        gpu_result = logits_gpu.cpu()
-        # For ties, we compare the number of survivors rather than exact positions
-        gpu_alive = (gpu_result > float('-inf')).sum().item()
-        cpu_alive = (logits_ref > float('-inf')).sum().item()
-        total += 1
-        if gpu_alive == cpu_alive:
-            passed += 1
-            print(f'  PASS: ties (k=50 from 100 equal top values) -- alive: gpu={gpu_alive} cpu={cpu_alive}')
-        else:
-            msg = f'ties: alive count differs: gpu={gpu_alive} cpu={cpu_alive}'
-            failed_cases.append(msg)
-            print(f'  FAIL: {msg}')
-    except Exception as e:
-        total += 1
-        msg = f'ties: GPU error: {e}'
-        failed_cases.append(msg)
-        print(f'  FAIL: {msg}')
-
-    print(f'\n{passed}/{total} passed')
+    print(f'\n{passed}/{len(CASES)} passed')
     if failed_cases:
         print('Failed:')
         for msg in failed_cases:
