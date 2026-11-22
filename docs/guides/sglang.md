@@ -75,9 +75,9 @@ python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
   --served-model-name qwen --dtype float16 --quantization moe_wna16 \
   --json-model-override-args "$awq" --attention-backend triton --sampling-backend pytorch \
   --context-length 512 --max-running-requests 1 --chunked-prefill-size 32 \
-  --mem-fraction-static 0.85 --model-loader-extra-config '{"enable_multithread_load":false}' \
+  --mem-fraction-static 0.85 \
   --cuda-graph-backend-prefill disabled --cuda-graph-bs-decode 1 --cuda-graph-backend-decode full \
-  --enable-metrics --skip-server-warmup --watchdog-timeout 3600 \
+  --enable-metrics \
   --host 127.0.0.1 --port 8000
 ```
 
@@ -92,7 +92,7 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-The command above measured **225.57 tokens/s in prefill** and **52.99 tokens/s in decode**. The SGLang configuration directory selects the W4A16 kernel tile sizes for this V100. The same model with SGLang’s default tiles measured 219.92 and 45.01 tokens/s. [Per-request results](./benchmarks/sglang-stock-sm80.json)
+The command above measured **255.19 tokens/s in prefill** and **53.44 tokens/s in decode**. The configuration directory selects SGLang’s W4A16 kernel tile sizes for the V100. In a separate comparison on one card, these tiles reached 225.57 and 52.99 tokens/s, versus 219.92 and 45.01 with SGLang’s default tiles. [Per-request results](./benchmarks/sglang-stock-sm80.json)
 
 An earlier VF 0.1.1 run at capability 7.5 measured **181.48 prefill** and **38.83 decode** tokens/s at 32 tokens per chunk. At eight tokens per chunk we compared the effect of decode graphs on the same card. [Earlier 32-token results](./benchmarks/sglang-stock-compile.json)
 
