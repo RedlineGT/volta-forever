@@ -4,6 +4,7 @@
 
 .visible .entry k(.param .u64 output) {
 .reg .u64 %out, %offset;
+.reg .b32 %double_b, %zero_b;
 .reg .b32 %lane, %a, %a0, %b, %d<4>, %check<4>, %expected;
 .reg .pred %first, %row0;
 ld.param.u64 %out, [output];
@@ -19,8 +20,11 @@ mov.b32 %d1, 0;
 mov.b32 %d2, 0;
 mov.b32 %d3, 0;
 mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
-mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
-mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+// These two right fragments are computed between products and keep their original values when scheduled.
+mov.b32 %double_b,0x3f803f80;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a,%a,%a}, {%double_b,%double_b}, {%d0,%d1,%d2,%d3};
+mov.b32 %zero_b,0;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a,%a,%a}, {%zero_b,%zero_b}, {%d0,%d1,%d2,%d3};
 mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a0,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
 st.global.b32 [%out], %d0;
 xor.b32 %check0, %d0, 0x42400000;

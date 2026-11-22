@@ -1,6 +1,8 @@
 //! Convert consecutive BF16 MMAs to FP16 MMAs when every participating lane has exactly
 //! representable inputs. Keep the original operations behind a warp-uniform branch for all
 //! other inputs. A group shares one vote and converts each distinct multiplicand once.
+mod schedule;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 
@@ -105,6 +107,14 @@ pub(super) fn rewrite(text: &str, items: &[Item], outside: &[String]) -> Option<
     if !text.contains(MMA) || text.contains("bfgroup_") || outside.iter().any(|s| s.contains("bfgroup_")) {
         return None;
     }
+    if let Some((scheduled, starts)) = schedule::prepare(text, items) {
+        let scheduled_items = scan::items(scheduled.as_bytes(), 0..scheduled.len())?;
+        return group(&scheduled, &scheduled_items, &starts);
+    }
+    group(text, items, &HashSet::new())
+}
+
+fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>) -> Option<(String, usize)> {
     let mut out = String::new();
     let mut copied = 0;
     let mut first = 0;
@@ -155,7 +165,7 @@ pub(super) fn rewrite(text: &str, items: &[Item], outside: &[String]) -> Option<
                 break;
             }
         }
-        if products.len() < 4 {
+        if products.len() < 4 && !(products.len() == 2 && scheduled.contains(&items[first].range.start)) {
             first += 1;
             continue;
         }
