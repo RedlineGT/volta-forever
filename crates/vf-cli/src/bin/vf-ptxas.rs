@@ -260,4 +260,33 @@ mod tests {
         assert_eq!(runfiles::view(&next, &compiler, &cache).unwrap(), next);
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn concurrent_runfiles_for_different_apps_preserve_each_layout() {
+        const THREADS: usize = 12;
+        let tmp = std::process::Command::new("mktemp").arg("-d").output().unwrap();
+        assert!(tmp.status.success());
+        let root = PathBuf::from(std::str::from_utf8(&tmp.stdout).unwrap().trim());
+        let compiler = root.join("vf-ptxas");
+        fs::write(&compiler, "VF").unwrap();
+        let start = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for i in 0..THREADS {
+                let src = root.join(format!("app-{i}.runfiles"));
+                let bin = src.join("cuda/bin");
+                fs::create_dir_all(&bin).unwrap();
+                fs::write(bin.join("ptxas"), "NVIDIA").unwrap();
+                fs::write(bin.join("nvlink"), i.to_string()).unwrap();
+                let (start, root, compiler) = (&start, &root, &compiler);
+                scope.spawn(move || {
+                    start.wait();
+                    for round in 0..24 {
+                        let view = runfiles::view(&src, compiler, &root.join(round.to_string())).unwrap();
+                        assert_eq!(fs::read_to_string(view.join("cuda/bin/nvlink")).unwrap(), i.to_string());
+                        assert_eq!(fs::read_to_string(view.join("cuda/bin/ptxas")).unwrap(), "VF");
+                    }
+                });
+            }
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
 }

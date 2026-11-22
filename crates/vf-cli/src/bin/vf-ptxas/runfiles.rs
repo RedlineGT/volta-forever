@@ -71,7 +71,7 @@ pub fn view(source: &Path, compiler: &Path, cache: &Path) -> io::Result<PathBuf>
             }
         })
         .unwrap()?;
-    let publish = || -> io::Result<()> {
+    let populate = || -> io::Result<()> {
         for dir in directories {
             if !dir.as_os_str().is_empty() {
                 fs::create_dir(staging.join(dir))?;
@@ -80,16 +80,24 @@ pub fn view(source: &Path, compiler: &Path, cache: &Path) -> io::Result<PathBuf>
         for (rel, target) in links {
             symlink(target, staging.join(rel))?;
         }
-        match fs::rename(&staging, &final_dir) {
-            Err(_) if final_dir.is_dir() => Ok(()), // A concurrent launch won the rename.
-            result => result,
-        }
+        Ok(())
     };
-    let result = publish();
-    if staging.exists() {
+    if let Err(error) = populate() {
         fs::remove_dir_all(staging)?;
+        return Err(error);
     }
-    result.map(|()| final_dir)
+    if let Err(error) = fs::rename(&staging, &final_dir) {
+        fs::remove_dir_all(staging)?;
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+        ) || !final_dir.is_dir()
+        {
+            return Err(error);
+        }
+    }
+    // After a successful rename, another caller may already own the staging name.
+    Ok(final_dir)
 }
 
 fn effective_uid() -> io::Result<u32> {
