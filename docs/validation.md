@@ -752,8 +752,10 @@ and 0.0005, and the CPU's most likely token at 97.9 % and 98.4 % of the position
 
 **vLLM 0.34.0** (`tests/gpu/vllm.sh`, Qwen2.5-0.5B-Instruct, three prompts). `transformers` in
 f32 on the GPU gives every token of the CPU; a kernel compiled by Triton gives the CPU's result
-bit for bit; the engine's greedy text (f16) is the CPU's (f32) token for token; with sampling it
-answers, which is compared with nothing; its HTTP server, with the repetition penalty that the
+bit for bit; the engine's greedy text (f16) is the CPU's (f32) token for token; with sampling
+(top-k 50, top-p 0.9), every token it samples is among the 50 most likely and within 0.9 of their
+probability by the log-probabilities of its own logits, 150 of 150 (what the kernels of the
+sampling do, not what the model computes); its HTTP server, with the repetition penalty that the
 model's configuration asks for, gives the CPU's text made with that penalty.
 
 **SGLang 0.5.23** (`tests/gpu/sglang.sh`, the same model and prompts), with its default
