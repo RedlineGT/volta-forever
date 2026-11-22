@@ -72,6 +72,7 @@ PY
     fi
     if [ "${2:-}" = "cuda12" ]; then
         : >"$_d/cuda-12.9.2/lib/libcufft.so.11"
+        : >"$_d/cuda-12.9.2/lib/libnvJitLink.so.12"
     fi
 }
 
@@ -141,6 +142,13 @@ case $ldp in
         pass "$name" ;;
     *)
         fail "$name" "got: $ldp" ;;
+esac
+
+name="jitlink-adapter-in-audit-map"
+map=$(get_var "$vf" VF_AUDIT_MAP)
+case ":$map:" in
+    *":libnvJitLink.so.13=$arch/lib/libnvJitLink.so.13:"*) pass "$name" ;;
+    *) fail "$name" "nvJitLink adapter absent from the map" ;;
 esac
 
 name="env-ld-audit"

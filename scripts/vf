@@ -148,6 +148,14 @@ find_cuda12() {
 build_map() {
     _launcher_map=
     _unserved=
+    # DT_RPATH and absolute dlopen paths can otherwise select an application's bundled
+    # CUDA 13 linker, which produces code for the advertised GPU instead of Volta.
+    if [ -f "$lib_dir/libnvJitLink.so.13" ] && {
+        [ -z "$_cuda12" ] || [ -n "${VF_JITLINK_REAL:-}" ] || [ -n "${VF_JITLINK_REAL_DIR:-}" ] ||
+            [ -f "$_cuda12/libnvJitLink.so.12" ]
+    }; then
+        _launcher_map="libnvJitLink.so.13=$lib_dir/libnvJitLink.so.13"
+    fi
     [ -f "$report" ] || return 0
     # Parse REPORT.txt: skip the first two header lines, then each line's
     # first field is the forwarder name, last field is the target (serves).

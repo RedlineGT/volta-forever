@@ -462,7 +462,7 @@ nvJitLink API and serves it with nvJitLink 12.9.2:
 together for one command: the library path (the proxy and the nvJitLink adapter, the
 forwarding libraries, the CUDA 12.9.2 libraries), the audit library with a table that has, for
 each forwarding library, its name and the name of the library that it calls, and the two
-variables that say the layer is there. It sets nothing else. A forwarding library is used
+variables that say the layer is there. It sets nothing else. The audit table also selects the VF nvJitLink adapter when an application bundles CUDA 13's linker under the same name and gives that directory priority through an ELF RPATH. A forwarding library is used
 only when the CUDA 12.9.2 library that it calls is there: without it the program keeps its
 own library of that name, whose kernels the layer translates like the rest of the program's
 code (cuBLAS is the one that a program cannot keep: the translator refuses some kernels of
