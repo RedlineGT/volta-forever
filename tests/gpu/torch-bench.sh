@@ -10,13 +10,14 @@
 # in $VF_TORCH_NATIVE (default $VF_TEST_ROOT/torch-cu126/site). Prints, for each operation, the
 # two times of a call and their ratio, and says when the two did not compute the same thing. The
 # forwarding libraries are put in front of the wheel's cuBLAS when the map is at
-# $VF_TEST_ROOT/torch-audit.map (or $VF_AUDIT_MAP_FILE).
+# $VF_OUT/torch-audit.map (or $VF_AUDIT_MAP_FILE). The stock wheel is $VF_TORCH (default
+# $VF_TEST_ROOT/torch-cu130/site).
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
 out=${VF_OUT:-$VF_TEST_ROOT}
-layer=${VF_TORCH:-$out/torch-cu130/site}
-native=${VF_TORCH_NATIVE:-$out/torch-cu126/site}
+layer=${VF_TORCH:-$VF_TEST_ROOT/torch-cu130/site}
+native=${VF_TORCH_NATIVE:-$VF_TEST_ROOT/torch-cu126/site}
 gpu=${1:-0}
 [ $# -gt 0 ] && shift
 for site in "$layer" "$native"; do
