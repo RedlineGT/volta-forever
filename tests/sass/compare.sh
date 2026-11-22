@@ -63,12 +63,20 @@ for f in "${inputs[@]}"; do
         todo+=("$f")
     fi
 done
+died=0
 if [ ${#todo[@]} -gt 0 ]; then
     printf '%s\n' "${todo[@]}" | awk -v jobs="$JOBS" -v dir="$work" '{print > (dir "/list." (NR % jobs))}'
+    jobs=()
     for list in "$work"/list.*; do
         python3 -I "$md/batch.py" "$work/py" $(cat "$list") > "$list.log" 2>&1 &
+        jobs+=("$! $list")
     done
-    wait
+    # (Each job waited for by its number: `wait` alone returns 0 whatever they did.)
+    for job in "${jobs[@]}"; do
+        wait "${job%% *}" && continue
+        status=$? list=${job#* } died=$((died + 1))
+        echo "the reference translator (batch.py) ended with status $status on $(wc -l < "$list") cubins, from $(basename "$(head -1 "$list")"): what it did not write is compared with nothing below; it said: $(tail -1 "$list.log" | cut -c1-200)"
+    done
 fi
 
 # The Rust translator.
@@ -103,4 +111,4 @@ for f in "${inputs[@]}"; do
     fi
 done
 echo "$same of $total cubins the same as the reference's ($functions functions, $refused refused)"
-[ "$same" -eq "$total" ]
+[ "$same" -eq "$total" ] && [ "$died" = 0 ]
