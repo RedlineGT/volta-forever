@@ -382,17 +382,10 @@ setup_env() {
             if [ -n "$_user_map" ]; then _user_map="$_user_map:$_mline"; else _user_map=$_mline; fi
         done < "$opt_map_file"
     fi
-    # Priority: user's VF_AUDIT_MAP (already in the env), then --map file, then launcher's.
-    _full_map=
-    if [ -n "${VF_AUDIT_MAP:-}" ]; then
-        _full_map=${VF_AUDIT_MAP}
-    fi
-    if [ -n "$_user_map" ]; then
-        if [ -n "$_full_map" ]; then _full_map="$_full_map:$_user_map"; else _full_map=$_user_map; fi
-    fi
-    if [ -n "$_launcher_map" ]; then
-        if [ -n "$_full_map" ]; then _full_map="$_full_map:$_launcher_map"; else _full_map=$_launcher_map; fi
-    fi
+    # Priority: user's VF_AUDIT_MAP (already in the env), then --map file, then launcher's. An
+    # entry that is there already is not added again: under itself (vf vf, or after
+    # eval "$(vf env)") the launcher finds its own entries in VF_AUDIT_MAP.
+    _full_map=$(path_prepend "${VF_AUDIT_MAP:-}" "$_user_map:$_launcher_map")
 
     if [ "${VF_QUIET:-0}" != 1 ]; then
         if [ -z "$_cuda12" ]; then

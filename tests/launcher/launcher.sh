@@ -419,6 +419,19 @@ case $map in
         fail "$name" "user entry not first: $map" ;;
 esac
 
+# 4b. Under itself (vf vf, or vf after eval "$(vf env)") the launcher does not add its entries
+# to the map again; the user's stay first.
+name="map-under-itself"
+m1=$(run_var "$vf" VF_AUDIT_MAP)
+m2=$("$vf" "$vf" sh -c 'printf "%s" "$VF_AUDIT_MAP"')
+m3=$(eval "$("$vf" env)"; unset LD_AUDIT; "$vf" sh -c 'printf "%s" "$VF_AUDIT_MAP"')
+m4=$(VF_AUDIT_MAP="mylib.so=/my/path" "$vf" "$vf" "$vf" sh -c 'printf "%s" "$VF_AUDIT_MAP"')
+if [ -n "$m1" ] && [ "$m2" = "$m1" ] && [ "$m3" = "$m1" ] && [ "$m4" = "mylib.so=/my/path:$m1" ]; then
+    pass "$name"
+else
+    fail "$name" "once: $m1; vf vf: $m2; after env: $m3; vf vf vf with an entry of the user's: $m4"
+fi
+
 # 5. --map FILE adds entries with priority (before launcher's, after user's VF_AUDIT_MAP).
 
 name="map-file-priority"
