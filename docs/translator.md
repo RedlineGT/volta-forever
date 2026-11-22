@@ -30,10 +30,16 @@ operands against both architectures' instruction descriptions. The translator
 lowers supported global loads and stores, paired FP32-to-FP16 conversions, and
 16-byte asynchronous copies. Each copy uses a four-register temporary for a global
 load followed by a shared store. Both instructions preserve the original predicate.
-It verifies the system descriptor along every path to a memory access. A kernel can call a single,
-private helper at the end of its section when each direct call establishes the return address and
-the helper preserves its return register. Any descriptor the helper can write is invalidated on return. Supported
-functions then pass through the existing register allocator and Volta scheduler.
+Global memory accesses require a proven system descriptor. The supported GPU-scope 32-bit atomic
+add preserves the previous value. A shared counter increment with a discarded result becomes a
+scaled address calculation and a predicated Volta shared atomic add. VF checks each repeated
+warp convergence barrier against the branch target on every incoming path.
+
+A kernel can call one private helper at the end of its section when each direct call establishes
+the return address and the helper preserves its return register. VF recognizes local helpers and
+the weak functions that CUDA 12’s assembler places in the local portion of the kernel’s symbol
+table. A call invalidates any descriptor or convergence barrier the helper can change.
+Supported functions then pass through the existing register allocator and Volta scheduler.
 A function outside this subset is refused at lookup. The supported forms are
 listed in `reference/ampere-forms.txt` and `reference/ampere_forms.py`.
 

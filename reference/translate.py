@@ -27,7 +27,7 @@ For each function (a `.text` section):
 MAP, if given, receives one line per instruction of the result (function, new offset, old offset,
 what was done), for validate.py.
 """
-import collections, os, struct, sys
+import collections, os, re, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import elf
 import ampere
@@ -783,7 +783,20 @@ class Function:
             # Level 3: the uniform registers of the frame that the instruction reads are loaded
             # before it, those it writes are stored after it.
             before = self.from_memory(i, d)
-            if isinstance(self.ampere_ops.get(i), tuple):
+            operation = self.ampere_ops.get(i)
+            if isinstance(operation, tuple) and operation[0] == 'increment':
+                if self.matrix_at is None:
+                    raise Refused('no dedicated registers for an sm_80 shared atomic increment')
+                scratch = self.matrix_at
+                addr = self.mc.assemble('lea_lo_imm__RuIR_RIR', Rd=scratch, Ra=d.ops['Ra'], Sb=0, scaleU5=2, Pu=7)
+                one = self.mc.assemble('imad__RRsI_RRI', Rd=scratch+1, Ra=255, Rb=255, Sc=1)
+                atom = self.mc.assemble('atoms__RaNonRZ', Ra=scratch, Ra_offset=operation[1], Rb=scratch+1, Rd=255,
+                                        op='ADD', sz='32', Pg=d.ops['Pg'], Pg_not=d.ops['Pg@not'], src_rel_sb=SEQUENCE)
+                new = [Item(addr | 63 << WAIT, i, 'sm80: index shared counter'),
+                       Item(one | 63 << WAIT, i, 'sm80: increment by one'),
+                       Item(atom | 63 << WAIT, i, 'sm80: shared atomic increment')]
+                new[-1].then = SEQUENCE
+            elif isinstance(operation, tuple):
                 kind, global_offset, shared_offset = self.ampere_ops[i]
                 assert kind == 'copy128'
                 if self.matrix_at is None:
@@ -2553,6 +2566,24 @@ def relocations_of(e, symbols, code):
     return relocations, holders, named
 
 
+def assembler_helper(e, symbols, index):
+    # CUDA 12 ptxas places certain weak helpers before the first global symbol.
+    # The kernel owns the entire helper body; see cubin_debug_ptx in vf-fatbin.
+    name, info, other, sec, start, size, _ = symbols[index]
+    symtab = next((s for s in e.sections if s.type == elf.SHT_SYMTAB), None)
+    if (not symtab or not index < symtab.info <= len(symbols) or info != 0x22 or other or
+            not 0 < sec < len(e.sections) or
+            not re.fullmatch(r'\$__internal_[0-9]+_\$__cuda_.+', name, flags=re.DOTALL)):
+        return False
+    section = e.sections[sec]
+    owner_index = section.info & 0xffffff
+    if section.type != 1 or not section.flags & 4 or owner_index >= len(symbols):
+        return False
+    _, owner_info, owner_other, owner_sec, base, length, _ = symbols[owner_index]
+    return (owner_info & 15 == 2 and owner_other & 0x10 and owner_sec == sec and size > 0 and
+            base <= start and start + size <= base + length)
+
+
 def translate(data, mc=None, listing=None, lives=None):
     """The sm_70 cubin for the sm_75 cubin `data`, and a report: {function: None or why it was refused}.
     `listing`, a list, gets one row for each instruction of the result (function, new offset, old
@@ -2609,11 +2640,11 @@ def translate(data, mc=None, listing=None, lives=None):
             sec = e.index(s)
             code = s.data
             if arch == 80:
-                secondary = [y for y in symbols if y[3] == sec and y[1] & 15 == 2 and y[4]]
+                secondary = [(idx, y) for idx, y in enumerate(symbols) if y[3] == sec and y[1] & 15 == 2 and y[4]]
                 helper = None
                 if secondary:
-                    _, info_byte, other, _, at, size, _ = secondary[0]
-                    if len(secondary) != 1 or info_byte >> 4 != 0 or other & 0x10 or not size or at % 16 or at + size != len(code):
+                    index, (_, info_byte, other, _, at, size, _) = secondary[0]
+                    if len(secondary) != 1 or (info_byte >> 4 != 0 and not assembler_helper(e, symbols, index)) or other & 0x10 or not size or at % 16 or at + size != len(code):
                         raise Refused('unsupported secondary entry in sm_80 code')
                     helper = at // 16
                 if relocations.get(sec):
@@ -2628,7 +2659,7 @@ def translate(data, mc=None, listing=None, lives=None):
                     if op == 'pack':
                         f.needs_pool |= f.src[i].ops['Rc'] != 255
                     else:
-                        f.scratch_need = max(f.scratch_need, 6)
+                        f.scratch_need = max(f.scratch_need, 2 if op[0] == "increment" else 6)
             report[name] = None
         except Refused as why:
             report[name] = str(why)

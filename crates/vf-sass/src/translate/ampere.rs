@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 
 use crate::generated::ampere::{
-    COMMIT, COPY128, HALF_CONSTANT, LOAD16, LOAD128, PACK, SHARED_FORMS, STORE16, STORE32, STORE128,
+    ATOM_ADD32, BRA_MASK_ALL, COMMIT, COPY128, HALF_CONSTANT, LOAD16, LOAD32, LOAD32_CONST, LOAD128, PACK,
+    SHARED_FORMS, SHARED_INC, STORE16, STORE32, STORE128,
 };
 
 use crate::assemble::{
@@ -44,6 +45,7 @@ pub(super) fn source(header: &[u8]) -> Result<u8, String> {
 #[derive(Debug)]
 pub(super) enum Operation {
     Pack,
+    IncrementShared { offset: u32 },
     GlobalToShared { global_offset: i32, shared_offset: i32 },
 }
 
@@ -53,7 +55,14 @@ pub(super) struct Normalized {
     pub operations: HashMap<usize, Operation>,
 }
 
+#[derive(Clone, Copy)]
+enum Convergence {
+    Set(u32, usize),
+    Wait(u32),
+}
+
 struct Step {
+    convergence: Option<Convergence>,
     killed: u64,
     initialized: u64,
     uses: Option<u8>,
@@ -71,8 +80,7 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
     }
     let mut result = Vec::with_capacity(code.len());
     let mut operations = HashMap::new();
-    let mut joins = [None; 16];
-    let mut syncs = Vec::new();
+    let mut barrier_mask = 0u16;
     let mut returns = None;
     let mut previous_move = None;
     let mut calls = Vec::new();
@@ -92,6 +100,8 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
         let rb = (w >> 32) & BYTE;
         let load128 = matches_form(bits, LOAD128);
         let store128 = matches_form(bits, STORE128);
+        let load32 = matches_form(bits, LOAD32);
+        let const32 = matches_form(bits, LOAD32_CONST);
         // Both encodings carry the signed byte displacement in the same 24 bits.
         let offset = (w >> 40) as u32 & 0xff_ffff;
         if load128 || store128 {
@@ -102,13 +112,22 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
                 )));
             }
         }
-        let (word, descriptor) = if matches_form(bits, LOAD16) || load128 {
+        let (word, descriptor) = if matches_form(bits, LOAD16) || load128 || load32 || const32 {
             let load = assemble(
                 "ldg__sImmOffset",
                 &[
                     ("e", Str("E")),
-                    ("sz", Str(if load128 { "_128" } else { "U16" })),
-                    ("sem", Str(if load128 { "WEAK" } else { "CONSTANT" })),
+                    (
+                        "sz",
+                        Str(if load128 {
+                            "_128"
+                        } else if load32 || const32 {
+                            "_32"
+                        } else {
+                            "U16"
+                        }),
+                    ),
+                    ("sem", Str(if load128 || load32 { "WEAK" } else { "CONSTANT" })),
                     ("sco", Str("SYS")),
                     ("cop", Str("EN")),
                     ("Rd", Int(rd as u32)),
@@ -134,12 +153,52 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
                     ("sem", Str("WEAK")),
                     ("sco", Str("SYS")),
                     ("cop", Str("EN")),
+                    ("Pg", Int((w >> 12) as u32 & 7)),
+                    ("Pg_not", Int((w >> 15) as u32 & 1)),
                     ("Rb", Int(rb as u32)),
                     ("Ra", Int(addr as u32)),
                     ("Ra_offset", Int(offset)),
                 ],
             );
             (store, Some((w >> 64) as u8 & 63))
+        } else if matches_form(bits, BRA_MASK_ALL) {
+            let branch = assemble("bra_", &[("Pg", Int(7)), ("Pp", Int(7)), ("cond", Str("DIV"))]);
+            (branch.map(|op| op | bits & BRA_MASK_ALL.1), None)
+        } else if matches_form(bits, ATOM_ADD32) {
+            let add = assemble(
+                "atomg__RaNonRZ",
+                &[
+                    ("Rd", Int(rd as u32)),
+                    ("Pu", Int(7)),
+                    ("Ra", Int(addr as u32)),
+                    ("Ra_offset", Int(offset)),
+                    ("Rb", Int(rb as u32)),
+                    ("e", Str("E")),
+                    ("sz", Str("32")),
+                    ("op", Str("ADD")),
+                    ("cop", Str("EN")),
+                    ("sem", Str("STRONG")),
+                    ("sco", Str("GPU")),
+                ],
+            );
+            (add, Some((w >> 64) as u8 & 63))
+        } else if matches_form(bits, SHARED_INC) {
+            if addr == 255 {
+                return Err(Refused(format!("missing sm_80 shared increment index at 0x{at:x}")));
+            }
+            operations.insert(i, Operation::IncrementShared { offset });
+            // This store describes the guard and index read by the atomic reduction.
+            let surrogate = assemble(
+                "sts__sImmOffset",
+                &[
+                    ("Ra", Int(addr as u32)),
+                    ("Rb", Int(255)),
+                    ("sz", Str("_32")),
+                    ("Pg", Int((w >> 12) as u32 & 7)),
+                    ("Pg_not", Int((w >> 15) as u32 & 1)),
+                ],
+            );
+            (surrogate, None)
         } else if matches_form(bits, HALF_CONSTANT) {
             // RN(-0 * +0 + c) preserves a finite half, including the sign of zero.
             let pair = (w >> 32) as u32;
@@ -255,21 +314,24 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
         } else {
             None
         };
-        // BSYNC can continue at its barrier's reconvergence PC. The supported regions
-        // place that PC directly after BSYNC, so ordinary fallthrough covers that edge.
-        if matches!(d.mnemonic, "BSSY" | "BSYNC") {
-            let barrier = d.op_or_name("barReg", 16) as usize;
-            let join = joins
-                .get_mut(barrier)
-                .ok_or_else(|| Refused(format!("invalid sm_80 convergence barrier at 0x{at:x}")))?;
-            if d.mnemonic == "BSYNC" {
-                syncs.push((i, barrier));
-            } else if join.is_some() && *join != branch {
-                return Err(Refused(format!("multiple sm_80 convergence targets for B{barrier}")));
-            } else {
-                *join = branch;
+        let convergence = match d.mnemonic {
+            "BSSY" | "BSYNC" => {
+                let reg = d.op_or_name("barReg", 16);
+                if reg >= 16 {
+                    return Err(Refused(format!("invalid sm_80 convergence barrier at 0x{at:x}")));
+                }
+                if d.mnemonic == "BSSY" {
+                    Some(Convergence::Set(
+                        reg,
+                        branch.ok_or_else(|| Refused(format!("missing sm_80 convergence target at 0x{at:x}")))?,
+                    ))
+                } else {
+                    barrier_mask |= 1u16 << reg;
+                    Some(Convergence::Wait(reg))
+                }
             }
-        }
+            _ => None,
+        };
         let conditional = d.op_or(OP_PG, 7) != 7
             || d.op_or(OP_PG_AT_NOT, 0) != 0
             || d.op_or(OP_PP, 7) != 7
@@ -331,6 +393,7 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
             }
         }
         steps.push(Step {
+            convergence,
             killed,
             initialized,
             uses: descriptor,
@@ -357,12 +420,9 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
             steps[call].killed |= helper_writes;
         }
     }
-    for (i, barrier) in syncs {
-        if joins[barrier] != Some(i + 1) {
-            return Err(Refused(format!(
-                "sm_80 BSYNC B{barrier} at 0x{:x} does not fall through to its convergence target",
-                i * 16
-            )));
+    for reg in 0..16 {
+        if barrier_mask & (1u16 << reg) != 0 {
+            check_convergence(&steps, reg, helper)?;
         }
     }
     let mut state = vec![None; steps.len()];
@@ -396,9 +456,62 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
     })
 }
 
+/// At every BSYNC, all paths must have established the following PC as that
+/// barrier's convergence target. An earlier completed region may reuse the same register.
+fn check_convergence(steps: &[Step], reg: u32, helper: Option<usize>) -> Result<(), Refused> {
+    // PCs lie below steps.len(). None is unreachable; unknown is reachable with no definite target.
+    let unknown = steps.len();
+    let callee_changes = helper.is_some_and(|start| {
+        steps[start..]
+            .iter()
+            .any(|step| matches!(step.convergence, Some(Convergence::Set(r,_) | Convergence::Wait(r)) if r == reg))
+    });
+    let mut live = vec![None; steps.len()];
+    let mut pending = vec![0];
+    live[0] = Some(unknown);
+    while let Some(i) = pending.pop() {
+        let step = &steps[i];
+        let before = live[i].unwrap();
+        let after = match step.convergence {
+            Some(Convergence::Set(r, target)) if r == reg => target,
+            Some(Convergence::Wait(r)) if r == reg => unknown,
+            _ if callee_changes && step.branch == helper => unknown,
+            _ => before,
+        };
+        let fall = (step.falls_through && i + 1 < steps.len()).then_some(i + 1);
+        for next in [step.branch, fall].into_iter().flatten() {
+            // On the implicit edge to reconvergence, the region has completed.
+            let out = if matches!(step.convergence, Some(Convergence::Set(r,target)) if r == reg && target == next) {
+                unknown
+            } else {
+                after
+            };
+            let joined = if live[next].is_some_and(|previous| previous != out) {
+                unknown
+            } else {
+                out
+            };
+            if live[next] != Some(joined) {
+                live[next] = Some(joined);
+                pending.push(next);
+            }
+        }
+    }
+    for (i, step) in steps.iter().enumerate() {
+        if matches!(step.convergence, Some(Convergence::Wait(r)) if r == reg) && live[i] != Some(i + 1) {
+            return Err(Refused(format!(
+                "sm_80 BSYNC B{reg} at 0x{:x} does not fall through to its convergence target",
+                i * 16
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn emit(ctx: &mut Ctx<'_>, i: usize, d: &Decoded, op: &Operation) -> Result<Vec<Item>, Refused> {
     let (global_offset, shared_offset) = match op {
         Operation::Pack => return pack(ctx, i, d),
+        Operation::IncrementShared { offset } => return increment(ctx, i, d, *offset),
         Operation::GlobalToShared {
             global_offset,
             shared_offset,
@@ -452,6 +565,55 @@ pub(super) fn emit(ctx: &mut Ctx<'_>, i: usize, d: &Decoded, op: &Operation) -> 
     let mut b = Item::new(store | 63 << WAIT, i, "sm80: store asynchronous copy", true);
     b.then = Some(SEQUENCE);
     Ok(vec![a, b])
+}
+
+fn increment(ctx: &Ctx<'_>, i: usize, d: &Decoded, offset: u32) -> Result<Vec<Item>, Refused> {
+    let temp = ctx
+        .scratch_at_reg
+        .ok_or_else(|| Refused("no dedicated registers for an sm_80 shared atomic increment".into()))?;
+    let addr = assemble(
+        "lea_lo_imm__RuIR_RIR",
+        &[
+            ("Rd", Int(temp)),
+            ("Ra", Int(d.op_or(OP_RA, 255))),
+            ("Sb", Int(0)),
+            ("scaleU5", Int(2)),
+            ("Pu", Int(7)),
+        ],
+    )
+    .ok_or_else(|| Refused("cannot encode scaled shared address".into()))?;
+    let one = assemble(
+        "imad__RRsI_RRI",
+        &[
+            ("Rd", Int(temp + 1)),
+            ("Ra", Int(255)),
+            ("Rb", Int(255)),
+            ("Sc", Int(1)),
+        ],
+    )
+    .ok_or_else(|| Refused("cannot encode increment operand".into()))?;
+    let word = assemble(
+        "atoms__RaNonRZ",
+        &[
+            ("Ra", Int(temp)),
+            ("Ra_offset", Int(offset)),
+            ("Rb", Int(temp + 1)),
+            ("Rd", Int(255)),
+            ("op", Str("ADD")),
+            ("sz", Str("32")),
+            ("Pg", Int(d.op_or(OP_PG, 7))),
+            ("Pg_not", Int(d.op_or(OP_PG_AT_NOT, 0))),
+            ("src_rel_sb", Int(SEQUENCE)),
+        ],
+    )
+    .ok_or_else(|| Refused("cannot encode shared atomic increment".into()))?;
+    let mut add = Item::new(word | 63 << WAIT, i, "sm80: shared atomic increment", true);
+    add.then = Some(SEQUENCE);
+    Ok(vec![
+        Item::new(addr | 63 << WAIT, i, "sm80: index shared counter", true),
+        Item::new(one | 63 << WAIT, i, "sm80: increment by one", true),
+        add,
+    ])
 }
 
 pub(super) fn pack(ctx: &mut super::context::Ctx<'_>, i: usize, d: &Decoded) -> Result<Vec<Item>, Refused> {
@@ -735,6 +897,62 @@ mod tests {
     }
 
     #[test]
+    fn full_mask_branch_and_local_weak_helper_are_required_for_the_scan() {
+        let bytes = include_bytes!("../../../../tests/kernels/translate/k_warp_scan.sm80.cubin");
+        let good = translate(bytes, false).unwrap();
+        assert!(good.report[0].refused.is_none());
+        let mut elf = Elf::parse(bytes).unwrap();
+        let sec = elf.section(".text.warp_scan").unwrap();
+        let symbols = elf.symbols().unwrap();
+        let index = symbols
+            .iter()
+            .position(|s| s.info == 0x22 && s.shndx as usize == sec && s.value != 0)
+            .unwrap();
+        assert!(vf_fatbin::cubin_has_assembler_helper(bytes, index));
+        assert!(!vf_fatbin::cubin_has_assembler_helper(bytes, usize::MAX));
+        // Moving the same symbol to the externally visible part of the table changes its ABI.
+        let symtab = elf.section(".symtab").unwrap();
+        elf.sections[symtab].info = index as u32;
+        let external = elf.write();
+        assert!(!vf_fatbin::cubin_has_assembler_helper(&external, index));
+        assert!(translate(&external, false).unwrap().report[0].refused.is_some());
+
+        let code = &elf.sections[sec].data;
+        let words = code.as_chunks::<16>().0;
+        let pc = words
+            .iter()
+            .position(|&w| matches_form(u128::from_le_bytes(w) & !CONTROLS, BRA_MASK_ALL))
+            .unwrap();
+        let original = u128::from_le_bytes(words[pc]);
+        for bit in [24, 30] {
+            // A register other than URZ or the uncomplemented URZ changes the participation mask.
+            let mut modified = code.clone();
+            modified[pc * 16..pc * 16 + 16].copy_from_slice(&(original ^ (1 << bit)).to_le_bytes());
+            let helper = Some(symbols[index].value as usize / 16);
+            assert!(normalize(&modified, &mut Decoder::new(75), helper).is_err());
+        }
+    }
+
+    #[test]
+    fn shared_and_global_atomics_require_the_recognized_operands_and_memory_scope() {
+        let bytes = include_bytes!("../../../../tests/kernels/translate/k_histogram.sm80.cubin");
+        let elf = Elf::parse(bytes).unwrap();
+        let code = &elf.sections[elf.section(".text.histogram").unwrap()].data;
+        let words = code.as_chunks::<16>().0;
+        let cases = [(ATOM_ADD32, 77), (ATOM_ADD32, 64), (SHARED_INC, 16), (SHARED_INC, 78)];
+        for (form, bit) in cases {
+            let pc = words
+                .iter()
+                .position(|&w| matches_form(u128::from_le_bytes(w) & !CONTROLS, form))
+                .unwrap();
+            let altered = u128::from_le_bytes(words[pc]) ^ (1 << bit);
+            let mut modified = code.clone();
+            modified[pc * 16..pc * 16 + 16].copy_from_slice(&altered.to_le_bytes());
+            assert!(normalize(&modified, &mut Decoder::new(75), None).is_err());
+        }
+    }
+
+    #[test]
     fn descriptor_must_be_canonical_along_every_path() {
         let e = Elf::parse(IMAGE).unwrap();
         let body = &e.sections[e.section(".text.memory_check").unwrap()].data;
@@ -773,6 +991,14 @@ mod tests {
         put(&mut code, 0x10, bssy | (0x10 << 32)); // BSSY B0, 0x30
         put(&mut code, 0x20, bsync);
         assert!(normalize(&code, &mut Decoder::new(75), None).is_ok());
+        // B0 can be recycled once the first region is complete.
+        put(&mut code, 0x40, bssy | (0x10 << 32));
+        put(&mut code, 0x50, bsync);
+        assert!(normalize(&code, &mut Decoder::new(75), None).is_ok());
+        // A path entering the second BSYNC directly has no established convergence target.
+        put(&mut code, 0, (branch & !(0xffu128 << 32)) | (0x40 << 32));
+        check(&code, "does not fall through to its convergence target");
+        put(&mut code, 0, word(0));
         put(&mut code, 0x10, bssy | (0x30 << 32)); // BSYNC would jump past the ULDC.
         check(&code, "does not fall through to its convergence target");
 

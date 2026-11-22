@@ -15,7 +15,12 @@ CANONICAL = {
     "LOAD128": "ldg_memdesc__Ra64 Rd Ra Ra_URb Ra_offset | Pg=PT e=E cop=EN sz=128 Pu=PT Pnz=PT input_reg_sz_64_dist=64 sem=WEAK",
     "STORE128": "stg_memdesc__Ra64 Ra Rb Ra_URc Ra_offset | Pg=PT e=E cop=EN sz=128 input_reg_sz_64_dist=64 sem=WEAK",
     "STORE16": "stg_memdesc__Ra64 Ra Rb Ra_URc | Pg=PT e=E cop=EN sz=U16 input_reg_sz_64_dist=64 sem=WEAK",
-    "STORE32": "stg_memdesc__Ra64 Ra Rb Ra_URc | Pg=PT e=E cop=EN sz=32 input_reg_sz_64_dist=64 sem=WEAK",
+    "STORE32": "stg_memdesc__Ra64 Pg Pg.not Ra Rb Ra_URc Ra_offset | e=E cop=EN sz=32 input_reg_sz_64_dist=64 sem=WEAK",
+    "LOAD32": "ldg_memdesc__Ra64 Rd Ra Ra_URb Ra_offset | Pg=PT e=E cop=EN sz=32 Pu=PT Pnz=PT input_reg_sz_64_dist=64 sem=WEAK",
+    "LOAD32_CONST": "ldg_memdesc__Ra64 Rd Ra Ra_URb Ra_offset | Pg=PT e=E cop=EN sz=32 Pu=PT Pnz=PT input_reg_sz_64_dist=64 sem=CONSTANT",
+    "BRA_MASK_ALL": "bra_uniform_ sImm | Pg=PT Pp=PT cond=DIV URb=URZ URb.invert=1",
+    "ATOM_ADD32": "atomg_uniform__memdesc Rd Ra Ra_URc Rb Ra_offset | Pg=PT e=E op=ADD cop=EN sz=32 Pu=PT input_reg_sz_64_dist=64 sem=STRONG sco=GPU",
+    "SHARED_INC": "atoms_arrive__popcinc Pg Pg.not Ra Ra_offset | Rd=RZ stride=X4 Ra_URc=URZ op=POPC.INC sz=32",
     "COPY128": "ldgsts__desc_RRU Pg Pg.not Rb Rb_offset Ra_URc Ra Ra_offset | loc=ACCESS cop=EN sz=128 input_reg_sz_64_dist=64 Pnz=PT sem=WEAK",
     "COMMIT": "ldgdepbar_ | Pg=PT",
     "HALF_CONSTANT": "hfma2_mma__RRI_norelu Rd Sc Sc1 | Pg=PT Ra=RZ Ra.negate=1 Rb=RZ",
@@ -128,6 +133,10 @@ def forms():
 
 
 def canonical_forms():
+    masked = encode(CANONICAL["BRA_MASK_ALL"], 80)
+    native = encode("bra_ sImm | Pg=PT Pp=PT cond=DIV", 75)
+    if masked[2]["sImm"] != native[2]["sImm"]:
+        raise ValueError("BRA.DIV displacement occupies different bits on sm80 and sm75")
     return {name: encode(spec, 80)[:2] for name, spec in CANONICAL.items()}
 
 

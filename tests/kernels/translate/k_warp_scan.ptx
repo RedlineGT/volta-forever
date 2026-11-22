@@ -1,0 +1,31 @@
+// CUDA 12.9: ptxas -arch=sm_80 k_warp_scan.ptx -o k_warp_scan.sm80.cubin
+// The scan branch is warp-uniform for n=0, 32 or 64 in a 64-thread block.
+.version 8.6
+.target sm_70
+.address_size 64
+.visible .entry warp_scan(.param .u64 output, .param .u32 n) {
+    .reg .u32 %lane, %n, %result;
+    .reg .u64 %base, %addr;
+    .reg .pred %skip, %valid;
+    .reg .u32 %tmp;
+    mov.u32 %lane, %tid.x;
+    ld.param.u32 %n, [n];
+    setp.ge.u32 %skip, %lane, %n;
+    @%skip bra skip;
+    mov.u32 %result,%lane;
+    shfl.sync.up.b32 %tmp|%valid, %result, 1, 0, -1;
+    @%valid add.u32 %result,%result,%tmp;
+    shfl.sync.up.b32 %tmp|%valid, %result, 2, 0, -1;
+    @%valid add.u32 %result,%result,%tmp;
+    shfl.sync.up.b32 %tmp|%valid, %result, 4, 0, -1;
+    @%valid add.u32 %result,%result,%tmp;
+    bra write;
+skip:
+    sub.u32 %result, 0, %lane;
+write:
+    ld.param.u64 %base, [output];
+    mul.wide.u32 %addr, %lane, 4;
+    add.u64 %addr, %base, %addr;
+    st.global.u32 [%addr], %result;
+    ret;
+}

@@ -245,6 +245,10 @@ DRVRUN_KERNELS=guarded_copy drv cubin-sm80-predicated-copy "$G/translate/k_guard
     "machine code for sm_80 translated" "guarded_copy +ok"
 DRVRUN_KERNELS=checked_add drv cubin-sm80-private-helper "$G/translate/k_ampere_helper.sm80.cubin" \
     "machine code for sm_80 translated" "checked_add +ok"
+DRVRUN_KERNELS=histogram drv cubin-sm80-histogram "$G/translate/k_histogram.sm80.cubin" \
+    "machine code for sm_80 translated" "histogram +ok"
+DRVRUN_KERNELS=warp_scan drv cubin-sm80-warp-scan "$G/translate/k_warp_scan.sm80.cubin" \
+    "machine code for sm_80 translated" "warp_scan +ok"
 # The same code in a fat binary that also has PTX, which is what is taken unless told otherwise.
 VF_TRANSLATE=first drv fatbin-elf75-first "$W/crates/vf-fatbin/tests/data/elf75-ptx75-zstd.fatbin" "fat binary without sm_70 code: machine code" "${translated[@]}"
 VF_TRANSLATE=0 drv cubin-sm75-as-is "$G/k_basic.135.sm75.cubin" "cubin with machine code for sm_75 and later only" "-> 209 CUDA_ERROR_NO_BINARY_FOR_GPU"

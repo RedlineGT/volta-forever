@@ -426,7 +426,9 @@ impl CubinSymbols<'_> {
     /// as weak functions in the local portion of .symtab. Their machine code is inside the
     /// owning kernel. CUDA 13 emits local functions for the same PTX operations.
     fn assembler_helper(&self, index: usize, sections: &[[u8; 64]]) -> bool {
-        let symbol = &self.table[index];
+        let Some(symbol) = self.table.get(index) else {
+            return false;
+        };
         if index >= self.first_global || symbol[4] != 0x22 || symbol[5] != 0 {
             return false;
         }
@@ -483,6 +485,14 @@ fn cubin_symbols<'a>(bytes: &'a [u8], sections: &[[u8; 64]]) -> Option<CubinSymb
         names: section_data(bytes, strings)?,
         first_global,
     })
+}
+
+/// Whether ptxas placed this weak routine in the local part of the kernel symbol table.
+pub fn cubin_has_assembler_helper(bytes: &[u8], index: usize) -> bool {
+    let Some(sections) = cubin_sections(bytes) else {
+        return false;
+    };
+    cubin_symbols(bytes, sections).is_some_and(|symbols| symbols.assembler_helper(index, sections))
 }
 
 /// Entry points retained by the device linker in a little-endian 64-bit CUDA ELF.

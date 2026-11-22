@@ -172,11 +172,12 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
             }
             let mut helpers = symbols
                 .iter()
-                .filter(|s| s.shndx as usize == si && s.info & 15 == 2 && s.value != 0);
+                .enumerate()
+                .filter(|(_, s)| s.shndx as usize == si && s.info & 15 == 2 && s.value != 0);
             let mut helper = None;
-            if let Some(s) = helpers.next() {
+            if let Some((index, s)) = helpers.next() {
                 if helpers.next().is_some()
-                    || s.info >> 4 != 0
+                    || (s.info >> 4 != 0 && !vf_fatbin::cubin_has_assembler_helper(data, index))
                     || s.other & 0x10 != 0
                     || s.size == 0
                     || !s.value.is_multiple_of(16)
@@ -195,6 +196,7 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
             for (i, op) in &fd.ampere_ops {
                 match op {
                     super::ampere::Operation::GlobalToShared { .. } => fd.scratch_need = fd.scratch_need.max(6),
+                    super::ampere::Operation::IncrementShared { .. } => fd.scratch_need = fd.scratch_need.max(2),
                     super::ampere::Operation::Pack => {
                         fd.needs_pool |= fd.src[*i].op_or(crate::generated::fields::OP_RC, 255) != 255
                     }

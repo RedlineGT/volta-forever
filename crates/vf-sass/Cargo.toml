@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+vf-fatbin.workspace = true
 vf-tables.workspace = true
 
 [dev-dependencies]

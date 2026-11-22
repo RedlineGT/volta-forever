@@ -1,0 +1,33 @@
+// CUDA 12.9: ptxas -arch=sm_80 k_histogram.ptx -o k_histogram.sm80.cubin
+// Count selected lanes in shared memory, then return the old global counter and its sum.
+.version 8.6
+.target sm_70
+.address_size 64
+
+.visible .entry histogram(.param .u64 totals, .param .u64 keys, .param .u32 active) {
+    .reg .u32 %lane, %limit, %key, %sum, %val, %s, %i, %j;
+    .reg .u64 %dst, %src, %o, %q;
+    .reg .pred %p;
+    .shared .align 4 .b8 bins[144];
+    ld.param.u64 %dst,[totals];
+    ld.param.u64 %src,[keys];
+    ld.param.u32 %limit,[active];
+    mov.u32 %lane,%tid.x;
+    mov.u32 %s,bins;
+    mad.lo.u32 %i,%lane,4,%s;
+    st.shared.u32 [%i+16],0;
+    bar.sync 0;
+    mul.wide.u32 %q,%lane,4;
+    add.u64 %o,%src,%q;
+    ld.global.u32 %key,[%o];
+    and.b32 %key,%key,31;
+    mad.lo.u32 %j,%key,4,%s;
+    setp.lt.u32 %p,%lane,%limit;
+    @%p red.shared.add.u32 [%j+16],1;
+    bar.sync 0;
+    ld.shared.u32 %sum,[%i+16];
+    add.u64 %o,%dst,%q;
+    atom.global.add.u32 %val,[%o],%sum;
+    st.global.u32 [%o+128],%val;
+    ret;
+}

@@ -72,8 +72,8 @@ VF_CAPABILITY=8.0 vf ./my_program
 VF compiles compatible PTX for Volta (`sm_70`). It reads standalone PTX, PTX entries in fat
 binaries, and, in builds from `main`, complete PTX retained inside a cubin by NVIDIA's assembler.
 Builds from `main` can also translate certain stripped `sm_80` kernels directly, including the
-FP16 sum of expert outputs in SGLang and FlashInfer’s CuTe normalization of hidden states,
-queries and keys. VF checks each kernel before use. [Supported images](LIMITS.md)
+FP16 sum of expert outputs and the 32-bit expert router in SGLang. FlashInfer’s CuTe kernels
+also run this way for hidden-state, query and key normalization. VF checks each kernel before use. [Supported images](LIMITS.md)
 
 On a V100 with this setting, ZML reported capability 8.0 and answered the test prompt with
 the expected word using Qwen3.5-9B. [Validation results](docs/validation.md#vllm-sglang-zml).

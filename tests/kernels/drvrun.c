@@ -283,6 +283,53 @@ static void run_all(CUmodule mod) {
         }
         verdict("checked_add", bad, 3 * (sizeof inputs / sizeof inputs[0]), 0);
     }
+    if (want("histogram") && !cuModuleGetFunction(&f, mod, "histogram")) {
+        enum { lanes = 32, words = 2 * lanes + 8, trials = 32 };
+        uint32_t keys[lanes], result[words], expected[words];
+        CUdeviceptr counters = dy + 4 * sizeof(uint32_t);
+        long bad = 0;
+        for (unsigned t = 0; t < trials; t++) {
+            unsigned active = (t == trials-1) ? lanes : t;
+            for (unsigned i = 0; i < words; i++) result[i] = expected[i] = 0xdecafbad;
+            for (unsigned i = 0; i < lanes; i++) {
+                keys[i] = (i * 7 + t) % (1 + t);
+                result[4 + i] = expected[4 + i] = 0xfffffffcu + i;
+                expected[4 + lanes + i] = result[4 + i];
+            }
+            for (unsigned i = 0; i < active; i++) expected[4 + keys[i]]++;
+            CK(cuMemcpyHtoD_v2(dx, keys, sizeof keys));
+            CK(cuMemcpyHtoD_v2(dy, result, sizeof result));
+            void *args[] = {&counters, &dx, &active};
+            CK(cuLaunchKernel(f, 1, 1, 1, lanes, 1, 1, 0, NULL, args, NULL));
+            CK(cuCtxSynchronize());
+            CK(cuMemcpyDtoH_v2(result, dy, sizeof result));
+            for (unsigned i = 0; i < words; i++) bad += result[i] != expected[i];
+        }
+        verdict("histogram", bad, trials * words, 0);
+    }
+    if (want("warp_scan") && !cuModuleGetFunction(&f, mod, "warp_scan")) {
+        uint32_t result[66];
+        CUdeviceptr output = dx + sizeof(uint32_t);
+        long bad = 0;
+        for (unsigned n = 0; n <= 64; n += 32) {
+            CK(cuMemsetD8_v2(dx, 0xa5, sizeof result));
+            void *args[] = {&output, &n};
+            CK(cuLaunchKernel(f, 1, 1, 1, 64, 1, 1, 0, NULL, args, NULL));
+            CK(cuCtxSynchronize());
+            CK(cuMemcpyDtoH_v2(result, dx, sizeof result));
+            bad += result[0] != 0xa5a5a5a5u;
+            bad += result[65] != 0xa5a5a5a5u;
+            for (unsigned i = 0; i < 64; i++) {
+                uint32_t expected = 0u - i;
+                if (i < n) {
+                    expected = 0;
+                    for (unsigned j = 0; j <= i % 32 && j < 8; j++) expected += i - j;
+                }
+                bad += result[i + 1] != expected;
+            }
+        }
+        verdict("warp_scan", bad, 3 * 66, 0);
+    }
     CK(cuMemFree_v2(dx)); CK(cuMemFree_v2(dy)); CK(cuMemFree_v2(dz));
     free(x); free(y);
 }

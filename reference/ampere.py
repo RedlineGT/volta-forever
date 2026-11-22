@@ -39,16 +39,31 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
             vector = rd if load128 else rb
             if vector % 4 or vector > 248 or addr % 2 or addr > 252:
                 raise refuse(f'invalid register group for sm_80 vector access at 0x{at:x}')
-        if matches(bits, canonical['LOAD16']) or load128:
+        weak32 = matches(bits, canonical['LOAD32'])
+        const32 = matches(bits, canonical['LOAD32_CONST'])
+        if matches(bits, canonical['LOAD16']) or load128 or weak32 or const32:
             descriptor = rb & 63
-            word = mc.assemble('ldg__sImmOffset', e='E', sz='_128' if load128 else 'U16',
-                               sem='WEAK' if load128 else 'CONSTANT', sco='SYS', cop='EN',
+            word = mc.assemble('ldg__sImmOffset', e='E', sz='_128' if load128 else '_32' if const32 or weak32 else 'U16',
+                               sem='WEAK' if load128 or weak32 else 'CONSTANT', sco='SYS', cop='EN',
                                Pu=7, Rd=rd, Ra=addr, Ra_offset=offset)
         elif matches(bits, canonical['STORE16']) or matches(bits, canonical['STORE32']) or store128:
             descriptor = source >> 64 & 63
             size = '_128' if store128 else 'U16' if matches(bits, canonical['STORE16']) else '_32'
             word = mc.assemble('stg__sImmOffset', e='E', sz=size, sem='WEAK',
-                               sco='SYS', cop='EN', Rb=rb, Ra=addr, Ra_offset=offset)
+                               sco='SYS', cop='EN', Rb=rb, Ra=addr, Ra_offset=offset, Pg=source >> 12 & 7, Pg_not=source >> 15 & 1)
+        elif matches(bits, canonical['BRA_MASK_ALL']):
+            # Ampere makes the participation mask explicit; ~URZ includes every lane.
+            word = mc.assemble('bra_', Pg=7, Pp=7, cond='DIV') | bits & canonical['BRA_MASK_ALL'][1]
+        elif matches(bits, canonical['ATOM_ADD32']):
+            descriptor = source >> 64 & 63
+            word = mc.assemble('atomg__RaNonRZ', Rd=rd, Pu=7, Ra=addr, Ra_offset=offset,
+                               Rb=rb, e='E', sz='32', op='ADD', cop='EN', sem='STRONG', sco='GPU')
+        elif matches(bits, canonical['SHARED_INC']):
+            if addr == 255:
+                raise refuse(f'missing sm_80 shared increment index at 0x{at:x}')
+            operations[at//16] = ('increment', offset)
+            word = mc.assemble('sts__sImmOffset', Ra=addr, Rb=255, sz='_32',
+                               Pg=source >> 12 & 7, Pg_not=source >> 15 & 1)
         elif matches(bits, canonical['HALF_CONSTANT']):
             # RN(-0 * +0 + c) is c for finite FP16 operands, including signed zero.
             pair = source >> 32 & 0xffffffff
@@ -143,10 +158,7 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
             successors.append(target//16)
             branches.add(target//16)
         if d.mnemonic == 'BSSY':
-            barrier = ops['barReg']
-            if barrier in joins and joins[barrier] != target//16:
-                raise refuse(f'multiple sm_80 convergence targets for B{barrier}')
-            joins[barrier] = target//16
+            joins[at//16] = (ops['barReg'], target//16)
         elif d.mnemonic == 'BSYNC':
             syncs.append((at//16, ops['barReg']))
         steps.append((killed, initialized, successors))
@@ -155,9 +167,37 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
             raise refuse('sm_80 local function lacks a proven call and return path')
         for _, call in calls:
             steps[call][0].update(helper_writes)
-    for i, barrier in syncs:
-        if joins.get(barrier) != i+1:
-            raise refuse(f'sm_80 BSYNC B{barrier} at 0x{16*i:x} does not fall through to its convergence target')
+    # Track which convergence target is definite on each path leading to BSYNC.
+    # A second use of the same barrier register starts a new region.
+    if syncs:
+        live, pending = {0: {}}, [0]
+        callee_barriers = {b for i, (b, _) in joins.items() if helper is not None and i >= helper}
+        callee_barriers.update(b for i,b in syncs if helper is not None and i >= helper)
+        consumed = dict(syncs)
+        call_sites = {call for _, call in calls}
+        while pending:
+            i = pending.pop()
+            out = live[i].copy()
+            if i in joins:
+                b, target = joins[i]
+                out[b] = target
+            if i in consumed:
+                out.pop(consumed[i], None)
+            if i in call_sites:
+                for b in callee_barriers:
+                    out.pop(b, None)
+            for j in steps[i][2]:
+                after = out
+                if i in joins and j == joins[i][1]:
+                    after = out.copy()
+                    after.pop(joins[i][0], None)
+                known = {b:t for b,t in after.items() if live[j].get(b) == t} if j in live else after
+                if live.get(j) != known:
+                    live[j] = known
+                    pending.append(j)
+        for i,b in syncs:
+            if live.get(i, {}).get(b) != i+1:
+                raise refuse(f'sm_80 BSYNC B{b} at 0x{16*i:x} does not fall through to its convergence target')
     state, pending = {0: set()}, [0]
     while pending:
         i = pending.pop()
