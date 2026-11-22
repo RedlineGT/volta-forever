@@ -196,6 +196,19 @@ SYM(CUresult, cuKernelGetFunction, void **, void *);
 SYM(CUresult, cuLibraryUnload, void *);
 #define LOAD(name) *(void **)&name = sym(#name)
 
+// Make the directory of the layer's cache. 1 when the layer will not use it: it does not belong
+// to the user that runs (on a file system that maps root to another user); 2 when it cannot be
+// made.
+static int cache_directory(const char *path) {
+    if (mkdir(path, 0700)) { perror("mkdir"); return 2; }
+    struct stat st;
+    return stat(path, &st) || st.st_uid != geteuid();
+}
+static int skip(const char *name) {
+    printf("skip   %-44s the cache directory does not belong to the user that runs\n", name);
+    return 0;
+}
+
 // The bytes in use in the heap, which the layer's allocations are in, with the blocks that malloc
 // maps on their own (a large table).
 static long heap(void) {
@@ -237,7 +250,7 @@ static int contexts(const char *proxy, const char *dir) {
     // Translations kept: a translation is taken from there after the first.
     char cache[4096];
     snprintf(cache, sizeof cache, "%s/cache", dir);
-    if (mkdir(cache, 0700)) { perror("mkdir"); return 2; }
+    if (cache_directory(cache) > 1) return 2;
     setenv("VF_PROXY_CACHE", cache, 1);
     open_proxy(proxy);
     LOAD(cuCtxCreate_v2); LOAD(cuCtxDestroy); LOAD(cuCtxDestroy_v2); LOAD(cuCtxSetCurrent);
@@ -401,7 +414,8 @@ static int lazy_lock(const char *proxy, const char *dir) {
     char cache[4096], log[4096];
     snprintf(cache, sizeof cache, "%s/cache", dir);
     snprintf(log, sizeof log, "%s/log", dir);
-    if (mkdir(cache, 0700)) { perror("mkdir"); return 2; }
+    int unusable = cache_directory(cache);
+    if (unusable) return unusable > 1 ? 2 : skip("lazy_lock");
     setenv("VF_PROXY_CACHE", cache, 1);
     setenv("VF_LOG", log, 1);
     setenv("VF_LOG_LEVEL", "2", 1);
@@ -460,7 +474,8 @@ static int cache_temporaries(const char *proxy, const char *dir) {
     snprintf(cache, sizeof cache, "%s/cache", dir);
     snprintf(old, sizeof old, "%s/.tmp-00000000000000aa", cache);
     snprintf(fresh, sizeof fresh, "%s/.tmp-00000000000000bb", cache);
-    if (mkdir(cache, 0700)) { perror("mkdir"); return 2; }
+    int unusable = cache_directory(cache);
+    if (unusable) return unusable > 1 ? 2 : skip("cache_temporaries");
     // Left by writes that did not end, an hour ago and now.
     for (const char *path = old; path; path = path == old ? fresh : NULL) {
         FILE *f = fopen(path, "w");

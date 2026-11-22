@@ -5,7 +5,9 @@
 # stand-in for the driver (lifecycle_mock_driver.c) gives every module a handle of its own;
 # lifecycle.c says what each case checks. Each case runs in a process of its own. Needs gcc and
 # tests/kernels/k_fit_test.135.sm75.cubin.
-# Prints one line a check, then PASS or FAIL; exit status 1 on FAIL.
+# Prints one line a check, then PASS or FAIL; exit status 1 on FAIL. The cases that need the layer's
+# cache say that they are skipped where its directory, under TMPDIR, does not belong to the user
+# that runs (a file system that maps root to another user).
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 proxy=${1:-$W/dist/lib}
