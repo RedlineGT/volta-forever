@@ -201,9 +201,28 @@ SGLang starts one process per GPU for tensor parallelism. A user tested two and 
 
 We separately tested this mapping with two Tesla V100-SXM2-32GBs. One process requested NCCL by soname and the other used the CUDA 13 library's absolute path. In a control with NCCL 2.30.7 for CUDA 13, VF refused `AllReduce_Sum_f16_RING_LL` on both ranks and the run timed out during initialization. With the map, both ranks loaded NCCL 2.32.6 for CUDA 12. Each rank received the exact expected integer sums for 1, 257 and 65,536 elements. [Commands for the SGLang environment](docs/guides/sglang.md#6-additional-notes)
 
+## Peer copies over NVLink
+
+One process enabled direct peer access between two V100-SXM2-32GBs connected by two NVLinks (`NV2`). It copied a 64 MiB buffer and verified every byte in each direction. Each rate below is the median of three sets of 32 copies after warm-up, measured one direction at a time on driver 580.178.04.
+
+| Bulk peer copy | Native driver (GB/s) | With VF (GB/s) |
+|---|---:|---:|
+| GPU 0 → GPU 2 | 48.44 | 48.45 |
+| GPU 2 → GPU 0 | 48.44 | 48.45 |
+
+The timer covers the copies through stream synchronization. The driver did not expose per-link traffic counters on these cards. These rates describe application payload on this GPU pair. [Test source](tests/gpu/peer-copy.c)
+
+Build with the CUDA headers and run on a pair listed as `NV2` by `nvidia-smi topo -m`. Set `CUDA_HOME` to your toolkit directory.
+
+```sh
+gcc -std=gnu11 -O2 -I"$CUDA_HOME/include" tests/gpu/peer-copy.c -lcuda -o /tmp/vf-peer-copy
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 /tmp/vf-peer-copy
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
+```
+
 ## What was not tried
 
-- More than one GPU in a process; NVLink
+- Running translated compute kernels concurrently on multiple devices within one process
 - MPS (the Multi-Process Service)
 - Driver 580.196.07 and later drivers of the 580 branch (everything was run with 580.178.04)
 - Windows; ARM
