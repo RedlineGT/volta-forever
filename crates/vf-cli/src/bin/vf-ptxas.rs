@@ -71,8 +71,10 @@ fn target(name: &OsStr) -> Option<&'static str> {
     }
 }
 
-// These options consume the following argument when their value is not joined with '='.
-// In particular, the output file must never be opened as a PTX input.
+// These options consume the following argument when their value is not joined with '=': those of
+// ptxas 13.5 (each given alone, it says "argument expected"), but the ones handled in `compile`.
+// In particular, the output file must never be opened as a PTX input. (`-O` takes its level joined,
+// `-O3`: alone, it is an option of its own, and what follows is an input.)
 fn consumes_value(option: &[u8]) -> bool {
     matches!(
         option,
@@ -80,7 +82,6 @@ fn consumes_value(option: &[u8]) -> bool {
             | b"--output-file"
             | b"-e"
             | b"--entry"
-            | b"-O"
             | b"--opt-level"
             | b"-m"
             | b"--machine"
@@ -114,6 +115,12 @@ fn consumes_value(option: &[u8]) -> bool {
             | b"--register-usage-level"
             | b"--split-compile"
             | b"-split-compile"
+            | b"--apply-controls"
+            | b"-apply-controls"
+            | b"--enable-func-clone-sc"
+            | b"-enable-func-clone-sc"
+            | b"--sanitize"
+            | b"-sanitize"
     )
 }
 

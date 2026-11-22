@@ -57,6 +57,48 @@ fn messages_name_the_inputs_as_given() {
 }
 
 #[test]
+fn options_of_ptxas_13_5_take_their_value() {
+    // (Until 2026-11-22 controls.txt was read as PTX, and so were true and memcheck; and `-O`
+    // took the input that followed it for its value.)
+    let dir = directory();
+    let (output, messages) = run(
+        &dir,
+        &[
+            "-arch=sm_75",
+            "--apply-controls",
+            "controls.txt",
+            "-enable-func-clone-sc",
+            "true",
+            "--sanitize",
+            "memcheck",
+            "-o",
+            "out.cubin",
+            "kernel.ptx",
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{messages}");
+    for line in [
+        "option -arch\nvalue sm_70\n",
+        "option --apply-controls\ninput controls.txt: \n",
+        "option -enable-func-clone-sc\nvalue true\n",
+        "option --sanitize\nvalue memcheck\n",
+        "option -o\nvalue out.cubin\n",
+        "input kernel.ptx: .target sm_70\n",
+    ] {
+        assert!(messages.contains(line), "{line:?} not in:\n{messages}");
+    }
+    // `-O` takes its level joined (`-O3`); what follows it alone is an input.
+    let (output, messages) = run(&dir, &["-arch=sm_75", "-O", "kernel.ptx"], &[]);
+    assert_eq!(output.status.code(), Some(0), "{messages}");
+    assert!(
+        messages.contains("option -O\ninput kernel.ptx: .target sm_70\n"),
+        "{messages}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn the_status_is_the_assemblers_or_255_as_ptxas_has_it() {
     let dir = directory();
     let (output, _) = run(&dir, &["kernel.ptx"], &[("VF_TEST_STATUS", "7")]);
