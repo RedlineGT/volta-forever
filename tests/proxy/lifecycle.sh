@@ -24,7 +24,7 @@ export VF_EMULATION_WARNINGS=0
 status=0
 export CUBIN=$W/tests/kernels/k_fit_test.135.sm75.cubin
 [ -f "$CUBIN" ] || { echo "missing: $CUBIN"; exit 2; }
-for case in fork_exit contexts; do
+for case in fork_exit contexts lazy_lock; do
     mkdir -p "$out/$case"
     "$out/lifecycle" "$case" "$proxy/libcuda.so.1" "$out/$case" || status=1
 done

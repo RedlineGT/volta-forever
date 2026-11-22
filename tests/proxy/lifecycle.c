@@ -14,6 +14,10 @@
 //     which the driver gave a module for it goes. The cubin of tests/kernels/k_fit_test (CUBIN in
 //     the environment), whose original the layer keeps for a second translation at launch, is
 //     dropped with its context too.
+//   - lazy_lock: a library restored from the layer's cache, whose kernel's code is not in the
+//     cache, is adapted when the program asks for the kernel; meanwhile a kernel of another
+//     library is given at once (the lock of all lazy libraries was held over the adaptation), and
+//     another thread that asks for the same kernel gets the same, once.
 //
 // usage: lifecycle CASE PROXY DIR
 // PROXY is the layer's libcuda.so.1, DIR a directory for the files of the case.
@@ -31,6 +35,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -340,12 +345,99 @@ static int contexts(const char *proxy, const char *dir) {
     return 0;
 }
 
+// ---- lazy_lock ----
+
+static double now(void) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return t.tv_sec + t.tv_usec / 1e6;
+}
+
+// PTX for sm_75 with many kernels, whose adaptation takes a while.
+static char *many_kernels(int kernels, int lines) {
+    size_t size = 128 + (size_t)kernels * (160 + (size_t)lines * 40);
+    char *image = malloc(size), *at = image;
+    at += sprintf(at, ".version 8.8\n.target sm_75\n.address_size 64\n");
+    for (int k = 0; k < kernels; k++) {
+        at += sprintf(at, ".visible .entry k%d(.param .u64 p)\n{\n .reg .b32 %%r<4>;\n .reg .b64 %%rd<2>;\n"
+                          " ld.param.u64 %%rd1, [p];\n mov.u32 %%r1, %%tid.x;\n", k);
+        for (int i = 0; i < lines; i++) at += sprintf(at, " add.s32 %%r1, %%r1, %d;\n", i + k);
+        at += sprintf(at, " st.global.u32 [%%rd1], %%r1;\n ret;\n}\n");
+    }
+    return image;
+}
+
+struct lookup { void *library; const char *name; void *kernel; CUresult result; double start, end; };
+static void *lookup_thread(void *arg) {
+    struct lookup *l = arg;
+    l->start = now();
+    l->result = cuLibraryGetKernel(&l->kernel, l->library, l->name);
+    l->end = now();
+    return NULL;
+}
+
+// Whether the file at `path` has `text` in it.
+static int file_has(const char *path, const char *text) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[4096];
+    int found = 0;
+    while (!found && fgets(line, sizeof line, f)) found = strstr(line, text) != NULL;
+    fclose(f);
+    return found;
+}
+
+static int lazy_lock(const char *proxy, const char *dir) {
+    char cache[4096], log[4096];
+    snprintf(cache, sizeof cache, "%s/cache", dir);
+    snprintf(log, sizeof log, "%s/log", dir);
+    if (mkdir(cache, 0700)) { perror("mkdir"); return 2; }
+    setenv("VF_PROXY_CACHE", cache, 1);
+    setenv("VF_LOG", log, 1);
+    setenv("VF_LOG_LEVEL", "2", 1);
+    open_proxy(proxy);
+    LOAD(cuLibraryLoadData); LOAD(cuLibraryGetKernel); LOAD(cuLibraryUnload);
+    char *large = many_kernels(400, 200);
+    void *first, *other, *kernel;
+    // Loaded once and unloaded: the layer keeps what it found of the library, not the code of its
+    // kernels. Loaded again: restored from there.
+    if (cuLibraryLoadData(&first, large, NULL, NULL, 0, NULL, NULL, 0)) return 2;
+    cuLibraryUnload(first);
+    if (cuLibraryLoadData(&first, large, NULL, NULL, 0, NULL, NULL, 0)) return 2;
+    if (cuLibraryLoadData(&other, ptx, NULL, NULL, 0, NULL, NULL, 0)) return 2;
+    if (cuLibraryGetKernel(&kernel, other, "good")) return 2;
+
+    struct lookup slow = { .library = first, .name = "k7" }, same = { .library = first, .name = "k7" },
+                  fast = { .library = other, .name = "good" };
+    pthread_t thread, again;
+    if (pthread_create(&thread, NULL, lookup_thread, &slow)) return 2;
+    int adapting = 0;
+    for (int i = 0; i < 10000 && !adapting && !slow.end; i++) {
+        adapting = file_has(log, "lazy: kernel k7 not cached, adapting original on demand");
+        if (!adapting) usleep(1000);
+    }
+    lookup_thread(&fast);
+    if (pthread_create(&again, NULL, lookup_thread, &same)) return 2;
+    pthread_join(thread, NULL);
+    pthread_join(again, NULL);
+    if (!adapting) { fprintf(stderr, "lazy_lock: the library was not adapted on demand\n"); return 2; }
+    double took = slow.end - slow.start, waited = fast.end - fast.start;
+    char what[128];
+    snprintf(what, sizeof what, "%.1f ms, while the other took %.1f ms (want less than a quarter)", waited * 1e3,
+             took * 1e3);
+    check("lazy_other_library_during_adaptation", !slow.result && !fast.result && waited < took / 4, what);
+    snprintf(what, sizeof what, "error %d, kernel %p (want 0, %p)", same.result, same.kernel, slow.kernel);
+    check("lazy_same_kernel_during_adaptation", !same.result && same.kernel == slow.kernel, what);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) { fprintf(stderr, "usage: lifecycle CASE PROXY DIR\n"); return 2; }
     const char *name = argv[1], *proxy = argv[2], *dir = argv[3];
     int status;
     if (!strcmp(name, "fork_exit")) status = fork_exit(proxy, dir);
     else if (!strcmp(name, "contexts")) status = contexts(proxy, dir);
+    else if (!strcmp(name, "lazy_lock")) status = lazy_lock(proxy, dir);
     else { fprintf(stderr, "unknown case: %s\n", name); return 2; }
     if (status) return status;
     printf("%s: %d checks, %d wrong\n", name, checks, wrong);

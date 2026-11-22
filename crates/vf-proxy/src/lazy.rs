@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 use vf_adapt::Refused;
 use vf_fatbin as fatbin;
@@ -83,8 +83,8 @@ struct LazyLibrary {
     /// Proxy cache key, for saving sub-modules when they are first compiled.
     cache_key: Option<crate::cache::CacheKey>,
     /// The original image bytes, kept on a cache hit so that the fallback path (materialization,
-    /// dependent entries) can adapt later.
-    original_bytes: Option<Vec<u8>>,
+    /// dependent entries) can adapt later, outside the lock.
+    original_bytes: Option<Arc<Vec<u8>>>,
 }
 
 /// Compilation state of a kernel in a lazy library.
@@ -637,7 +637,7 @@ unsafe fn setup_common(
         cached_entries,
         linked_entries,
         cache_key,
-        original_bytes,
+        original_bytes: original_bytes.map(Arc::new),
     };
 
     let (mutex, _) = &*LAZY_LIBS;
@@ -1229,38 +1229,53 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
     let sub_ptx = match sub_ptx {
         Some(ptx) => ptx,
         None => {
-            if let Some(original) = lazy_lib.original_bytes.as_deref() {
-                log::info(format_args!(
-                    "lazy: kernel {name_str} not cached, adapting original on demand"
-                ));
-                match ensure_adapted(original) {
-                    Some((adapted, info)) => {
-                        let extracted = info.extract(&name_str);
-                        // Store for future use.
-                        lazy_lib.adapted_data = adapted;
-                        lazy_lib.info = Some(info);
-                        match extracted {
-                            Some(ptx) => ptx,
-                            None => {
-                                return CUDA_ERROR_NOT_FOUND;
-                            }
-                        }
-                    }
-                    None => {
-                        return CUDA_ERROR_NOT_FOUND;
-                    }
-                }
-            } else {
+            let Some(original) = lazy_lib.original_bytes.clone() else {
                 log::trace(format_args!(
                     "lazy: kernel {name_str} not found in deferred module or cache"
                 ));
                 return CUDA_ERROR_NOT_FOUND;
+            };
+            log::info(format_args!(
+                "lazy: kernel {name_str} not cached, adapting original on demand"
+            ));
+            // Outside the lock, which is that of every lazy library, as `materialize` does: the
+            // adaptation and the analysis of a whole module take from tens of milliseconds to
+            // seconds. A thread that asks for this kernel meanwhile waits for it.
+            lazy_lib.kernels.insert(name_str.clone(), KernelState::Compiling);
+            drop(libs);
+            let adapted = ensure_adapted(&original);
+            libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+            // The library may have been unloaded meanwhile, and its handle given to another.
+            let Some(lazy_lib) = libs.get_mut(&library).filter(|lazy_lib| {
+                lazy_lib
+                    .original_bytes
+                    .as_ref()
+                    .is_some_and(|kept| Arc::ptr_eq(kept, &original))
+            }) else {
+                condvar.notify_all();
+                return CUDA_ERROR_NOT_FOUND;
+            };
+            let extracted = adapted.and_then(|(adapted, info)| {
+                let extracted = info.extract(&name_str);
+                // Store for future use.
+                lazy_lib.adapted_data = adapted;
+                lazy_lib.info = Some(info);
+                extracted
+            });
+            match extracted {
+                Some(ptx) => ptx,
+                None => {
+                    lazy_lib.kernels.remove(&name_str);
+                    condvar.notify_all();
+                    return CUDA_ERROR_NOT_FOUND;
+                }
             }
         }
     };
     let t_extract = t_kernel_start.elapsed();
 
     // Mark as compiling and copy what we need for the driver call.
+    let lazy_lib = libs.get_mut(&library).unwrap();
     lazy_lib.kernels.insert(name_str.clone(), KernelState::Compiling);
     let jit_opts = lazy_lib.jit_options.clone();
     let jit_vals = lazy_lib.jit_values.clone();
