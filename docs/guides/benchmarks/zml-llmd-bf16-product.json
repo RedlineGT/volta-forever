@@ -3,7 +3,14 @@
     "name": "ZML LLMD",
     "distribution": "20260924.0-cuda",
     "executable_sha256": "cd0c30103e38608fde2a3cc629b1a9cd940389de771912fa19a3dc1cfee0b075",
-    "upstream_binary_modified": false
+    "upstream_binary_modified": false,
+    "image": "index.docker.io/zmlai/llmd@sha256:19c0ca74e1fa1c716915833115d66999820656fab7d43edd2ec508e2d317da9c",
+    "archive_extraction": {
+      "directory": "llmd",
+      "files": 55,
+      "bytes": 4611661236,
+      "executable_bytes": 54525840
+    }
   },
   "checkpoint": {
     "repository": "amd/Qwen3.5-35B-A3B-MXFP4",
@@ -320,6 +327,73 @@
         }
       ],
       "median_gpu_prefill_tokens_per_s": 774.6290755214892
+    }
+  },
+  "full_bundle_recheck": {
+    "vf_commit": "c6f678c1dceec6aba4d07c7e54fb0f209b058f22",
+    "client_commit": "0eab875",
+    "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "os": "Ubuntu 24.04.5 LTS",
+    "extraction": "crane export of the recorded amd64 manifest, with all 55 files and no symbolic links. The verified executable, libzml_cuda and cuDNN came directly from the extracted llmd directory. VF supplied its runfiles view of the assembler.",
+    "max_concurrency": 1,
+    "semantic_check": {
+      "expected": "Paris",
+      "reply": "Paris"
+    },
+    "unprofiled_requests": [
+      {
+        "id": "warmup",
+        "input_tokens": 228,
+        "output_tokens": 64,
+        "server_ttft_s": 0.29999999999999993,
+        "decode_steps": 63,
+        "decode_s": 1.2533639199999993,
+        "prompt_tokens_per_ttft_s": 760.0000000000001,
+        "decode_tokens_per_s": 50.2647307734852,
+        "decode_steps_per_s": 50.2647307734852,
+        "reply": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a blue folder on this table to document"
+      },
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "server_ttft_s": 0.30200000000000005,
+        "decode_steps": 64,
+        "decode_s": 1.2732433560000005,
+        "prompt_tokens_per_ttft_s": 751.6556291390727,
+        "decode_tokens_per_s": 49.47993618275749,
+        "decode_steps_per_s": 50.26533199518221,
+        "reply": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors open"
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "server_ttft_s": 0.30200000000000005,
+        "decode_steps": 64,
+        "decode_s": 1.2718447539999982,
+        "prompt_tokens_per_ttft_s": 751.6556291390727,
+        "decode_tokens_per_s": 49.53434749159652,
+        "decode_steps_per_s": 50.32060697559011,
+        "reply": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in the shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, a dedicated"
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "server_ttft_s": 0.30299999999999994,
+        "decode_steps": 64,
+        "decode_s": 1.2717427719999992,
+        "prompt_tokens_per_ttft_s": 749.1749174917493,
+        "decode_tokens_per_s": 49.53831968781187,
+        "decode_steps_per_s": 50.32464222253904,
+        "reply": "Lima, Peru, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a yellow envelope on this table to signal the"
+      }
+    ],
+    "unprofiled_medians": {
+      "prompt_tokens_per_ttft_s": 751.6556291390727,
+      "decode_tokens_per_s": 49.53434749159652,
+      "decode_steps_per_s": 50.32060697559011
     }
   }
 }

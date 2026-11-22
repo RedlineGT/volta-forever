@@ -50,7 +50,20 @@ Look for `platform: cuda` and `Tesla V100` in the device listing. The tested mod
 
 ## 5. Benchmarks
 
-The 35B benchmark uses the official Linux LLMD executable and its adjacent `llmd.runfiles` directory. The measured build is the September 24 distribution. Sections 3 and 4 run ZML’s separate source example. [Upstream LLMD distribution](https://zml.ai/llmd/)
+The 35B benchmark uses ZML’s official Linux LLMD server. Upstream distributes its CUDA executable and runfiles together in a registry image. These commands extract the measured September 24 distribution into your home directory and run it directly on Ubuntu. Allow 4.7 GB for LLMD before downloading the model. [Upstream distribution](https://zml.ai/llmd/) · [crane export](https://github.com/google/go-containerregistry/blob/main/cmd/crane/doc/crane_export.md)
+
+```bash
+(
+set -euo pipefail
+mkdir -p ~/llmd-v100 && cd ~/llmd-v100
+curl -fL --retry 3 -o crane.tar.gz https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz
+tar --no-same-owner -xzf crane.tar.gz crane
+record="$HOME/volta-forever/docs/guides/benchmarks/zml-llmd-bf16-product.json"
+image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["engine"]["image"])' "$record")
+./crane export --platform linux/amd64 "$image" - | tar --no-same-owner -xf - llmd
+./llmd/llmd --help
+)
+```
 
 Download the AMD MXFP4 checkpoint once. The revision below selects the exact 14 weight shards used in the benchmark. [Checkpoint files](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1) · [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli)
 
@@ -62,9 +75,10 @@ vf venv "$HOME/.venvs/zml-download"
   --revision 2e19c6576db91e5d5a93455415619262218bf8a1 --local-dir "$MODEL"
 ```
 
-From the directory containing `llmd` and `llmd.runfiles`, start the server. The measured configuration uses XLA autotuning, tree accumulation and single-token decoding. The two BF16 multiply measurements below both use `tree`.
+Start the extracted server. The measured configuration uses XLA autotuning, tree accumulation and single-token decoding. The two BF16 multiply measurements below both use `tree`.
 
 ```bash
+cd ~/llmd-v100/llmd
 export VF_BF16_COLUMN=tree
 VF_CAPABILITY=8.0 VF_BF16_TC_TILES=1 VF_PROXY_CACHE=0 \
   XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 \
@@ -89,6 +103,8 @@ After a Lisbon warm-up, each request used a distinct 227-token prompt and produc
 | With the BF16 change | **774.63** | **751.66** | **50.16** |
 
 Each reply contributes 63 visible tokens after the first. LLMD counted 64 internal steps per measured reply in this pair, giving 49.32 and 50.95 internal steps/s respectively. The decode column uses 63 divided by the server’s decode time for each request. Native 1Cat-vLLM on this card reached 1,443.33 / 76.09 with a different checkpoint, QuantTrio AWQ. [Per-request replies, counters and graph spans](./benchmarks/zml-llmd-bf16-product.json)
+
+An independent run using the extracted distribution on a second V100 returned Paris and completed all three benchmark requests. It measured **751.66 prompt tokens/s through the first token** and **49.53 visible decode tokens/s**. [Extracted-bundle timings](./benchmarks/zml-llmd-bf16-product.json)
 
 Tree accumulation saved 1.87 ms per decode graph in an earlier comparison with the column optimization off. Its FP32 sums can differ under cancellation. Ordered accumulation matched scalar bits on all 16,384 operator outputs tested. [Column results](./benchmarks/zml-llmd-column.json) · [Tile comparison](./benchmarks/zml-llmd-autotune.json) · [Chunk-size comparison](./benchmarks/zml-llmd-mxfp4.json)
 
