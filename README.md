@@ -34,7 +34,7 @@ Run `vf fetch --all` if the application needs more CUDA 12.9 libraries. Builds f
 
 CUDA 13 applications ship kernels for GPUs newer than Volta. VF intercepts module loads, retargets supported PTX and translates supported Turing (`sm_75`) machine code to Volta (`sm_70`). The NVIDIA driver runs the resulting kernels on the V100. VF caches translations and routes libraries such as cuBLAS to their CUDA 12.9 implementations.
 
-CUDA 13 programs see capability 7.5 by default. Applications with native Volta kernels keep 7.0. To select an application’s Ampere kernels, run `VF_CAPABILITY=8.0 vf ./my_program`. VF can emulate instructions used by BF16, FP8 and NVFP4 kernels. Builds from `main` also handle selected `sm_80` machine code and PTX retained inside a cubin. When a kernel needs an unsupported instruction, VF reports the kernel name and the reason. [Architecture](docs/architecture.md) · [Instruction emulation](docs/emulations.md) · [Supported images and limits](LIMITS.md)
+CUDA 13 programs see capability 7.5 by default. Applications with native Volta kernels keep 7.0. `VF_CAPABILITY=8.0 vf ./my_program` tells an application 8.0, so that it takes its Ampere PTX, as the engine guides below do. An application whose kernels VF can only give from their `sm_75` machine code, such as PyTorch, is still told 7.5, and VF says so. VF can emulate instructions used by BF16, FP8 and NVFP4 kernels. Builds from `main` also handle selected `sm_80` machine code and PTX retained inside a cubin. When a kernel needs an unsupported instruction, VF reports the kernel name and the reason. [Architecture](docs/architecture.md) · [Instruction emulation](docs/emulations.md) · [Supported images and limits](LIMITS.md)
 
 ## Inference engines
 

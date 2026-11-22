@@ -33,7 +33,8 @@
 //!   instructions (default 20; 0: none);
 //! - `VF_CAPABILITY=8.0`: compute capability reported to the callers that have no code for this GPU
 //!   (default: the architecture their code starts at when it can be adapted, else the real one; see
-//!   `callers`). The code taken from a program is then the code it has for that capability;
+//!   `callers`). The PTX taken from a program is then the PTX it has for that capability; a caller
+//!   whose code runs from its sm_75 machine code is still told 7.5;
 //! - `VF_STATS=1`: route every function through this library and print, when the process exits,
 //!   the number of calls per function and the kernels launched most often (adds an atomic increment
 //!   to each driver call, and a name lookup to each launch);
