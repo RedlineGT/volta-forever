@@ -3,19 +3,31 @@
 #[path = "vf-ptxas/runfiles.rs"]
 mod runfiles;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_char, c_int, c_uint, c_ulong};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::{ffi::OsStrExt, fs::MetadataExt, process::CommandExt};
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::MetadataExt,
+    process::{CommandExt, ExitStatusExt},
+};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use vf_adapt::{Outcome, Policy};
 
 unsafe extern "C" {
-    fn memfd_create(name: *const std::ffi::c_char, flags: std::ffi::c_uint) -> std::ffi::c_int;
+    fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
+    fn prctl(option: c_int, ...) -> c_int;
+    fn getpid() -> c_int;
+    fn getppid() -> c_int;
+    fn signal(signum: c_int, handler: usize) -> usize;
+    fn raise(signum: c_int) -> c_int;
 }
 
+const PR_SET_PDEATHSIG: c_int = 1;
+const SIGTERM: c_int = 15;
+const SIG_DFL: usize = 0;
 /// What ptxas ends with on every error it finds, and so this program on those it finds itself.
 const FATAL: u8 = 255;
 
@@ -126,7 +138,7 @@ fn adapted_input(data: &[u8], policy: &Policy) -> Result<Option<File>, String> {
     Ok(Some(file))
 }
 
-fn compile(args: Vec<OsString>) -> Result<(), String> {
+fn compile(args: Vec<OsString>) -> Result<ExitCode, String> {
     let backend = backend()?;
     let mut process = Command::new(&backend);
     if args
@@ -136,7 +148,9 @@ fn compile(args: Vec<OsString>) -> Result<(), String> {
         return Err(process.args(args).exec().to_string());
     }
     let policy = Policy::cuda_12_9().with_environment();
+    // The adapted inputs, and what the user called them.
     let mut retained = Vec::new();
+    let mut names = Vec::new();
     let mut explicit_arch = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -172,7 +186,9 @@ fn compile(args: Vec<OsString>) -> Result<(), String> {
                 if let Some(file) =
                     adapted_input(&data, &policy).map_err(|e| format!("{}: {e}", Path::new(&arg).display()))?
                 {
-                    process.arg(format!("/proc/self/fd/{}", file.as_raw_fd()));
+                    let given = format!("/proc/self/fd/{}", file.as_raw_fd());
+                    process.arg(&given);
+                    names.push((given.into_bytes(), arg.as_bytes().to_vec()));
                     retained.push(file);
                 } else {
                     process.arg(arg);
@@ -183,10 +199,75 @@ fn compile(args: Vec<OsString>) -> Result<(), String> {
     if !explicit_arch {
         process.arg("-arch=sm_70");
     }
-    Err(process.exec().to_string())
+    if names.is_empty() {
+        return Err(process.exec().to_string());
+    }
+    assemble(process, &names).map_err(|e| format!("{}: {e}", backend.display()))
 }
 
-fn run(args: Vec<OsString>) -> Result<(), String> {
+/// Run the assembler on adapted inputs, which it is given as `/proc/self/fd/N`: its messages
+/// (all on its standard error) name the files the user gave instead (`names`: what it was given,
+/// what the user gave). This ends with the status the assembler ends with, or by the signal that
+/// ended it; the assembler is sent SIGTERM if this ends first.
+fn assemble(mut process: Command, names: &[(Vec<u8>, Vec<u8>)]) -> io::Result<ExitCode> {
+    let parent = unsafe { getpid() };
+    unsafe {
+        process.pre_exec(move || {
+            prctl(PR_SET_PDEATHSIG, SIGTERM as c_ulong);
+            if getppid() != parent {
+                // (This front end has ended already: ESRCH, and nothing that allocates.)
+                return Err(io::Error::from_raw_os_error(3));
+            }
+            Ok(())
+        });
+    }
+    let mut child = process.stderr(Stdio::piped()).spawn()?;
+    let mut messages = io::BufReader::new(child.stderr.take().expect("piped"));
+    let mut stderr = io::stderr().lock();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match messages.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let _ = stderr.write_all(&renamed(&line, names));
+                let _ = stderr.flush();
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    drop(messages);
+    let status = child.wait()?;
+    if let Some(number) = status.signal() {
+        unsafe {
+            signal(number, SIG_DFL);
+            raise(number);
+        }
+    }
+    Ok(ExitCode::from(status.code().map_or(FATAL, |code| code as u8)))
+}
+
+/// `line` with each name the assembler was given (`/proc/self/fd/3`, not followed by a digit)
+/// replaced by the one the user gave.
+fn renamed(line: &[u8], names: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(line.len());
+    let mut at = 0;
+    'scan: while at < line.len() {
+        for (given, user) in names {
+            if line[at..].starts_with(given) && !line.get(at + given.len()).is_some_and(u8::is_ascii_digit) {
+                out.extend_from_slice(user);
+                at += given.len();
+                continue 'scan;
+            }
+        }
+        out.push(line[at]);
+        at += 1;
+    }
+    out
+}
+
+fn run(args: Vec<OsString>) -> Result<ExitCode, String> {
     if args.first().is_none_or(|a| a != "--vf-runfiles") {
         return compile(args);
     }
@@ -199,12 +280,13 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         out.write_all(path.as_os_str().as_bytes())?;
         out.write_all(b"\n")
     };
-    write_view().map_err(|e| format!("CUDA runfiles: {e}"))
+    write_view().map_err(|e| format!("CUDA runfiles: {e}"))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1).collect()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("vf-ptxas: {error}");
             ExitCode::from(FATAL)
@@ -215,6 +297,17 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_name_the_inputs_as_the_user_gave_them() {
+        let names = [(b"/proc/self/fd/3".to_vec(), b"kernel.ptx".to_vec())];
+        assert_eq!(
+            renamed(b"ptxas /proc/self/fd/3, line 2; error\n", &names),
+            b"ptxas kernel.ptx, line 2; error\n"
+        );
+        assert_eq!(renamed(b"/proc/self/fd/30\n", &names), b"/proc/self/fd/30\n");
+        assert_eq!(renamed(b"/proc/self/fd/3", &names), b"kernel.ptx");
+    }
 
     #[test]
     fn recent_targets_retain_architecture_kind() {
@@ -263,6 +356,7 @@ mod tests {
         assert_eq!(runfiles::view(&next, &compiler, &cache).unwrap(), next);
         fs::remove_dir_all(dir).unwrap();
     }
+
     #[test]
     fn concurrent_runfiles_for_different_apps_preserve_each_layout() {
         const THREADS: usize = 12;

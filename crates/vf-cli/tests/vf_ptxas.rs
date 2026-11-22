@@ -45,6 +45,18 @@ fn run(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (Output, String) {
 }
 
 #[test]
+fn messages_name_the_inputs_as_given() {
+    // The assembler is given the adapted PTX as /proc/self/fd/N; its messages name what the user
+    // gave. (Until 2026-11-22 they named /proc/self/fd/3.)
+    let dir = directory();
+    let (output, messages) = run(&dir, &["-arch=sm_75", "-o", "out.cubin", "kernel.ptx"], &[]);
+    assert_eq!(output.status.code(), Some(0), "{messages}");
+    assert!(messages.contains("input kernel.ptx: .target sm_70\n"), "{messages}");
+    assert!(!messages.contains("/proc/self/fd"), "{messages}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn the_status_is_the_assemblers_or_255_as_ptxas_has_it() {
     let dir = directory();
     let (output, _) = run(&dir, &["kernel.ptx"], &[("VF_TEST_STATUS", "7")]);
