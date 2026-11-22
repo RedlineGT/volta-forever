@@ -14,7 +14,8 @@ use super::context::{Predicates, entries, stand_ins};
 use super::function::{follow, translate_function};
 use super::parse::{FuncData, parse_function, placement, tables_of};
 use super::{
-    FunctionReport, MapEntry, Options, Refused, Relocation, STAY, TRAP, TransResult, TranslateResult, with_stall,
+    FunctionReport, LifeEntry, MapEntry, Options, Refused, Relocation, STAY, TRAP, TransResult, TranslateResult,
+    with_stall,
 };
 
 /// Translate an sm_75 or supported sm_80 cubin to sm_70.
@@ -924,8 +925,9 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
         }
     }
 
-    // Build the listing
+    // Build the listing, and what the validator is told beside it
     let mut listing: Option<Vec<MapEntry>> = if want_map { Some(Vec::new()) } else { None };
+    let mut lives: Option<Vec<LifeEntry>> = if want_map { Some(Vec::new()) } else { None };
 
     // Update the container
     let mut counts: HashMap<u32, u32> = HashMap::new();
@@ -943,6 +945,11 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                         (16 * item.origin) as u64,
                         item.what_str().to_string(),
                     ));
+                }
+            }
+            if let Some(ref mut lives) = lives {
+                for (first, second, how, offsets) in &tr.lives {
+                    lives.push((name.clone(), *first, *second, how, offsets.clone()));
                 }
             }
             e.sections[si].data = tr.code.clone();
@@ -1108,6 +1115,7 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
         bytes: e.write(),
         report: ordered_report,
         map: listing,
+        lives,
     })
 }
 

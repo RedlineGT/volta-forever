@@ -1,7 +1,7 @@
 #!/bin/bash
 # The Rust translator (crates/vf-sass) against the Python reference (reference/translate.py): for every
-# cubin, the translated bytes, the map of instructions and the refusals with their reasons must be
-# the same.
+# cubin, the translated bytes, the map of instructions, what the validator reads beside the map
+# (MAP.lives) and the refusals with their reasons must be the same.
 #
 #   tests/sass/compare.sh [CUBIN | DIR]...     (cubins of different names: one directory a call)
 #
@@ -53,12 +53,13 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/py" "$work/rs"
 
-# The prototype: batch.py writes NAME, NAME.map and NAME.report (reasons without their offsets).
+# The prototype: batch.py writes NAME, NAME.map, NAME.map.lives and NAME.report (reasons without
+# their offsets).
 todo=()
 for f in "${inputs[@]}"; do
     name=$(basename "$f")
     if [ -n "${REFERENCE:-}" ] && [ -f "$REFERENCE/$name.report" ]; then
-        for x in "" .map .report; do [ -f "$REFERENCE/$name$x" ] && ln -s "$REFERENCE/$name$x" "$work/py/$name$x"; done
+        for x in "" .map .map.lives .report; do [ -f "$REFERENCE/$name$x" ] && ln -s "$REFERENCE/$name$x" "$work/py/$name$x"; done
     else
         todo+=("$f")
     fi
@@ -90,6 +91,7 @@ for f in "${inputs[@]}"; do
         [ "$(cat "$work/rs/$name.rc" 2>/dev/null)" = 0 ] || what="$what exit $(cat "$work/rs/$name.rc" 2>/dev/null);"
         cmp -s "$work/rs/$name" "$work/py/$name" || what="$what bytes;"
         cmp -s "$work/rs/$name.map" "$work/py/$name.map" || what="$what map;"
+        cmp -s "$work/rs/$name.map.lives" "$work/py/$name.map.lives" || what="$what lives;"
         cmp -s "$work/rs/$name.report" "$work/py/$name.report" || what="$what refusals;"
     fi
     if [ -z "$what" ]; then

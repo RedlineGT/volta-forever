@@ -37,6 +37,8 @@ pub(super) struct Borrowed {
     pub(super) never: RegSet,
     /// {uniform register: ordinary register it lives in through its whole life}.
     pub(super) homes: HashMap<u32, u32>,
+    /// {uniform register with a home: the instructions of its life}.
+    pub(super) spans: HashMap<u32, Vec<usize>>,
     /// The ordinary registers taken for homes or for the pool.
     pub(super) used: HashSet<u32>,
     /// Level 3: everything at the instruction.
@@ -290,6 +292,7 @@ impl Borrowed {
         // that is free wherever it is alive, read or written, and that no other one has there.
         let mut taken: Vec<RegSet> = vec![regset_empty(); n];
         let mut homes: HashMap<u32, u32> = HashMap::new();
+        let mut spans: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut used: HashSet<u32> = HashSet::new();
 
         // Build the list of uniform register units with their spans.
@@ -332,6 +335,7 @@ impl Borrowed {
                 if let Some(r) = found {
                     for k in 0..width {
                         homes.insert(*u + k, r + k);
+                        spans.insert(*u + k, span.clone());
                         used.insert(r + k);
                     }
                     for &i in span {
@@ -351,6 +355,7 @@ impl Borrowed {
             touch,
             never,
             homes,
+            spans,
             used,
             everything: false,
             slots: HashMap::new(),
@@ -457,6 +462,12 @@ impl Borrowed {
             self.frame_bytes = (self.frame_bytes + 15) & !15;
         }
         self.frame_bytes
+    }
+
+    /// Where frame word `word` is, from the top of the thread's local memory (what the stack
+    /// pointer starts at): the frame is right under it.
+    pub(super) fn slot_offset(&self, word: u32) -> i64 {
+        4 * i64::from(word) - i64::from(self.frame_bytes)
     }
 
     pub(super) fn slot_count(&self) -> u32 {

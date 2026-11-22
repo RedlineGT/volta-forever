@@ -253,6 +253,17 @@ fn marked(d: &Option<Decoded>) -> bool {
 /// A listing entry: (function_name, new_offset, old_offset, what).
 pub type MapEntry = (String, u64, u64, String);
 
+/// A line of `MAP.lives`, for `reference/validate.py`, as `reference/translate.py` writes it
+/// (`write_lives`): (function, two numbers, what, offsets). `free` or `saved`: a life of a
+/// uniform predicate (the first number) and the ordinary predicate that stands for it there (the
+/// second), saved around the life or not; `held`: a life of a uniform predicate held in a
+/// register, `held-slot` in a word of the frame so many bytes under its top. With borrowed
+/// registers: `home`, a uniform register in a register of the program along its life; `pool`, so
+/// many registers from this one taken at an instruction; `room`, a register of the program put in
+/// the frame for an instruction; `slot`, a uniform register so many bytes under the top of the
+/// frame; `frame`, the bytes of the frame.
+pub type LifeEntry = (String, i64, i64, &'static str, Vec<u64>);
+
 /// What became of one function of a cubin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionReport {
@@ -274,6 +285,8 @@ pub struct TranslateResult {
     /// Its functions, in the order of their sections.
     pub report: Vec<FunctionReport>,
     pub map: Option<Vec<MapEntry>>,
+    /// With the map: the lives of `MAP.lives`, function by function.
+    pub lives: Option<Vec<LifeEntry>>,
 }
 
 /// Options for the translator.
@@ -340,6 +353,8 @@ struct TransResult {
     moved: Vec<u64>,
     /// Level 3: the frame size in bytes added for uniform registers in local memory.
     frame_bytes: u32,
+    /// Its lines of `MAP.lives`, without the name of the function.
+    lives: Vec<(i64, i64, &'static str, Vec<u64>)>,
 }
 
 /// A relocation on a section of code: the section of relocations it is in and where in it, the

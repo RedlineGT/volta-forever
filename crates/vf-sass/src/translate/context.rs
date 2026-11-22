@@ -1207,6 +1207,10 @@ pub(super) struct Predicates {
     pub(super) held: HashMap<usize, Vec<(u32, u32, bool, bool)>>,
     /// The lives held in a register: (uniform predicate, the instructions of the life).
     pub(super) held_lives: Vec<(u32, Vec<usize>)>,
+    /// Each life and the ordinary predicate that stands for the uniform one along it, in the order
+    /// they were given (a held life: one for each instruction that names it): (uniform predicate,
+    /// ordinary predicate, saved around the life, its instructions). For the validator (`MAP.lives`).
+    pub(super) lives: Vec<(u32, u32, bool, Vec<usize>)>,
     /// The uniform predicates that some life holds in a register, sorted.
     pub(super) held_predicates: Vec<u32>,
     /// A predicate that a late instruction writes: at this instruction, wait this many cycles
@@ -1285,6 +1289,7 @@ pub(super) fn stand_ins(fd: &FuncData) -> Result<Predicates, Refused> {
         save_slots: 0,
         held: HashMap::new(),
         held_lives: Vec::new(),
+        lives: Vec::new(),
         held_predicates: Vec::new(),
         delayed: HashMap::new(),
         slow_predicates: slow,
@@ -1335,11 +1340,12 @@ pub(super) fn stand_ins(fd: &FuncData) -> Result<Predicates, Refused> {
     }
     lives.sort();
 
-    let give = |out: &mut Predicates, taken_at: &mut Vec<u32>, q: u32, part: &[usize], p: u32| {
+    let give = |out: &mut Predicates, taken_at: &mut Vec<u32>, q: u32, part: &[usize], p: u32, saved: bool| {
         for &i in part {
             out.stand.insert((q, i), p);
             taken_at[i] |= 1 << p;
         }
+        out.lives.push((q, p, saved, part.to_vec()));
     };
     let mut hard: Vec<(u32, Vec<usize>)> = Vec::new();
     for (_, q, part) in lives {
@@ -1353,7 +1359,7 @@ pub(super) fn stand_ins(fd: &FuncData) -> Result<Predicates, Refused> {
             .fold(0u32, |taken, &i| taken | (busy[i] as u32 & 0x7f) | taken_at[i]);
         match pick(taken, &order_up, slow, never) {
             Some(p) => {
-                give(&mut out, &mut taken_at, q, &part, p);
+                give(&mut out, &mut taken_at, q, &part, p, false);
                 for &i in &part {
                     if live.defs[i] >> (7 + q) & 1 != 0 {
                         delay(&mut delayed, i, p);
@@ -1391,7 +1397,7 @@ pub(super) fn stand_ins(fd: &FuncData) -> Result<Predicates, Refused> {
         }
         let p = p.unwrap();
         let k = slot(i0, i1);
-        give(&mut out, &mut taken_at, q, &part, p);
+        give(&mut out, &mut taken_at, q, &part, p, true);
         out.saves.entry(i0).or_default().push((k, p));
         out.restores.entry(i1).or_default().push((k, p));
         delay(&mut delayed, i0, p);
@@ -1433,6 +1439,7 @@ pub(super) fn stand_ins(fd: &FuncData) -> Result<Predicates, Refused> {
             let read_back = reads || (writes && live.kills[i] >> (7 + q) & 1 == 0);
             let write_down = writes;
             out.held.entry(i).or_default().push((q, p, read_back, write_down));
+            out.lives.push((q, p, saved, vec![i]));
         }
         out.held_lives.push((q, part.clone()));
     }
