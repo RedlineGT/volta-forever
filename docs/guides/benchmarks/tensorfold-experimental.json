@@ -309,5 +309,180 @@
     ],
     "reviewed_main": "1eed88bb097d974a2e0ef70c69ca874306e16c6d",
     "affected_cuda_and_dispatch_files_unchanged_between_tags_and_reviewed_main": 7
+  },
+  "same_gpu_1_3_3_comparison": {
+    "hardware": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+    "driver": "580.178.04",
+    "ubuntu": "24.04",
+    "upstream_commit": "1e4a32cb5e80f2908e4642f9e7ffe71ae63792cc",
+    "source": "https://github.com/ashhart/TensorFold/tree/v1.3.3",
+    "checkpoint": "henrybravo/Qwen3.5-35B-A3B-4bit",
+    "revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "quantization": "MLX affine Q4, 64-element groups, 8-bit routers",
+    "vf_proxy_sha256": "a0a734f64f683e3e32fb2c04857f48369175852a35d66b8d49ffa7d39e6feffa",
+    "server_args": [
+      "serve",
+      "MODEL",
+      "--backend",
+      "cuda",
+      "--context",
+      "512",
+      "--parallel",
+      "1",
+      "--prompt-cache-gib",
+      "0",
+      "--name",
+      "qwen-eval",
+      "--no-thinking",
+      "--no-update-check",
+      "--no-drafts",
+      "--prompt-precision",
+      "int8"
+    ],
+    "common_environment": {
+      "VF_CAPABILITY": "8.0",
+      "VF_FIT_SHARED": "1",
+      "TF_QWEN_KV_PAGES": "0"
+    },
+    "experimental_patch_sha256": {
+      "affine4-decode-rows.patch": "4278daf26cbc1070396d6e92efc6e5609f7b2e991aeafcb40788a01952826824",
+      "affine4-dense-rows.patch": "fa01fda25eee185235766dc2c80d5f7141b75e98a07607a0b7be8025db0e3855",
+      "affine4-prefill-tiles.patch": "879a85eaba701d143443c0391881d89647b5992f5a485b0b1b4b07497c8ee97d",
+      "moe-router-row.patch": "c02d083f8875290e78d42f2f01a8a3307a16e7e2be60efd3ecb24960ed7ee564"
+    },
+    "experimental_environment": {
+      "TF_AFFINE4_DECODE_ROWS": "all",
+      "TF_AFFINE4_PREFILL_TILES": "compact",
+      "TF_AFFINE4_DENSE_ROWS": "1",
+      "TF_MOE_ROUTER_ROW": "1"
+    },
+    "native_reference": {
+      "file": "llamacpp-reference.json",
+      "run": "graph_run_reference",
+      "checkpoint": "unsloth/Qwen3.5-35B-A3B-GGUF",
+      "quantization": "Q4_K_M",
+      "prefill_tokens_per_s": 474.56875915949064,
+      "decode_tokens_per_s": 99.76531397569528
+    },
+    "runs": {
+      "official": {
+        "binary_sha256": "6ce4ee3108b3b67246ab1b82f59a7edf07f8f17d1d74675e04b5c5a92f45ab84",
+        "sanity_answer": "Paris",
+        "requests": [
+          {
+            "id": "warmup",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open",
+            "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+            "prefill_seconds": 0.703212858,
+            "decode_seconds": 3.715449495,
+            "prefill_tokens_per_s": 324.22615344158,
+            "decode_tokens_per_s": 16.95622564235663
+          },
+          {
+            "id": "run1",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, a designated volunteer places a red notebook on the long table to document daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+            "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+            "prefill_seconds": 0.696964746,
+            "decode_seconds": 3.716363175,
+            "prefill_tokens_per_s": 325.6979657906542,
+            "decode_tokens_per_s": 16.95205689901391
+          },
+          {
+            "id": "run2",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Lyon, France, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+            "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+            "prefill_seconds": 0.699165298,
+            "decode_seconds": 3.707429166,
+            "prefill_tokens_per_s": 324.67286441324495,
+            "decode_tokens_per_s": 16.99290726246609
+          },
+          {
+            "id": "run3",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, a designated volunteer places a yellow envelope on the long table to signal",
+            "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+            "prefill_seconds": 0.695359738,
+            "decode_seconds": 3.707671823,
+            "prefill_tokens_per_s": 326.4497318365016,
+            "decode_tokens_per_s": 16.991795123071224
+          }
+        ],
+        "median": {
+          "prefill_tokens_per_s": 325.6979657906542,
+          "decode_tokens_per_s": 16.991795123071224
+        }
+      },
+      "locally_patched": {
+        "binary_sha256": "62d468ab5b8d497d91659b8f6668045c295a00710593839f7e9159ce09aa04ea",
+        "sanity_answer": "Paris",
+        "requests": [
+          {
+            "id": "warmup",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open",
+            "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+            "prefill_seconds": 0.351418317,
+            "decode_seconds": 0.577001718,
+            "prefill_tokens_per_s": 648.7994192972019,
+            "decode_tokens_per_s": 109.18511684570062
+          },
+          {
+            "id": "run1",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, a designated volunteer places a red notebook on the long table to document daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+            "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+            "prefill_seconds": 0.349118968,
+            "decode_seconds": 0.576901638,
+            "prefill_tokens_per_s": 650.2081548316218,
+            "decode_tokens_per_s": 109.2040581101626
+          },
+          {
+            "id": "run2",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Lyon, France, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+            "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+            "prefill_seconds": 0.349558809,
+            "decode_seconds": 0.576674674,
+            "prefill_tokens_per_s": 649.3900143709437,
+            "decode_tokens_per_s": 109.2470379581816
+          },
+          {
+            "id": "run3",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_tokens": 0,
+            "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, a designated volunteer places a yellow envelope on the long table to signal",
+            "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+            "prefill_seconds": 0.349265198,
+            "decode_seconds": 0.576495987,
+            "prefill_tokens_per_s": 649.9359263387015,
+            "decode_tokens_per_s": 109.28089946964366
+          }
+        ],
+        "median": {
+          "prefill_tokens_per_s": 649.9359263387015,
+          "decode_tokens_per_s": 109.2470379581816
+        }
+      }
+    },
+    "all_four_output_token_hashes_identical": true,
+    "new_driver_xid_events": 0
   }
 }

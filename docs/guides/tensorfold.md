@@ -61,7 +61,8 @@ Download the 20.4 GB MLX checkpoint with 4-bit experts and 8-bit routers. Tensor
 hf download henrybravo/Qwen3.5-35B-A3B-4bit --local-dir ~/models/qwen35-4bit
 VF_CAPABILITY=8.0 VF_FIT_SHARED=1 TF_QWEN_KV_PAGES=0 \
   vf tensorfold-native serve ~/models/qwen35-4bit --backend cuda \
-  --context 512 --parallel 1 --prompt-cache-gib 0 --name qwen --no-thinking
+  --context 512 --parallel 1 --prompt-cache-gib 0 --name qwen --no-thinking \
+  --no-drafts --prompt-precision int8
 ```
 
 When `curl -fsS http://127.0.0.1:8080/health` reports `"backend":"cuda"`, send a request from a second terminal.
@@ -84,20 +85,15 @@ curl -fsSLO "$base/tensorfold.py" && curl -fsSLO "$base/prompts.json"
 python3 tensorfold.py
 ```
 
-Each measured request used 227 uncached prompt tokens and generated 64. The answers began with Kyoto, Lyon and Lima. TensorFold reports prefill time separately and counts the 63 tokens after the first for decode. These are medians on the same Tesla V100-SXM2-32GB. [Official TensorFold measurements](./benchmarks/tensorfold-results.json) · [Local experiment and native reference](./benchmarks/tensorfold-experimental.json)
+Each measured request read 227 uncached tokens and generated 64. The answers began with Kyoto, Lyon and Lima. TensorFold reports prefill time separately and counts 63 decode steps after the first output token.
 
-| Engine and settings | Prefill (tokens/s) | Decode (tokens/s) |
+| On the same Tesla V100-SXM2-32GB | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Official TensorFold 1.3.2 source, BF16 prompts | 170.35 | 17.18 |
-| Official TensorFold 1.3.2 source, INT8 prompts, drafts off | 326.80 | 17.01 |
-| Official TensorFold 1.3.3 source, BF16 prompts | 170.38 | 17.19 |
-| Official TensorFold 1.3.3 source, INT8 prompts, drafts off | 326.74 | 16.99 |
-| Local TensorFold 1.3.2 with four CUDA changes, INT8 prompts, drafts off | **650.38** | **108.93** |
-| Native llama.cpp sm70, GGUF Q4_K_M | 473.88 | 99.22 |
+| Official TensorFold 1.3.3, using the settings above | 325.70 | 16.99 |
+| TensorFold 1.3.3 with four local CUDA source changes | 649.94 | 109.25 |
+| Native llama.cpp, Qwen3.5-35B-A3B GGUF Q4_K_M | 474.57 | 99.77 |
 
-For the official INT8 configuration, add `--no-drafts --prompt-precision int8` to the server command in step 4. TensorFold used MLX affine Q4 with 8-bit routers. The llama.cpp reference used the GGUF Q4_K_M quantization of Qwen3.5-35B-A3B. It ran immediately after the local TensorFold experiment in the same GPU reservation. [Checkpoint revisions and per-request timings](./benchmarks/tensorfold-experimental.json)
-
-The faster TensorFold run used four changes to the engine's CUDA source. It processes routed experts one row at a time during decode, uses smaller expert tiles during prefill, specializes dense projections for a single input row and preserves the router's FP32 accumulation order in a single-row kernel. The warm-up and all three responses matched the official INT8 engine token for token. TensorFold reported a median time to the first token of 0.352 s. [Experiment results](./benchmarks/tensorfold-experimental.json)
+The official build remains below the native reference in both phases. In the local build, four changes to the expert, projection and router kernels preserved the output token IDs on the warm-up and all three prompts. The installation above builds the official source. [TensorFold timings, responses and token hashes](./benchmarks/tensorfold-experimental.json) · [Native reference and commands](./benchmarks/llamacpp-reference.json)
 
 ## 6. Additional notes
 
