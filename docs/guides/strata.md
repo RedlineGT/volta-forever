@@ -89,4 +89,4 @@ The earlier VF release measured 1943.5 prefill and 104.55 decode. The newer VF b
 
 ## 6. Additional notes
 
-The standard Qwen3.5-35B-A3B Q4_K_M file has 733 tensors. Strata rejected it with `missing qwen35moe.nextn_predict_layers`. The MTP file used above includes 753 tensors. Strata also registers Qwen3.6-35B-A3B under the same profile; omitting `--model-path` selects that separate checkpoint. [Strata model catalog](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md#qwen36-35b-a3b)
+The standard Unsloth Q4_K_M used by llama.cpp and FreeToken has 733 tensors. On a V100, the signed Strata 0.1.64 CUDA 12 and CUDA 13 engines both stopped at load time with `missing qwen35moe.nextn_predict_layers` using the engine arguments produced with drafting and MTP disabled. The UD-Q4_K_XL file used above has 753 tensors and supplies that metadata. Strata also registers Qwen3.6-35B-A3B under the same profile; omitting `--model-path` selects that separate checkpoint. [Strata model catalog](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md#qwen36-35b-a3b)
