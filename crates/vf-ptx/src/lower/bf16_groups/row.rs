@@ -1,33 +1,50 @@
-//! Specialize two independent MMA instructions for an A tile with only row zero active.
-//! The scheduler has already moved independent preparations for B before the pair.
+//! Specialize independent MMA instructions for an A tile with only row zero active.
+//! Four products can share the row guard when both B words of every product are proved small.
 use super::{Bf16Row, Declarations, Product};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write;
 
-pub(super) fn eligible(first: &Product<'_>, second: &Product<'_>, declared: &Declarations) -> bool {
-    // The guard reads both original C fragments at the start; the fast path writes
-    // destinations in program order. Never read a register clobbered by the first MMA.
-    first.a == second.a
-        && [first, second].iter().all(|p| {
-            p.d.iter()
-                .chain(&p.a)
-                .chain(&p.b)
-                .chain(&p.c)
-                .all(|s| declared.width(s) == Some(32))
-                && p.d.iter().collect::<BTreeSet<_>>().len() == 4
-        })
-        && second
-            .a
-            .iter()
-            .chain(&second.b)
-            .chain(&second.c)
-            .chain(&second.d)
-            .all(|s| !first.d.contains(s))
+type IndexedProduct<'a> = (usize, Product<'a>);
+
+pub(super) fn batch<'a, 't>(
+    products: &'a [IndexedProduct<'t>],
+    declared: &Declarations,
+    small_b: &HashSet<usize>,
+    scheduled: bool,
+) -> Option<(&'a [IndexedProduct<'t>], bool)> {
+    for n in [4, 2] {
+        let Some(batch) = products.get(..n) else { continue };
+        let small = batch.iter().all(|(index, _)| small_b.contains(index));
+        if !small && !(n == 2 && products.len() == 2 && scheduled) {
+            continue;
+        }
+        let (first, left) = &batch[0];
+        let mut written = BTreeSet::new();
+        if batch.iter().enumerate().all(|(i, (index, p))| {
+            let inputs = p.a.iter().chain(&p.b).chain(&p.c);
+            *index == first + i
+                && p.a == left.a
+                && inputs
+                    .chain(&p.d)
+                    .all(|s| declared.width(s) == Some(32) && !written.contains(s))
+                && p.d.iter().all(|d| written.insert(*d))
+        }) {
+            return Some((batch, small));
+        }
+    }
+    None
 }
 
-pub(super) fn write(out: &mut String, id: usize, pair: [&Product<'_>; 2], mode: Bf16Row, original: &str) {
+pub(super) fn write(
+    out: &mut String,
+    id: usize,
+    batch: &[IndexedProduct<'_>],
+    mode: Bf16Row,
+    small: bool,
+    original: &str,
+) {
     let r = format!("%bfgroup_{id}_r");
-    let a = &pair[0].a;
+    let a = &batch[0].1.a;
     writeln!(
         out,
         ".reg .b32 {r}lane,{r}t,{r}g,{r}col,{r}even,{r}odd,{r}lo,{r}hi,{r}word,{r}k,{r}acc,{r}next;\n\
@@ -40,26 +57,35 @@ pub(super) fn write(out: &mut String, id: usize, pair: [&Product<'_>; 2], mode: 
         a[0], a[2], a[1], a[3]
     )
     .unwrap();
-    // Every inactive A and C element must be positive zero. With finite B,
-    // a chain of fma.rn starting at +0 on those rows always returns +0.
+    // Dense B uses a dynamic finite check and requires inactive C to start at +0.
+    // With statically nonnegative B, inactive C can instead receive its exact update.
     writeln!(out, "mov.b32 {r}bounds,0;").unwrap();
-    let accumulators: BTreeSet<_> = pair.iter().map(|p| &p.c).collect();
+    let accumulators: BTreeSet<_> = batch.iter().map(|(_, p)| &p.c).collect();
     for c in accumulators {
-        writeln!(
-            out,
-            "or.b32 {r}x,{},{}; selp.b32 {r}x,0,{r}x,{r}row;\n\
+        if !small {
+            writeln!(
+                out,
+                "or.b32 {r}x,{},{}; selp.b32 {r}x,0,{r}x,{r}row;\n\
              or.b32 {r}y,{},{}; or.b32 {r}x,{r}x,{r}y; or.b32 {r}flags,{r}flags,{r}x;",
-            c[0], c[1], c[2], c[3]
-        )
-        .unwrap();
+                c[0], c[1], c[2], c[3]
+            )
+            .unwrap();
+        }
         if mode == Bf16Row::Tree {
             for v in c[..2].iter().collect::<BTreeSet<_>>() {
                 writeln!(out, "and.b32 {r}x,{v},0x7fffffff; max.u32 {r}bounds,{r}bounds,{r}x;").unwrap();
             }
         }
     }
-    let mut words: BTreeSet<_> = pair.iter().flat_map(|p| p.b.iter()).collect();
+    let mut words: BTreeSet<&str> = BTreeSet::new();
+    if !small {
+        words.extend(batch.iter().flat_map(|(_, p)| p.b.iter().copied()));
+    }
     if mode == Bf16Row::Tree {
+        if small {
+            // Only row-zero accumulators participate in the reassociated dot product.
+            writeln!(out, "selp.b32 {r}bounds,{r}bounds,0,{r}row;").unwrap();
+        }
         // |C| < 2^120, and each nonzero multiplicand is in [2^-32,2^32).
         // The 16 finite products and partial sums cannot overflow. Small terms can
         // still disappear by rounding; tree mode deliberately opts into that order.
@@ -69,7 +95,7 @@ pub(super) fn write(out: &mut String, id: usize, pair: [&Product<'_>; 2], mode: 
              or.b32 {r}flags,{r}flags,{r}x;"
         )
         .unwrap();
-        words.extend([&a[0], &a[2]]);
+        words.extend([a[0], a[2]]);
     }
     writeln!(out, "mov.b32 {r}bounds,0;").unwrap();
     for w in words {
@@ -118,7 +144,10 @@ pub(super) fn write(out: &mut String, id: usize, pair: [&Product<'_>; 2], mode: 
             writeln!(out, "shfl.sync.idx.b32 {r}word,{},{src},31,0xffffffff; shl.b32 {r}a{i},{r}word,16; and.b32 {r}a{},{r}word,0xffff0000;", a[2*block],i+1).unwrap();
         }
     }
-    for p in pair {
+    if small {
+        writeln!(out, ".reg .b32 {r}zero<4>;").unwrap();
+    }
+    for (_, p) in batch {
         if mode == Bf16Row::Ordered {
             writeln!(
                 out,
@@ -177,12 +206,24 @@ pub(super) fn write(out: &mut String, id: usize, pair: [&Product<'_>; 2], mode: 
             )
             .unwrap();
         }
-        writeln!(
-            out,
-            "selp.b32 {},{r}even,0,{r}row; selp.b32 {},{r}odd,0,{r}row; mov.b32 {},0; mov.b32 {},0;",
-            p.d[0], p.d[1], p.d[2], p.d[3]
-        )
-        .unwrap();
+        if small {
+            // B is nonnegative and finite. On inactive rows every product is +0.
+            // The first addition quiets a signaling NaN and turns -0 into +0.
+            // Save every original C before writing D: even a permuted D/C alias is legal.
+            for (i, c) in p.c.iter().enumerate() {
+                writeln!(out, "add.rn.f32 {r}zero{i},{c},0f00000000;").unwrap();
+            }
+            writeln!(out,
+                "selp.b32 {},{r}even,{r}zero0,{r}row; selp.b32 {},{r}odd,{r}zero1,{r}row; mov.b32 {},{r}zero2; mov.b32 {},{r}zero3;",
+                p.d[0], p.d[1], p.d[2], p.d[3]).unwrap();
+        } else {
+            writeln!(
+                out,
+                "selp.b32 {},{r}even,0,{r}row; selp.b32 {},{r}odd,0,{r}row; mov.b32 {},0; mov.b32 {},0;",
+                p.d[0], p.d[1], p.d[2], p.d[3]
+            )
+            .unwrap();
+        }
     }
     writeln!(
         out,
@@ -230,6 +271,70 @@ mod tests {
             ("elsewhere: mov.b32 %b2,%b3;", "%c4", Bf16Row::Tree),
         ] {
             assert!(!test_pair(gap, c, mode).0.contains("$bfgroup_row_"));
+        }
+    }
+
+    #[test]
+    fn bounded_quartets_use_original_c_and_require_all_eight_words() {
+        let mut body_text = "{.reg .pred %p; .reg .b32 %a<4>,%b<8>,%n,%q,%k,tmp,%c<16>;".to_string();
+        body_text.push_str("mov.b32 %k,0x43004300; mov.b32 tmp,0xbf80bf80;");
+        for n in 0..8 {
+            write!(
+                body_text,
+                "and.b32 %n,%a0,0x000f000f; or.b32 %q,%n,0x43004300; fma.rn.bf16x2 %b{n},%k,tmp,%q;"
+            )
+            .unwrap();
+        }
+        let proof_end = body_text.len();
+        for k in 0..4 {
+            let [i, j, m, n] = [4 * k, 4 * k + 1, 4 * k + 2, 4 * k + 3];
+            write!(
+                body_text,
+                "{MMA} {{%c{j},%c{m},%c{n},%c{i}}},{{%a0,%a1,%a2,%a3}},{{%b{},%b{}}},{{%c{i},%c{j},%c{m},%c{n}}};",
+                2 * k,
+                2 * k + 1
+            )
+            .unwrap();
+        }
+        body_text.push('}');
+        for mode in [Bf16Row::Ordered, Bf16Row::Tree] {
+            let opt = Options {
+                bf16_row: mode,
+                ..Default::default()
+            };
+            let (fast, _) = body(&body_text, 64, opt).unwrap();
+            assert_eq!(fast.matches("vote.sync.any.pred").count(), 1);
+            for k in 0..4 {
+                let before = format!("add.rn.f32 %bfgroup_0_rzero3,%c{},0f00000000;", 4 * k + 3);
+                let write = format!("selp.b32 %c{},%bfgroup_0_reven,%bfgroup_0_rzero0,", 4 * k + 1);
+                assert!(fast.find(&before).unwrap() < fast.find(&write).unwrap());
+            }
+            assert_eq!(fast.contains("setp.ge.u32 %bfgroup_0_rbad"), mode == Bf16Row::Tree);
+            assert!(fast.contains("setp.ne.u32 %bfgroup_0_rbad,%bfgroup_0_rflags,0;"));
+            let quartet = |text: &str| {
+                body(text, 64, opt)
+                    .unwrap()
+                    .0
+                    .matches("add.rn.f32 %bfgroup_0_rzero3,")
+                    .count()
+                    == 4
+            };
+            // A family member with leading zeroes is one register even across a scope.
+            assert!(quartet(&body_text.replace("%b1,", "%b01,")));
+            for gap in [
+                "@%p mov.u32 %b01,%a3;",
+                "join:",
+                "{.reg .b32 %b<2>; mov.b32 %b01,%a3;}",
+                "{.reg .b32 %b1; mov.b32 %b1,%a3;}",
+                "bra join; mov.u32 %b1,0; join:",
+            ] {
+                let mut partial = body_text.clone();
+                partial.insert_str(proof_end, gap);
+                assert!(!quartet(&partial), "{gap}");
+            }
+            let mut ambiguous = body_text.replace("%b1,", "%b01,");
+            ambiguous.insert_str(ambiguous.find(MMA).unwrap(), "{.reg .b32 %b1;}");
+            assert!(body(&ambiguous, 64, opt).is_err());
         }
     }
 

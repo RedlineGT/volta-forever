@@ -1,4 +1,5 @@
 //! Bit facts for straight-line operations that construct packed floating-point operands.
+pub(super) mod nibbles;
 use std::collections::HashMap;
 
 use super::types::{first_operand, integer};

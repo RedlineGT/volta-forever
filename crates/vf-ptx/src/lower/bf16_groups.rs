@@ -124,6 +124,11 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
     let mut groups = 0;
     let mut added_products = 0;
     let mut declarations = Declarations::default();
+    let small_b = if options.bf16_row != Bf16Row::Off {
+        super::known_bits::nibbles::at_products(text, items, MMA)
+    } else {
+        HashSet::new()
+    };
     let mut depth = 0;
     while first < items.len() {
         match &items[first].kind {
@@ -176,23 +181,26 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
                 break;
             }
         }
-        if products.len() < 4 && !(products.len() == 2 && scheduled.contains(&items[first].range.start)) {
-            first += 1;
-            continue;
-        }
         if options.bf16_row != Bf16Row::Off
-            && let [(one, left), (two, right)] = &products[..]
-            && *two == *one + 1
-            && scheduled.contains(&items[*one].range.start)
-            && row::eligible(left, right, &declarations)
+            && let Some((batch, small)) = row::batch(
+                &products,
+                &declarations,
+                &small_b,
+                scheduled.contains(&items[first].range.start),
+            )
         {
-            let begin = items[*one].range.start;
-            let end = items[*two].range.end;
+            let begin = items[first].range.start;
+            let last_product = batch.last().unwrap().0;
+            let end = items[last_product].range.end;
             out.push_str(&text[copied..begin]);
-            row::write(&mut out, groups, [left, right], options.bf16_row, &text[begin..end]);
+            row::write(&mut out, groups, batch, options.bf16_row, small, &text[begin..end]);
             copied = end;
             groups += 1;
-            first = last + 1;
+            first = last_product + 1;
+            continue;
+        }
+        if products.len() < 4 && !(products.len() == 2 && scheduled.contains(&items[first].range.start)) {
+            first += 1;
             continue;
         }
         if !options.bf16_tc_groups {
