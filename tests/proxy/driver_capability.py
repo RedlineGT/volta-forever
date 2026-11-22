@@ -95,11 +95,20 @@ def limited(given, code_sm):
     return code_sm if given and code_sm and given // 10 > code_sm // 10 else given
 
 
+def asked():
+    """What VF_CAPABILITY asks for, as an SM number: None when it is not set, and when it is not a
+    capability written <major>.<minor> of 7.0 or more (said, and not used)."""
+    major, dot, minor = os.environ.get("VF_CAPABILITY", "").strip().partition(".")
+    if not (major.isdigit() and dot and minor.isdigit() and len(minor) == 1):
+        return None
+    sm = int(major) * 10 + int(minor)
+    return sm if sm >= 70 else None
+
+
 def run(proxy, directory):
     api = c.CDLL(str(proxy))
     launched = "VOLTA_FOREVER" in os.environ
-    override = os.environ.get("VF_CAPABILITY")
-    given = int(override.replace(".", "")) if override else None
+    given = asked()
     # Machine code only, as PyTorch's (from sm_75) and SGLang's kernels (from sm_80): told no later
     # generation than the code that runs, whatever VF_CAPABILITY asks.
     for name, code_sm in (("turing_only", 75), ("ampere_only", 80)):
@@ -138,8 +147,7 @@ def run(proxy, directory):
 def run_runtimes(proxy, directory):
     """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED)."""
     api = c.CDLL(str(proxy))
-    override = os.environ.get("VF_CAPABILITY")
-    given = int(override.replace(".", "")) if override else None
+    given = asked()
     for runtime, user, code_sm in (("libcudart.so.13", "user_turing.so", 75), ("libcudart.so.14", "user_ptx.so", None),
                                    ("libcudart.so.15", "user_ampere.so", 80)):
         c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
@@ -189,12 +197,23 @@ if __name__ == "__main__":
             env = {k: v for k, v in os.environ.items() if k not in ("VOLTA_FOREVER", "VF_CAPABILITY")}
             env.update(VF_REAL_LIBCUDA=str(directory / "mock.so"), VF_LOG_LEVEL="0")
             for launched, override in ((True, None), (True, "7.0"), (True, "8.0"), (True, "12.0"), (False, None),
-                                       (False, "8.0")):
+                                       (False, "8.0"), (True, "8"), (True, "sm_80"), (True, "6.1"), (True, "0.0")):
                 settings = {"VOLTA_FOREVER": "test"} if launched else {}
                 if override:
                     settings["VF_CAPABILITY"] = override
                 for mode in ([], ["--runtimes"]):
                     subprocess.run([sys.executable, __file__, proxy, directory, *mode], env={**env, **settings},
                                    check=True)
+            # A value that is not used is said once, at the default log level; one that is used is not.
+            for override, said in (("8", "VF_CAPABILITY=8 is not a compute capability"),
+                                   ("6.1", "VF_CAPABILITY=6.1 is below the 7.0 of the GPU"), ("8.0", None)):
+                settings = {"VOLTA_FOREVER": "test", "VF_CAPABILITY": override, "VF_LOG_LEVEL": "1"}
+                log = subprocess.run([sys.executable, __file__, proxy, directory], env={**env, **settings},
+                                     check=True, capture_output=True, text=True).stderr
+                lines = [line for line in log.splitlines() if "is not used" in line]
+                if said:
+                    assert len(lines) == 1 and lines[0].startswith(f"[volta-forever] {said}"), log
+                else:
+                    assert not lines, log
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
-              "and machine code that limits what its callers are told")
+              "machine code that limits what its callers are told, and values of VF_CAPABILITY that are not used")

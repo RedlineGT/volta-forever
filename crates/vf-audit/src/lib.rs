@@ -260,11 +260,11 @@ fn init_state() -> AuditState {
         entries,
         own_cookies: std::sync::Mutex::new(Vec::new()),
         cudnn_version,
+        // (A value that is not used is said by the proxy, once.)
         nvml_sm: std::env::var_os("VOLTA_FOREVER").map(|_| {
-            std::env::var("VF_CAPABILITY")
+            vf_adapt::requested_capability()
                 .ok()
-                .as_deref()
-                .and_then(vf_adapt::capability_sm)
+                .flatten()
                 .unwrap_or(vf_adapt::TRANSLATED_FROM)
         }),
     }

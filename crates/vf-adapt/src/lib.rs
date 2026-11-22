@@ -75,6 +75,34 @@ pub fn capability_sm(text: &str) -> Option<u32> {
     major.checked_mul(10)?.checked_add(minor)
 }
 
+/// The capability that `value`, a value of `VF_CAPABILITY`, asks the programs to be told, as an
+/// SM number: `Ok(None)` for an empty value; `Err`, with what to say, for a value that is not a
+/// compute capability written `<major>.<minor>` and for one below the 7.0 of the GPU, which are
+/// not used.
+pub fn capability_from(value: &str) -> Result<Option<u32>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    match capability_sm(value) {
+        None => Err(format!(
+            "VF_CAPABILITY={value} is not a compute capability (<major>.<minor>, such as 8.0): it is not used"
+        )),
+        Some(sm) if sm < 70 => Err(format!(
+            "VF_CAPABILITY={value} is below the 7.0 of the GPU: it is not used"
+        )),
+        Some(sm) => Ok(Some(sm)),
+    }
+}
+
+/// `capability_from` the environment: `Ok(None)` when `VF_CAPABILITY` is not set.
+pub fn requested_capability() -> Result<Option<u32>, String> {
+    match std::env::var("VF_CAPABILITY") {
+        Ok(value) => capability_from(&value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err("VF_CAPABILITY is not text: it is not used".to_string()),
+    }
+}
+
 /// With `VF_TRANSLATE_DUMP=DIR`, every cubin given to the translator is written to
 /// `DIR/<pid>-<number>.sm_<target>.cubin` as it was received: the machine code a program really loads,
 /// to be translated and checked apart (`reference/validate.py`). Libraries keep some of
@@ -268,7 +296,8 @@ impl Policy {
     /// `VF_BF16_TC_GROUPS=1`: use guarded Volta FP16 Tensor Cores for groups of BF16 products.
     /// `VF_BF16_TC_TILES=1`: apply the same guarded conversion to two-by-two BF16 tiles.
     /// `VF_BF16_COLUMN=ordered|tree`: specialize four BF16 products with one active B column.
-    /// `VF_CAPABILITY=<major>.<minor>`: the compute capability the programs are told (`told_sm`).
+    /// `VF_CAPABILITY=<major>.<minor>`: the compute capability the programs are told (`told_sm`);
+    /// a value that is not one, or is below 7.0, is not used (`requested_capability`).
     /// `VF_TRANSLATE=0`: do not translate machine code; `VF_TRANSLATE=first`: translate it also
     /// where an image has PTX (`Translate`).
     pub fn with_environment(mut self) -> Policy {
@@ -303,7 +332,7 @@ impl Policy {
                 _ => Bf16Row::Off,
             };
         }
-        if let Some(sm) = std::env::var("VF_CAPABILITY").ok().as_deref().and_then(capability_sm) {
+        if let Ok(Some(sm)) = requested_capability() {
             self.told_sm = Some(sm);
         }
         if let Ok(value) = std::env::var("VF_PAIRS") {
@@ -1367,6 +1396,33 @@ mod tests {
         assert_eq!(capability_sm("12.1"), Some(121));
         assert_eq!(capability_sm("8"), None);
         assert_eq!(capability_sm("8.10"), None);
+    }
+
+    #[test]
+    fn a_capability_that_is_not_one_or_is_below_the_gpu_is_said_and_not_used() {
+        for (value, sm) in [
+            ("8.0", 80),
+            (" 8.0", 80),
+            ("8.0 ", 80),
+            ("8.6", 86),
+            ("7.0", 70),
+            ("12.0", 120),
+        ] {
+            assert_eq!(capability_from(value), Ok(Some(sm)), "{value}");
+        }
+        assert_eq!(capability_from(""), Ok(None));
+        assert_eq!(capability_from(" "), Ok(None));
+        for value in ["8", "80", "sm_80", "8,0", "8.10", "abc", "4294967295.0"] {
+            let said = capability_from(value).unwrap_err();
+            assert!(
+                said.contains(&format!("VF_CAPABILITY={value} is not a compute capability")),
+                "{said}"
+            );
+        }
+        for value in ["6.1", "0.0"] {
+            let said = capability_from(value).unwrap_err();
+            assert!(said.contains("below the 7.0 of the GPU"), "{said}");
+        }
     }
 
     #[test]

@@ -202,6 +202,9 @@ fn real_library() -> Option<CString> {
 extern "C" fn init() {
     let config = config();
     log::open();
+    if let Err(problem) = vf_adapt::requested_capability() {
+        log::warn(format_args!("{problem}"));
+    }
     profile::open();
     let path = real_library();
     let handle = match &path {
