@@ -1,0 +1,16 @@
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="input",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="device_hit",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="host_hit",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="storage_hit",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="input",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 333.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="device_hit",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="host_hit",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+sglang:prefill_effective_tokens_total{engine_type="unified",mode="storage_hit",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+sglang:forward_execution_seconds_total{category="extend",engine_type="unified",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 17.03753790283203
+sglang:forward_execution_seconds_total{category="decode",engine_type="unified",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="1"} 1.3405071268081667
+sglang:forward_execution_seconds_total{category="extend",engine_type="unified",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 17.024852226257323
+sglang:forward_execution_seconds_total{category="decode",engine_type="unified",model_name="qwen",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.3387765655517576
+sglang:prompt_tokens_total{engine_type="unified",is_streaming="false",model_name="qwen"} 105.0
+sglang:prompt_tokens_total{engine_type="unified",is_streaming="true",model_name="qwen"} 228.0
+sglang:generation_tokens_total{engine_type="unified",is_streaming="false",model_name="qwen"} 10.0
+sglang:generation_tokens_total{engine_type="unified",is_streaming="true",model_name="qwen"} 64.0

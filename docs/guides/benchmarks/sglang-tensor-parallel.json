@@ -1,0 +1,195 @@
+{
+  "engine": "SGLang 0.5.23, official wheel environment",
+  "pytorch": "2.14.1+cu130",
+  "hardware": "Tesla V100-SXM2-32GB, NVIDIA driver 580.178.04",
+  "model": {
+    "repository": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+    "revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+    "weight_shards": 9,
+    "loader": "Upstream automatic AWQ Marlin"
+  },
+  "runtime": {
+    "toolkit": "CUDA 13.5.0",
+    "vf_nccl_selection_commit": "e9687ce6ba25b2bdf1ebb2f172fa7e99b6ec79c5",
+    "vf_proxy_sha256": "7a93fd679f20be483cf4a8feb2ddc79272677bec1fd21f2ae8bf3e3d7fe05e1b",
+    "vf_launcher_sha256": "f454ffc8078b37cbc0765ac6edac4d9b57c509557a6fdbe742615b9c79366e6b",
+    "fetched_nccl_sha256": "f90198d76c8dfba9b4764c29f32fae83be6a396a357c1e2ccb10a7f68ff6df0d",
+    "manual_audit_map": false,
+    "sgl_kernel_aot_sha256": "a75fb56d461b9ba40fe96f62ae88a2cc622ea3cb2930e152f8e2028d519fad68"
+  },
+  "protocol": {
+    "prompts": "prompts.json",
+    "sequence": "one Lisbon warm-up then three disjoint prompts, 227 uncached input and 64 generated tokens each, batch 1, temperature 0, speculation and thinking disabled",
+    "gpu_timing": "Deltas of forward_execution_seconds_total for each tp_rank and phase. The reference phase duration is the maximum accumulated time from any rank over the entire request. It does not trace which rank was slowest on each step or measure wall-clock delivery. Phase rates use 227 inputs and 63 post-first-token steps.",
+    "client_timing": "Monotonic time from sending the request to the first nonempty SSE text fragment, and from that fragment to the last nonempty fragment, measured independently of the GPU counters.",
+    "reproduce": "Follow the SGLang guide with vf fetch --only libnccl, add --tp N to the server command, then run python3 sglang.py --tp-size N in the directory with prompts.json."
+  },
+  "first_two_gpu_functional_check": {
+    "gpus": [
+      {
+        "uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+        "pci_bus": "00000000:3B:00.0"
+      },
+      {
+        "uuid": "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd",
+        "pci_bus": "00000000:AF:00.0"
+      }
+    ],
+    "response_cities": [
+      "Paris",
+      "Lisbon",
+      "Kyoto",
+      "Lyon",
+      "Lima"
+    ],
+    "collective": "NCCL 2.32.6+cuda12.9 P2P/IPC/read",
+    "new_xid_count": 0,
+    "timing_note": "The original single-rank client summed both GPU timers, while token totals were emitted once. These observations establish functionality only.",
+    "aggregate_warmup_plus_three_requests": {
+      "input_tokens": 909,
+      "output_tokens": 256,
+      "post_first_token_decode_steps": 252,
+      "ranks": [
+        {
+          "tp_rank": 0,
+          "prefill_s": 0.32131072235107183,
+          "decode_s": 2.9070602273941013
+        },
+        {
+          "tp_rank": 1,
+          "prefill_s": 0.319626243591312,
+          "decode_s": 2.908301310539246
+        }
+      ]
+    }
+  },
+  "tensor_parallel": {
+    "2": {
+      "gpus": [
+        {
+          "uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+          "pci_bus": "00000000:3B:00.0"
+        },
+        {
+          "uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+          "pci_bus": "00000000:18:00.0"
+        }
+      ],
+      "ubuntu_version": "24.04.5 LTS",
+      "nccl_version": "2.32.6+cuda12.9",
+      "nccl_transport": [
+        "P2P/IPC/read"
+      ],
+      "nccl_reported_nvlink_topology": true,
+      "confirmed_schedulers_using_fetched_nccl": 2,
+      "model_health": "ready",
+      "semantic_reply": "Paris",
+      "new_xid_count": 0,
+      "requests": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.09357823944091948,
+          "decode_s": 0.7374878730773929,
+          "prefill_tokens_per_s": 2436.4638762406676,
+          "decode_tokens_per_s": 85.42513348336604,
+          "text": "Lisbon, Portugal, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one team member places a blue folder on the long table while another inspects the signs near the stairs to report any changes before the doors open. We meet after lunch to review the morning",
+          "gpu_rank_phases": [
+            {
+              "tp_rank": 0,
+              "prefill_s": 0.09357823944091948,
+              "decode_s": 0.7372369899749753
+            },
+            {
+              "tp_rank": 1,
+              "prefill_s": 0.09277133178710883,
+              "decode_s": 0.7374878730773929
+            }
+          ],
+          "client_ttft_s": 0.11540149385109544,
+          "client_first_to_last_text_s": 0.7424401920288801
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.08149401855468597,
+          "decode_s": 0.7294607324600211,
+          "prefill_tokens_per_s": 2785.4805055130923,
+          "decode_tokens_per_s": 86.36516977074264,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by",
+          "gpu_rank_phases": [
+            {
+              "tp_rank": 0,
+              "prefill_s": 0.08149401855468597,
+              "decode_s": 0.7290562553405753
+            },
+            {
+              "tp_rank": 1,
+              "prefill_s": 0.07975526428222679,
+              "decode_s": 0.7294607324600211
+            }
+          ],
+          "client_ttft_s": 0.09534478094428778,
+          "client_first_to_last_text_s": 0.7333038221113384
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.08050176239013496,
+          "decode_s": 0.7295027170181272,
+          "prefill_tokens_per_s": 2819.8140420813643,
+          "decode_tokens_per_s": 86.3601992567144,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the",
+          "gpu_rank_phases": [
+            {
+              "tp_rank": 0,
+              "prefill_s": 0.07988326263427581,
+              "decode_s": 0.7292006444931034
+            },
+            {
+              "tp_rank": 1,
+              "prefill_s": 0.08050176239013496,
+              "decode_s": 0.7295027170181272
+            }
+          ],
+          "client_ttft_s": 0.09595510293729603,
+          "client_first_to_last_text_s": 0.7329542671795934
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.07935385894775493,
+          "decode_s": 0.7290071020126345,
+          "prefill_tokens_per_s": 2860.604424410569,
+          "decode_tokens_per_s": 86.41891118216861,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily in a shared room situated near the main entrance. Each morning, a volunteer places a yellow envelope on the long table to initiate the day's activities, while another checks the signs by the stairs to report any changes before the doors open. We meet",
+          "gpu_rank_phases": [
+            {
+              "tp_rank": 0,
+              "prefill_s": 0.07909683227538977,
+              "decode_s": 0.72863846206665
+            },
+            {
+              "tp_rank": 1,
+              "prefill_s": 0.07935385894775493,
+              "decode_s": 0.7290071020126345
+            }
+          ],
+          "client_ttft_s": 0.0930693477857858,
+          "client_first_to_last_text_s": 0.732672831043601
+        }
+      ],
+      "medians": {
+        "id": "median",
+        "prefill_tokens_per_s": 2819.8140420813643,
+        "decode_tokens_per_s": 86.36516977074264,
+        "client_ttft_s": 0.09534478094428778,
+        "client_first_to_last_text_s": 0.7329542671795934
+      }
+    }
+  }
+}

@@ -111,8 +111,14 @@ The launch command selects FlashInfer’s CUDA normalization on V100. To reprodu
 
 The optional JIT router with FlashInfer’s CUDA normalization measured 2,002.22 prefill and 77.20 decode tokens/s in the same virtual environment. [Installation and comparison](./benchmarks/sglang-fresh-venv.json)
 
-For tensor parallelism on V100s, fetch the CUDA 12 build of NCCL before starting SGLang with `--tp 2` or `--tp 4`. VF selects this library for both SGLang and PyTorch, including when either opens the wheel's `libnccl.so.2` by absolute path. The issue reporter verified generation on two and four GPUs. [Multi-GPU results and tested models](https://github.com/nbald/volta-forever/issues/2)
+For tensor parallelism, fetch the CUDA 12 build of NCCL and add `--tp 2` to the server command in section 4. The two workers loaded NCCL 2.32.6+cuda12.9 automatically. On two V100s, the same AWQ checkpoint answered Paris and all four benchmark prompts, with medians of **2819.81 prefill tokens/s** and **86.37 decode steps/s**. The client uses the longest cumulative GPU duration across the ranks for each whole phase. Its separate median time to first visible text was **95.34 ms**. [Per-rank durations, client timings and replies](./benchmarks/sglang-tensor-parallel.json) · [Upstream issue and other multi-GPU results](https://github.com/nbald/volta-forever/issues/2)
 
 ```sh
 vf fetch --only libnccl
+```
+
+After the server starts with two ranks, run the client from a second terminal.
+
+```sh
+python3 ~/volta-forever/docs/guides/benchmarks/sglang.py --tp-size 2
 ```
