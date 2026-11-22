@@ -39,6 +39,22 @@ int kernel(int (*f)(int *, int, void *, int), int *v) { return f(v, 6, (void *)1
 """
 
 
+# A main program that asks the driver itself:   main PROXY [DIRECTORY-TO-ENTER-FIRST]
+MAIN = """
+#include <dlfcn.h>
+#include <stdio.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    void *proxy = dlopen(argv[1], RTLD_NOW);
+    if (!proxy || (argc > 2 && chdir(argv[2]))) return 2;
+    int (*query)(int *, int *, int) = (int (*)(int *, int *, int))dlsym(proxy, "cuDeviceComputeCapability");
+    int major = -1, minor = -1, status = query(&major, &minor, 0);
+    printf("%d.%d %d\\n", major, minor, status);
+    return 0;
+}
+"""
+
+
 def probe(api, client, device_sm, binary_sm):
     val, a, b = c.c_int(), c.c_int(), c.c_int()
     for dev, sm in enumerate((device_sm, 75, 80, 86)):
@@ -182,6 +198,29 @@ def build(directory):
                         "-Wl,--no-as-needed", f"-l:{runtime}", "-Wl,-rpath,$ORIGIN"],
                        input="int user(void) { return 0; }\n", text=True, check=True)
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", runtimes / user], check=True)
+    (directory / "bin").mkdir()
+    (directory / "elsewhere").mkdir()
+    subprocess.run(["cc", "-O0", "-x", "c", "-", "-o", str(directory / "main"), "-ldl"], input=MAIN, text=True,
+                   check=True)
+    for name, fixture in (("main75", data / "elf75-ptx75-zstd.fatbin"),
+                          ("main_turing_only", directory / "turing_only.fatbin")):
+        subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", directory / "main",
+                        directory / "bin" / name], check=True)
+
+
+def run_main(proxy, directory, env):
+    """The main program is told what its code says, however it was started (by its path, by name
+    through PATH, before a change of directory)."""
+    programs = directory / "bin"
+    for name, override, told in (("main75", None, "7.5"), ("main75", "8.0", "8.0"),
+                                 ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5")):
+        settings = {**env, "VOLTA_FOREVER": "test", "PATH": f"{programs}:{os.environ['PATH']}"}
+        if override:
+            settings["VF_CAPABILITY"] = override
+        for command, cwd in (([str(programs / name), str(proxy)], directory), ([name, str(proxy)], directory / "elsewhere"),
+                             ([f"./{name}", str(proxy), "/"], programs)):
+            out = subprocess.run(command, cwd=cwd, env=settings, check=True, capture_output=True, text=True).stdout
+            assert out == f"{told} 0\n", (command, cwd, override, out)
 
 
 if __name__ == "__main__":
@@ -215,5 +254,7 @@ if __name__ == "__main__":
                     assert len(lines) == 1 and lines[0].startswith(f"[volta-forever] {said}"), log
                 else:
                     assert not lines, log
+            run_main(proxy, directory, env)
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
-              "machine code that limits what its callers are told, and values of VF_CAPABILITY that are not used")
+              "machine code that limits what its callers are told, values of VF_CAPABILITY that are not used, "
+              "and main programs however they were started")

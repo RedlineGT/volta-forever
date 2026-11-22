@@ -329,7 +329,15 @@ fn caller(return_address: usize) -> Decision {
     if let Some(decision) = cache.by_base.get(&base) {
         return *decision;
     }
-    let path = unsafe { CStr::from_ptr(info.dli_fname) };
+    let objects = objects(return_address);
+    // For the main program the loader's name is `argv[0]`, which names no file when the program
+    // was started by name through PATH, or once it has changed directory: its file is read
+    // through `/proc/self/exe`.
+    let main = objects
+        .first()
+        .filter(|object| object.holds)
+        .and_then(|object| object.path.as_deref());
+    let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
     // What limits the answer matters only when the user asks for a later generation than Turing's.
     let limits = config()
         .policy
@@ -338,7 +346,7 @@ fn caller(return_address: usize) -> Decision {
     let (caller, own) = classify(path, limits);
     let mut limit = own.map(|sm| (sm, path.to_owned()));
     if limits && caller != Caller::Native {
-        let dependents = dependents_limit(&objects(return_address), &mut cache.limits);
+        let dependents = dependents_limit(&objects, &mut cache.limits);
         if let Some((sm, file)) = dependents
             && limit.as_ref().is_none_or(|(lowest, _)| sm < *lowest)
         {
@@ -349,7 +357,13 @@ fn caller(return_address: usize) -> Decision {
         caller,
         limit: limit.as_ref().map(|(sm, _)| *sm),
     };
-    let name = path.to_string_lossy();
+    let name = match main {
+        Some(path) if path == c"/proc/self/exe" => std::fs::read_link("/proc/self/exe").map_or_else(
+            |_| path.to_string_lossy().into_owned(),
+            |file| file.display().to_string(),
+        ),
+        _ => path.to_string_lossy().into_owned(),
+    };
     match (caller, config().capability, &limit) {
         (Caller::Native, _, _) => log::info(format_args!(
             "{name} is told the real compute capability: it has code for this GPU"
