@@ -463,12 +463,14 @@ unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
 
 /// A lookup of kernel `name` in the module or library `handle`: refused when the kernel cannot run on
 /// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced.
+/// A refusal leaves NULL in `kernel_out`, as NVIDIA's driver does for a name it does not have: a
+/// program that ignores the error then launches nothing, not what its variable held before.
 /// When `kernel_out` is not null and the lookup succeeds, the profiler records the kernel handle ->
 /// name mapping (since `cuFuncGetName` does not work for lazily compiled sub-modules).
 ///
 /// # Safety
-/// `name` must be null or a C string. `kernel_out` must be null or point to the handle the driver
-/// stored.
+/// `name` must be null or a C string. `kernel_out` must be null or writable; after a success it
+/// points to the handle the driver stored.
 unsafe fn lookup(
     handle: usize,
     name: *const c_char,
@@ -480,6 +482,9 @@ unsafe fn lookup(
     }
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     if kernels::refused(handle, &name) {
+        if !kernel_out.is_null() {
+            unsafe { *kernel_out = std::ptr::null_mut() };
+        }
         return CUDA_ERROR_INVALID_PTX;
     }
     let result = find();
@@ -1350,10 +1355,13 @@ type LinkAddData = unsafe extern "C" fn(
     *mut *mut c_void,
 ) -> CUresult;
 
-/// Add `data` to a link, with the CUDA input type matching the replacement image. The linker reads its input during the
-/// call, so the replacement does not outlive it.
+/// Add `data` to the link `state`, with the CUDA input type matching the replacement image. The linker reads its input
+/// during the call, so the replacement does not outlive it; what was found in it goes to the image the link makes
+/// (`images::link_input`, `cuLinkComplete`). A kernel of another input that calls a function of this one that traps is
+/// not known: launched, it ends its CUDA context.
 unsafe fn link_add_data(
     who: &str,
+    state: *mut c_void,
     input: c_int,
     data: *mut c_void,
     size: usize,
@@ -1368,10 +1376,9 @@ unsafe fn link_add_data(
         return call(input, data, size);
     };
     if let Some(first) = replacement.refused().first() {
-        // Linked code comes back as one image of machine code: its lookups cannot be told apart.
-        log::warn(format_args!(
-            "{who}: {} kernels of this code cannot run on this GPU (the first is {}: {}); nothing keeps them \
-             from the program once linked, and launching one ends its CUDA context",
+        log::info(format_args!(
+            "{who}: {} kernels of this code cannot run on this GPU (the first is {}: {}); they are refused if the \
+             program asks for them in the image the link makes",
             replacement.refused().len(),
             first.kernel,
             first.reason
@@ -1384,6 +1391,7 @@ unsafe fn link_add_data(
     };
     let result = call(kind, replacement.as_ptr() as *mut c_void, replacement.len());
     if result == CUDA_SUCCESS {
+        images::link_input(state as usize, &replacement);
         return result;
     }
     log::warn(format_args!(
@@ -1405,7 +1413,7 @@ pub unsafe extern "C" fn cuLinkAddData(
 ) -> CUresult {
     let real = real!(cuLinkAddData: LinkAddData);
     unsafe {
-        link_add_data("cuLinkAddData", input, data, size, |input, data, size| {
+        link_add_data("cuLinkAddData", state, input, data, size, |input, data, size| {
             real(state, input, data, size, name, count, options, values)
         })
     }
@@ -1424,10 +1432,28 @@ pub unsafe extern "C" fn cuLinkAddData_v2(
 ) -> CUresult {
     let real = real!(cuLinkAddData_v2: LinkAddData);
     unsafe {
-        link_add_data("cuLinkAddData", input, data, size, |input, data, size| {
+        link_add_data("cuLinkAddData", state, input, data, size, |input, data, size| {
             real(state, input, data, size, name, count, options, values)
         })
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_void, size: *mut usize) -> CUresult {
+    let real = real!(cuLinkComplete: unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> CUresult);
+    let result = unsafe { real(state, image, size) };
+    if result == CUDA_SUCCESS && !image.is_null() && !size.is_null() {
+        unsafe { images::link_output(state as usize, *image, *size) };
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLinkDestroy(state: *mut c_void) -> CUresult {
+    let real = real!(cuLinkDestroy: unsafe extern "C" fn(*mut c_void) -> CUresult);
+    let result = unsafe { real(state) };
+    images::link_destroyed(state as usize);
+    result
 }
 
 // ---- failed launches (diagnostics) -------------------------------------------------------------------

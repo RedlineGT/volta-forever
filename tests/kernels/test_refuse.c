@@ -4,6 +4,9 @@
  *
  *   test_refuse library    load with cuLibraryLoadData, look up with cuLibraryGetKernel
  *   test_refuse module     load with cuModuleLoadData, look up with cuModuleGetFunction
+ *   test_refuse link       link with cuLinkAddData and cuLinkComplete, load what the link made with
+ *                          cuModuleLoadData, look up with cuModuleGetFunction (the first module
+ *                          without refused_by_compiler, which the linker would refuse whole)
  *
  * Two modules of PTX for sm_75 (so that the proxy adapts them), each with a variable its kernels
  * share. What is wrong with the kernels that must be refused:
@@ -14,7 +17,8 @@
  *     without those functions. (A register that does not exist stands for any instruction the proxy
  *     does not know: nothing it learns later makes this test pass by another way.)
  *   - caller_of_bad is sound and calls bad_helper.
- * A lookup of each of them must return CUDA_ERROR_INVALID_PTX (218); nothing must trap on the GPU.
+ * A lookup of each of them must return CUDA_ERROR_INVALID_PTX (218) and leave NULL in the handle;
+ * nothing must trap on the GPU.
  * The kernel soft has a tanh, which the proxy emulates: it must run, and be announced on the console.
  *
  * Build: gcc -O2 -Wall -o test_refuse test_refuse.c -ldl -lm
@@ -56,6 +60,18 @@ static const char module_main[] =
     ONE_WORD("refused_by_compiler", "    ld.global.u32 %r0, [counter];\n    mov.u32 %r1, %never_declared;\n")
     ONE_WORD("refused_by_layer", "    barrier.cluster.arrive;\n    barrier.cluster.wait;\n");
 
+static const char module_linked[] =
+    ".version 9.0\n"
+    ".target sm_75\n"
+    ".address_size 64\n"
+    "\n"
+    ".visible .global .align 4 .b32 counter = 5;\n"
+    "\n"
+    ONE_WORD("add_one", "    ld.global.u32 %r0, [%rd1];\n    add.u32 %r1, %r0, 1;\n    st.global.u32 [%rd1], %r1;\n")
+    ONE_WORD("read_counter", "    ld.global.u32 %r0, [counter];\n    st.global.u32 [%rd1], %r0;\n")
+    ONE_WORD("soft", "    ld.global.f32 %f0, [%rd1];\n    tanh.approx.f32 %f1, %f0;\n    st.global.f32 [%rd1], %f1;\n")
+    ONE_WORD("refused_by_layer", "    barrier.cluster.arrive;\n    barrier.cluster.wait;\n");
+
 static const char module_helper[] =
     ".version 9.0\n"
     ".target sm_75\n"
@@ -80,8 +96,8 @@ static CUresult (*synchronize)(void);
 static CUresult (*to_device)(CUdeviceptr, const void *, size_t);
 static CUresult (*from_device)(void *, CUdeviceptr, size_t);
 
-static int by_module, failed;
-static void *loaded;
+static int by_module, by_link, failed;
+static void *loaded, *link_state;
 static CUdeviceptr word;
 
 static void check(const char *what, int ok) {
@@ -90,6 +106,18 @@ static void check(const char *what, int ok) {
 }
 
 static CUresult load(const char *text) {
+    if (by_link) {
+        CUresult (*create)(unsigned, int *, void **, void **) = DRIVER("cuLinkCreate_v2");
+        CUresult (*add)(void *, int, void *, size_t, const char *, unsigned, int *, void **) = DRIVER("cuLinkAddData_v2");
+        CUresult (*complete)(void *, void **, size_t *) = DRIVER("cuLinkComplete");
+        CUresult (*load_data)(void **, const void *) = DRIVER("cuModuleLoadData");
+        void *image = NULL;
+        size_t size = 0;
+        CUresult r = create(0, NULL, NULL, &link_state);
+        if (!r) r = add(link_state, 1 /* CU_JIT_INPUT_PTX */, (void *)text, strlen(text) + 1, "linked.ptx", 0, NULL, NULL);
+        if (!r) r = complete(link_state, &image, &size);
+        return r ? r : load_data(&loaded, image);
+    }
     if (by_module) {
         CUresult (*load_data)(void **, const void *) = DRIVER("cuModuleLoadData");
         return load_data(&loaded, text);
@@ -102,6 +130,10 @@ static CUresult load(const char *text) {
 static void unload(void) {
     CUresult (*unload_it)(void *) = DRIVER(by_module ? "cuModuleUnload" : "cuLibraryUnload");
     unload_it(loaded);
+    if (by_link) {
+        CUresult (*destroy)(void *) = DRIVER("cuLinkDestroy");
+        destroy(link_state);
+    }
 }
 
 /* The function to launch for kernel `name`, or the error of the lookup. */
@@ -133,11 +165,12 @@ static unsigned run(const char *name, unsigned in) {
 }
 
 static void refused(const char *name) {
-    void *function = NULL;
-    char what[128];
-    CUresult r = find(name, &function);
-    snprintf(what, sizeof what, "%s refused with error 218 (got %d)", name, r);
-    check(what, r == 218);
+    CUresult (*get)(void **, void *, const char *) = DRIVER(by_module ? "cuModuleGetFunction" : "cuLibraryGetKernel");
+    void *handle = (void *)0xdeadbeef;
+    char what[160];
+    CUresult r = get(&handle, loaded, name);
+    snprintf(what, sizeof what, "%s refused with error 218 and a null handle (got %d, %p)", name, r, handle);
+    check(what, r == 218 && handle == NULL);
 }
 
 static unsigned global(const char *name) {
@@ -151,11 +184,12 @@ static unsigned global(const char *name) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2 || (strcmp(argv[1], "library") && strcmp(argv[1], "module"))) {
-        fprintf(stderr, "usage: test_refuse library|module\n");
+    if (argc != 2 || (strcmp(argv[1], "library") && strcmp(argv[1], "module") && strcmp(argv[1], "link"))) {
+        fprintf(stderr, "usage: test_refuse library|module|link\n");
         return 2;
     }
-    by_module = !strcmp(argv[1], "module");
+    by_link = !strcmp(argv[1], "link");
+    by_module = by_link || !strcmp(argv[1], "module");
     const char *path = getenv("DRVRUN_LIBCUDA");
     cuda = dlopen(path ? path : "libcuda.so.1", RTLD_NOW);
     if (!cuda) {
@@ -177,8 +211,9 @@ int main(int argc, char **argv) {
     }
 
     printf("through the %s interface\n", argv[1]);
-    CUresult r = load(module_main);
-    printf("module with a kernel the compiler refuses and one the proxy refuses: load -> %d\n", r);
+    CUresult r = load(by_link ? module_linked : module_main);
+    printf("module with %s: load -> %d\n",
+           by_link ? "a kernel the proxy refuses" : "a kernel the compiler refuses and one the proxy refuses", r);
     check("the module loads", r == 0);
     if (r == 0) {
         check("add_one(10) is 11", run("add_one", 10) == 11);
@@ -191,15 +226,17 @@ int main(int argc, char **argv) {
         memcpy(&got, &out, sizeof got);
         printf("  soft(0.5) = %.6f, tanh(0.5) = %.6f\n", got, tanhf(half));
         check("soft computes tanh", fabsf(got - tanhf(half)) < 1e-3f);
-        refused("refused_by_compiler");
+        if (!by_link) refused("refused_by_compiler");
         refused("refused_by_layer");
         check("add_one still runs", run("add_one", 41) == 42);
         unload();
     }
 
-    r = load(module_helper);
-    printf("module with a function the compiler refuses: load -> %d\n", r);
-    check("the module loads", r == 0);
+    r = by_link ? 1 : load(module_helper);
+    if (!by_link) {
+        printf("module with a function the compiler refuses: load -> %d\n", r);
+        check("the module loads", r == 0);
+    }
     if (r == 0) {
         check("good_reader reads 7", run("good_reader", 0) == 7);
         refused("caller_of_bad");

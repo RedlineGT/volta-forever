@@ -140,24 +140,29 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, and the same kernel asked for by another thread is the same; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Four more host regressions exercise the built libraries directly:
+Six more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
 python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1
 python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
+python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
+python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
-deferred loads and the lifetime of replacement images. The second checks the compute
-capability that the proxy gives (device attributes, `cuDeviceComputeCapability`, the
-attributes of a function and of a kernel) to callers whose code is for different GPUs, on a
-stand-in driver with a V100 and three later cards, with and without the launcher's marker and
-`VF_CAPABILITY`; it needs gcc and objcopy. The third checks the capability that NVML gives
-through the audit library, by `ctypes` (as `pynvml` asks) and to a library linked against
-it; it needs gcc. The fourth links a native sm_70 device function from both a host object
-and a static library with the CUDA 12.9 toolkit.
+deferred loads and the lifetime of replacement images, and that a refused lookup leaves NULL in
+the handle. The second checks the compute capability that the proxy gives (device attributes,
+`cuDeviceComputeCapability`, the attributes of a function and of a kernel) to callers whose
+code is for different GPUs, on a stand-in driver with a V100 and three later cards, with and
+without the launcher's marker and `VF_CAPABILITY`; it needs gcc and objcopy. The third checks
+the capability that NVML gives through the audit library, by `ctypes` (as `pynvml` asks) and
+to a library linked against it; it needs gcc. The fourth checks, with another stand-in, that
+a kernel refused in an input of the driver's linker is refused in the image the link makes,
+and in a copy of it. The fifth checks that a refused kernel of NCCL makes the layer say once,
+at the default log level, that NCCL's CUDA 12 build is the remedy. The last links a native
+sm_70 device function from both a host object and a static library with the CUDA 12.9 toolkit.
 
 ### Forwarding stack test (`tests/forward/`)
 

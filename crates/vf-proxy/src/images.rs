@@ -260,6 +260,115 @@ pub fn release(handle: usize) {
     crate::contexts::forget(handle);
 }
 
+/// What the adaptation found in the inputs of a link.
+#[derive(Default, Clone)]
+struct Found {
+    refused: Vec<Refused>,
+    emulated: Vec<Emulated>,
+}
+
+/// The driver's linker gives back one image of machine code for this GPU, which the program then
+/// loads as it got it or as a copy: by its bytes alone, its kernels that trap cannot be told from
+/// the others. So what was found in the inputs of a link (`cuLinkAddData`) is kept by link state,
+/// and passed on to the image the link makes (`cuLinkComplete`), kept by the length and digest of
+/// its bytes. (Only links with something to say are kept: the images grow with the distinct links
+/// of a program that refuses kernels.)
+#[derive(Default)]
+struct Links {
+    inputs: HashMap<usize, Found>,
+    outputs: HashMap<(usize, u64), Found>,
+}
+
+static LINKS: LazyLock<Mutex<Links>> = LazyLock::new(|| Mutex::new(Links::default()));
+
+fn links() -> std::sync::MutexGuard<'static, Links> {
+    LINKS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = twox_hash::XxHash64::with_seed(0x6c696e6b);
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+/// The extent of the cubin at `bytes`, by its tables, within `len` when it is known.
+///
+/// # Safety
+/// `bytes` must point to a cubin the driver could read, or to `len` readable bytes.
+unsafe fn cubin_extent(bytes: *const u8, len: Option<usize>) -> Option<usize> {
+    let header = unsafe { std::slice::from_raw_parts(bytes, 0x40) };
+    fatbin::cubin_tables_len(header)
+        .filter(|&tables| len.is_none_or(|len| tables <= len))
+        .and_then(|tables| fatbin::cubin_len(unsafe { std::slice::from_raw_parts(bytes, tables) }))
+        .filter(|&length| len.is_none_or(|len| length <= len))
+}
+
+/// `replacement` was added to the link `state`.
+pub fn link_input(state: usize, replacement: &Replacement) {
+    if replacement.refused.is_empty() && replacement.emulated.is_empty() {
+        return;
+    }
+    let mut links = links();
+    let found = links.inputs.entry(state).or_default();
+    found.refused.extend(replacement.refused.iter().cloned());
+    found.emulated.extend(replacement.emulated.iter().cloned());
+}
+
+/// The link `state` made the `size` bytes at `image`.
+///
+/// # Safety
+/// `image` must be null or point to `size` readable bytes.
+pub unsafe fn link_output(state: usize, image: *const c_void, size: usize) {
+    let mut links = links();
+    let Some(found) = links.inputs.get(&state).cloned() else {
+        return;
+    };
+    if image.is_null() || size < 0x40 || !fatbin::is_elf(unsafe { std::slice::from_raw_parts(image.cast(), 4) }) {
+        return;
+    }
+    // Keyed as `linked` finds it again when the image is loaded.
+    let Some(length) = (unsafe { cubin_extent(image.cast(), Some(size)) }) else {
+        return;
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(image.cast::<u8>(), length) };
+    links.outputs.insert((length, digest(bytes)), found);
+}
+
+/// The link `state` is destroyed: the driver may give its handle to another.
+pub fn link_destroyed(state: usize) {
+    links().inputs.remove(&state);
+}
+
+/// The cubin at `bytes`, when a link made it from inputs in which kernels trap or run emulated
+/// instructions: the same bytes, to load with what is known of those kernels.
+///
+/// # Safety
+/// As for `adapt`, with `bytes` at a cubin.
+unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
+    let links = links();
+    if links.outputs.is_empty() {
+        return None;
+    }
+    let length = unsafe { cubin_extent(bytes, len) }?;
+    let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
+    let found = links.outputs.get(&(length, digest(cubin)))?.clone();
+    drop(links);
+    if let Some(first) = found.refused.first() {
+        log::info(format_args!(
+            "{who}: cubin made by the driver's linker, in which {} kernels cannot run on this GPU (the first is {}: \
+             {}); they are refused if the program asks for them",
+            found.refused.len(),
+            first.kernel,
+            first.reason
+        ));
+    }
+    let mut replacement = Replacement::new(cubin.to_vec(), None);
+    replacement.refused = found.refused;
+    replacement.emulated = found.emulated;
+    Some(replacement)
+}
+
 fn report(who: &str, what: &str, outcome: &Outcome) {
     match outcome {
         Outcome::Native => log::trace(format_args!("{who}: {what} with code for this GPU")),
@@ -687,6 +796,9 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
         }
         let header = unsafe { std::slice::from_raw_parts(bytes, 0x40) };
         if !policy.translates_cubin(header) {
+            if let Some(linked) = unsafe { linked(who, bytes, len) } {
+                return Some(linked);
+            }
             return finish(who, "cubin", policy.adapt_cubin(header), None, false, None);
         }
         // To be translated, all of it: how far it reaches is in its tables, which the driver would

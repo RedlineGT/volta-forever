@@ -20,8 +20,11 @@ def check(proxy, mock):
     options = (c.c_int * 1)(1)  # CU_LIBRARY_BINARY_IS_PRESERVED
     values = (c.c_void_p * 1)(None)
     assert api.cuLibraryLoadData(c.byref(library), ptx, None, None, 0, options, values, 1) == 0
-    kernel = c.c_void_p()
+    # A refused lookup leaves NULL in the handle, as NVIDIA's driver does for a name it does not
+    # have: a program that ignores the error must not launch what the variable held before.
+    kernel = c.c_void_p(0xDEADBEEF)
     assert api.cuLibraryGetKernel(c.byref(kernel), library, b"bad") == 218
+    assert kernel.value is None, hex(kernel.value)
     assert api.cuLibraryGetKernel(c.byref(kernel), library, b"good") == 0
     function, alias = c.c_void_p(), c.c_void_p()
     assert api.cuKernelGetFunction(c.byref(function), kernel) == 0
@@ -35,6 +38,9 @@ def check(proxy, mock):
     assert api.cuLibraryGetModule(c.byref(module), library) == 0
     direct = c.c_void_p()
     assert api.cuModuleLoadData(c.byref(direct), ptx) == 0
+    function = c.c_void_p(0xDEADBEEF)
+    assert api.cuModuleGetFunction(c.byref(function), direct, b"bad") == 218
+    assert function.value is None, hex(function.value)
 
     for owner, count_fn, enum_name in (
         (library, api.cuLibraryGetKernelCount, "cuLibraryEnumerateKernels"),
