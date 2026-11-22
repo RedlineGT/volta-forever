@@ -935,6 +935,38 @@ impl LinkedShared {
     }
 }
 
+fn plain_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'$'))
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+}
+
+/// A complete PTX debug location line. An unrecognised extension or trailing text is
+/// kept intact, even if it starts with the same directive.
+fn debug_location(line: &str) -> bool {
+    let mut clauses = line.split(',');
+    let position = |clause: &str, directive: &str| {
+        let mut fields = clause.split_ascii_whitespace();
+        fields.next() == Some(directive)
+            && (0..3).all(|_| fields.next().is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())))
+            && fields.next().is_none()
+    };
+    if !position(clauses.next().unwrap_or_default(), ".loc") {
+        return false;
+    }
+    let Some(function) = clauses.next() else {
+        return true;
+    };
+    let mut fields = function.split_ascii_whitespace();
+    fields.next() == Some("function_name")
+        && fields.next().is_some_and(plain_identifier)
+        && fields.next().is_none()
+        && clauses.next().is_none_or(|inline| position(inline, "inlined_at"))
+        && clauses.next().is_none()
+}
+
 impl ModuleInfo {
     /// Analyse a PTX module. The text should be the full module content (already lowered for Volta
     /// if needed).
@@ -1162,16 +1194,97 @@ impl ModuleInfo {
         self.extract(name)
     }
 
-    /// Compare weak definitions by their complete executable PTX. The returned bytes include
-    /// the module header, entry declaration and body, and every referenced per-block variable.
-    /// Module-wide file and debug string tables accompany the selected definition when emitted.
+    /// Comparison key for a weak leaf, including its header, signature and referenced
+    /// shared storage. Local branch labels and source locations may differ between objects.
+    /// The selected definition and its debug tables are emitted unchanged by `extract`.
     pub fn weak_leaf_definition(&self, name: &str, shared: &LinkedShared) -> Option<Vec<u8>> {
         let entry = self.linked_leaf(name, shared)?;
         let (_, weak, _, _) = parse_linkage(&self.text[entry.range.start..entry.body.start]);
         if !weak {
             return None;
         }
-        self.extract_with_debug(name, &[])
+        let key = self.weak_body_key(entry);
+        self.extract_with_debug(name, &[], key.as_deref().map(|bytes| (entry, bytes)))
+    }
+
+    /// A key for direct branches to unique outer-scope labels. Every occurrence of a
+    /// candidate name must be either its definition or the sole operand of a direct branch.
+    /// Leave an ambiguous scope, a symbol in another role, or an unknown form to byte equality.
+    fn weak_body_key(&self, entry: &FuncDef) -> Option<Vec<u8>> {
+        let raw = std::str::from_utf8(&self.text[entry.body.clone()]).ok()?;
+        let blanked = raw.contains('/').then(|| scan::blank_comments(raw));
+        let body = blanked.as_deref().unwrap_or(raw);
+        let items = scan::items(body.as_bytes(), 0..body.len())?;
+        let mut labels = HashMap::new();
+        let mut depth = 0usize;
+        for item in &items {
+            match item.kind {
+                scan::Kind::Open => depth += 1,
+                scan::Kind::Close => depth = depth.checked_sub(1)?,
+                scan::Kind::Label => {
+                    let name = body[item.range.clone()].strip_suffix(':')?.trim_ascii();
+                    let index = u32::try_from(labels.len()).ok()?;
+                    if depth != 0 || !plain_identifier(name) || labels.insert(name, index).is_some() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let signature = std::str::from_utf8(&self.text[entry.range.start..entry.body.start]).ok()?;
+        if scan::names(signature).any(|s| labels.contains_key(s))
+            || self.variables.iter().any(|v| labels.contains_key(v.name.as_str()))
+            || self.func_decls.iter().any(|f| labels.contains_key(f.name.as_str()))
+            || self.func_defs.iter().any(|f| labels.contains_key(f.name.as_str()))
+        {
+            return None;
+        }
+
+        // PTX source is UTF-8. These two bytes cannot occur in any literal, identifier or
+        // instruction. They separate complete items and encode fixed-width label ordinals.
+        let mut key = Vec::with_capacity(raw.len());
+        let mut targeted = HashSet::new();
+        key.push(0xfe);
+        for item in items {
+            let text = &body[item.range.clone()];
+            let target = match item.kind {
+                scan::Kind::Line if debug_location(text) => continue,
+                scan::Kind::Label => {
+                    let name = text.strip_suffix(':')?.trim_ascii();
+                    Some((item.range.start..item.range.start + name.len(), labels[name]))
+                }
+                scan::Kind::Statement { opcode, operands, .. } => match &body[opcode] {
+                    "bra" | "bra.uni" => {
+                        let all = &body[operands.clone()];
+                        let name = all.trim_ascii();
+                        let &index = labels.get(name)?;
+                        let start = operands.end - all.trim_ascii_start().len();
+                        if scan::names(&body[item.range.start..start]).any(|s| labels.contains_key(s)) {
+                            return None;
+                        }
+                        targeted.insert(index);
+                        Some((start..start + name.len(), index))
+                    }
+                    // These attach non-instruction meanings to names that look like labels.
+                    ".callprototype" | ".calltargets" | ".branchtargets" => return None,
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((range, index)) = target {
+                key.extend_from_slice(&body.as_bytes()[item.range.start..range.start]);
+                key.push(0xff);
+                key.extend_from_slice(&index.to_le_bytes());
+                key.extend_from_slice(&body.as_bytes()[range.end..item.range.end]);
+            } else {
+                if scan::names(text).any(|s| labels.contains_key(s)) {
+                    return None;
+                }
+                key.extend_from_slice(text.as_bytes());
+            }
+            key.push(0xfe);
+        }
+        (targeted.len() == labels.len()).then_some(key)
     }
 
     fn linked_leaf(&self, name: &str, shared: &LinkedShared) -> Option<&FuncDef> {
@@ -1242,10 +1355,15 @@ impl ModuleInfo {
     /// Extract a sub-module containing only the named entry function and its dependencies.
     /// Returns `None` if the entry function is not in this module.
     pub fn extract(&self, entry_name: &str) -> Option<Vec<u8>> {
-        self.extract_with_debug(entry_name, &self.file_directives)
+        self.extract_with_debug(entry_name, &self.file_directives, None)
     }
 
-    fn extract_with_debug(&self, entry_name: &str, debug_directives: &[Range<usize>]) -> Option<Vec<u8>> {
+    fn extract_with_debug(
+        &self,
+        entry_name: &str,
+        debug_directives: &[Range<usize>],
+        comparison_body: Option<(&FuncDef, &[u8])>,
+    ) -> Option<Vec<u8>> {
         if self.has_module_pragma || !self.entries.contains(&entry_name.to_string()) {
             return None;
         }
@@ -1275,7 +1393,15 @@ impl ModuleInfo {
         let mut out = Vec::with_capacity(self.header.len() + ranges.iter().map(|r| r.len()).sum::<usize>());
         out.extend_from_slice(&self.text[self.header.clone()]);
         for range in ranges {
-            out.extend_from_slice(&self.text[range.clone()]);
+            if let Some((entry, key)) = comparison_body
+                && range == &entry.range
+            {
+                out.extend_from_slice(&self.text[range.start..entry.body.start]);
+                out.extend_from_slice(key);
+                out.extend_from_slice(&self.text[entry.body.end..range.end]);
+            } else {
+                out.extend_from_slice(&self.text[range.clone()]);
+            }
         }
 
         Some(out)
@@ -1523,6 +1649,93 @@ mod tests {
                 .weak_leaf_definition("project", &shared)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn weak_entries_compare_the_targets_of_local_branches() {
+        let first = r#".version 8.0
+.target sm_70
+.address_size 64
+.file 1 "first.cu"
+.weak .entry k(.param .u64 arg) {
+    .reg .pred %p; .reg .u32 %r; .reg .u64 %out;
+    .loc 1 4 0
+    ld.param.u64 %out, [arg]; mov.u32 %r, %tid.x; setp.eq.u32 %p, %r, 1;
+    .loc 1 9 0, function_name $L__debug1, inlined_at 1 4 0
+    @%p bra $L__B3_a;
+    bra.uni $L__B3_b;
+$L__B3_a:
+    { add.u32 %r, %r, 1; }
+    bra $L__B3_b;
+$L__B3_b:
+    st.global.u32 [%out], %r; ret;
+}
+
+.section .debug_str
+{
+$L__debug1:
+.b8 107
+.b8 0
+}
+"#;
+        let renamed = first
+            .replace("B3_", "B81_")
+            .replace("first.cu", "other.cu")
+            .replace(".file 1 ", ".file 2 ")
+            .replace(".loc 1 ", ".loc 2 ")
+            .replace("inlined_at 1 ", "inlined_at 2 ")
+            .replace("$L__debug1", "$L__debug33");
+        fn key(s: &str) -> Vec<u8> {
+            ModuleInfo::analyse(s.as_bytes())
+                .weak_leaf_definition("k", &LinkedShared::default())
+                .unwrap()
+        }
+        assert_eq!(key(first), key(&renamed));
+        assert_eq!(
+            key(first),
+            key(&renamed.replace("    @%p", "    // different nvcc backend comment\n    @%p"))
+        );
+        let a = first.replace(".param .u64 arg", ".param .u64 arg, .param .u32 $L__B3_a");
+        let b = renamed.replace(".param .u64 arg", ".param .u64 arg, .param .u32 $L__B3_a");
+        assert_ne!(key(&a), key(&b));
+        let a = first.replace("add.u32 %r, %r, 1", "mov.u32 %r, sym/* a */bol");
+        let b = renamed.replace("add.u32 %r, %r, 1", "mov.u32 %r, symbol");
+        assert_ne!(key(&a), key(&b));
+        let emitted = ModuleInfo::analyse(first.as_bytes())
+            .extract_linked_leaf("k", &LinkedShared::default())
+            .unwrap();
+        let emitted = String::from_utf8(emitted).unwrap();
+        assert!(emitted.contains("@%p bra $L__B3_a;"));
+        assert!(emitted.contains(".loc 1 9 0, function_name $L__debug1"));
+        for wrong in [
+            renamed.replacen("@%p bra $L__B81_a", "@%p bra $L__B81_b", 1),
+            renamed.replace("@%p bra", "@!%p bra"),
+            renamed.replace("bra.uni", "bra"),
+            renamed.replace("add.u32 %r, %r, 1", "add.u32 %r, %r, 2"),
+            renamed.replace("[arg]", "[other]"),
+            renamed.replace("add.u32 %r, %r, 1", "add.u32 %r, %r, %s"),
+        ] {
+            assert_ne!(key(first), key(&wrong));
+        }
+        // A name with a second role or definition cannot be treated as a private branch target.
+        for extra in [
+            "mov.u64 %r, $L__B3_a;",
+            ".reg .u32 $L__B3_a;",
+            ".pragma \"$L__B3_a\";",
+            "$L__B3_a: ret;",
+            "{ $L__B3_a: ret; }",
+        ] {
+            let a = first.replace("    @%p", &format!("    {extra}\n    @%p"));
+            let b = renamed.replace("    @%p", &format!("    {extra}\n    @%p"));
+            assert_ne!(key(&a), key(&b), "{extra}");
+        }
+        // A pragma or instruction on a malformed debug line is never omitted from the key.
+        let a = first.replace(".loc 1 9 0,", ".loc 1 9 0 add.u32 %r, %r, 5; ,");
+        let b = renamed.replace(".loc 2 9 0,", ".loc 2 9 0 add.u32 %r, %r, 6; ,");
+        assert_ne!(key(&a), key(&b));
+        let a = first.replace("    @%p", "    .pragma \"keep.a\"; @%p");
+        let b = renamed.replace("    @%p", "    .pragma \"keep.b\"; @%p");
+        assert_ne!(key(&a), key(&b));
     }
 
     #[test]
