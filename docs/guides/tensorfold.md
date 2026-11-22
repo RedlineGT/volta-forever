@@ -89,13 +89,15 @@ Each measured request read 227 uncached tokens and generated 64. The answers beg
 
 | On the same Tesla V100-SXM2-32GB | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Official TensorFold 1.3.3, using the settings above | 325.70 | 16.99 |
-| TensorFold 1.3.3 with four local CUDA source changes | 649.94 | 109.25 |
-| Native llama.cpp, Qwen3.5-35B-A3B GGUF Q4_K_M | 474.57 | 99.77 |
+| Official TensorFold 1.3.3 with VF `a9a4044` | **366.90** | **19.29** |
+| Same TensorFold executable with VF `1740d8f` | 324.46 | 16.92 |
+| Native llama.cpp, Qwen3.5-35B-A3B GGUF Q4_K_M | 470.60 | 99.49 |
 
-The official build remains below the native reference in both phases. In the local build, four changes to the expert, projection and router kernels preserved the output token IDs on the warm-up and all three prompts. The installation above builds the official source. [TensorFold timings, responses and token hashes](./benchmarks/tensorfold-experimental.json) · [Native reference and commands](./benchmarks/llamacpp-reference.json)
+Both TensorFold runs answered Paris and produced identical token IDs for the warm-up and the three measured prompts. The improvement comes from VF’s translation of packed BF16 arithmetic. [Requests, phase timings and token hashes](./benchmarks/tensorfold-stock-vf.json) · [Native reference on the same GPU](./benchmarks/ninfer-results.json)
 
 ## 6. Additional notes
+
+A separate experiment with four local changes to TensorFold’s CUDA kernels reached 649.94 tokens/s prefill and 109.25 decode on another V100. Its native llama.cpp reference reached 474.57 and 99.77. [Experimental build and comparison](./benchmarks/tensorfold-experimental.json)
 
 TensorFold 1.3.3 selects fixed CUDA kernels for MLX affine Q4 experts. Its `TF_NVFP4_DECODE_WARPS` setting applies to NVFP4 weights, and its experimental `TF_CUDA_TEST_MLP128` setting requires sm120. Enabling the four paths measured here requires changes to the engine. [Official expert dispatch](https://github.com/ashhart/TensorFold/blob/v1.3.3/zig/src/cuda/experts.zig#L143-L223) · [Official tile override](https://github.com/ashhart/TensorFold/blob/v1.3.3/zig/src/cuda/sm120_test_override.zig#L6-L13)
 

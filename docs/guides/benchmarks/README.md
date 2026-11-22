@@ -64,4 +64,4 @@ The official NInfer server ran its published Qwen3.6-35B-A3B quantization with a
 
 ## TensorFold
 
-The client reads TensorFold’s prefill and generation timers. The official 1.3.3 build measured 325.70 tokens/s prefill and 16.99 tokens/s decode. The same version with four local CUDA source changes reached 649.94 and 109.25. Both builds used MLX affine weights with 4-bit experts and 8-bit routers and generated identical token IDs. Native llama.cpp reached 474.57 and 99.77 on the same V100 with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [TensorFold measurements](tensorfold-experimental.json) · [Native reference](llamacpp-reference.json)
+The official 1.3.3 build reached 366.90 tokens/s prefill and 19.29 decode with VF `a9a4044`. The same executable with VF `1740d8f` reached 324.46 and 16.92 on the same V100. The two runs produced identical token IDs with MLX 4-bit experts and 8-bit routers. Native llama.cpp reached 470.60 and 99.49 on that GPU with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [TensorFold phase timers and responses](tensorfold-stock-vf.json) · [Native reference](ninfer-results.json)
