@@ -6,6 +6,7 @@
 # This is run INSIDE a gpu-run.sh call (it expects $VF_GPU to be set).
 # It needs: $VF_PROXY, Python 3.12 headers (for Triton's C stub),
 # and the vLLM/torch sites.
+# The exit status is the test's: of pass 2 when there is one, else of pass 1.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
@@ -46,8 +47,9 @@ echo "=== Pass 1: compile kernels, dump cubins, find refusals ==="
 rm -rf "$dump"/*
 export VF_TRANSLATE_DUMP="$dump"
 export VF_DEBUG_TRANSLATED="$hook"
-# Run the test; it will fail on refused kernels but that's expected
-python3 -s "$W/tests/gpu/vllm-topk-topp-test.py" 2>&1 || true
+# Run the test; it will fail on refused kernels but that's expected (pass 2 then has the verdict)
+python3 -s "$W/tests/gpu/vllm-topk-topp-test.py" 2>&1
+first=$?
 unset VF_TRANSLATE_DUMP
 
 echo ""
@@ -90,7 +92,8 @@ if [ $translated -gt 0 ]; then
     echo "=== Pass 2: clear proxy cache and run test with all translations available ==="
     rm -rf "$VF_PROXY_CACHE"/*
     python3 -s "$W/tests/gpu/vllm-topk-topp-test.py" 2>&1
-else
-    echo ""
-    echo "=== No new translations needed; pass 1 results are final ==="
+    exit $?
 fi
+echo ""
+echo "=== No new translations needed; pass 1 results are final ==="
+exit $first

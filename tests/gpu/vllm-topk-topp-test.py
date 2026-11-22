@@ -13,7 +13,7 @@ PyTorch CPU reference for several batch sizes, vocabulary sizes, k and p values.
 Environment:
   VF_PROXY must be set (the proxy's lib directory).
   PYTHONPATH must include vllm and torch sites.
-Prints PASS or FAIL per case, and a summary.
+Prints PASS or FAIL per case, and a summary; the exit status is 1 when a case fails.
 """
 import os, sys, torch, math
 
@@ -364,9 +364,10 @@ def main():
         for msg in failed_cases:
             print(f'  {msg}')
         print('FAIL')
-    else:
-        print('PASS')
+        return 1
+    print('PASS')
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
