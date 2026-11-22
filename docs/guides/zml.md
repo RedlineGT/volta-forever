@@ -45,18 +45,17 @@ Look for `platform: cuda` and `Tesla V100` in the device listing. The tested mod
 
 Read the final `decode` line after running the command above. On one Tesla V100-SXM2-32GB with driver 580.178.04 and VF 0.1.0, Qwen3.5-0.8B decoded at **96.1 tokens/s** over 0.458 seconds. This is a single run of the upstream example. [Tested ZML revision](https://github.com/zml/zml/commit/f430c3530fbc6d99f734b641eb8f3fd699868843)
 
-The upstream build from step 3 stops before the first token with the QuantTrio 35B checkpoint. The following measurements required changes to ZML itself. Five local builds added support for the split AWQ expert weights, then optimized the GPU code for those experts. All used the original QuantTrio checkpoint. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
+The official **LLMD** server generated with the full AMD MXFP4 Qwen3.5-35B-A3B checkpoint on one V100. This test used a VF development compiler with CUDA 12.9.2. LLMD ran with its Triton backend, one request at a time, 64-token prefill chunks and MTP disabled. Setting `reasoning_effort` to `"none"` produced a visible **Paris** and the expected answer on all four benchmark prompts.
 
-| Engine | Prefill (tokens/s) | Decode (tokens/s) |
-| --- | ---: | ---: |
-| Local ZML with split AWQ experts | 343.79 | 30.17 |
-| Local ZML with fused AWQ decode projections | 350.57 | 42.73 |
-| Local ZML with fused decode and eight-step prefill recurrence | 448.27 | 42.74 |
-| Local ZML with packed AWQ prefill projections added | 535.35 | 36.39 |
-| Local ZML with grouped AWQ decode projections added | 536.38 | 66.85 |
-| Native 1Cat-vLLM | 1427.41 | 76.13 |
+| Prompt | Input / output tokens | Input tokens/s through first token | Decode (tokens/s) |
+| --- | ---: | ---: | ---: |
+| Lisbon (warm-up) | 228 / 64 | 309.36 | 38.04 |
+| Kyoto | 227 / 64 | 309.69 | 38.12 |
+| Lyon | 227 / 64 | 310.53 | 38.08 |
+| Lima | 227 / 64 | 309.69 | 38.12 |
+| **Median after warm-up** | **227 / 64** | **309.69** | **38.12** |
 
-Packed prefill removed 1.5 GiB of intermediate BF16 weights per compiled layer. The grouped decode kernel matched 14,304 of 14,336 CPU-oracle values exactly on seven layer inputs and met the numerical tolerance on all of them. [Per-request text, times, numerical tolerances and GPU profiles](./benchmarks/zml-awq-experimental.json)
+The input rate includes all server work through the first token. LLMD exposes separate decode time and step counters. Native 1Cat-vLLM reached **1427.41 prefill / 76.13 decode** on the same GPU and prompts using QuantTrio AWQ. The checkpoint format and prefill timer differ. [LLMD settings, counters and replies](./benchmarks/zml-llmd-mxfp4.json) · [Native reference](./benchmarks/zml-awq-experimental.json)
 
 ## 6. Additional notes
 
@@ -66,4 +65,6 @@ The MLX 4-bit and Sehyo NVFP4 indexes also lack that tensor. The tested ZML load
 
 ZML publishes the example used here as source. It also ships a separate inference server, **LLMD**, as a prebuilt CUDA image. In a V100 diagnostic with the October 23 LLMD build, XLA compiled GPU kernels through VF, then execution stopped at the bundled CUTLASS expert library. Its sm_120 binary contains only machine code for that architecture. Recompiling one upstream NVFP4 expert matrix multiplication with PTX retained exposed a second requirement. The kernel reads the cluster rank and uses tensor-map bulk copies. VF currently stops at the cluster rank on V100. This October build still requires support for those expert kernels. [LLMD distribution](https://zml.ai/llmd/) · [Upstream CUTLASS expert library](https://github.com/zml/flashinfer/releases/tag/cutlass-moe-v0.2.0)
 
-The September 24 LLMD build recognizes the split expert tensors in AMD’s MXFP4 format. A small diagnostic model exercised five XLA kernels from this build on a V100. All five matched CPU results with the VF update linked below. Generation with the full AMD 35B checkpoint remains unverified. [AMD checkpoint and revision](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1) · [VF support for the XLA kernels](https://github.com/nbald/volta-forever/commit/c99663f7bf4e0d70ecd8e10f1078ff9c43cd9b4d)
+The September 24 LLMD distribution loads the split expert tensors in AMD’s MXFP4 checkpoint directly. The 35B test used its original server binary and a development build of VF that adapts PTX passed to XLA’s external assembler. The commands in sections 3 and 4 run the upstream source example with 0.8B. [AMD checkpoint revision](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1) · [VF support for XLA kernels](https://github.com/nbald/volta-forever/commit/c99663f7bf4e0d70ecd8e10f1078ff9c43cd9b4d)
+
+An earlier local modification to the ZML example added a QuantTrio AWQ loader and grouped expert kernels. That build reached **536.38 prefill / 66.85 decode** on this card. [Experimental AWQ builds, measurements and profiles](./benchmarks/zml-awq-experimental.json)

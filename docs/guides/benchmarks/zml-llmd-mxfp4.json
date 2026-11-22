@@ -1,0 +1,251 @@
+{
+  "engine": "Official ZML LLMD, distribution 20260924.0-cuda, unchanged executable",
+  "vf": "Development build with external PTX assembler integration under test",
+  "hardware": {
+    "gpu": "Tesla V100-SXM2-32GB",
+    "uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "driver": "580.178.04"
+  },
+  "sha256": {
+    "llmd": "cd0c30103e38608fde2a3cc629b1a9cd940389de771912fa19a3dc1cfee0b075",
+    "vf_libcuda": "40f130aa4f70fd16de404d078df31c4c6e5fc7132d1361cea303d38f4cf9b7da",
+    "vf_diagnostic_assembler": "d3ffe9ccf5454beb5b3dc1a41d50df54ac222eda4c58886316151e1e66ae7d08"
+  },
+  "checkpoint": {
+    "repository": "amd/Qwen3.5-35B-A3B-MXFP4",
+    "revision": "2e19c6576db91e5d5a93455415619262218bf8a1",
+    "format": "AMD MXFP4 packed routed experts with scales; other text weights primarily BF16.",
+    "shards": [
+      {
+        "name": "model.safetensors-00001-of-00014.safetensors",
+        "size": 1426769992,
+        "algorithm": "sha256",
+        "hash": "1460d43a2cc934c53a0fcc8d69809e1f46d9dcabc32eee53308f5f33f7ff9bc6"
+      },
+      {
+        "name": "model.safetensors-00002-of-00014.safetensors",
+        "size": 1426767944,
+        "algorithm": "sha256",
+        "hash": "9dc94405c9cb77bab3e2da5b33cae73eb99e0b278d6f05046f66358165e912ea"
+      },
+      {
+        "name": "model.safetensors-00003-of-00014.safetensors",
+        "size": 1426767944,
+        "algorithm": "sha256",
+        "hash": "916d384b99d59e0e6f3bbf3ffe2f0764637c356a3a7549c88b5fd52e654ad887"
+      },
+      {
+        "name": "model.safetensors-00004-of-00014.safetensors",
+        "size": 1426768968,
+        "algorithm": "sha256",
+        "hash": "9bafcfafd6db09dd1621e7c8a1a4d46d68f42bfd4a32ad9b7342a472c4724344"
+      },
+      {
+        "name": "model.safetensors-00005-of-00014.safetensors",
+        "size": 1426769992,
+        "algorithm": "sha256",
+        "hash": "05c8d0182f2aa7934f6c0e35f90dfe0304eb10faaf619eda98aa4b2313d034f1"
+      },
+      {
+        "name": "model.safetensors-00006-of-00014.safetensors",
+        "size": 1426768968,
+        "algorithm": "sha256",
+        "hash": "0b5d8b05aa63015c4d3af3070274d91771fbe3189304f00b59f172d48bbfc57b"
+      },
+      {
+        "name": "model.safetensors-00007-of-00014.safetensors",
+        "size": 1426767944,
+        "algorithm": "sha256",
+        "hash": "71c1874152c89b966ca62af849ce83a0a065f2e363fee80df53b20f25d7de913"
+      },
+      {
+        "name": "model.safetensors-00008-of-00014.safetensors",
+        "size": 1426767944,
+        "algorithm": "sha256",
+        "hash": "47d110f99018c2574a8238b6988094b13460b6533f74ad3670dfb9c959b2fde3"
+      },
+      {
+        "name": "model.safetensors-00009-of-00014.safetensors",
+        "size": 2890308528,
+        "algorithm": "sha256",
+        "hash": "858ba45dbc09418ac15dda4d9317c6c7a8a6511e07422584d9f6771b0759d394"
+      },
+      {
+        "name": "model.safetensors-00010-of-00014.safetensors",
+        "size": 1426775624,
+        "algorithm": "sha256",
+        "hash": "42fc04935bdce821f8a82ed313cc8cae05017297f10494319098837dbad06cc8"
+      },
+      {
+        "name": "model.safetensors-00011-of-00014.safetensors",
+        "size": 1426777672,
+        "algorithm": "sha256",
+        "hash": "d3eb7e622d61e65069c08537b9139566ace88f1cdedaeca8dc7969aa8356dd01"
+      },
+      {
+        "name": "model.safetensors-00012-of-00014.safetensors",
+        "size": 1426776136,
+        "algorithm": "sha256",
+        "hash": "3d6ccfdce1456d435a15c189b4d339e3c1319b72eaef363fce6ecebd6ca57c76"
+      },
+      {
+        "name": "model.safetensors-00013-of-00014.safetensors",
+        "size": 3791068528,
+        "algorithm": "sha256",
+        "hash": "2b61fcad30ecf23ed9cdd4521f5fdbbac529dbbca19da3e187245d79ce780a71"
+      },
+      {
+        "name": "model.safetensors-00014-of-00014.safetensors",
+        "size": 2224764664,
+        "algorithm": "sha256",
+        "hash": "943cfeb9f925fe9dac48508dbec4518637b90c243f914277a86db982de9de3ad"
+      }
+    ]
+  },
+  "server": {
+    "backend": "triton",
+    "capability": "8.0",
+    "physical_sm": "70",
+    "ptxas": "CUDA 12.9.2",
+    "batch_size": 1,
+    "prefill_chunk_size": 64,
+    "token_batch_size": 64,
+    "page_chunk_size": 16,
+    "max_context_len": 512,
+    "gpu_memory_fraction": 0.94,
+    "cache_memory_fraction": 0.97,
+    "topk": 1,
+    "speculative_decoding": false,
+    "xla_flags": "--xla_gpu_autotune_level=0 --xla_gpu_force_compilation_parallelism=1"
+  },
+  "request": {
+    "endpoint": "/v1/chat/completions",
+    "model": "qwen",
+    "temperature": 0,
+    "reasoning_effort": "none",
+    "max_tokens": 64,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "concurrency": 1,
+    "prompts": "prompts.json"
+  },
+  "smoke_test": {
+    "prompt": "What is the capital of France? Answer with just the city's name.",
+    "reply": "Paris",
+    "finish_reason": "stop",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 27,
+      "total_tokens": 28
+    }
+  },
+  "measurements": [
+    {
+      "request": "warmup",
+      "city": "Lisbon",
+      "input_tokens": 228,
+      "output_tokens": 64,
+      "response": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another carefully inspects the signs by the stairs to report any changes before the",
+      "finish_reason": "length",
+      "server_counter_deltas": {
+        "prefill_tokens_total": 228.0,
+        "output_tokens_total": 64.0,
+        "decode_steps_total": 63.0,
+        "decode_seconds_total": 1.656219176,
+        "gen_ai_server_time_to_first_token_sum": 0.7370000000000001,
+        "gen_ai_server_time_to_first_token_count": 1.0,
+        "request_queue_time_seconds_sum": 0.0
+      },
+      "server_prompt_tokens_per_ttft_s": 309.3622795115332,
+      "server_decode_steps_per_s": 38.038443771768044,
+      "client_ttft_s": 0.7385573429055512,
+      "client_output_span_s": 1.6585553351324052,
+      "client_decode_tokens_per_s": 37.98486469851222
+    },
+    {
+      "request": "run1",
+      "city": "Kyoto",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "response": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors open",
+      "finish_reason": "length",
+      "server_counter_deltas": {
+        "prefill_tokens_total": 227.0,
+        "output_tokens_total": 64.0,
+        "decode_steps_total": 64.0,
+        "decode_seconds_total": 1.6788869559999997,
+        "gen_ai_server_time_to_first_token_sum": 0.7330000000000001,
+        "gen_ai_server_time_to_first_token_count": 1.0,
+        "request_queue_time_seconds_sum": 0.0
+      },
+      "server_prompt_tokens_per_ttft_s": 309.68622100954974,
+      "server_decode_steps_per_s": 38.12049392085456,
+      "client_ttft_s": 0.7348176029045135,
+      "client_output_span_s": 1.6540425070561469,
+      "client_decode_tokens_per_s": 38.08850119101652
+    },
+    {
+      "request": "run2",
+      "city": "Lyon",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "response": "Lyon, France, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily tasks, while another carefully inspects the signs by the stairs to report any changes before the doors open. We meet after",
+      "finish_reason": "length",
+      "server_counter_deltas": {
+        "prefill_tokens_total": 227.0,
+        "output_tokens_total": 64.0,
+        "decode_steps_total": 64.0,
+        "decode_seconds_total": 1.6807148080000003,
+        "gen_ai_server_time_to_first_token_sum": 0.7309999999999999,
+        "gen_ai_server_time_to_first_token_count": 1.0,
+        "request_queue_time_seconds_sum": 0.0
+      },
+      "server_prompt_tokens_per_ttft_s": 310.5335157318742,
+      "server_decode_steps_per_s": 38.07903619065394,
+      "client_ttft_s": 0.7331899390555918,
+      "client_output_span_s": 1.6562708879355341,
+      "client_decode_tokens_per_s": 38.03725613901638
+    },
+    {
+      "request": "run3",
+      "city": "Lima",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "response": "Lima, Peru, is the location where our volunteer group convenes daily in a shared room situated by the main entrance. Each morning, one volunteer places a yellow envelope on the long table to signal the start of operations, while another checks the signs by the stairs to report any changes before the doors open. We meet",
+      "finish_reason": "length",
+      "server_counter_deltas": {
+        "prefill_tokens_total": 227.0,
+        "output_tokens_total": 64.0,
+        "decode_steps_total": 64.0,
+        "decode_seconds_total": 1.6789971170000033,
+        "gen_ai_server_time_to_first_token_sum": 0.7330000000000001,
+        "gen_ai_server_time_to_first_token_count": 1.0,
+        "request_queue_time_seconds_sum": 0.0
+      },
+      "server_prompt_tokens_per_ttft_s": 309.68622100954974,
+      "server_decode_steps_per_s": 38.117992789858896,
+      "client_ttft_s": 0.7345734839327633,
+      "client_output_span_s": 1.6545908011030406,
+      "client_decode_tokens_per_s": 38.07587952139028
+    }
+  ],
+  "median_after_warmup": {
+    "server_prompt_tokens_per_ttft_s": 309.68622100954974,
+    "server_decode_steps_per_s": 38.117992789858896,
+    "client_decode_tokens_per_s": 38.07587952139028
+  },
+  "method": {
+    "server_prompt_tokens_per_ttft_s": "Delta of uncached prefill_tokens_total divided by delta of gen_ai_server_time_to_first_token_sum for one request. Includes all server activity up to first token. No pure GPU prefill duration in these counters.",
+    "server_decode_steps_per_s": "LLMD decode_steps_total divided by decode_seconds_total, both differenced across each request. The server counted 64 steps for each measured request.",
+    "client_decode_tokens_per_s": "63 inter-token intervals divided by time between first and last streamed token."
+  },
+  "target": {
+    "engine": "Native 1Cat-vLLM, QuantTrio AWQ W4A16, same physical card and prompts",
+    "checkpoint": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+    "prefill_tokens_per_s": 1427.4138226292546,
+    "decode_tokens_per_s": 76.13127062703167,
+    "evidence": "zml-awq-experimental.json"
+  }
+}
