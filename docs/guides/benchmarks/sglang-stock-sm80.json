@@ -75,7 +75,7 @@
   },
   "volta_forever": "883e4209021f411c5fadd67b9313717cf60409a1",
   "reported_capability": "8.0 (VF_CAPABILITY), physical 7.0",
-  "execution": "Eager 32-token prefill, full batch-one decode CUDA graph, SGLang JIT router, default dynamic KV partitions, official Triton assembler.",
+  "execution": "Batch one, 32-token prefill, full decode CUDA graph, SGLang JIT router, default dynamic KV partitions and the official Triton assembler. Each run lists its changes to the server settings below.",
   "runs": {
     "default_tiling": {
       "gpu_index": 1,
@@ -238,6 +238,71 @@
           "id": "median",
           "prefill_tokens_per_s": 255.18966347405583,
           "decode_tokens_per_s": 53.444963858838115
+        }
+      ]
+    },
+    "v100_tiling_prefill_graphs": {
+      "gpu_index": 1,
+      "SGLANG_MOE_CONFIG_DIR": "tuning/sglang",
+      "server_overrides": {
+        "cuda_graph_backend_prefill": "breakable",
+        "cuda_graph_bs_prefill": [
+          8,
+          16,
+          32
+        ],
+        "cuda_graph_backend_decode": "full",
+        "model_loader_extra_config": "{}",
+        "skip_server_warmup": false,
+        "watchdog_timeout": 300
+      },
+      "chat_answer": "Paris",
+      "new_driver_xid": false,
+      "results": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.6469457931518567,
+          "decode_s": 1.1913349113464315,
+          "prefill_tokens_per_s": 352.425199164224,
+          "decode_tokens_per_s": 52.88185496788489,
+          "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to ensure smooth operations for our visitors. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member ins"
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.7109355621337876,
+          "decode_s": 1.1906867141723687,
+          "prefill_tokens_per_s": 319.29757363478456,
+          "decode_tokens_per_s": 52.91064328687879,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.7124828186035161,
+          "decode_s": 1.190713348388667,
+          "prefill_tokens_per_s": 318.6041741258064,
+          "decode_tokens_per_s": 52.90945976649608,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.7129333724975595,
+          "decode_s": 1.1911096343994156,
+          "prefill_tokens_per_s": 318.40282522442453,
+          "decode_tokens_per_s": 52.89185661886282,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in the room situated by the entrance, where a yellow envelope is placed on the long table each morning to signal the start of duties. Before the doors open, another volunteer"
+        },
+        {
+          "id": "median",
+          "prefill_tokens_per_s": 318.6041741258064,
+          "decode_tokens_per_s": 52.90945976649608
         }
       ]
     }

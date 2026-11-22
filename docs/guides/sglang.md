@@ -76,7 +76,8 @@ python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
   --json-model-override-args "$awq" --attention-backend triton --sampling-backend pytorch \
   --context-length 512 --max-running-requests 1 --chunked-prefill-size 32 \
   --mem-fraction-static 0.85 \
-  --cuda-graph-backend-prefill disabled --cuda-graph-bs-decode 1 --cuda-graph-backend-decode full \
+  --cuda-graph-backend-prefill breakable --cuda-graph-bs-prefill 8 16 32 \
+  --cuda-graph-backend-decode full --cuda-graph-bs-decode 1 \
   --enable-metrics \
   --host 127.0.0.1 --port 8000
 ```
@@ -92,7 +93,7 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-The command above measured **255.19 tokens/s in prefill** and **53.44 tokens/s in decode**. The configuration directory selects SGLang’s W4A16 kernel tile sizes for the V100. In a separate comparison on one card, these tiles reached 225.57 and 52.99 tokens/s, versus 219.92 and 45.01 with SGLang’s default tiles. [Per-request results](./benchmarks/sglang-stock-sm80.json)
+The command above measured **318.60 tokens/s in prefill** and **52.91 tokens/s in decode**. SGLang captures graphs for prefill chunks of 8, 16 and 32 tokens and uses the V100 configuration for its W4A16 expert kernels. With eager prefill, a separate run reached 255.19 and 53.44 tokens/s. [Per-request results and tile comparison](./benchmarks/sglang-stock-sm80.json)
 
 An earlier VF 0.1.1 run at capability 7.5 measured **181.48 prefill** and **38.83 decode** tokens/s at 32 tokens per chunk. At eight tokens per chunk we compared the effect of decode graphs on the same card. [Earlier 32-token results](./benchmarks/sglang-stock-compile.json)
 
