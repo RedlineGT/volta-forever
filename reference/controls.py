@@ -196,6 +196,14 @@ level 3):
                 a uniform predicate kept in the frame is loaded, after the uniform registers of
                 the frame that the instruction reads, into the register that stands for the
                 first of them, and read back from there
+    up_wrong_word_l3
+                a uniform predicate kept in the frame is loaded from the word after its own
+    up_no_store_l3
+                what an instruction writes of a uniform predicate kept in the frame is written
+                down in its temporary register and not stored
+    up_unwaited_l3
+                what reads back a uniform predicate loaded from the frame does not wait for the
+                load
 
 With room made at an instruction (VF_BORROW=5 makes it where a kernel would otherwise need more
 registers than it has):
@@ -905,7 +913,7 @@ def patched(control):
     # ---- level 3 controls: the uniform predicates kept in the frame (`mem: load UP<n>`,
     # `mem: store UP<n>`), which `translate` moves with `load_word` and `store_word` and reads
     # back with `read_back` ----
-    load_word, read_back = Function.load_word, Function.read_back
+    load_word, store_word, read_back = Function.load_word, Function.store_word, Function.read_back
 
     def load_word_up_standin(self, word, rd, i, items, what):
         if what.startswith('mem: load UP'):
@@ -921,6 +929,13 @@ def patched(control):
         if moved is not None and moved[:2] == (i, holder):
             holder = moved[2]
         return read_back(self, holder, p, i)
+
+    def load_word_up_wrong_word(self, word, rd, i, items, what):
+        return load_word(self, word + 1 if what.startswith('mem: load UP') else word, rd, i, items, what)
+
+    def store_word_up_none(self, word, rb, i, items, what):
+        if not what.startswith('mem: store UP'):
+            store_word(self, word, rb, i, items, what)
 
     # ---- level 3 product controls ----
     def product_odd_before_l3(self, i, d, wait):
@@ -994,6 +1009,9 @@ def patched(control):
         'standin_operand_l3': {'from_memory': from_memory_into_operand},
         'standin_shared_l3': {'from_memory': from_memory_shared},
         'up_standin_l3': {'load_word': load_word_up_standin, 'read_back': read_back_up_standin},
+        'up_wrong_word_l3': {'load_word': load_word_up_wrong_word},
+        'up_no_store_l3': {'store_word': store_word_up_none},
+        'up_unwaited_l3': {},
         # ---- room controls ----
         'room_reads_orig': {},
         'room_home_alive': {},
@@ -1034,7 +1052,7 @@ CONTROLS += BORROW_CONTROLS
 # (Those of level 3: only when VF_BORROW>=2 and a function uses the frame.)
 FRAME_CONTROLS = ['no_lane_l3', 'odd_pair_l3', 'no_r1_lower', 'wrong_r1_lower', 'wrong_slot_load', 'no_store_l3', 'held_busy_l3', 'unkept_holder_l3', 'shared_holder_l3', 'home_unsaid', 'guarded_store_l3', 'no_old_load_l3', 'no_load_wait', 'store_no_read_sb', 'wrong_base_const', 'missing_pool_line', 'no_attr_raise', 'no_borrow_wait_l3', 'no_c3_wait',
                   'store_before_l3', 'store_other_l3', 'stray_store_l3', 'standin_home_l3', 'standin_operand_l3', 'standin_shared_l3',
-                  'base_after_use_l3', 'up_standin_l3']
+                  'base_after_use_l3', 'up_standin_l3', 'up_wrong_word_l3', 'up_no_store_l3', 'up_unwaited_l3']
 CONTROLS += FRAME_CONTROLS
 # (Those of a frame addressed from its top, which a register is loaded with: at VF_BORROW=3,
 # and wherever the program moves its stack pointer in a way that is not followed.)
@@ -1498,6 +1516,22 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                         changed = True
         if changed:
             out = container.write()
+        if out == untouched[path]:
+            return None, ''
+    elif control == 'up_unwaited_l3':
+        # The instruction after each load of a uniform predicate from the frame, which reads it
+        # back, does not wait for the load's scoreboard.
+        container = elf.Elf(out)
+        for name, new_off, old_off, what in listing:
+            if what.startswith('mem: load UP'):
+                section = container.section('.text.' + name)
+                data = bytearray(section.data)
+                board = (int.from_bytes(data[new_off:new_off + 16], 'little') >> WRITE_BARRIER) & 7
+                after = int.from_bytes(data[new_off + 16:new_off + 32], 'little')
+                if board != 7 and after >> (WAIT + board) & 1:
+                    data[new_off + 16:new_off + 32] = (after & ~(1 << (WAIT + board))).to_bytes(16, 'little')
+                    section.data = bytes(data)
+        out = container.write()
         if out == untouched[path]:
             return None, ''
     elif control == 'no_attr_raise':
