@@ -311,5 +311,171 @@
         0
       ]
     }
+  },
+  "fused_awq_prefill": {
+    "implementation": "Fourth local build. The routed Triton prefill kernel unpacks and scales each expert tile as needed; the eight-step GDN recurrence and single-token decode path are shared with the preceding build.",
+    "binary_sha256": "195a233b65496015d7ffd2ac564c92cfffe60094bbcdea49aae47edf023f59c6",
+    "source_patch_sha256": "bbf37dbe7fda650dd703832b428fb17842ec448002ff7cfc60b5656eb5c140cb",
+    "layer_oracle": {
+      "gpu_uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+      "checkpoint_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+      "cpu_reference": {
+        "gate_up": {
+          "elements": 18944,
+          "bit_identical": 18944,
+          "max_abs_error": 0.0,
+          "absolute_tolerance": 1e-07,
+          "relative_tolerance": 0.008,
+          "failures": 0
+        },
+        "weighted_swiglu": {
+          "elements": 9472,
+          "bit_identical": 9404,
+          "max_abs_error": 3.7252903e-09,
+          "absolute_tolerance": 1e-09,
+          "relative_tolerance": 0.012,
+          "failures": 0
+        }
+      },
+      "full_layer_vs_dense": {
+        "full_layer": {
+          "elements": 655360,
+          "bit_identical": 655360,
+          "max_abs_error": 0.0,
+          "absolute_tolerance": 1e-08,
+          "relative_tolerance": 0.025,
+          "failures": 0
+        }
+      },
+      "full_layer": {
+        "layer": 1,
+        "experts": 256,
+        "selected_experts_per_token": 8,
+        "padded_length": 320,
+        "measured_prompt_length": 227,
+        "routes": 2560,
+        "active_experts": 225,
+        "input": "Real checkpoint embeddings and router weights applied to the common Lyon prompt. This isolates a layer using surrogate hidden states.",
+        "timing": "One warmup per implementation, followed by seven synchronous calls. Weight loading and graph compilation occur before timing.",
+        "trials_ns": {
+          "dense": [
+            9781426,
+            9782033,
+            9829335,
+            9808021,
+            9730460,
+            9493956,
+            9515735
+          ],
+          "packed": [
+            6328875,
+            6354132,
+            6334839,
+            6346576,
+            6339905,
+            6300224,
+            6350487
+          ]
+        },
+        "median_ns": {
+          "dense": 9781426,
+          "packed": 6339905
+        },
+        "relative_time": 0.6481575385838425
+      }
+    },
+    "visible_answer": {
+      "text": "Paris",
+      "output_tokens": 1,
+      "stop_reason": "eos"
+    },
+    "medians": {
+      "prefill_tokens_per_s": 535.3530011916368,
+      "decode_tokens_per_s": 36.38761406856402
+    },
+    "trials": [
+      {
+        "prompt_file": "run1.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 422024288,
+        "decode_ns": 1731358365,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by",
+        "matching_prefix_vs_previous_build": 64
+      },
+      {
+        "prompt_file": "run2.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 425219835,
+        "decode_ns": 1755317842,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by",
+        "matching_prefix_vs_previous_build": 64
+      },
+      {
+        "prompt_file": "run3.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 424019291,
+        "decode_ns": 1676334309,
+        "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on",
+        "matching_prefix_vs_previous_build": 64
+      }
+    ],
+    "prefill_profile": {
+      "request": "A second, independently profiled Lyon request with the same 227 input IDs and 64 output IDs as the timed Lyon request.",
+      "order": [
+        "eight-step GDN and fused decode",
+        "plus fused packed AWQ prefill"
+      ],
+      "gpu_kernel_executions": [
+        27281,
+        26969
+      ],
+      "gpu_kernel_families_ms": {
+        "expert AWQ gathers/dequant": [
+          159.766574,
+          0
+        ],
+        "expert projections": [
+          152.90108,
+          4.228053
+        ],
+        "fused expert AWQ projections": [
+          0,
+          197.552758
+        ],
+        "external dense matmul": [
+          154.04698,
+          125.226242
+        ],
+        "attention/GDN recurrent loop": [
+          78.968404,
+          75.389337
+        ]
+      },
+      "gpu_busy_union_ms": [
+        497.661627,
+        418.255493
+      ],
+      "wall_ms": [
+        562.069242,
+        475.265745
+      ],
+      "hlo_materialized_bf16_expert_weight_bytes_per_layer_module": [
+        {
+          "prefill/GDN": 1610612736,
+          "prefill/full attention": 1610612736
+        },
+        {
+          "prefill/GDN": 0,
+          "prefill/full attention": 0
+        }
+      ],
+      "durations": "Each family sums kernel durations, which can overlap. Wall time covers the instrumented prefill."
+    }
   }
 }
