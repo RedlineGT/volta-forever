@@ -34,21 +34,26 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
         descriptor = None
         load128 = matches(bits, canonical['LOAD128'])
         store128 = matches(bits, canonical['STORE128'])
+        const64 = matches(bits, canonical['LOAD64_CONST'])
+        store64 = matches(bits, canonical['STORE64'])
         offset = source >> 40 & 0xffffff
-        if load128 or store128:
-            vector = rd if load128 else rb
-            if vector % 4 or vector > 248 or addr % 2 or addr > 252:
+        if load128 or store128 or const64 or store64:
+            vector = rd if load128 or const64 else rb
+            width = 4 if load128 or store128 else 2
+            zero_store = store128 and vector == 255
+            aligned_vector = vector % width == 0 and vector <= 256 - 2 * width
+            if not (aligned_vector or zero_store) or addr % 2 or addr > 252:
                 raise refuse(f'invalid register group for sm_80 vector access at 0x{at:x}')
         weak32 = matches(bits, canonical['LOAD32'])
         const32 = matches(bits, canonical['LOAD32_CONST'])
-        if matches(bits, canonical['LOAD16']) or load128 or weak32 or const32:
+        if matches(bits, canonical['LOAD16']) or load128 or weak32 or const32 or const64:
             descriptor = rb & 63
-            word = mc.assemble('ldg__sImmOffset', e='E', sz='_128' if load128 else '_32' if const32 or weak32 else 'U16',
+            word = mc.assemble('ldg__sImmOffset', e='E', sz='_128' if load128 else '_64' if const64 else '_32' if const32 or weak32 else 'U16',
                                sem='WEAK' if load128 or weak32 else 'CONSTANT', sco='SYS', cop='EN',
-                               Pu=7, Rd=rd, Ra=addr, Ra_offset=offset)
-        elif matches(bits, canonical['STORE16']) or matches(bits, canonical['STORE32']) or store128:
+                               Pu=7, Rd=rd, Ra=addr, Ra_offset=offset, Pg=source >> 12 & 7, Pg_not=source >> 15 & 1)
+        elif matches(bits, canonical['STORE16']) or matches(bits, canonical['STORE32']) or store128 or store64:
             descriptor = source >> 64 & 63
-            size = '_128' if store128 else 'U16' if matches(bits, canonical['STORE16']) else '_32'
+            size = '_128' if store128 else '_64' if store64 else 'U16' if matches(bits, canonical['STORE16']) else '_32'
             word = mc.assemble('stg__sImmOffset', e='E', sz=size, sem='WEAK',
                                sco='SYS', cop='EN', Rb=rb, Ra=addr, Ra_offset=offset, Pg=source >> 12 & 7, Pg_not=source >> 15 & 1)
         elif matches(bits, canonical['BRA_MASK_ALL']):

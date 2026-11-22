@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use crate::generated::ampere::{
-    ATOM_ADD32, BRA_MASK_ALL, COMMIT, COPY128, HALF_CONSTANT, LOAD16, LOAD32, LOAD32_CONST, LOAD128, PACK,
-    SHARED_FORMS, SHARED_INC, STORE16, STORE32, STORE128,
+    ATOM_ADD32, BRA_MASK_ALL, COMMIT, COPY128, HALF_CONSTANT, LOAD16, LOAD32, LOAD32_CONST, LOAD64_CONST, LOAD128,
+    PACK, SHARED_FORMS, SHARED_INC, STORE16, STORE32, STORE64, STORE128,
 };
 
 use crate::assemble::{
@@ -100,19 +100,25 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
         let rb = (w >> 32) & BYTE;
         let load128 = matches_form(bits, LOAD128);
         let store128 = matches_form(bits, STORE128);
+        let const64 = matches_form(bits, LOAD64_CONST);
+        let store64 = matches_form(bits, STORE64);
         let load32 = matches_form(bits, LOAD32);
         let const32 = matches_form(bits, LOAD32_CONST);
         // Both encodings carry the signed byte displacement in the same 24 bits.
         let offset = (w >> 40) as u32 & 0xff_ffff;
-        if load128 || store128 {
-            let vector = if load128 { rd } else { rb };
-            if !vector.is_multiple_of(4) || vector > 248 || !addr.is_multiple_of(2) || addr > 252 {
+        if load128 || store128 || const64 || store64 {
+            let vector = if load128 || const64 { rd } else { rb };
+            let width = if load128 || store128 { 4 } else { 2 };
+            // A vector store can read four zeros from the architectural zero register.
+            let zero_store = store128 && vector == 255;
+            let valid_group = vector.is_multiple_of(width) && vector <= 256 - 2 * width;
+            if !(valid_group || zero_store) || !addr.is_multiple_of(2) || addr > 252 {
                 return Err(Refused(format!(
                     "invalid register group for sm_80 vector access at 0x{at:x}"
                 )));
             }
         }
-        let (word, descriptor) = if matches_form(bits, LOAD16) || load128 || load32 || const32 {
+        let (word, descriptor) = if matches_form(bits, LOAD16) || load128 || load32 || const32 || const64 {
             let load = assemble(
                 "ldg__sImmOffset",
                 &[
@@ -121,6 +127,8 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
                         "sz",
                         Str(if load128 {
                             "_128"
+                        } else if const64 {
+                            "_64"
                         } else if load32 || const32 {
                             "_32"
                         } else {
@@ -134,12 +142,16 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize
                     ("Ra", Int(addr as u32)),
                     ("Ra_offset", Int(offset)),
                     ("Pu", Int(7)),
+                    ("Pg", Int((w >> 12) as u32 & 7)),
+                    ("Pg_not", Int((w >> 15) as u32 & 1)),
                 ],
             );
             (load, Some((w >> 32) as u8 & 63))
-        } else if matches_form(bits, STORE16) || matches_form(bits, STORE32) || store128 {
+        } else if matches_form(bits, STORE16) || matches_form(bits, STORE32) || store64 || store128 {
             let size = if store128 {
                 "_128"
+            } else if store64 {
+                "_64"
             } else if matches_form(bits, STORE16) {
                 "U16"
             } else {
@@ -819,6 +831,54 @@ mod tests {
             let error = normalize(&input, &mut Decoder::new(75), None).unwrap_err();
             assert!(error.0.contains(why), "{}", error.0);
         }
+    }
+
+    #[test]
+    fn preserves_vector_store_sources_predicates_and_displacements() {
+        // Actual ptxas output for a 128-bit zero fill and a predicated concatenation.
+        let descriptor = 0x000fc60000000a00_0000460000047ab9u128;
+        let zero = 0x000fe2000c101d04_000000ff02007986u128;
+        let load = 0x000ee8000c1e9b00_0000000404048981u128;
+        let store = 0x010fe8000c101b04_0800000608008986u128;
+        let half = 0x000fe8000c101504_1000060d0a007986u128;
+        let code = |inst: u128| [descriptor.to_le_bytes(), inst.to_le_bytes()].concat();
+        let mut decoder = Decoder::new(75);
+        for (word, mnemonic, size, reg_field, reg, pg, inverted, displacement) in [
+            (zero, "STG", 6, OP_RB, 255, 7, 0, 0),
+            (load, "LDG", 5, OP_RD, 4, 0, 1, 0),
+            (store, "STG", 5, OP_RB, 6, 0, 1, 0x80000),
+            (half, "STG", 2, OP_RB, 13, 7, 0, 0x100006),
+        ] {
+            let result = normalize(&code(word), &mut decoder, None).unwrap();
+            let target = decoder
+                .decode(u128::from_le_bytes(result.words[16..].try_into().unwrap()))
+                .unwrap();
+            assert_eq!(target.mnemonic, mnemonic);
+            assert_eq!(target.op(OP_SZ), Some(size));
+            assert_eq!(target.op(reg_field), Some(reg));
+            assert_eq!((target.op(OP_PG), target.op(OP_PG_AT_NOT)), (Some(pg), Some(inverted)));
+            assert_eq!(target.op_or_name("Ra_offset", 0), displacement);
+        }
+        for invalid in [
+            zero ^ (1 << 32),                    // R254 cannot name a quad.
+            zero | (1 << 24),                    // R3 cannot hold a 64-bit address.
+            load | (1 << 16),                    // Odd destination.
+            (load & !(255 << 16)) | (255 << 16), // RZ is only accepted for the zero store.
+            store | (1 << 32),                   // Odd source.
+        ] {
+            assert!(
+                normalize(&code(invalid), &mut decoder, None)
+                    .unwrap_err()
+                    .0
+                    .contains("invalid register group")
+            );
+        }
+        assert!(
+            normalize(&load.to_le_bytes(), &mut decoder, None)
+                .unwrap_err()
+                .0
+                .contains("descriptor")
+        );
     }
 
     const LOCAL: &[u8] = include_bytes!("../../../../tests/kernels/translate/k_ampere_helper.sm80.cubin");

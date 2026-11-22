@@ -212,3 +212,11 @@ isetp__RsIR_RIR_noEX/isetp__RsIR_RIR Pu Ra Sb | Pg=PT Pp=PT Pv=PT icmp=EQ sm75.P
 isetp__RsIR_RIR_noEX/isetp__RsIR_RIR Pu Ra Sb | Pg=PT Pp=PT Pv=PT icmp=NE sm75.Pr=PT
 shfl__RIR Pu Rd Ra Sb | Pg=PT Rc=RZ shflmd=UP
 shfl__RRR Pu Rd Ra Rb Rc | Pg=PT shflmd=UP
+sgxt__RuIR_RIR Rd Ra Sb | Pg=PT fmt=U32
+isetp__RsIR_RIR_noEX/isetp__RsIR_RIR Pu Ra Sb | Pg=PT Pp=PT Pv=PT icmp=GE sm75.Pr=PT
+lop3_lut__RRR_RRR Pg Pg.not Rd Ra Rb Rc imm8 | Pu=PT Pp=PT Pp.not=1
+shf__RuIR_RIR Pg Rd Sb Rc | Pg.not=1 dir=R fmt=U32 hilo=HI Ra=RZ
+shf__RuIR_RIR Pg Rd Ra Sb | Pg.not=1 fmt=U32 Rc=RZ
+imad__RsIR_RIR Pg Rd Ra Sb | Pg.not=1 Rc=RZ
+imad_wide__RRC_RRC Pg Rd Ra Rb Sc_addr | Pg.not=1 Pu=PT
+imad_wide__RRC_RRC Pg Rd Ra Rb Sc_addr | Pg.not=1 Pu=PT reuse_src_a=reuse reuse_src_b=reuse
