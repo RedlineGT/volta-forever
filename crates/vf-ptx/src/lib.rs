@@ -484,16 +484,7 @@ pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lo
             let outside = outside.get_or_insert_with(|| outside_names(text, &functions));
             std::str::from_utf8(body)
                 .map_err(|_| lower::Unsupported("not text".to_string()))
-                .and_then(|body| {
-                    let projected = function
-                        .entry
-                        .then(|| {
-                            let signature = std::str::from_utf8(&text[function.name.end..function.body.start]).ok()?;
-                            lower::matrix_projection(signature, body, outside, options)
-                        })
-                        .flatten();
-                    lower::body_in(projected.as_deref().unwrap_or(body), outside, address_bits, options)
-                })
+                .and_then(|body| lower::body_in(body, outside, address_bits, options))
         } else {
             Err(lower::Unsupported(
                 "the kernel asks for a cluster of blocks, which this GPU does not have".to_string(),

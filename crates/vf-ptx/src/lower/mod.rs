@@ -119,7 +119,6 @@ mod parse;
 mod plain;
 mod plan;
 mod products;
-mod projection;
 mod scaled;
 #[cfg(test)]
 mod tests;
@@ -319,21 +318,6 @@ fn may_change_shared(opcode: &str) -> bool {
         Some("bar" | "barrier" | "call" | "stmatrix" | "cp") => true,
         _ => false,
     }
-}
-
-pub(crate) fn matrix_projection(signature: &str, text: &str, outside: &[String], options: Options) -> Option<String> {
-    if !options.bf16_tc_groups || options.bf16_row != Bf16Row::Tree {
-        return None;
-    }
-    if !outside.iter().any(|s| s.contains("rowdot"))
-        && let Some(rewritten) = projection::ordered_row_dot(signature, text)
-    {
-        return Some(rewritten);
-    }
-    if outside.iter().any(|s| s.contains("q4affine")) {
-        return None;
-    }
-    projection::rewrite(signature, text)
 }
 
 /// Lower the function body `text` (outer braces included) of a module whose addresses have
