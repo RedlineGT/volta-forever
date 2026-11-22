@@ -293,6 +293,100 @@
       "sampling_backend": "pytorch",
       "SGLANG_OPT_LORA_FUSED_TOPK_PACK": "0",
       "vf_proxy_sha256": "6360a2d5ef63aaf65e9898828530f1cbbf5b2f1e9178768a071297210e29e18f"
+    },
+    "final-marlin-auto": {
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "gpu_pci_address": "0000:18:00.0",
+      "warmup_tokens": 228,
+      "test_prompt_tokens": 227,
+      "generation_tokens": 64,
+      "cache_hits": 0,
+      "chat": "Paris",
+      "new_driver_xid": false,
+      "results": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.11526758575439455,
+          "decode_s": 0.8379217920303361,
+          "prefill_tokens_per_s": 1978.0062062357158,
+          "decode_tokens_per_s": 75.18601449348527,
+          "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member inspects the signs"
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11373977661132795,
+          "decode_s": 0.8380764169692965,
+          "prefill_tokens_per_s": 1995.7837685553523,
+          "decode_tokens_per_s": 75.1721426881626,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.1134909439086913,
+          "decode_s": 0.8383416318893433,
+          "prefill_tokens_per_s": 2000.159591435172,
+          "decode_tokens_per_s": 75.148361483634,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11444326019287132,
+          "decode_s": 0.8385269746780413,
+          "prefill_tokens_per_s": 1983.515670712602,
+          "decode_tokens_per_s": 75.13175115706841,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to ensure smooth operations. Upon arrival, you will find a shared room situated directly by the entrance where a yellow envelope is placed on the long table each morning to signal the start of duties. Before the doors open, please check the signs located by"
+        },
+        {
+          "id": "median",
+          "prefill_tokens_per_s": 1995.7837685553523,
+          "decode_tokens_per_s": 75.148361483634
+        }
+      ],
+      "http": [
+        {
+          "id": "warmup",
+          "first_s": 0.1951213360298425,
+          "output_span_s": 0.781934108119458
+        },
+        {
+          "id": "run1",
+          "first_s": 0.12699071411043406,
+          "output_span_s": 0.8401254029013216
+        },
+        {
+          "id": "run2",
+          "first_s": 0.12517282110638916,
+          "output_span_s": 0.840702858986333
+        },
+        {
+          "id": "run3",
+          "first_s": 0.12607808993197978,
+          "output_span_s": 0.8398772680666298
+        }
+      ],
+      "chunked_prefill_size": 256,
+      "prefill_graph_token_buckets": [
+        8,
+        16,
+        32,
+        64,
+        128,
+        192,
+        256
+      ],
+      "decode_graph_batch_size": 1,
+      "attention_backend": "auto",
+      "sampling_backend": "auto",
+      "SGLANG_OPT_LORA_FUSED_TOPK_PACK": "0",
+      "vf_proxy_sha256": "6360a2d5ef63aaf65e9898828530f1cbbf5b2f1e9178768a071297210e29e18f"
     }
   },
   "native_reference_gpu0": {
