@@ -137,6 +137,22 @@ mod tests {
             (0x000fce000f8ff03f_0000000104047891, 0x000fce00078ff0ff_0000000168687811),
             // ULEA.HI in speculative attention: a different immediate, shift and destination.
             (0x000fe2000f8fe83f_0000800018057891, 0x000fe200078fe8ff_000080007c697811),
+            // The same words with other fields, as nvdisasm reads them on both sides: a third
+            // register that is not URZ, the negate bit, a guard, the other forms of USGXT.
+            // ULEA.HI UR5, UR24, 0x8000, UR7, 0x1d -> LEA.HI R105, R124, 0x8000, R107, 0x1d
+            (0x000fe2000f8fe807_0000800018057891, 0x000fe200078fe86b_000080007c697811),
+            // ULEA.HI UR4, -UR4, 0x1, UR12, 0x1e -> LEA.HI R104, -R104, 0x1, R112, 0x1e
+            (0x000fce000f8ff10c_0000000104047891, 0x000fce00078ff170_0000000168687811),
+            // @!UP2 ULEA.HI UR5, UR24, 0x8000, UR3, 0x1d -> @!P2 LEA.HI R105, R124, 0x8000, R103, 0x1d
+            (0x000fe2000f8fe803_000080001805a891, 0x000fe200078fe867_000080007c69a811),
+            // USGXT UR2, UR9, 0xc -> SGXT R102, R109, 0xc
+            (0x000fe20008000200_0000000c0902789a, 0x000fe20000000200_0000000c6d66781a),
+            // @UP0 USGXT.W.U32 UR11, UR11, 0x4 -> @P0 SGXT.W.U32 R111, R111, 0x4
+            (0x000fe20008000800_000000040b0b089a, 0x000fe20000000800_000000046f6f081a),
+            // @!UP1 ULEA.HI.SX32 UR6, UR6, -UR8, 0x1f -> @!P1 LEA.HI.SX32 R106, R106, -R108, 0x1f
+            (0x000fc8000f8ffa3f_8000000806069291, 0x000fc800078ffaff_8000006c6a6a9211),
+            // @P3 LEA.HI R0, R2, -UR14, R7, 0x1c -> @P3 LEA.HI R0, R2, -R114, R7, 0x1c
+            (0x000fe4000f8fe007_8000000e02003c11, 0x000fe400078fe007_8000007202003211),
         ];
         let mut decoder = Decoder::new(75);
         for (source, expected) in cases {
