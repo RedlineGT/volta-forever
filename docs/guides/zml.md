@@ -45,15 +45,16 @@ Look for `platform: cuda` and `Tesla V100` in the device listing. The tested mod
 
 Read the final `decode` line after running the command above. On one Tesla V100-SXM2-32GB with driver 580.178.04 and VF 0.1.0, Qwen3.5-0.8B decoded at **96.1 tokens/s** over 0.458 seconds. This is a single run of the upstream example. [Tested ZML revision](https://github.com/zml/zml/commit/f430c3530fbc6d99f734b641eb8f3fd699868843)
 
-Two local ZML builds ran the split-expert AWQ checkpoint for Qwen3.5-35B-A3B. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
+Three local ZML builds ran the split-expert AWQ checkpoint for Qwen3.5-35B-A3B. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
 
 | Engine | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: |
 | Local ZML with split AWQ experts | 343.79 | 30.17 |
 | Local ZML with fused AWQ decode projections | 350.57 | 42.73 |
+| Local ZML with fused decode and eight-step prefill recurrence | 448.27 | 42.74 |
 | Native 1Cat-vLLM | 1427.41 | 76.13 |
 
-The fused projection eliminated 48 MiB of intermediate BF16 weights per decode layer and 24,570 kernel launches over 63 decode steps. Eight BF16 test outputs matched the independent CPU calculation exactly. All three answers retained the correct city and its associated detail. The Lyon answer matched all 64 original tokens, while Kyoto and Lima matched the first 16 before their wording diverged. [Measurements, numerical check and source revision](./benchmarks/zml-awq-experimental.json)
+Fusing AWQ projections raised decode throughput by 42% and removed a 48 MiB BF16 intermediate per layer. Grouping eight recurrent updates raised prefill throughput by 28% and cut stream synchronizations from 6,840 to 990 on a 227-token prompt. The three builds retained the expected cities and details. Their wording sometimes differed after token 16. [Per-request times, numerical tolerances and GPU profiles](./benchmarks/zml-awq-experimental.json)
 
 ## 6. Additional notes
 

@@ -210,5 +210,106 @@
         0
       ]
     }
+  },
+  "blocked_gdn_prefill": {
+    "implementation": "Third local build, with fused AWQ decode and eight recurrent updates per full prefill loop iteration. A scalar tail handles the remaining positions.",
+    "binary_sha256": "2428eb660c9b3dc64cfa8eeda6c9de5168686beea5fcaf9ac453c84b2f375365",
+    "source_patch_sha256": "dcfed46ca97444ba7b993c6693c6f6a86c6c170be9e2793ba2e1a2af63f86431",
+    "numerical_check": {
+      "backend": "PJRT CPU vs independent scalar FP32 recurrence",
+      "sequence_capacity": 19,
+      "active_lengths": [
+        -7,
+        0,
+        1,
+        7,
+        8,
+        9,
+        15,
+        16,
+        17,
+        19,
+        25
+      ],
+      "sequence_output_elements_per_case": 76,
+      "final_state_elements_per_case": 12,
+      "absolute_tolerance": 1e-06,
+      "relative_tolerance": 1e-06
+    },
+    "visible_answer": "Paris (1 output token, EOS).",
+    "medians": {
+      "prefill_tokens_per_s": 448.27495768802777,
+      "decode_tokens_per_s": 42.737297560892
+    },
+    "trials": [
+      {
+        "prompt_file": "run1.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 507557238,
+        "decode_ns": 1474122221,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by",
+        "matching_output_ids_vs_fused_decode": 16,
+        "matching_output_prefix_vs_fused_decode": 16
+      },
+      {
+        "prompt_file": "run2.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 506379123,
+        "decode_ns": 1475763747,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by",
+        "matching_output_ids_vs_fused_decode": 64,
+        "matching_output_prefix_vs_fused_decode": 64
+      },
+      {
+        "prompt_file": "run3.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 506385637,
+        "decode_ns": 1468437227,
+        "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on",
+        "matching_output_ids_vs_fused_decode": 64,
+        "matching_output_prefix_vs_fused_decode": 64
+      }
+    ],
+    "prefill_profile": {
+      "order": [
+        "fused decode",
+        "fused decode plus blocked prefill"
+      ],
+      "request": "Separate warm repeat of run2.txt (Lyon, 227 input tokens).",
+      "stream_synchronizations": [
+        6840,
+        990
+      ],
+      "device_to_host_bytes": [
+        6844,
+        994
+      ],
+      "gpu_kernel_executions": [
+        63341,
+        27281
+      ],
+      "gpu_idle_gaps_ms": [
+        218.634,
+        64.408
+      ],
+      "recurrent_kernel_duration_ms": [
+        132.233,
+        78.968
+      ],
+      "profiled_prefill_wall_ms": [
+        771.164,
+        562.069
+      ],
+      "cupti_dropped_records": [
+        0,
+        0
+      ]
+    }
   }
 }
