@@ -1,6 +1,6 @@
-// Driver for link_refusals.py: a linker whose output is the image the test puts in `linked`, with
-// one handle for every link state (as an allocator may give a freed one again), and modules that
-// have every kernel they are asked for.
+// Driver for link_refusals.py and nccl_remedy.py: a linker whose output is the image the test puts
+// in `linked`, with one handle for every link state (as an allocator may give a freed one again),
+// and modules that have every kernel they are asked for.
 #include <stddef.h>
 #include <stdint.h>
 

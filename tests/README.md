@@ -138,20 +138,22 @@ through the stand-in.
 | `tests/proxy/graph_fit.sh [PROXY_LIBRARY]` | CUDA graph register pressure with a stand-in driver reading the actual translated ELF. Eight recording, update and capture paths under the usual, bounded and block-size-aware policies | seconds | the proxy, the same cubin and a C compiler |
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 
-Three more host regressions exercise the built libraries directly:
+Four more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
 python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
+python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
 deferred loads and the lifetime of replacement images, and that a refused lookup leaves NULL in
 the handle. The second checks, with another stand-in, that a kernel refused in an input of the
-driver's linker is refused in the image the link makes, and in a copy of it. The third links a
-native sm_70 device function from both a host object and a static library with the CUDA 12.9
-toolkit.
+driver's linker is refused in the image the link makes, and in a copy of it. The third checks
+that a refused kernel of NCCL makes the layer say once, at the default log level, that NCCL's
+CUDA 12 build is the remedy. The fourth links a native sm_70 device function from both a host
+object and a static library with the CUDA 12.9 toolkit.
 
 ### Forwarding stack test (`tests/forward/`)
 

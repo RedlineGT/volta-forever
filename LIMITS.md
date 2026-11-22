@@ -199,7 +199,9 @@ emulated kernels.
 
 A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ server used CUDA graphs for both prefill and decode. A graph can report error 701 when it is instantiated or replayed if the translated kernel needs too many registers for the recorded block size. For translated machine code, `VF_BORROW=9 vf …` can preserve a source block size that would otherwise be lost. Shared-memory limits still apply. [SGLang measurements](docs/guides/benchmarks/sglang-default-operators.json) · [GPU validation](docs/validation.md#cuda-graph-replay)
 
-## SGLang tensor parallelism and NCCL
+## Several GPUs and NCCL
+
+Any use of several GPUs from PyTorch goes through NCCL: `torch.distributed` (a process for each GPU), `torch.nn.DataParallel` (one process with several GPUs) and SGLang's tensor parallelism (below). The NCCL of the CUDA 13 wheel cannot run its collectives on a V100: the layer refuses its kernels, whose indirect calls can reach multicast instructions with no Volta translation. NCCL's CUDA 12 build has code for Volta: fetch it with `vf fetch --only libnccl` and start the program through `vf`, which gives it that build in place of the wheel's. Without it, on two V100s, `init_process_group` succeeds and the first collective fails after a minute and a half (`Cuda failure 'a PTX JIT compilation failed'`), and `DataParallel` stops when it copies the model to the other GPUs (`NCCL Error 1: unhandled cuda error`); with its first refusal of an NCCL kernel the layer says that the CUDA 12 build is missing.
 
 SGLang starts one process per GPU for tensor parallelism. A user tested two and four V100s with NCCL's CUDA 12 build mapped through VF. With the CUDA 13 build, the first all-reduce failed. VF reported that NCCL's indirect calls could reach multicast instructions with no Volta translation. Four ranks also needed the uniform-address translation merged in PR #1. [Issue #2 and reproduction](https://github.com/nbald/volta-forever/issues/2) · [Address translation change](https://github.com/nbald/volta-forever/pull/1)
 

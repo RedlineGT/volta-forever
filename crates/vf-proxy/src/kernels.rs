@@ -8,6 +8,7 @@
 //! - Kernels that run emulated instructions: announced on the console when the program takes them.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{LazyLock, Mutex};
 
 use vf_adapt::emulation::Announcer;
@@ -43,6 +44,42 @@ static KNOWN: LazyLock<Mutex<HashMap<usize, Kernels>>> = LazyLock::new(|| Mutex:
 static ANNOUNCER: Announcer = Announcer::new();
 /// Refused kernels the program already asked for: the refusal is explained once.
 static EXPLAINED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Whether the remedy for NCCL's kernels was given (`nccl_remedy`).
+static NCCL_REMEDY_GIVEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether `name` is the name of one of NCCL's device kernels (`ncclDevKernel_...`,
+/// `ncclSymkDevKernel_...`; `ncclKernel_...` before NCCL 2.19), as the compiler gives it: plain, or
+/// mangled as a function at global scope (`_Z`, the length of the name, the name, its parameters).
+fn nccl_kernel(name: &str) -> bool {
+    let identifier = match name.strip_prefix("_Z") {
+        Some(rest) => {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            match rest[..digits].parse::<usize>() {
+                Ok(length) => rest.get(digits..digits + length).unwrap_or(""),
+                Err(_) => "",
+            }
+        }
+        None => name,
+    };
+    ["ncclDevKernel_", "ncclSymkDevKernel_", "ncclKernel_"]
+        .iter()
+        .any(|prefix| identifier.starts_with(prefix))
+}
+
+/// For the first refused kernel of NCCL: what the program needs instead. The CUDA 13 build of NCCL
+/// reaches instructions that Volta does not have; its CUDA 12 build has code for Volta, and the
+/// launcher gives it to the program when it is installed.
+fn nccl_remedy(name: &str) -> Option<String> {
+    if !nccl_kernel(name) || NCCL_REMEDY_GIVEN.swap(true, Relaxed) {
+        return None;
+    }
+    Some(format!(
+        "{name} is a kernel of NCCL, whose CUDA 13 build cannot run its collectives on this GPU: a program \
+         that uses several GPUs needs NCCL's CUDA 12 build, which has code for it. `vf fetch --only libnccl` \
+         downloads it, and a program started through `vf` is given it in place of its own (`vf doctor` says \
+         whether it is found)"
+    ))
+}
 
 fn known() -> std::sync::MutexGuard<'static, HashMap<usize, Kernels>> {
     KNOWN.lock().unwrap_or_else(|e| e.into_inner())
@@ -153,6 +190,9 @@ pub fn refused(handle: usize, name: &str) -> bool {
         log::warn(format_args!(
             "kernel {name} cannot run on this GPU and is not given to the program: {reason}{through}"
         ));
+        if let Some(remedy) = nccl_remedy(name) {
+            log::warn(format_args!("{remedy}"));
+        }
     }
     true
 }
@@ -211,5 +251,48 @@ pub fn is_adapted(handle: usize) -> bool {
 pub fn summary() {
     if let Some(line) = ANNOUNCER.summary(config().emulation_warnings) {
         log::warn(format_args!("{line}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nccl_kernels_are_known_by_their_names() {
+        // Names of NCCL 2.30 for CUDA 13, as the layer refused them on a V100.
+        for name in [
+            "_Z39ncclDevKernel_AllReduce_Sum_f32_RING_LL24ncclDevKernelArgsStorageILm4096EE",
+            "_Z22ncclDevKernel_SendRecv24ncclDevKernelArgsStorageILm4096EE",
+            "_Z32ncclSymkDevKernel_AllGather_STMC21ncclSymkDevWorkArgs4K",
+            "ncclDevKernel_Generic",
+            "_Z38ncclKernel_AllReduce_RING_LL_Sum_float14ncclDevKernelArgs",
+        ] {
+            assert!(nccl_kernel(name), "{name}");
+        }
+        for name in [
+            "sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_execute_kernel__5x_cudnn",
+            // The length says where the name ends: here it ends before the prefix is complete.
+            "_Z4ncclDevKernel_AllReduce",
+            "_Z999ncclDevKernel_",
+            "_ZN4nccl13ncclDevKernel_E",
+            "_Z12ncclDevFunc_v",
+            "my_ncclDevKernel_copy",
+            "_Z",
+            "",
+        ] {
+            assert!(!nccl_kernel(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_remedy_for_nccl_is_given_once() {
+        assert_eq!(nccl_remedy("refused_by_layer"), None);
+        let first = nccl_remedy("_Z22ncclDevKernel_SendRecv24ncclDevKernelArgsStorageILm4096EE").unwrap();
+        assert!(first.contains("vf fetch --only libnccl"), "{first}");
+        assert_eq!(
+            nccl_remedy("_Z39ncclDevKernel_AllReduce_Sum_f32_RING_LL24ncclDevKernelArgsStorageILm4096EE"),
+            None
+        );
     }
 }
