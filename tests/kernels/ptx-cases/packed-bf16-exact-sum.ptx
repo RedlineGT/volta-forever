@@ -25,6 +25,22 @@
     prmt.b32 %r2, %r0, %r1, 0x7632;
     xor.b32 %r0, %fused, %r2;
 
+    // Move the unit factor between operands. Compare both packed lanes to n.
+    mov.b32 %a, 1065369472;
+    mov.b32 %b, -1023360256;
+    shl.b32 %packed, %n, 16;
+    or.b32 %packed, %packed, %n;
+    and.b32 %packed, %packed, 0x000f000f;
+    or.b32 %packed, %packed, 0x43004300;
+    cvt.rn.f32.u32 %r1, %n;
+    prmt.b32 %r1, %r1, %r1, 0x3232;
+    fma.rn.bf16x2 %r2, %packed, %a, %b;
+    xor.b32 %r2, %r2, %r1;
+    or.b32 %r0, %r0, %r2;
+    fma.rn.bf16x2 %packed, %a, %packed, %b;
+    xor.b32 %r1, %packed, %r1;
+    or.b32 %r0, %r0, %r1;
+
     // A difference of adjacent minimum normal BF16 numbers is subnormal.
     mov.b32 %a, 0x00800080;
     mov.b32 %b, 0xbf803f80;

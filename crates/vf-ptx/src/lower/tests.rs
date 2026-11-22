@@ -3389,3 +3389,24 @@ fn packed_bf16_fma_uses_exact_cancellation_when_both_lanes_qualify() {
     ));
     assert_eq!(count(&after_join, "add.rn.f32 "), 2);
 }
+
+#[test]
+fn packed_bf16_fma_with_a_unit_factor_uses_the_bounded_multiplicand() {
+    let program = |op: &str, one: &str| {
+        lower(&format!(
+            "{{ .reg .b32 %x,%one,%bias,%packed;
+        mov.u32 %one,{one}; mov.u32 %bias,-1023360256;
+        and.b32 %packed,%x,0x000f000f; or.b32 %packed,%packed,0x43004300;
+        fma.rn.bf16x2 %packed,{op},%bias; ret; }}"
+        ))
+    };
+    for (op, one) in [("%packed,%one", "0x3f803f80"), ("%one,%packed", "1065369472")] {
+        let output = program(op, one);
+        assert_eq!(count(&output, "add.rn.f32 "), 2);
+        assert!(output.contains("0fc3000000;"));
+        assert_eq!(count(&output, "fma.rm.f32 "), 0);
+    }
+    for bad in ["0x3f813f80", "0x3f807fc0", "0xbf803f80"] {
+        assert_eq!(count(&program("%packed,%one", bad), "fma.rm.f32 "), 2);
+    }
+}

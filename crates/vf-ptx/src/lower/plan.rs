@@ -47,7 +47,7 @@ pub(super) struct Plan<'a> {
     /// Unshadowed 16-bit registers with one unconditional constant definition.
     pub(super) constants16: HashMap<&'a str, u32>,
     /// Products of packed BF16 FMAs whose sums are exactly representable.
-    pub(super) exact_bf16_sums: HashMap<usize, [u32; 2]>,
+    pub(super) exact_bf16_sums: HashMap<usize, super::known_bits::ExactSum<'a>>,
     /// Registers written by `movmatrix`: their layout is transposed, not suitable for the chain
     /// form's shuffle indices.
     pub(super) transposed: HashSet<&'a str>,
@@ -135,7 +135,7 @@ impl<'a> Plan<'a> {
                 if all_ones(value) {
                     set_to_ones.push(name);
                 }
-                if packed_fma && let Some(bits) = integer(value) {
+                if packed_fma && let Some(bits) = super::known_bits::word_literal(value) {
                     constants32.push((name, bits));
                 }
             }

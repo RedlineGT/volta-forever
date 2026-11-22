@@ -4,6 +4,20 @@ use std::collections::HashMap;
 use super::types::{first_operand, integer};
 use crate::scan;
 
+/// Packed 32-bit words may also be written as negative integer literals.
+pub(super) fn word_literal(text: &str) -> Option<u32> {
+    integer(text).or_else(|| {
+        let magnitude = integer(text.strip_prefix('-')?)?;
+        (magnitude <= 1 << 31).then(|| magnitude.wrapping_neg())
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ExactSum<'a> {
+    pub(super) operand: &'a str,
+    pub(super) bits: [u32; 2],
+}
+
 /// Lower and upper bit patterns: a bit is known when it agrees in both.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Word {
@@ -15,7 +29,7 @@ impl Word {
     const UNKNOWN: Self = Self { low: 0, high: u32::MAX };
 
     fn get(registers: &HashMap<&str, Self>, constants: &HashMap<&str, u32>, operand: &str) -> Self {
-        if let Some(n) = integer(operand).or_else(|| constants.get(operand).copied()) {
+        if let Some(n) = word_literal(operand).or_else(|| constants.get(operand).copied()) {
             Self { low: n, high: n }
         } else {
             registers.get(operand).copied().unwrap_or(Self::UNKNOWN)
@@ -51,19 +65,10 @@ impl Word {
     /// The exact f32 products if each packed BF16 lane of a*b+c is a cancellation
     /// between two BF16 numbers whose absolute values differ by at most a factor of two.
     /// Sterbenz's lemma then guarantees that the result is already representable in BF16.
-    fn cancelling_products(
-        registers: &HashMap<&str, Self>,
-        constants: &HashMap<&str, u32>,
-        a: &str,
-        b: &str,
-        c: &str,
-    ) -> Option<[u32; 2]> {
-        let a = Self::get(registers, constants, a);
-        let b = Self::get(registers, constants, b);
+    fn cancelling_products(a: Self, b: Self, c: Self) -> Option<[u32; 2]> {
         if a.low != a.high || b.low != b.high {
             return None;
         }
-        let c = Self::get(registers, constants, c);
         let lane = |word: u32, shift| f32::from_bits(((word >> shift) & 0xffffu32) << 16);
         let mut result = [0; 2];
         for (index, product_bits) in result.iter_mut().enumerate() {
@@ -92,12 +97,12 @@ impl Word {
 
 /// Analyze original PTX before emitting any Volta instructions. Facts expire on every
 /// incoming branch target and when a scope changes the meaning of a register name.
-pub(super) fn exact_bf16_sums(
-    text: &str,
+pub(super) fn exact_bf16_sums<'a>(
+    text: &'a str,
     items: &[scan::Item],
     constants: &HashMap<&str, u32>,
     shadowable: &[&str],
-) -> HashMap<usize, [u32; 2]> {
+) -> HashMap<usize, ExactSum<'a>> {
     let mut found = HashMap::new();
     let mut registers = HashMap::new();
     for (index, item) in items.iter().enumerate() {
@@ -130,9 +135,23 @@ pub(super) fn exact_bf16_sums(
         }
         if opcode == "fma.rn.bf16x2"
             && let [_, a, b, c] = &scan::split_operands(operands)[..]
-            && let Some(product) = Word::cancelling_products(&registers, constants, a, b, c)
         {
-            found.insert(index, product);
+            let [x, y, z] = [a, b, c].map(|src| Word::get(&registers, constants, src));
+            let one = Word {
+                low: 0x3f803f80,
+                high: 0x3f803f80,
+            };
+            // With an exact multiplier of one the same cancellation proof applies to x+c or y+c.
+            let (left, right, bounded, operand) = if y == one && z.low == z.high {
+                (z, y, x, *a)
+            } else if x == one && z.low == z.high {
+                (x, z, y, *b)
+            } else {
+                (x, y, z, *c)
+            };
+            if let Some(bits) = Word::cancelling_products(left, right, bounded) {
+                found.insert(index, ExactSum { operand, bits });
+            }
         }
         let result = if !guarded && matches!(opcode, "mov.b32" | "mov.u32" | "mov.s32" | "and.b32" | "or.b32") {
             Word::definition(&registers, constants, opcode, operands)
@@ -156,11 +175,9 @@ pub(super) fn exact_bf16_sums(
 #[cfg(test)]
 mod tests {
     use super::Word;
-    use std::collections::HashMap;
 
     #[test]
     fn exact_bf16_products_cover_cancellation_over_the_full_exponent_range() {
-        let constants = HashMap::new();
         // Verify the representability independently for every possible BF16 addend
         // and products near underflow, common quantization offsets, and overflow.
         for (x, y) in [
@@ -176,11 +193,9 @@ mod tests {
             };
             let as_f64 = |h| f64::from(f32::from_bits(u32::from(h) << 16));
             let product = as_f64(x) * as_f64(y);
-            let mut registers = HashMap::from([("a", known(x)), ("b", known(y))]);
             let mut admitted = 0;
             for c in 0..=u16::MAX {
-                registers.insert("c", known(c));
-                if let Some([low, high]) = Word::cancelling_products(&registers, &constants, "a", "b", "c") {
+                if let Some([low, high]) = Word::cancelling_products(known(x), known(y), known(c)) {
                     let exact = product + as_f64(c);
                     let got = f32::from_bits(low) + as_f64(c) as f32;
                     assert_eq!(low, high);
