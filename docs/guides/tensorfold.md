@@ -14,7 +14,7 @@ If you installed the driver, reboot and repeat the check. Building the CUDA kern
 
 ## 2. VF
 
-The measured server needs VF's shared-memory adaptation from the main branch. Build VF with its standard build targets, then use the launcher from that checkout. [VF shared-memory change](https://github.com/nbald/volta-forever/commit/e8c9774)
+VF 0.1.2 includes the shared-memory adaptation used by the measured server. Build VF with its standard build targets, then use the launcher from that checkout. [VF shared-memory change](https://github.com/nbald/volta-forever/commit/e8c9774)
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils

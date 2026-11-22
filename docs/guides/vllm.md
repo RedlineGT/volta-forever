@@ -31,7 +31,7 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-Use VF from the main branch for this 35B configuration. The released VF 0.1.1 stops when vLLM compiles its unified-attention kernel. Main includes the required GPU instruction translation. [VF correction](https://github.com/nbald/volta-forever/commit/cc36e4e)
+VF 0.1.2 includes the GPU instruction translation needed by vLLM’s unified-attention kernel. [VF correction](https://github.com/nbald/volta-forever/commit/cc36e4e)
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils

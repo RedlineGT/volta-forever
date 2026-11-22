@@ -30,7 +30,7 @@ fi
 
 ## 2. VF
 
-Build VF from the main branch for long prompts in the official NInfer server. [Required VF change](https://github.com/nbald/volta-forever/commit/a9dd4cece3cfa38d051e23ea6f37ef4f535f745a)
+VF 0.1.2 supports long prompts in the official NInfer server. [Required VF change](https://github.com/nbald/volta-forever/commit/a9dd4cece3cfa38d051e23ea6f37ef4f535f745a)
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3 xz-utils

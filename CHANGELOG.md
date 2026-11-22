@@ -1,5 +1,13 @@
 # Changes
 
+## 0.1.2 (2026-11-22)
+
+- VF can fetch the CUDA 12 build of NCCL and select it for both SGLang and PyTorch. SGLang generated with the 35B model on two V100s over NVLink. A separate NCCL all-reduce passed on four V100s. The four-GPU SGLang server stopped during startup.
+- Add an opt-in register allocation policy (`VF_BORROW=9`) for CUDA Graph kernels whose register use would otherwise prevent a legal block size on Volta.
+- Extend BF16 and machine-code translation, preserve compatible indirect calls in standalone PTX, and adapt PTX passed to external assemblers through `vf ptxas`.
+- Install releases atomically and share fetched CUDA libraries across installed versions.
+- Add guides and measured prefill and decode rates for eight inference engines on V100 with quantized Qwen3.5-35B-A3B weights. See the inference engine table for each quantization and native comparison.
+
 ## 0.1.1 (2026-11-21)
 
 - CUDA runtime libraries built with separate device compilation can now use their relocatable PTX on Volta. VF compiles independent kernels on demand and preserves cross-object calls when linking the complete library.

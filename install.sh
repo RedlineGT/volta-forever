@@ -28,7 +28,7 @@ fail() { printf 'volta-forever: %s\n' "$*" >&2; exit 1; }
 # (Everything is in a function that is called on the last line: a script cut short while it
 # was being downloaded runs nothing.)
 main() {
-    version=${VF_VERSION:-0.1.1}
+    version=${VF_VERSION:-0.1.2}
     case $version in *[!a-zA-Z0-9._+-]*) fail "invalid release version: $version" ;; esac
     name=volta-forever-$version-linux-x86_64
     archive=$name.tar.gz

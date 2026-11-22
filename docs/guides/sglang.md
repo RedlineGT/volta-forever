@@ -30,7 +30,7 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-Build VF from the main branch for the 8.0 capability profile used below. VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
+VF 0.1.2 supports the 8.0 capability profile used below. VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils
