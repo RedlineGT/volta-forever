@@ -109,6 +109,7 @@ macro_rules! emit {
 mod barrier;
 mod body;
 mod convert;
+mod known_bits;
 mod lane;
 mod matrix;
 mod names;

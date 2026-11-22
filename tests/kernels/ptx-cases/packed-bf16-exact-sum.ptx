@@ -1,0 +1,43 @@
+.version 8.0
+.target sm_90
+.address_size 64
+
+.visible .entry k(.param .u64 output) .reqntid 32,1,1
+{
+    .reg .b32 %a, %b, %lane, %n, %packed, %fused, %r<4>;
+    .reg .b64 %out;
+    .reg .pred %p;
+
+    mov.u32 %lane, %laneid;
+    and.b32 %n, %lane, 15;
+    shl.b32 %packed, %n, 16;
+    or.b32 %packed, %packed, %n;
+    and.b32 %packed, %packed, 0x000f000f;
+    or.b32 %packed, %packed, 0xc0004300;
+    // Low: (128+n)-128 = n. High: 2-(2+n/64) = -n/64.
+    mov.b32 %a, 0x40004300;
+    mov.b32 %b, 0x3f80bf80;
+    fma.rn.bf16x2 %fused, %a, %b, %packed;
+    cvt.rn.f32.u32 %r0, %n;
+    mul.rn.f32 %r1, %r0, 0fbc800000;
+    setp.eq.u32 %p, %n, 0;
+    @%p mov.b32 %r1, 0;
+    prmt.b32 %r2, %r0, %r1, 0x7632;
+    xor.b32 %r0, %fused, %r2;
+
+    // A difference of adjacent minimum normal BF16 numbers is subnormal.
+    mov.b32 %a, 0x00800080;
+    mov.b32 %b, 0xbf803f80;
+    mov.b32 %packed, 0x00818081;
+    fma.rn.bf16x2 %r1, %a, %b, %packed;
+    mov.b32 %r2, 0x12345678;
+    setp.ge.u32 %p, %lane, 32;
+    @%p fma.rn.bf16x2 %r2, %a, %b, %packed;
+    mov.b32 %r3, 0x00808080;
+    fma.rn.bf16x2 %r3, %a, %b, %r3;
+
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.b32 [%out], {%r0,%r1,%r2,%r3};
+    ret;
+}

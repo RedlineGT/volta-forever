@@ -402,6 +402,15 @@ impl<'a> Body<'a> {
             let [d, a, b, c] = parts[..] else {
                 return Err(unsupported("operands not recognised"));
             };
+            if let Some(&[low, high]) = self.plan.exact_bf16_sums.get(&self.current_index) {
+                let (c_hi, c_lo) = self.bf16x2_to_f32(c);
+                emit!(self, "add.rn.f32 {c_lo}, {c_lo}, 0f{low:08x};");
+                emit!(self, "add.rn.f32 {c_hi}, {c_hi}, 0f{high:08x};");
+                self.written(d);
+                emit!(self, "{guard}prmt.b32 {d}, {c_lo}, {c_hi}, 0x7632;");
+                self.counts.other += 1;
+                return Ok(());
+            }
             let (a_hi, a_lo) = self.bf16x2_to_f32(a);
             let (b_hi, b_lo) = self.bf16x2_to_f32(b);
             let (c_hi, c_lo) = self.bf16x2_to_f32(c);

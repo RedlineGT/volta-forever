@@ -3355,3 +3355,37 @@ fn other_barrier_operations_refuse_the_whole_body() {
         assert!(refusal(&body).starts_with(instruction.split_whitespace().next().unwrap()));
     }
 }
+
+#[test]
+fn packed_bf16_fma_uses_exact_cancellation_when_both_lanes_qualify() {
+    // Low lane: -128 + [128,143]. High lane: +2 + [-3.984375,-2].
+    let setup = "mov.u32 %a,0x40004300;\nmov.b32 %b,0x3f80bf80;\nand.b32 %c,%x,0x007f000f;\nor.b32 %c,%c,0xc0004300;";
+    let program = |body: &str| {
+        lower(&format!(
+            "{{\n.reg .b32 %a,%b,%c,%x;\n.reg .pred %p;\n{setup}\n{body}\nret;\n}}"
+        ))
+    };
+    let fma = "@%p fma.rn.bf16x2 %c,%a,%b,%c;";
+    let result = program(fma);
+    assert_eq!(count(&result, "add.rn.f32 "), 2);
+    assert!(result.contains("@%p prmt.b32 %c,"));
+    assert!(result.contains("0fc3000000;") && result.contains("0f40000000;"));
+    for change in [
+        "@%p mov.u32 %c,%x;",                  // a predicated change makes its bounds unknown
+        "branch_target:",                      // the addend no longer has a known local definition
+        "mov.b32 %b,0xbf803f80;",              // both lanes now add terms of the same sign
+        "or.b32 %c,%c,0x7f800000;",            // high lane may be nonfinite
+        "mov.b32 %a,0x40000000;",              // zero multiplicand
+        "{\n.reg .b32 %c;\nmov.b32 %c,%x;\n}", // no bounds survive a shadow
+    ] {
+        assert_eq!(
+            count(&program(&format!("{change}\n{fma}")), "fma.rm.f32 "),
+            2,
+            "{change}"
+        );
+    }
+    let after_join = program(&format!(
+        "join:\nand.b32 %c,%x,0x007f000f;\nor.b32 %c,%c,0xc0004300;\n{fma}"
+    ));
+    assert_eq!(count(&after_join, "add.rn.f32 "), 2);
+}

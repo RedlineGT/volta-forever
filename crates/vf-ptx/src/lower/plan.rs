@@ -46,6 +46,8 @@ pub(super) struct Plan<'a> {
     pub(super) ones: HashSet<&'a str>,
     /// Unshadowed 16-bit registers with one unconditional constant definition.
     pub(super) constants16: HashMap<&'a str, u32>,
+    /// Products of packed BF16 FMAs whose sums are exactly representable.
+    pub(super) exact_bf16_sums: HashMap<usize, [u32; 2]>,
     /// Registers written by `movmatrix`: their layout is transposed, not suitable for the chain
     /// form's shuffle indices.
     pub(super) transposed: HashSet<&'a str>,
@@ -95,6 +97,8 @@ impl<'a> Plan<'a> {
         let mut loads: Vec<(&str, Origin)> = Vec::new();
         let mut set_to_ones: Vec<&str> = Vec::new();
         let mut constants16 = Vec::new();
+        let mut constants32 = Vec::new();
+        let packed_fma = text.contains("fma.rn.bf16x2");
         let mut plan = Plan::default();
         let mut depth = 0usize;
         for (index, item) in items.iter().enumerate() {
@@ -126,10 +130,14 @@ impl<'a> Plan<'a> {
             }
             if let ("mov.b32" | "mov.u32" | "mov.s32", false, [register, value]) =
                 (opcode, guarded, &scan::split_operands(operands)[..])
-                && all_ones(value)
-                && scan::register(register).is_some()
+                && let Some(name) = scan::register(register)
             {
-                set_to_ones.push(register);
+                if all_ones(value) {
+                    set_to_ones.push(name);
+                }
+                if packed_fma && let Some(bits) = integer(value) {
+                    constants32.push((name, bits));
+                }
             }
             if matches!(opcode, "mov.b16" | "mov.u16" | "mov.s16")
                 && !guarded
@@ -190,6 +198,15 @@ impl<'a> Plan<'a> {
             .into_iter()
             .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(16))
             .collect();
+        if packed_fma {
+            // Only unshadowed registers with one unconditional write retain constants across labels.
+            let constants = constants32
+                .into_iter()
+                .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(32))
+                .collect();
+            let shadowable: Vec<_> = writes.keys().copied().filter(|name| shadowed(name)).collect();
+            plan.exact_bf16_sums = super::known_bits::exact_bf16_sums(text, items, &constants, &shadowable);
+        }
         // Who reads what, and how.
         let mut gathered: HashSet<&str> = HashSet::new();
         let mut products: Vec<(usize, Vec<&str>, Vec<&str>)> = Vec::new();

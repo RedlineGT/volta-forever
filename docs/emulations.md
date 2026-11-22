@@ -280,12 +280,18 @@ bf16 x bf16 has at most 14 significant bits, well within f32).
 | `add.rn.f32.bf16`, `sub.rn.f32.bf16` | Widen the first operand and add or subtract in f32 |
 | `min.NaN.bf16`, `max.NaN.bf16` | Compare the widened inputs, propagating a NaN from either operand |
 | `cvt.rn.bf16.f16` | Widen exactly to f32, then round to bf16 |
-| `fma.rn.bf16`, `fma.rn.bf16x2` | Rounded to odd in f32 first (from `fma.rm.f32` and `fma.rp.f32`), then to bf16 |
+| `fma.rn.bf16`, `fma.rn.bf16x2` | Rounded to odd in f32 first (from `fma.rm.f32` and `fma.rp.f32`), then to bf16. Packed lanes with proven exact cancellation use a single f32 add per lane |
 | `cvt.rn.bf16.f64` | f32 rounded to odd (from `cvt.rm.f32.f64` and `cvt.rp.f32.f64`), then to bf16 |
 | `cvt.rn.f16.bf16` | Widen exactly to f32, then round to f16 |
 | `cvt.rn.bf16x2.e4m3x2`, `cvt.rn.bf16x2.e5m2x2` | Decode each FP8 byte through an exact f16 intermediate, then pack both bf16 values |
 | `setp.<cmp>.bf16` | Comparison of the two f32 |
 | `set.<cmp>.bf16x2.bf16x2` | Two comparisons, 1.0 or 0.0 as bf16 in each half |
+
+For a packed FMA, VF tracks the bits set by moves, masks and bitwise OR. When both multiplicands
+are constant, their product can sometimes be represented exactly in BF16. If the addend has the
+opposite sign and its magnitude lies between half and twice the product magnitude, subtraction is
+exact in BF16 (Sterbenz’s lemma). When both lanes meet these conditions, VF adds each constant
+product in f32 and packs the high halves. This occurs when TensorFold unpacks affine 4-bit weights.
 
 **One rounding, not two.** Computing an `fma` in f32 and then rounding to bf16 would round
 twice, which can give the wrong answer: a first rounding can land on a halfway point, and

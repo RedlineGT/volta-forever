@@ -84,6 +84,7 @@ px stmatrix-transposed "$G/ptx-cases/stmatrix-transposed.ptx" 0 0
 
 # Each half of a packed BF16 bound propagates its own NaNs and preserves signed zero.
 px xla-sort-bounds "$G/ptx-cases/xla-sort-bounds.ptx" c0400000 80000000 00000000 0000000f
+px packed-bf16-exact-sum "$G/ptx-cases/packed-bf16-exact-sum.ptx" 0 00018001 12345678 0
 px packed-bf16-convert "$G/ptx-cases/packed-bf16-convert.ptx" 40203f88 c13cc238 7fff0001 ff80ff80
 px packed-bf16-bounds "$G/ptx-cases/packed-bf16-bounds.ptx" 00000002 80008001 7fff0002 40007fff
 
