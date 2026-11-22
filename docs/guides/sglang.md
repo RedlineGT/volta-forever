@@ -63,9 +63,7 @@ Start SGLang in the active environment. It downloads the 4-bit AWQ checkpoint an
 export PATH="$CUDA_HOME/bin:$PATH"
 export VF_CAPABILITY=8.0
 export NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80'
-export SGLANG_MAMBA_CONV_DTYPE=float16 FLASHINFER_USE_CUDA_NORM=1
-export SGLANG_EXPERIMENTAL_LORA_OPTI=1 SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN=1
-export SGLANG_OPT_LORA_FUSED_TOPK_PACK=0
+export SGLANG_MAMBA_CONV_DTYPE=float16
 export SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
 export OMP_NUM_THREADS=4 MAX_JOBS=4
 python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
@@ -92,16 +90,17 @@ With the server running, send one warm-up and three distinct requests from the s
 python3 ~/volta-forever/docs/guides/benchmarks/sglang.py
 ```
 
-The client checks SGLang’s phase timers and token counts. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
+After one warm-up, each request processed 227 uncached input tokens and generated 64. The first token comes from prefill. SGLang’s GPU timers measure prefill over all 227 inputs and decode over the remaining 63 outputs.
 
-The command above measured **2,015.34 tokens/s in prefill** and **77.36 tokens/s in decode**. Each 227-token prompt ran in a single CUDA graph. Native 1Cat-vLLM measured 1,427.41 and 76.13 on the same physical V100, checkpoint and prompts. Omitting `--attention-backend triton --sampling-backend pytorch` selects FlashInfer and measured 1,995.78 prefill and 75.15 decode tokens/s on the same V100. [SGLang measurements](./benchmarks/sglang-stock-marlin.json) · [1Cat reference](./benchmarks/vllm-expert-tiles.json)
+| Server on the same V100 and AWQ checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
+|---|---:|---:|
+| SGLang with the command above | **1,988.55** | **74.62** |
+| Native 1Cat-vLLM | 1,427.41 | 76.13 |
 
-A fresh Ubuntu 24.04 virtual environment installed all 207 packages from verified PyPI wheels. The command above reproduced **2,002.22 prefill and 77.20 decode tokens/s**. With `FLASHINFER_USE_CUDA_NORM` unset and `CUTE_DSL_LINEINFO=1`, FlashInfer’s default CuTe normalization reached **1,994.89 and 75.84** on the same card. Both runs answered Paris. [Fresh installation and individual results](./benchmarks/sglang-fresh-venv.json)
-
-In a separate paired run on the same V100, Marlin measured 2,001.75 prefill and 77.39 decode tokens/s at a 256-token chunk, and 1,565.10 and 77.38 at a 128-token chunk. Native 1Cat-vLLM on that card measured 1,361.25 and 76.31. The earlier Triton WNA16 expert backend measured 311.97 and 52.68 tokens/s at a 32-token chunk. [Earlier WNA16 results](./benchmarks/sglang-stock-sm80.json)
+Each prompt fit in a single CUDA graph. The server answered Paris and returned the expected city and notebook details for Kyoto, Lyon and Lima. [Phase timers and answers](./benchmarks/sglang-default-operators.json) · [Native reference](./benchmarks/vllm-expert-tiles.json)
 
 ## 6. Additional notes
 
-The run used VF main at `d9f8083`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. The stock wheel contains an Ampere binary for the expert reduction. VF translates it to Volta. The LoRA settings select SGLang's JIT expert router and the three-field output expected by the floating-point layer. FlashInfer uses its CUDA normalization kernel. [Tested VF source](https://github.com/nbald/volta-forever/commit/d9f8083afe412da84e016040acb5424e9fde3602)
+The run used VF main at `1740d8f`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. [Tested VF source](https://github.com/nbald/volta-forever/commit/1740d8fc1f6291b5838112b2d17d7d9e10dd787c)
 
-SGLang also answered **Paris** with the checkpoint’s own prediction head and four speculative steps (NEXTN). A VF source build at `a381fc7` measured **171.66 tokens/s in prefill** and **37.60 in decode**. Decode includes draft generation, target verification and draft extension. [NEXTN settings and per-request results](./benchmarks/sglang-stock-mtp.json)
+The optional JIT router with FlashInfer’s CUDA normalization measured 2,002.22 prefill and 77.20 decode tokens/s in the same virtual environment. [Installation and comparison](./benchmarks/sglang-fresh-venv.json)
