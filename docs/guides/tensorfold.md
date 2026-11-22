@@ -89,11 +89,11 @@ The three measured requests each read 227 uncached tokens and generated 64. The 
 
 | Build | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| TensorFold before the four-lane projection change | 463.81 | 70.78 |
-| TensorFold with VF from section 4 | **463.95** | **72.36** |
-| Native llama.cpp with GGUF Q4_K_M on the same card | 474.57 | 99.77 |
+| TensorFold before the BF16 router change | 463.90 | 72.05 |
+| TensorFold with VF from section 4 | **463.73** | **78.55** |
+| Native llama.cpp with GGUF Q4_K_M on the same card | 470.60 | 99.49 |
 
-Four warp lanes share the work on four expert output columns. Across the 40 layers, the gate and up projections took 2.15 ms per generated token, down from 2.48 ms. Decode improved by 2.24% with identical replies to all four prompts. Earlier paired runs measured 57.69 to 69.18 tokens/s for the single-row specialization and 69.26 to 70.31 for the Q4 weight lookup. [TensorFold measurements](./benchmarks/tensorfold-affine-q4.json) · [Same-card native reference](./benchmarks/llamacpp-reference.json)
+When decoding one token, each warp reads two BF16 rows for the router and computes the scores in the original FP32 order. Across 40 layers, this reduced router time from 2.14 to 0.93 ms per token. Decode improved by 9.02% with identical replies to all four prompts. Earlier runs measured the Q4 expert projection separately. [Per-request timings and GPU profile](./benchmarks/tensorfold-bf16-router.json) · [Earlier expert measurements](./benchmarks/tensorfold-affine-q4.json) · [Same-card native reference](./benchmarks/tensorfold-stock-vf.json)
 
 Earlier measurements cover shared operand checks, dense projections, FP32 operand forwarding and two- and four-product groups. [Shared operand checks](./benchmarks/tensorfold-expert-checks.json) · [Dense projections](./benchmarks/tensorfold-dense-bf16.json) · [Operand forwarding](./benchmarks/tensorfold-bf16-forwarding.json) · [Four-product groups](./benchmarks/tensorfold-four-products.json) · [Two-product groups](./benchmarks/tensorfold-bf16-row.json)
 

@@ -1,0 +1,258 @@
+{
+  "engine": "Official TensorFold 1.3.3, compute_80 PTX, x86-64-v2",
+  "engine_sha256": "6ce4ee3108b3b67246ab1b82f59a7edf07f8f17d1d74675e04b5c5a92f45ab84",
+  "model": "henrybravo/Qwen3.5-35B-A3B-4bit",
+  "model_revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+  "format": "MLX affine 4-bit expert weights and 8-bit routers. TensorFold materializes the router tables as BF16.",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "driver": "580.178.04",
+  "control_vf_commit": "8cd365b9686878310e5dafd7ca285dd93e295726",
+  "vf_commit": "a1a0c2cbda4ef7a0058c9af881fcc3335653bbe7",
+  "implementation": "../../../crates/vf-ptx/src/lower/projection/row_dot/mod.rs",
+  "settings": {
+    "prompt_mode": "INT8",
+    "context": 512,
+    "batch": 1,
+    "temperature": 0,
+    "speculative_drafts": false,
+    "thinking": false,
+    "vf_options": {
+      "VF_CAPABILITY": "8.0",
+      "VF_FIT_SHARED": "1",
+      "VF_BF16_TC_GROUPS": "1",
+      "VF_BF16_ROW": "tree"
+    }
+  },
+  "phase_timing": "One warm-up, then three independently timed requests. Decode counts the 63 tokens after the first. A separate post-benchmark request records every kernel in the 63 decode graph replays.",
+  "runs": {
+    "control": {
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "measured_libcuda_sha256": "7c8d57f472e0de284b595cbedc0c14f3815c6d75d709ce964198ad623f390938",
+      "measured_libnvJitLink_sha256": "b494f48a319fdf66ddc2c7059add14818ac8e1f1a7d409ce67f759ad0a75d088",
+      "semantic_checks": [
+        [
+          "Paris",
+          "stop"
+        ],
+        [
+          "",
+          "stop"
+        ],
+        [
+          "one",
+          "length"
+        ]
+      ],
+      "requests": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 462.7931452808706,
+          "decode_tokens_per_s": 72.04552783332589,
+          "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+          "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+          "prefill_seconds": 0.492660711,
+          "decode_seconds": 0.87444706
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 464.5074682948023,
+          "decode_tokens_per_s": 72.04667957890308,
+          "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+          "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+          "prefill_seconds": 0.488689667,
+          "decode_seconds": 0.874433081
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 463.280177416144,
+          "decode_tokens_per_s": 72.0623079539493,
+          "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+          "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+          "prefill_seconds": 0.489984271,
+          "decode_seconds": 0.87424344
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 463.90457704379975,
+          "decode_tokens_per_s": 72.05128074925646,
+          "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+          "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+          "prefill_seconds": 0.489324769,
+          "decode_seconds": 0.87437724
+        }
+      ],
+      "server_phase_medians": {
+        "prefill_tokens_per_s": 463.90457704379975,
+        "decode_tokens_per_s": 72.05128074925646
+      },
+      "activity": {
+        "decode_graph_id": 2,
+        "graph_replays": 63,
+        "nodes_per_decode_graph": 594,
+        "decode_kernel_events": 37422,
+        "dropped": 0,
+        "invalid_events": 0,
+        "sum_kernel_ms_per_decode_step": 14.397777111111113
+      },
+      "families_ms_per_decode_step": {
+        "dense projections": 3.572605492063492,
+        "MoE routing and top-k": 2.427009777777778,
+        "routed experts gate/up": 2.1553229841269843,
+        "attention": 1.4307454126984127,
+        "grouped dense projection": 1.3840823492063492,
+        "routed experts down": 1.2080464603174603,
+        "gated delta net": 0.9243087460317461,
+        "normalization": 0.6673202063492064,
+        "other": 0.6283356825396825
+      },
+      "router_ms_per_decode_step": 2.14004326984127,
+      "top_k_ms_per_decode_step": 0.2869665079365079
+    },
+    "exact": {
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "measured_libcuda_sha256": "0766fc3aaaa8f9b6117909dd662f863912d847f981f2d6acfc47279d427e669b",
+      "measured_libnvJitLink_sha256": "2c26f4c74ac1b8c710700de7db28096fe23932bd0894d0a91b337329eadd9f26",
+      "semantic_checks": [
+        [
+          "Paris",
+          "stop"
+        ],
+        [
+          "",
+          "stop"
+        ],
+        [
+          "one",
+          "length"
+        ]
+      ],
+      "requests": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 459.5882620117761,
+          "decode_tokens_per_s": 78.5253938160679,
+          "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+          "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+          "prefill_seconds": 0.496096221,
+          "decode_seconds": 0.80228824
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 464.57123387485785,
+          "decode_tokens_per_s": 78.56233814287812,
+          "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+          "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+          "prefill_seconds": 0.488622591,
+          "decode_seconds": 0.80191096
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 462.98027090138197,
+          "decode_tokens_per_s": 78.44062585738405,
+          "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+          "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+          "prefill_seconds": 0.49030167,
+          "decode_seconds": 0.803155244
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "prefill_tokens_per_s": 463.7325952627995,
+          "decode_tokens_per_s": 78.54744097555353,
+          "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+          "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+          "prefill_seconds": 0.489506242,
+          "decode_seconds": 0.802063049
+        }
+      ],
+      "server_phase_medians": {
+        "prefill_tokens_per_s": 463.7325952627995,
+        "decode_tokens_per_s": 78.54744097555353
+      },
+      "activity": {
+        "decode_graph_id": 2,
+        "graph_replays": 63,
+        "nodes_per_decode_graph": 594,
+        "decode_kernel_events": 37422,
+        "dropped": 0,
+        "invalid_events": 0,
+        "sum_kernel_ms_per_decode_step": 13.240525841269841
+      },
+      "families_ms_per_decode_step": {
+        "dense projections": 3.5614828253968254,
+        "routed experts gate/up": 2.200886904761905,
+        "attention": 1.4316570476190476,
+        "grouped dense projection": 1.3834696825396826,
+        "MoE routing and top-k": 1.2175085555555556,
+        "routed experts down": 1.2058988412698413,
+        "gated delta net": 0.9281946666666666,
+        "normalization": 0.6778273174603175,
+        "other": 0.6336
+      },
+      "router_ms_per_decode_step": 0.9305101746031745,
+      "top_k_ms_per_decode_step": 0.28699838095238095
+    }
+  },
+  "all_four_token_and_text_hashes_match": true,
+  "same_gpu_native_reference": {
+    "source": "tensorfold-stock-vf.json",
+    "engine": "llama.cpp native sm70, GGUF Q4_K_M for Qwen3.5-35B-A3B",
+    "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "prefill_tokens_per_s": 470.6038448541439,
+    "decode_tokens_per_s": 99.49038812305857,
+    "section": "same_gpu_native_reference"
+  },
+  "operator_checks": {
+    "learned_router_layers": [
+      0,
+      3,
+      27
+    ],
+    "captured_input_row_indices": [
+      0,
+      6,
+      43
+    ],
+    "fp32_router_scores_compared_to_cpu": 2313,
+    "mismatches": 0,
+    "guarded_output_bytes": 64,
+    "graph_replays_with_new_inputs": 13,
+    "updated_graph_and_executable_parameter_sets": 12,
+    "buffer_alias_fallbacks_checked": 3,
+    "official_fatbins_total": 139,
+    "fatbins_changed": 1,
+    "measured_and_reviewed_adaptations_byte_identical": 139,
+    "new_xid_on_model_gpu": false
+  }
+}
