@@ -56,6 +56,35 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 With 256-token batches and chunks, XLA autotuning and guarded BF16 tiles, the official LLMD server reached **745.71 tokens/s of GPU prefill** and **46.07 decode steps/s**. The paired control with tiles off reached **681.68 / 46.15**. The server also recorded **739.41** versus **673.59** input tokens/s through the first token. Each measured request processed 227 uncached input tokens and generated 64. [Ubuntu guide and client](../zml.md#5-benchmarks) · [Requests, GPU graph timings and independent repeat](zml-llmd-autotune.json)
 
+### LLMD GPU prefill
+
+The ordinary client reports server decode and prompt tokens per second through the first token. To time the GPU prefill graph, start a fresh LLMD server with the CUPTI collector below. Use the same launch options as in the Ubuntu guide. The collector starts after warm-up and records the three measured requests. [LLMD launch command](../zml.md#5-benchmarks) · [NVIDIA CUPTI Activity API](https://docs.nvidia.com/cupti/12.9/main/main.html)
+
+In the server terminal, build the collector from your VF checkout. The optional profiling dependencies are in NVIDIA’s Ubuntu CUDA repository. [Ubuntu 24.04 packages](https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/)
+
+```bash
+bench="$HOME/volta-forever/docs/guides/benchmarks"
+cuda=/usr/local/cuda-12.9/targets/x86_64-linux
+if [ ! -f "$cuda/include/cupti.h" ] || [ ! -f "$cuda/include/cuda.h" ]; then
+  sudo apt install -y cuda-cupti-dev-12-9 cuda-cudart-dev-12-9
+fi
+export VF_LLMD_PROFILE_DIR="$(mktemp -d)"
+gcc -std=gnu11 -O2 -fPIC -shared "$bench/zml-activity.c" -I"$cuda/include" \
+  -L"$cuda/lib" -Wl,-rpath,"$cuda/lib" -lcupti -pthread -o "$VF_LLMD_PROFILE_DIR/capture.so"
+printf 'export VF_LLMD_PROFILE_DIR=%q\n' "$VF_LLMD_PROFILE_DIR"
+export LD_PRELOAD="$VF_LLMD_PROFILE_DIR/capture.so${LD_PRELOAD:+:$LD_PRELOAD}"
+```
+
+Start LLMD in that terminal. In a second terminal, paste the printed `export VF_LLMD_PROFILE_DIR=…` line and run the client.
+
+```sh
+bench="$HOME/volta-forever/docs/guides/benchmarks"
+python3 "$bench/zml.py" --profile-dir "$VF_LLMD_PROFILE_DIR" > "$VF_LLMD_PROFILE_DIR/responses.jsonl"
+python3 "$bench/zml-profile.py" "$VF_LLMD_PROFILE_DIR/activity.tsv" "$VF_LLMD_PROFILE_DIR/responses.jsonl"
+```
+
+The result includes the input and output counts, the elapsed time from the first to the last kernel in the prefill graph, and the median GPU prefill rate. The analyzer checks complete graph signatures for the 40-layer MoE checkpoint and rejects captures with dropped records. A repeat on a second V100 measured **744.45 GPU prefill tokens/s** with `VF_BF16_TC_TILES=1` and the single-column optimization disabled.
+
 ## Strata
 
 With **MTP and all other drafting disabled**, Strata CUDA 13 with VF reached **1982.5 prefill and 104.25 decode tokens/s**. Native Strata CUDA 12 reached 1948.5 and 99.07 on the same V100, with the same checkpoint and cuBLAS setting. Each measured request read 227 uncached tokens and generated 64, with zero draft proposals and acceptances. The common decode numerator is 63. [Ubuntu guide](../strata.md#5-benchmarks) · [Non-speculative measurements](strata-uniform-divisor.json) · [Historical MTP experiment](strata-results.json)

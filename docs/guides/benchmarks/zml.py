@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+import socket
 import statistics
 import time
 from pathlib import Path
@@ -92,17 +93,32 @@ def measure(url, model, item):
             "decode_steps_per_s": delta["decode_steps_total"] / decode, "reply": text}
 
 
+def mark_profile(directory, number):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control:
+        control.settimeout(120)
+        control.connect(str(directory / "control"))
+        marker = str(number).encode("ascii")
+        control.sendall(marker)
+        if control.recv(1) != marker:
+            raise RuntimeError(f"LLMD failed to record profiling marker {number}")
+
+
 def main():
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("--url", default="http://127.0.0.1:8000")
     args.add_argument("--model", default="qwen")
+    args.add_argument("--profile-dir", type=Path, help="directory of the optional CUPTI capture")
     options = args.parse_args()
     prompts = json.loads(Path(__file__).with_name("prompts.json").read_text())
     if [item["id"] for item in prompts] != ["warmup", "run1", "run2", "run3"]:
         raise ValueError("Expected a warm-up and three measured prompts")
     measured = []
-    for item in prompts:
+    for index, item in enumerate(prompts):
+        if options.profile_dir and index:
+            mark_profile(options.profile_dir, 2 * (index - 1))
         row = measure(options.url.rstrip("/"), options.model, item)
+        if options.profile_dir and index:
+            mark_profile(options.profile_dir, 2 * index - 1)
         print(json.dumps(row, ensure_ascii=False), flush=True)
         if item["id"] != "warmup":
             measured.append(row)

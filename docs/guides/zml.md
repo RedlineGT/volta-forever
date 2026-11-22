@@ -79,7 +79,7 @@ python3 zml.py
 | Lima | 227 / 64 | 743.52 | 46.07 |
 | **Median** | **227 / 64** | **745.71** | **46.07** |
 
-On the same V100, enabling guarded BF16 tiles raised GPU prefill from **681.68 to 745.71 tokens/s**. Decode measured **46.15** with tiles off and **46.07** with tiles on. CUPTI timed all kernels in each prefill graph in a separate run. The server measured **673.59 / 739.41 prompt tokens/s through the first token** with tiles off / on. An independent run of the client above reproduced **659.88 / 718.35** through the first token and **45.81 / 44.97** in decode. Each run produced the expected city and handover. [Request timings and replies](./benchmarks/zml-llmd-autotune.json)
+On the same V100, enabling guarded BF16 tiles raised GPU prefill from **681.68 to 745.71 tokens/s**. Decode measured **46.15** with tiles off and **46.07** with tiles on. CUPTI timed all kernels in each prefill graph in a separate run. The server measured **673.59 / 739.41 prompt tokens/s through the first token** with tiles off / on. An independent run of the client above reproduced **659.88 / 718.35** through the first token and **45.81 / 44.97** in decode. Each run produced the expected city and handover. [Request timings and replies](./benchmarks/zml-llmd-autotune.json) · [Reproduce GPU prefill with CUPTI](./benchmarks/README.md#llmd-gpu-prefill)
 
 With autotuning disabled, LLMD measured **482.98 / 38.35**. The input rate includes all server work through the first token. Native 1Cat-vLLM reached **1427.41 prefill / 76.13 decode** on the same GPU and prompts with QuantTrio AWQ. The checkpoint format and prompt timer differ. [Prior chunk size measurements](./benchmarks/zml-llmd-mxfp4.json) · [Native reference](./benchmarks/zml-awq-experimental.json)
 
