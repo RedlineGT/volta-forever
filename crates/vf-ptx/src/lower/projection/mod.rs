@@ -21,6 +21,7 @@
 mod emit;
 mod eval;
 mod program;
+mod row_dot;
 mod symbolic;
 mod values;
 
@@ -295,6 +296,19 @@ fn prove<'a>(program: Program<'a>) -> Option<Transfer<'a>> {
         outputs,
         names: p.names.clone(),
     })
+}
+
+/// A one-row BF16 dot product that keeps the increasing-K FMA chain.
+pub(super) fn ordered_row_dot(signature: &str, text: &str) -> Option<String> {
+    if !text.contains("ld.shared.u16")
+        || !text.contains("fma.rn.f32")
+        || !text.contains(".shared .align")
+        || text.contains("%rowdot")
+        || text.contains("$rowdot")
+    {
+        return None;
+    }
+    row_dot::rewrite(signature, text)
 }
 
 pub(super) fn rewrite(signature: &str, text: &str) -> Option<String> {

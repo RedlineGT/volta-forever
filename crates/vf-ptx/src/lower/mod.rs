@@ -322,7 +322,15 @@ fn may_change_shared(opcode: &str) -> bool {
 }
 
 pub(crate) fn matrix_projection(signature: &str, text: &str, outside: &[String], options: Options) -> Option<String> {
-    if !options.bf16_tc_groups || options.bf16_row != Bf16Row::Tree || outside.iter().any(|s| s.contains("q4affine")) {
+    if !options.bf16_tc_groups || options.bf16_row != Bf16Row::Tree {
+        return None;
+    }
+    if !outside.iter().any(|s| s.contains("rowdot"))
+        && let Some(rewritten) = projection::ordered_row_dot(signature, text)
+    {
+        return Some(rewritten);
+    }
+    if outside.iter().any(|s| s.contains("q4affine")) {
         return None;
     }
     projection::rewrite(signature, text)

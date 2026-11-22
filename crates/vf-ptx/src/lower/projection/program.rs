@@ -12,6 +12,7 @@ pub(super) enum Arg {
     Mem(Register, i64),
     Tuple(Vec<Arg>),
     Label(usize),
+    Shared(usize),
 }
 impl Arg {
     pub fn reg(&self) -> Option<Register> {
@@ -39,21 +40,22 @@ pub(super) struct Program<'a> {
     pub roots: Vec<bool>,
     pub labels: HashMap<&'a str, usize>,
     pub params: Vec<&'a str>,
+    pub shared: Vec<(&'a str, usize)>,
 }
 const TYPES: [&str; 12] = [
     ".u64", ".u32", ".u32", ".u64", ".u32", ".u32", ".u64", ".u64", ".u64", ".u64", ".u32", ".f32",
 ];
 
-fn formal_names(signature: &str) -> Option<Vec<&str>> {
+fn formal_names<'a>(signature: &'a str, types: &[&str], threads: usize) -> Option<Vec<&'a str>> {
     let (args, shape) = signature.trim().strip_prefix('(')?.split_once(')')?;
     let shape = shape.split_whitespace().collect::<String>();
-    if shape != ".maxntid128,1,1" {
+    if shape != format!(".maxntid{threads},1,1") {
         return None;
     }
     let mut names = Vec::new();
     for (index, field) in args.split(',').enumerate() {
         let mut fields = field.split_whitespace();
-        if fields.next() != Some(".param") || fields.next() != TYPES.get(index).copied() {
+        if fields.next() != Some(".param") || fields.next() != types.get(index).copied() {
             return None;
         }
         let name = scan::register(fields.next()?)?;
@@ -62,7 +64,18 @@ fn formal_names(signature: &str) -> Option<Vec<&str>> {
         }
         names.push(name);
     }
-    (names.len() == TYPES.len()).then_some(names)
+    (names.len() == types.len()).then_some(names)
+}
+
+// PTX interprets an integer beginning with 0 as octal. Accept only the
+// unambiguous decimal spelling in this verifier and leave every other radix
+// to explicit integer/bit-pattern prefixes below or to the original kernel.
+fn decimal_digits(word: &str) -> Option<&str> {
+    (!word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) && (word == "0" || !word.starts_with('0')))
+        .then_some(word)
+}
+fn size(word: &str) -> Option<usize> {
+    decimal_digits(word)?.parse().ok()
 }
 
 fn integer(word: &str) -> Option<i64> {
@@ -73,6 +86,7 @@ fn integer(word: &str) -> Option<i64> {
     if let Some(x) = bare.strip_prefix("0x") {
         i64::from_str_radix(x, 16).ok()
     } else {
+        decimal_digits(bare.strip_prefix('-').unwrap_or(bare))?;
         bare.parse().ok()
     }
 }
@@ -85,6 +99,8 @@ struct RegSet<'a> {
     widths: Vec<u8>,
     roots: Vec<bool>,
     serial: usize,
+    static_shared: bool,
+    shared: Vec<(&'a str, usize)>,
 }
 impl<'a> RegSet<'a> {
     fn declare(&mut self, operands: &'a str) -> Option<()> {
@@ -98,7 +114,7 @@ impl<'a> RegSet<'a> {
         };
         for item in decls.split(',').map(str::trim) {
             let (name, len, family) = if let Some((s, n)) = item.split_once('<') {
-                (s, n.strip_suffix('>')?.parse::<usize>().ok()?, true)
+                (s, size(n.strip_suffix('>')?)?, true)
             } else {
                 (item, 1, false)
             };
@@ -113,31 +129,32 @@ impl<'a> RegSet<'a> {
         Some(())
     }
     fn reg(&mut self, name: &'a str) -> Option<Register> {
-        let (scope, width) = if matches!(name, "%tid.x" | "%ctaid.x" | "%nctaid.x") {
-            (0, 32)
-        } else {
-            scan::register(name)?;
-            let digits = name.trim_end_matches(|ch: char| ch.is_ascii_digit());
-            let suffix = &name[digits.len()..];
-            if suffix.len() > 1 && suffix.starts_with('0') {
-                return None;
-            }
-            let mut declared = None;
-            for (depth, frame) in self.scopes.iter().enumerate().rev() {
-                let direct = frame.get(name).filter(|d| !d.2);
-                let family = frame
-                    .get(digits)
-                    .filter(|d| d.2 && suffix.parse::<usize>().is_ok_and(|i| i < d.0));
-                if direct.is_some() && family.is_some() {
+        let (scope, width) =
+            if matches!(name, "%tid.x" | "%ctaid.x" | "%nctaid.x") || self.static_shared && name == "%ctaid.y" {
+                (0, 32)
+            } else {
+                scan::register(name)?;
+                let digits = name.trim_end_matches(|ch: char| ch.is_ascii_digit());
+                let suffix = &name[digits.len()..];
+                if suffix.len() > 1 && suffix.starts_with('0') {
                     return None;
                 }
-                if let Some(d) = direct.or(family) {
-                    declared = Some((if depth == 0 { 1 } else { self.serial + 1 }, d.1));
-                    break;
+                let mut declared = None;
+                for (depth, frame) in self.scopes.iter().enumerate().rev() {
+                    let direct = frame.get(name).filter(|d| !d.2);
+                    let family = frame
+                        .get(digits)
+                        .filter(|d| d.2 && size(suffix).is_some_and(|i| i < d.0));
+                    if direct.is_some() && family.is_some() {
+                        return None;
+                    }
+                    if let Some(d) = direct.or(family) {
+                        declared = Some((if depth == 0 { 1 } else { self.serial + 1 }, d.1));
+                        break;
+                    }
                 }
-            }
-            declared?
-        };
+                declared?
+            };
         let next = self.names.len();
         if next >= 16384 {
             return None;
@@ -178,6 +195,9 @@ impl<'a> RegSet<'a> {
         }
         if let Some(x) = integer(word) {
             return Some(Arg::Imm(x));
+        }
+        if let Some(i) = self.shared.iter().position(|(name, _)| *name == word) {
+            return Some(Arg::Shared(i));
         }
         Some(Arg::Reg(self.reg(word)?))
     }
@@ -241,7 +261,17 @@ impl<'a> Program<'a> {
         if text.len() > 1 << 20 || text.contains("%q4affine") || text.contains("$q4affine") {
             return None;
         }
-        let params = formal_names(signature)?;
+        Self::parse_typed(signature, text, &TYPES, 128, false)
+    }
+
+    pub(super) fn parse_typed(
+        signature: &'a str,
+        text: &'a str,
+        types: &[&str],
+        threads: usize,
+        shared: bool,
+    ) -> Option<Self> {
+        let params = formal_names(signature, types, threads)?;
         let items = scan::items(text.as_bytes(), 0..text.len())?;
         if items.len() > 25000 {
             return None;
@@ -254,6 +284,8 @@ impl<'a> Program<'a> {
             widths: Vec::new(),
             roots: Vec::new(),
             serial: 0,
+            static_shared: shared,
+            shared: Vec::new(),
         };
         let mut pos = 0;
         let mut local_writes = std::collections::HashSet::new();
@@ -265,7 +297,11 @@ impl<'a> Program<'a> {
                         return None;
                     }
                 }
-                Kind::Statement { opcode, .. } if &text[opcode.clone()] != ".reg" => pos += 1,
+                Kind::Statement { opcode, .. }
+                    if !(text[opcode.clone()] == *".reg" || shared && text[opcode.clone()] == *".shared") =>
+                {
+                    pos += 1
+                }
                 _ => {}
             }
         }
@@ -296,8 +332,44 @@ impl<'a> Program<'a> {
                 } => {
                     let op = &text[opcode.clone()];
                     let raw = &text[operands.clone()];
+                    if shared && op == ".shared" {
+                        if *guarded || regs.scopes.len() != 1 || !statements.is_empty() || regs.shared.len() >= 2 {
+                            return None;
+                        }
+                        let mut fields = raw.split_ascii_whitespace();
+                        if fields.next()? != ".align" {
+                            return None;
+                        }
+                        let align = size(fields.next()?)?;
+                        if !align.is_power_of_two() || fields.next()? != ".b8" {
+                            return None;
+                        }
+                        let (name, len) = fields.next()?.strip_suffix(']')?.split_once('[')?;
+                        let len = size(len)?;
+                        if fields.next().is_some()
+                            || scan::register(name)? != name
+                            || name.starts_with('%')
+                            || params.contains(&name)
+                            || regs.shared.iter().any(|(n, _)| *n == name)
+                            || !(2..=49152).contains(&len)
+                        {
+                            return None;
+                        }
+                        regs.shared.push((name, len));
+                        continue;
+                    }
                     if op == ".reg" {
                         if *guarded {
+                            return None;
+                        }
+                        if shared
+                            && !raw
+                                .trim()
+                                .split_once(char::is_whitespace)?
+                                .1
+                                .split(',')
+                                .all(|d| d.trim().starts_with('%'))
+                        {
                             return None;
                         }
                         regs.declare(raw)?;
@@ -371,6 +443,22 @@ impl<'a> Program<'a> {
             roots: regs.roots,
             labels: regs.labels,
             params,
+            shared: regs.shared,
         })
+    }
+}
+
+#[cfg(test)]
+mod literal_tests {
+    use super::{integer, size};
+    #[test]
+    fn octal_cannot_be_mistaken_for_decimal() {
+        for token in ["010", "-010", "+010", "010U", "00", "08"] {
+            assert_eq!(integer(token), None);
+            assert_eq!(size(token), None);
+        }
+        for (token, expected) in [("0", 0), ("-16", -16), ("16U", 16), ("0x10", 16), ("0f00000010", 16)] {
+            assert_eq!(integer(token), Some(expected));
+        }
     }
 }
