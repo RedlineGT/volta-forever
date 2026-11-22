@@ -629,6 +629,21 @@ else
     fail "$name" "paths differ after second eval: $ldp1 / $ldp2"
 fi
 
+# The function that joins these lists gives each component once and no empty one (which the
+# loader takes for the current directory), of the new value as of the old, and every component
+# as it is: no pattern expanded, no backslash read.
+name="path-prepend"
+sed -n '/^path_prepend() {/,/^}/p' "$launcher" >"$tmp/path_prepend.sh"
+: >"$tmp/a-file"
+got=$(. "$tmp/path_prepend.sh"; path_prepend '/a::/c:' ':/c:/d::/a:')
+got2=$(cd "$tmp" && . "$tmp/path_prepend.sh"; path_prepend '*:/b\tc' '/b\tc:/d\n')
+got3=$(. "$tmp/path_prepend.sh"; path_prepend '' ':/d:')
+if [ "$got" = "/a:/c:/d" ] && [ "$got2" = '*:/b\tc:/d\n' ] && [ "$got3" = /d ]; then
+    pass "$name"
+else
+    fail "$name" "got: $got | $got2 | $got3"
+fi
+
 # 13b. What env prints is read back by eval as it is, whatever the path holds: a space, a
 # dollar, a quote, a backquote.
 name="env-quoting"

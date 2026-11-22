@@ -251,12 +251,16 @@ build_map() {
 path_prepend() {
     # $1 = new components (colon-separated), $2 = old value.
     _new_parts=$1 _old=$2 _result=
-    # Build the result from new parts, then add old parts not already present.
+    # Build the result from new parts, then add old parts not already present. An empty
+    # component, of either, is left out (the loader takes it for the current directory), and
+    # a component is taken as it is (no pattern expanded, no backslash read).
+    set -f
     _oifs=$IFS; IFS=:
     # shellcheck disable=SC2086
     set -- $_new_parts
     IFS=$_oifs
     for _p do
+        [ -z "$_p" ] && continue
         case ":${_result}:" in
             *":$_p:"*) ;;
             *) if [ -n "$_result" ]; then _result=$_result:$_p; else _result=$_p; fi ;;
@@ -270,10 +274,11 @@ path_prepend() {
         [ -z "$_p" ] && continue
         case ":${_result}:" in
             *":$_p:"*) ;;
-            *) _result=$_result:$_p ;;
+            *) if [ -n "$_result" ]; then _result=$_result:$_p; else _result=$_p; fi ;;
         esac
     done
-    echo "$_result"
+    set +f
+    printf '%s\n' "$_result"
 }
 
 # --- build environment for run/env, as variable assignments ---------------------
