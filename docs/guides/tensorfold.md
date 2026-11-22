@@ -93,8 +93,12 @@ The official TensorFold 1.3.3 source build ran on the same Tesla V100-SXM2-32GB 
 | Two-product VF control, `tree` | 461.90 | 37.21 |
 | Four-product VF, `tree`, in the earlier comparison | 462.85 | 46.63 |
 | Four-product VF, `tree`, repeated control | 463.11 | 46.67 |
-| Four-product VF reusing exact FP32 operands, `tree` (section 4) | **463.77** | **48.22** |
+| Exact FP32 operand forwarding, `tree`, in the earlier comparison | 463.77 | 48.22 |
+| Exact FP32 operand forwarding, `tree`, repeated control | 463.05 | 48.24 |
+| VF recognizing bounded operands in dense projections, `tree` (section 4) | **462.86** | **50.55** |
 | Native llama.cpp target on the same V100, Qwen3.5 GGUF Q4_K_M | 470.60 | 99.49 |
+
+VF proved that the dense projections decode their packed weights to BF16 integers from 0 to 15. On the full model, median decode rose by 4.79% over the repeated control. Dense projection time fell from 4.355 to 3.588 ms per decode step. Both builds returned `Paris`, passed the stop checks and produced identical token hashes for the warm-up and three measured replies. [Timings, replies and projection checks](./benchmarks/tensorfold-dense-bf16.json)
 
 Reusing the two FP32 values from a packed BF16 cancellation raised median decode by 3.32% over the repeated four-product control. Both builds returned `Paris`, passed the stop and length checks, and produced identical token hashes for the warm-up and all three measured replies. In a separate profiled request, the routed experts’ gate/up and down projections fell from 7.721 to 7.235 and from 1.682 to 1.597 ms per decode step. [Timings, replies, hashes and kernel-family measurements](./benchmarks/tensorfold-bf16-forwarding.json)
 

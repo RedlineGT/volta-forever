@@ -1,0 +1,326 @@
+{
+  "engine": "TensorFold 1.3.3 (official unmodified source, sm80 with embedded PTX, x86-64-v2)",
+  "engine_sha256": "6ce4ee3108b3b67246ab1b82f59a7edf07f8f17d1d74675e04b5c5a92f45ab84",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+  "driver": "580.178.04",
+  "os": "Ubuntu 24.04",
+  "checkpoint": {
+    "repo": "henrybravo/Qwen3.5-35B-A3B-4bit",
+    "revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "quantization": "MLX affine 4-bit expert weights, group size 64, 8-bit routers",
+    "shard_sha256": {
+      "model-00001-of-00004.safetensors": "2f0b46971988739b06ab2f6e1e9a817068f5641570556385043f0d7cebd09451",
+      "model-00002-of-00004.safetensors": "1a53c8753b7a3314980f77aeca8f2a4736a0986451fee9059b2b54d54713950b",
+      "model-00003-of-00004.safetensors": "b813fcb8159dc7b008000f3c69970d42b328a4ca0f4898a05afb423b5fd60991",
+      "model-00004-of-00004.safetensors": "a863ceefd68bb5a81522cd9c7063fed2a3c14d7dc65c3a0c80b0923617548b88"
+    }
+  },
+  "environment": {
+    "VF_CAPABILITY": "8.0",
+    "VF_FIT_SHARED": "1",
+    "VF_BF16_TC_GROUPS": "1",
+    "VF_BF16_ROW": "tree",
+    "TF_QWEN_KV_PAGES": "0"
+  },
+  "server_options": [
+    "--backend",
+    "cuda",
+    "--context",
+    "512",
+    "--parallel",
+    "1",
+    "--prompt-cache-gib",
+    "0",
+    "--no-thinking",
+    "--no-update-check",
+    "--no-drafts",
+    "--prompt-precision",
+    "int8"
+  ],
+  "method": "Three different requests after a 228/64 warm-up, one request at a time, temperature zero. Both builds ran the same TensorFold binary with the same local weights on the same reserved V100. Each run used a fresh process and private empty driver and VF caches. All benchmark timings precede CUPTI activation. Phase medians are computed from the three native per-request rates.",
+  "model_checks": {
+    "capital_reply": "Paris",
+    "finish_reason": "stop",
+    "stop_sequence_Paris_reply": "",
+    "stop_sequence_finish_reason": "stop",
+    "one_token_reply": "one",
+    "one_token_finish_reason": "length",
+    "passed_in_all_modes": true
+  },
+  "reproduce": "../tensorfold.md#5-benchmarks",
+  "phase_counts": {
+    "warmup": [
+      228,
+      64
+    ],
+    "run1": [
+      227,
+      64
+    ],
+    "run2": [
+      227,
+      64
+    ],
+    "run3": [
+      227,
+      64
+    ],
+    "timed_decode_steps_per_response": 63,
+    "cached_tokens": 0,
+    "drafts": false
+  },
+  "native_target": {
+    "engine": "llama.cpp native sm70",
+    "checkpoint": "Qwen3.5-35B-A3B GGUF Q4_K_M",
+    "reference": "ninfer-results.json",
+    "prefill_tokens_per_s": 470.6038448541439,
+    "decode_tokens_per_s": 99.49038812305857,
+    "reached": false
+  },
+  "sources": {
+    "engine": "https://github.com/ashhart/TensorFold/tree/1e4a32cb5e80f2908e4642f9e7ffe71ae63792cc",
+    "checkpoint": "https://huggingface.co/henrybravo/Qwen3.5-35B-A3B-4bit/tree/e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "measured_client": "https://github.com/nbald/volta-forever/blob/428354713cb0640c57ee688ae77b8585efbdb06d/docs/guides/benchmarks/tensorfold.py",
+    "measured_client_sha256": "8d0eabf0013da13e0c0b0ed9e612cd3951dbda4747f582a6a397656991d7ef74",
+    "measured_prompts": "https://github.com/nbald/volta-forever/blob/428354713cb0640c57ee688ae77b8585efbdb06d/docs/guides/benchmarks/prompts.json",
+    "prompts_sha256": "c40ce4a6b25ec6821587480eb3e13bf0ba0186106c4a960e4f69d5c8ede3f4a9",
+    "forwarding_control": "https://github.com/nbald/volta-forever/commit/f4885eb8781be2385395e824077bf188811c3ad4",
+    "candidate": "https://github.com/nbald/volta-forever/commit/6073cca7482f10258caeaa9676df76533cf6f830"
+  },
+  "build_provenance": "The timed control is the exact forwarding binary from tensorfold-bf16-forwarding.json. The candidate adds conservative tracking of read-only register literals and a shared BF16 cancellation proof to the control implementation. The public links describe the reviewed source. The binary hashes below identify both measured builds.",
+  "modes": {
+    "control": {
+      "sha256": {
+        "vf-translate": "d05d6984a41d08d03d9e54941b36f6af076231d3b87f463eb161e164c33e75f3",
+        "libcuda.so": "33e00cbbb8538fca8b91b8199c776208a08bccbac0e0aa78d7bf19c66abc4f58",
+        "libnvJitLink.so": "d2706092569d64fc3e115ed527928931fb0b2776b7e5219855cb2ba7e080aa41"
+      },
+      "requests": {
+        "warmup": {
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.494757996,
+          "decode_s": 1.306328503,
+          "prefill_tokens_per_s": 460.8313596613404,
+          "decode_tokens_per_s": 48.226766740004294,
+          "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948"
+        },
+        "run1": {
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.490187242,
+          "decode_s": 1.30610627,
+          "prefill_tokens_per_s": 463.0883477787453,
+          "decode_tokens_per_s": 48.23497248811156,
+          "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371"
+        },
+        "run2": {
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.492017291,
+          "decode_s": 1.305963853,
+          "prefill_tokens_per_s": 461.36589943543265,
+          "decode_tokens_per_s": 48.24023257250138,
+          "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863"
+        },
+        "run3": {
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.490226617,
+          "decode_s": 1.305975081,
+          "prefill_tokens_per_s": 463.0511525244253,
+          "decode_tokens_per_s": 48.23981783156244,
+          "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7"
+        }
+      },
+      "median_tokens_per_s": {
+        "prefill": 463.0511525244253,
+        "decode": 48.23981783156244
+      },
+      "profile": {
+        "all_request_kernel_events": 38502,
+        "decode_steps": 63,
+        "decode_kernel_events": 37422,
+        "dropped": 0,
+        "invalid_events": 0,
+        "mean_gpu_ms_per_decode_step": {
+          "routed experts gate/up": 7.236507904761905,
+          "dense projections": 4.355354936507936,
+          "MoE routing and top-k": 2.426811603174603,
+          "routed experts down": 1.5964046349206351,
+          "grouped dense projection": 1.5172107777777777,
+          "attention": 1.4280348253968254,
+          "gated delta net": 0.9272742539682539,
+          "other": 0.6270589682539682,
+          "normalization": 0.5817576031746032
+        }
+      }
+    },
+    "exact": {
+      "sha256": {
+        "vf-translate": "78b34268aff5742413db0acd52eb813048b4dd3cf496df939de5524a53e61cfc",
+        "libcuda.so": "a8510c21bb92f61857b917324dd81967ec018c261da37d529ba2e07506a1ca71",
+        "libnvJitLink.so": "c9bae156aafad66ec17989cb1835e6daede457324954e8f06792b2db720ab356"
+      },
+      "requests": {
+        "warmup": {
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.493667344,
+          "decode_s": 1.248373188,
+          "prefill_tokens_per_s": 461.8494676042416,
+          "decode_tokens_per_s": 50.4656785371459,
+          "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948"
+        },
+        "run1": {
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.492536596,
+          "decode_s": 1.248849202,
+          "prefill_tokens_per_s": 460.87945919860135,
+          "decode_tokens_per_s": 50.446442932507075,
+          "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371"
+        },
+        "run2": {
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.490423885,
+          "decode_s": 1.24632268,
+          "prefill_tokens_per_s": 462.8648949265593,
+          "decode_tokens_per_s": 50.54870701703029,
+          "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863"
+        },
+        "run3": {
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.489994722,
+          "decode_s": 1.245897311,
+          "prefill_tokens_per_s": 463.2702962053538,
+          "decode_tokens_per_s": 50.56596514317383,
+          "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7"
+        }
+      },
+      "median_tokens_per_s": {
+        "prefill": 462.8648949265593,
+        "decode": 50.54870701703029
+      },
+      "profile": {
+        "all_request_kernel_events": 38502,
+        "decode_steps": 63,
+        "decode_kernel_events": 37422,
+        "dropped": 0,
+        "invalid_events": 0,
+        "mean_gpu_ms_per_decode_step": {
+          "routed experts gate/up": 7.245259238095238,
+          "dense projections": 3.5881365714285716,
+          "MoE routing and top-k": 2.4251585714285713,
+          "routed experts down": 1.5973528730158728,
+          "attention": 1.4317679682539683,
+          "grouped dense projection": 1.3841880793650794,
+          "gated delta net": 0.9258593174603175,
+          "other": 0.6205243492063492,
+          "normalization": 0.5841251904761905
+        }
+      }
+    }
+  },
+  "responses_in_both_modes": {
+    "warmup": {
+      "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open",
+      "finish_reason": "length",
+      "token_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948"
+    },
+    "run1": {
+      "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, a designated volunteer places a red notebook on the long table to document daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+      "finish_reason": "length",
+      "token_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371"
+    },
+    "run2": {
+      "text": "Lyon, France, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+      "finish_reason": "length",
+      "token_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863"
+    },
+    "run3": {
+      "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, a designated volunteer places a yellow envelope on the long table to signal",
+      "finish_reason": "length",
+      "token_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7"
+    }
+  },
+  "median_change_percent": {
+    "prefill": -0.04022397889531515,
+    "decode": 4.786272604779995
+  },
+  "dense_projection_oracle": {
+    "split_bf16_outputs": 50784,
+    "two_segment_bf16_outputs": 101568,
+    "bf16_differences_against_control": 0,
+    "output_canary_changes": 0,
+    "max_relative_l2_against_cpu": 0.0017445904131134613,
+    "split": [
+      {
+        "projection": "0.linear_attn.in_proj_qkv",
+        "control_us": 63.2149,
+        "candidate_us": 51.6779
+      },
+      {
+        "projection": "0.linear_attn.in_proj_z",
+        "control_us": 34.3381,
+        "candidate_us": 28.1941
+      },
+      {
+        "projection": "0.linear_attn.out_proj",
+        "control_us": 34.9525,
+        "candidate_us": 28.6037
+      },
+      {
+        "projection": "0.linear_attn.in_proj_a",
+        "control_us": 21.2309,
+        "candidate_us": 18.3637
+      },
+      {
+        "projection": "3.self_attn.k_proj",
+        "control_us": 21.3675,
+        "candidate_us": 18.5003
+      },
+      {
+        "projection": "3.self_attn.o_proj",
+        "control_us": 34.9525,
+        "candidate_us": 28.7403
+      }
+    ],
+    "two_segments": [
+      {
+        "projection": "0.linear_attn.in_proj_qkv",
+        "control_us": 103.9019,
+        "candidate_us": 85.1968
+      },
+      {
+        "projection": "0.linear_attn.in_proj_z",
+        "control_us": 54.4085,
+        "candidate_us": 45.056
+      },
+      {
+        "projection": "0.linear_attn.out_proj",
+        "control_us": 54.8181,
+        "candidate_us": 45.3291
+      },
+      {
+        "projection": "0.linear_attn.in_proj_a",
+        "control_us": 21.9136,
+        "candidate_us": 19.456
+      },
+      {
+        "projection": "3.self_attn.k_proj",
+        "control_us": 22.2549,
+        "candidate_us": 19.7291
+      },
+      {
+        "projection": "3.self_attn.o_proj",
+        "control_us": 54.7499,
+        "candidate_us": 45.3973
+      }
+    ]
+  },
+  "new_xid": false
+}
