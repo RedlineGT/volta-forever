@@ -64,7 +64,7 @@ KERNEL(s_mxf4_bid_a2) {
 // "Illegal modifier '.scale_vec::2X' for instruction 'mma' with type '.ue4m3'"
 // No kernel for it.
 
-// E5M2 operands in kind::mxf8f6f4
+// E5M2 with singleton scale register vectors, also emitted by CUDA libraries.
 KERNEL(s_mxf8_e5m2_1x) {
     unsigned a0=in[GI*12+0], a1=in[GI*12+1], a2=in[GI*12+2], a3=in[GI*12+3];
     unsigned b0=in[GI*12+4], b1=in[GI*12+5];
@@ -76,7 +76,7 @@ KERNEL(s_mxf8_e5m2_1x) {
     asm volatile(
         "mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.f32.e5m2.e5m2.f32.ue8m0 "
         "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3},"
-        "%10,{0,0},%11,{0,0};"
+        "{%10},{0,0},{%11},{0,0};"
         :"+f"(d0),"+f"(d1),"+f"(d2),"+f"(d3)
         :"r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1),"r"(sa),"r"(sb));
     __builtin_memcpy(&out[GI*4+0],&d0,4); __builtin_memcpy(&out[GI*4+1],&d1,4);

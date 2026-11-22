@@ -2596,6 +2596,24 @@ fn block_scaled_selectors_out_of_range_are_refused() {
 }
 
 #[test]
+fn block_scaled_single_register_vectors_and_scalar_scales_have_the_same_lowering() {
+    let product = "{\n\tmma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 \
+        {%d0,%d1,%d2,%d3}, {%a0,%a1,%a2,%a3}, {%b0,%b1}, {%c0,%c1,%c2,%c3}, %sa,{0,0},%sb,{0,0};\nret;\n}";
+    let expected = lower(product);
+    assert!(expected.contains("mma.sync.aligned.m8n8k4."));
+    for (operand, side) in [("%sa", "scale_a"), ("%sb", "scale_b")] {
+        assert_eq!(lower(&product.replace(operand, &format!("{{ {operand} }}"))), expected);
+        for invalid in ["{}", "{%x,%y}", "{{%x}}", "{3}"] {
+            assert!(refusal(&product.replace(operand, invalid)).contains(side), "{invalid}");
+        }
+    }
+    assert_eq!(
+        lower(&product.replace("%sa", "{%sa}").replace("%sb", "{%sb}")),
+        expected
+    );
+}
+
+#[test]
 fn block_scaled_selectors_in_constant_u16_registers() {
     let product = "mma.sync.aligned.m16n8k64.row.col.kind::mxf4.block_scale.f32.e2m1.e2m1.f32.ue8m0
         {%d0,%d1,%d2,%d3},{%a0,%a1,%a2,%a3},{%b0,%b1},{%c0,%c1,%c2,%c3},

@@ -204,7 +204,13 @@ pub(super) fn parse_block_scaled<'a>(
     let a = scan::vector(parts[1]).ok_or_else(|| unsupported("a not recognised"))?;
     let b = scan::vector(parts[2]).ok_or_else(|| unsupported("b not recognised"))?;
     let c = scan::vector(parts[3]).ok_or_else(|| unsupported("c not recognised"))?;
-    let scale_a = scan::register(parts[4].trim()).ok_or_else(|| unsupported("scale_a not recognised"))?;
+    // PTX accepts both a register and a singleton register vector for a scale.
+    let scale_register = |part: &'a str| {
+        let part = part.trim();
+        let inner = part.strip_prefix('{').and_then(|v| v.strip_suffix('}')).unwrap_or(part);
+        scan::register(inner.trim())
+    };
+    let scale_a = scale_register(parts[4]).ok_or_else(|| unsupported("scale_a not recognised"))?;
     // LLVM may materialize the 16-bit selectors in registers before the product.
     let selector = |value: &str| integer(value).or_else(|| constants.get(value).copied());
     let parse_selector = |part: &str| -> Option<(u32, u32)> {
@@ -216,7 +222,7 @@ pub(super) fn parse_block_scaled<'a>(
         Some((selector(items[0].trim())?, selector(items[1].trim())?))
     };
     let (byte_id_a, thread_id_a) = parse_selector(parts[5]).ok_or_else(|| unsupported("selector_a not recognised"))?;
-    let scale_b = scan::register(parts[6].trim()).ok_or_else(|| unsupported("scale_b not recognised"))?;
+    let scale_b = scale_register(parts[6]).ok_or_else(|| unsupported("scale_b not recognised"))?;
     let (byte_id_b, thread_id_b) = parse_selector(parts[7]).ok_or_else(|| unsupported("selector_b not recognised"))?;
     if d.len() != 4 || c.len() != 4 {
         return Err(unsupported("d or c length not 4"));

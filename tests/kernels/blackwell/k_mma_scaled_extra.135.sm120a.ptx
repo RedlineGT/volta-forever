@@ -423,7 +423,7 @@
 	ld.global.b32 	%r11, [%rd10+8];
 	ld.global.b32 	%r12, [%rd10+12];
 	// begin inline asm
-	mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.f32.e5m2.e5m2.f32.ue8m0 {%r1,%r2,%r3,%r4},{%r5,%r6,%r7,%r8},{%r9,%r10},{%r1,%r2,%r3,%r4},%r11,{0,0},%r12,{0,0};
+	mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.f32.e5m2.e5m2.f32.ue8m0 {%r1,%r2,%r3,%r4},{%r5,%r6,%r7,%r8},{%r9,%r10},{%r1,%r2,%r3,%r4},{%r11},{0,0},{%r12},{0,0};
 	// end inline asm
 	shl.b32 	%r56, %r16, 2;
 	mul.wide.u32 	%rd11, %r56, 4;
