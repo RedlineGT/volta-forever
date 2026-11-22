@@ -30,6 +30,10 @@ def chat(engine, url, model, prompt, max_tokens):
     start = time.monotonic()
     result = api(url, "/chat/completions", payload)
     wall_seconds = time.monotonic() - start
+    if engine == "strata":
+        timings = result["timings"]
+        if (timings.get("draft_n"), timings.get("draft_n_accepted")) != (0, 0):
+            raise ValueError("The benchmark requires zero draft tokens. Start Strata with --drafting off --mtp off.")
     choice = result["choices"][0]
     return {
         "answer": choice["message"]["content"],
@@ -70,12 +74,16 @@ def main():
             raise SystemExit(f"Inconsistent output count in {row['id']}.")
         if t["prompt_n"] <= 0 or t["predicted_n"] < 2 or min(t["prompt_ms"], t["predicted_ms"]) <= 0:
             raise SystemExit(f"Missing phase measurements in {row['id']}.")
+        row["decode_steps"] = t["predicted_n"] - 1
+        # Strata counts every output token in its API rate. The first comes from prefill.
+        row["decode_tokens_per_s"] = (row["decode_steps"] * 1000 / t["predicted_ms"]
+                                      if args.engine == "strata" else t["predicted_per_second"])
         rows.append(row)
 
     measured = rows[1:]
     summary = {
         "median_prefill_tok_s": statistics.median(r["timings"]["prompt_per_second"] for r in measured),
-        "median_decode_tok_s": statistics.median(r["timings"]["predicted_per_second"] for r in measured),
+        "median_decode_tok_s": statistics.median(r["decode_tokens_per_s"] for r in measured),
     }
     print(json.dumps({"engine": args.engine, "model": model, "semantic": demo, "runs": rows, **summary}, indent=2))
 

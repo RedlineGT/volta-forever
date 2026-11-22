@@ -1,4 +1,5 @@
 {
+  "benchmark_mode": "Historical speculative experiment with MTP enabled. See strata-no-drafts.json for the cross-engine comparison.",
   "engine": "Strata CUDA 13, 0.1.63",
   "vf": "0.1.1",
   "gpu": "Tesla V100-SXM2-32GB",

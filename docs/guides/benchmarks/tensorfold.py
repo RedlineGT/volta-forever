@@ -65,6 +65,8 @@ def measure(url, model, item, disable_prompt_cache=False):
         raise ValueError(f"Unexpected answer for {item['id']}: {answer!r}")
     if not native:
         raise ValueError("TensorFold omitted its timing block.")
+    if native.get("drafts") is not False:
+        raise ValueError("The benchmark requires TensorFold to report drafts=false. Start it with --no-drafts.")
     cache = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     if cache != 0:
         raise ValueError(f"Expected zero cached prompt tokens, got {cache!r}.")

@@ -1,6 +1,8 @@
 # Single-request 35B benchmarks
 
-Start the engine using its Ubuntu guide. Run the benchmark on the same computer, with one model loaded and the server idle. Each run uses the model's chat template at temperature zero, with thinking disabled and a limit of 64 output tokens. The warm-up starts with Lisbon. The three measured prompts start with Kyoto, Lyon and Lima and ask for a handover based on different notebook entries. Read the generated text when checking a new engine. [Common prompts](prompts.json)
+The common comparison uses single-token autoregressive decoding with **MTP and all other speculative decoding disabled**. Start the engine using its Ubuntu guide. Run the benchmark on the same computer, with one model loaded and the server idle. Each run uses the model's chat template at temperature zero, with thinking disabled and a limit of 64 output tokens. The warm-up starts with Lisbon. The three measured prompts start with Kyoto, Lyon and Lima and ask for a handover based on different notebook entries. Read the generated text when checking a new engine. [Common prompts](prompts.json)
+
+The measured vLLM server reported `speculative_config=None`, and SGLang reported `speculative_algorithm=None` and no draft-model path. FreeToken used the standard Q4_K_M file with no drafter supplied. Strata reported zero proposed and accepted drafts on every measured request. TensorFold reported `drafts=false`. NInfer’s Qwen3.6 run reported the speculative backend as `none` and zero draft rounds.
 
 ## vLLM
 
@@ -43,7 +45,7 @@ python3 sglang.py
 
 The client gives each chat a fresh cache salt and checks the token counts and cache hits. It measures 227 input tokens with the GPU prefill timer and 63 subsequent tokens with the decode timer. With its default expert router and FlashInfer’s CUDA normalization, the official wheel reached 2016.06 prefill and 77.33 decode tokens/s. With FlashInfer’s default CuTe normalization it reached 1988.55 and 74.62. [Phase timings and replies](sglang-default-operators.json) · [Ubuntu guide](../sglang.md)
 
-For NEXTN speculative decoding, the client sums the GPU timers for draft generation, verification and extension. [NEXTN measurements](sglang-stock-mtp.json) · [Earlier Marlin comparisons](sglang-stock-marlin.json) · [Historical adapter experiment](sglang-results.json)
+The common client checks for ordinary prefill and decode phases. The archived NEXTN experiment measured speculative decoding separately. [NEXTN measurements](sglang-stock-mtp.json) · [Earlier Marlin comparisons](sglang-stock-marlin.json) · [Historical adapter experiment](sglang-results.json)
 
 ## FreeToken
 
@@ -56,7 +58,7 @@ An experimental ZML build loaded the same QuantTrio AWQ checkpoint as vLLM and S
 
 ## Strata
 
-Strata CUDA 13 with VF and cuBLAS FP32 prompt projections reached **1894.8 prefill and 152.5 decode tokens/s** on Qwen3.5-35B-A3B-MTP. The default projections reached 1869.9 and 152.4 on the same V100. Each setting ran 15 uncached chats, with 227 prompt and 64 generated tokens each. [Ubuntu guide](../strata.md#5-benchmarks) · [Per-request results and native CUDA comparison](strata-results.json)
+With **MTP and all other drafting disabled**, Strata CUDA 13 with VF reached **1943.5 prefill and 104.55 decode tokens/s**. Native Strata CUDA 12 reached 1950.2 and 99.04 on the same V100, with the same checkpoint and cuBLAS setting. Each measured request read 227 uncached tokens and generated 64, with zero draft proposals and acceptances. The common decode numerator is 63. [Ubuntu guide](../strata.md#5-benchmarks) · [Non-speculative measurements](strata-no-drafts.json) · [Historical MTP experiment](strata-results.json)
 
 ## NInfer
 

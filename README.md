@@ -102,7 +102,7 @@ rather set it by hand.
 
 ## Inference engines on Ubuntu
 
-Start with Ubuntu 24.04 and a Tesla V100. Each guide checks for the NVIDIA R580 driver, explains which CUDA components the engine needs, and gives commands to install `vf` and test a model.
+Start with Ubuntu 24.04 and a Tesla V100. The common 35B benchmark runs with **MTP and all other speculative decoding disabled**. Each guide checks for the NVIDIA R580 driver, explains which CUDA components the engine needs, and gives commands to install `vf` and test a model.
 
 | Ubuntu guide | Model in the example | V100 result |
 |---|---|---|
@@ -110,7 +110,7 @@ Start with Ubuntu 24.04 and a Tesla V100. Each guide checks for the NVIDIA R580 
 | [SGLang](docs/guides/sglang.md) | Qwen3.5-35B-A3B, 4-bit AWQ | The official wheel used its default expert router, FlashInfer’s CUDA normalization and CUDA graphs. It answered “Paris” and measured **2016.06 tokens/s** prefill and **77.33 tokens/s** decode. [Phase timings and replies](docs/guides/benchmarks/sglang-default-operators.json) |
 | [FreeToken](docs/guides/freetoken.md) | Qwen3.5-35B-A3B, GGUF Q4_K_M | The server answered “Paris”. Batch-one CUDA graphs reached **884.56 tokens/s** prefill and **109.26 tokens/s** decode. [Benchmark](docs/guides/benchmarks/freetoken-graphs.json) |
 | [ZML](docs/guides/zml.md) | Qwen3.5-0.8B upstream, Qwen3.5-35B-A3B-AWQ with local ZML changes | The upstream example answered “Paris” on 0.8B and stopped while loading the 35B. A locally modified ZML engine ran the 35B at **536.38 tokens/s** prefill and **66.85 tokens/s** decode. [Experimental results](docs/guides/benchmarks/zml-awq-experimental.json) |
-| [Strata](docs/guides/strata.md) | Qwen3.5-35B-A3B-MTP, GGUF UD-Q4_K_XL | The CUDA 13 server answered “Paris”. With VF and the engine’s cuBLAS prompt projections, **1894.8 tokens/s** prefill and **152.5 tokens/s** decode. [Native CUDA 12 comparison](docs/guides/benchmarks/strata-results.json) |
+| [Strata](docs/guides/strata.md) | Qwen3.5-35B-A3B-MTP, GGUF UD-Q4_K_XL | With **MTP and all drafting disabled**, the CUDA 13 server answered “Paris” and reached **1943.5 tokens/s** prefill and **104.55 tokens/s** decode. [Per-request results](docs/guides/benchmarks/strata-no-drafts.json) |
 | [NInfer](docs/guides/ninfer.md) | Qwen3.6-35B-A3B, upstream `.ninfer` | The official server measured **570.65 tokens/s** prefill and **116.93 tokens/s** decode with VF’s optional BF16 Tensor Core translation. The same V100 reached 470.60 and 99.49 with native llama.cpp on Qwen3.5 Q4_K_M. [Tested weights and replies](docs/guides/benchmarks/ninfer-bf16-mma.json) |
 | [TensorFold](docs/guides/tensorfold.md) | Qwen3.5-35B-A3B, MLX 4-bit experts and 8-bit routers | The official 1.3.3 source build answered “Paris” and reached **461.63 tokens/s** prefill and **34.04 tokens/s** decode with INT8 prompt processing and VF’s optional grouped BF16 Tensor Cores. Native llama.cpp on the same V100 reached 470.60 and 99.49. [Measurements](docs/guides/benchmarks/tensorfold-stock-vf.json) |
 

@@ -36,14 +36,14 @@ STRATA_CUDA=13 vf strata update --backend cuda --no-control
 
 ## 4. Test
 
-Download the 22.85 GB Qwen3.5-35B-A3B MTP GGUF. Strata calls the compatible engine profile `qwen36`. The explicit file path selects the Qwen3.5 weights. [Checkpoint](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF)
+Download the 22.85 GB Qwen3.5-35B-A3B MTP GGUF. Strata calls the compatible engine profile `qwen36`. The explicit file path selects the Qwen3.5 weights. This GGUF contains an MTP head. The launch command disables MTP and all other drafting for the common benchmark. [Checkpoint](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF)
 
 ```sh
 model=Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
 curl -fL --retry 3 -o "$model" \
   "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/resolve/main/$model"
 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch --family qwen36 --model UD-Q4_K_XL \
-  --model-path "$PWD/$model" --context 8k --vision off --tune skip --set STRATA_Q36_BLAS_F32=1 \
+  --model-path "$PWD/$model" --context 8k --parallel 1 --vision off --drafting off --mtp off --tune skip --set STRATA_Q36_BLAS_F32=1 \
   --set prompt-cache=0 --set conversation-cache-mib=0 --access local --port 9085 \
   --no-api-key --yes --no-tui
 ```
@@ -61,14 +61,14 @@ curl -fsSLO "$base/prompts.json"
 python3 strata-ninfer.py strata
 ```
 
-The command above enables cuBLAS for the prompt’s FP32 router and GDN projections. We tested the setting on one Tesla V100-SXM2-32GB, alternating the default and cuBLAS paths in four blocks. Both ran Strata 0.1.64 CUDA 13 with VF 0.1.1, the same MTP checkpoint and five rounds of three chats. [Upstream implementation](https://github.com/Niko1221/Strata/blob/v0.2.18/engine/src/qwen35/q36_engine.cu#L1655-L1683)
+**MTP and all other drafting were disabled** (`--drafting off --mtp off`). Each of three distinct requests read 227 uncached tokens and generated 64. The replies began with Kyoto, Lyon and Lima. The server reported zero draft proposals and zero acceptances on every request. The decode rate counts the 63 steps after the first token.
 
-| FP32 prompt projections | Median prefill (range) | Median decode (range) |
+| On the same V100-SXM2-32GB, same checkpoint and cuBLAS setting | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Default | 1,869.9 (1,865.2–1,872.9) tok/s | 152.4 (141.7–158.8) tok/s |
-| cuBLAS, as launched above | **1,894.8** (1,877.6–1,901.2) tok/s | **152.5** (145.8–158.7) tok/s |
+| Strata CUDA 13 with VF | **1943.5** | **104.55** |
+| Native Strata CUDA 12 | 1950.2 | 99.04 |
 
-Each of the 30 measured requests processed 227 uncached tokens, generated 64 and began with the requested city. On a second V100 of the same type, native Strata CUDA 12 measured **1,872.9 prefill / 151.1 decode tok/s** on 0.1.63 and **1,877.6 / 150.9** on 0.1.64. The results file includes the individual replies, phase timers, both native comparisons and the chunk-size and expert-routing trials. [Full measurements](./benchmarks/strata-results.json)
+The same one-slot configuration in an independent pass measured 1940.2 prefill and 104.53 decode. With the default four server slots and one request at a time, VF measured 1940.2 prefill and 103.81 decode. The earlier 152.5 decode measurement used two MTP drafts per step and belongs to the separate speculative experiment. [Non-speculative requests, counters and timings](./benchmarks/strata-no-drafts.json) · [Historical MTP results](./benchmarks/strata-results.json)
 
 ## 6. Additional notes
 
