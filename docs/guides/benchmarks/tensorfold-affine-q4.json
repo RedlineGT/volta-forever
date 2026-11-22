@@ -388,5 +388,243 @@
       "clippy_all_targets_deny_warnings": true,
       "new_xid": false
     }
+  },
+  "cooperative_q4_projection": {
+    "control_vf_commit": "777bff37491991d50f8e03f4bf0e34c5b283895d",
+    "source": "../../../crates/vf-ptx/src/lower/projection/emit.rs",
+    "measured_source_sha256": "3ffe2ef1eb8c69db38f37e902724cd4419d2ad95b18f3115a7746b4c3d360a78",
+    "measured_candidate_libcuda_sha256": "1ea88d8c7bc29b4c33e0e7827465b646bb05dde09da3e2ed8a0d435329377415",
+    "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+    "same_gpu_native_reference": {
+      "source": "llamacpp-reference.json",
+      "section": "graph_run_reference",
+      "engine": "llama.cpp native sm70, GGUF Q4_K_M for Qwen3.5-35B-A3B",
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "prefill_tokens_per_s": 474.56875915949064,
+      "decode_tokens_per_s": 99.76531397569528
+    },
+    "runs": {
+      "control": {
+        "semantic_checks": [
+          [
+            "Paris",
+            "stop"
+          ],
+          [
+            "",
+            "stop"
+          ],
+          [
+            "one",
+            "length"
+          ]
+        ],
+        "requests": [
+          {
+            "id": "warmup",
+            "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 462.8307665493489,
+            "decode_tokens_per_s": 70.74019593518412
+          },
+          {
+            "id": "run1",
+            "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 463.8069730346283,
+            "decode_tokens_per_s": 70.7771014317965
+          },
+          {
+            "id": "run2",
+            "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 462.67145692098876,
+            "decode_tokens_per_s": 70.77807239368862
+          },
+          {
+            "id": "run3",
+            "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 465.28167738709817,
+            "decode_tokens_per_s": 70.77239275184742
+          }
+        ],
+        "server_phase_medians": {
+          "prefill_tokens_per_s": 463.8069730346283,
+          "decode_tokens_per_s": 70.7771014317965
+        },
+        "gpu_profile": {
+          "activity": {
+            "decode_graph_id": 2,
+            "graph_replays": 63,
+            "nodes_per_decode_graph": 594,
+            "decode_kernel_events": 37422,
+            "dropped": 0,
+            "invalid_events": 0,
+            "decode_stream_ids": [
+              13
+            ],
+            "union_kernel_ms_per_decode_step": 14.66290438095238,
+            "sum_kernel_ms_per_decode_step": 14.66290438095238
+          },
+          "families_ms_per_decode_step": {
+            "dense projections": 3.5618729523809525,
+            "routed experts gate/up": 2.477962380952381,
+            "MoE routing and top-k": 2.4189653809523812,
+            "attention": 1.4182739365079367,
+            "grouped dense projection": 1.384516380952381,
+            "routed experts down": 1.2081906825396826,
+            "gated delta net": 0.923082873015873,
+            "normalization": 0.6473162380952381,
+            "other": 0.6227235555555555
+          }
+        }
+      },
+      "exact": {
+        "semantic_checks": [
+          [
+            "Paris",
+            "stop"
+          ],
+          [
+            "",
+            "stop"
+          ],
+          [
+            "one",
+            "length"
+          ]
+        ],
+        "requests": [
+          {
+            "id": "warmup",
+            "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+            "input_tokens": 228,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 462.1815413092753,
+            "decode_tokens_per_s": 72.29751211178416
+          },
+          {
+            "id": "run1",
+            "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 464.69132525595404,
+            "decode_tokens_per_s": 72.36130055254928
+          },
+          {
+            "id": "run2",
+            "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 463.95022447679776,
+            "decode_tokens_per_s": 72.37678818271782
+          },
+          {
+            "id": "run3",
+            "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+            "input_tokens": 227,
+            "output_tokens": 64,
+            "cached_input_tokens": 0,
+            "prefill_tokens_per_s": 463.83072524245273,
+            "decode_tokens_per_s": 72.35616233499648
+          }
+        ],
+        "server_phase_medians": {
+          "prefill_tokens_per_s": 463.95022447679776,
+          "decode_tokens_per_s": 72.36130055254928
+        },
+        "gpu_profile": {
+          "activity": {
+            "decode_graph_id": 2,
+            "graph_replays": 63,
+            "nodes_per_decode_graph": 594,
+            "decode_kernel_events": 37422,
+            "dropped": 0,
+            "invalid_events": 0,
+            "decode_stream_ids": [
+              13
+            ],
+            "union_kernel_ms_per_decode_step": 14.339974777777778,
+            "sum_kernel_ms_per_decode_step": 14.339974777777778
+          },
+          "families_ms_per_decode_step": {
+            "dense projections": 3.5660660476190476,
+            "MoE routing and top-k": 2.4188230476190475,
+            "routed experts gate/up": 2.1537690634920637,
+            "attention": 1.4173829206349207,
+            "grouped dense projection": 1.3842972222222223,
+            "routed experts down": 1.2063217142857143,
+            "gated delta net": 0.9230877142857143,
+            "normalization": 0.6480499047619047,
+            "other": 0.6221771428571429
+          }
+        }
+      }
+    },
+    "all_visible_replies_identical": true,
+    "hardware_checks": {
+      "kernel_real_weight_outputs": 4608,
+      "stress_cases": 84,
+      "stress_output_slots": 774144,
+      "canary_bytes_per_launch": 128,
+      "zero_mismatches": true,
+      "graph_updates": {
+        "paths": [
+          "native standalone cubins",
+          "original checkpoint PTX loaded through VF"
+        ],
+        "replays_per_path": 20,
+        "graph_node_updates_per_path": 10,
+        "executable_parameter_updates_per_path": 9,
+        "geometry_reads_per_path": 40,
+        "output_slots_compared_across_both_paths": 368640
+      },
+      "new_xid": false,
+      "launch_grid": [
+        36,
+        1,
+        1
+      ],
+      "launch_block": [
+        128,
+        1,
+        1
+      ],
+      "isolated_gate_up_median_us": {
+        "lookup-control": 62.532,
+        "xor-four-lanes": 52.907
+      },
+      "l1_global_load_sectors": {
+        "control": 1272528,
+        "exact": 424656
+      },
+      "integration_validation": {
+        "base_vf_commit": "2eee389dfbb82482912271e9380f1dce3d32bba9",
+        "release_tests": 376,
+        "gpu_tests": 108,
+        "accepted_register_label_and_entry_renamings": 3,
+        "rejected_declaration_abi_guard_or_address_mutations": 16,
+        "unchanged_inactive_policy_combinations": 7,
+        "engine_fatbins_compared_to_measured_build": 139,
+        "byte_identical_adapted_fatbins": 139,
+        "full_expert_module_sm70_cubin_sha256": "c6ae5851bfd4abe4e949f32a4d15a64ca9dc75040f0f74ac7e5686da9406bcdb",
+        "isolated_gate_up_sm70_cubin_sha256": "5515ea27eda71ee18dee263335c5ee62b79eb4a302ebe16b96b79e275db57a13",
+        "distinct_cached_images_for_two_builds_and_three_policies": 4,
+        "cache_hits_after_returning_to_prior_build_or_policy": 2
+      }
+    },
+    "mode": "VF_BF16_TC_GROUPS=1 VF_BF16_ROW=tree"
   }
 }
