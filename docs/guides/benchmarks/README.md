@@ -41,7 +41,7 @@ curl -fsSLO "$base/sglang.py" && curl -fsSLO "$base/prompts.json"
 python3 sglang.py
 ```
 
-The client gives each chat a fresh cache salt and checks the token counts and cache hits. It measures 227 input tokens with the GPU prefill timer and 63 subsequent tokens with the decode timer. With the wheel’s default router and normalization, SGLang reached 1988.55 prefill and 74.62 decode tokens/s. [Phase timings and replies](sglang-default-operators.json) · [Ubuntu guide](../sglang.md)
+The client gives each chat a fresh cache salt and checks the token counts and cache hits. It measures 227 input tokens with the GPU prefill timer and 63 subsequent tokens with the decode timer. With its default expert router and FlashInfer’s CUDA normalization, the official wheel reached 2016.06 prefill and 77.33 decode tokens/s. With FlashInfer’s default CuTe normalization it reached 1988.55 and 74.62. [Phase timings and replies](sglang-default-operators.json) · [Ubuntu guide](../sglang.md)
 
 For NEXTN speculative decoding, the client sums the GPU timers for draft generation, verification and extension. [NEXTN measurements](sglang-stock-mtp.json) · [Earlier Marlin comparisons](sglang-stock-marlin.json) · [Historical adapter experiment](sglang-results.json)
 

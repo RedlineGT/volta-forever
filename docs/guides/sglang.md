@@ -64,6 +64,7 @@ export PATH="$CUDA_HOME/bin:$PATH"
 export VF_CAPABILITY=8.0
 export NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80'
 export SGLANG_MAMBA_CONV_DTYPE=float16
+export FLASHINFER_USE_CUDA_NORM=1
 export SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
 export OMP_NUM_THREADS=4 MAX_JOBS=4
 python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
@@ -94,7 +95,8 @@ After one warm-up, each request processed 227 uncached input tokens and generate
 
 | Server on the same V100 and AWQ checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
 |---|---:|---:|
-| SGLang with the command above | **1,988.55** | **74.62** |
+| SGLang with the command above | **2,016.06** | **77.33** |
+| SGLang with FlashInfer’s default CuTe normalization | 1,988.55 | 74.62 |
 | Native 1Cat-vLLM | 1,427.41 | 76.13 |
 
 Each prompt fit in a single CUDA graph. The server answered Paris and returned the expected city and notebook details for Kyoto, Lyon and Lima. [Phase timers and answers](./benchmarks/sglang-default-operators.json) · [Native reference](./benchmarks/vllm-expert-tiles.json)
@@ -102,5 +104,7 @@ Each prompt fit in a single CUDA graph. The server answered Paris and returned t
 ## 6. Additional notes
 
 The run used VF main at `1740d8f`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. [Tested VF source](https://github.com/nbald/volta-forever/commit/1740d8fc1f6291b5838112b2d17d7d9e10dd787c)
+
+The launch command selects FlashInfer’s CUDA normalization on V100. To reproduce the CuTe result, unset `FLASHINFER_USE_CUDA_NORM` before starting the server. Both runs use the wheel’s default expert router.
 
 The optional JIT router with FlashInfer’s CUDA normalization measured 2,002.22 prefill and 77.20 decode tokens/s in the same virtual environment. [Installation and comparison](./benchmarks/sglang-fresh-venv.json)
