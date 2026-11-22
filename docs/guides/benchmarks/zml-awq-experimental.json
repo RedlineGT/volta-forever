@@ -137,5 +137,78 @@
     "chat": "The local CLI implements the checkpoint chat template with thinking disabled and recognizes both generation EOS IDs.",
     "build": "Bazel CUDA backend. Sequential compilation, 128 MiB loader DMA pool.",
     "binary_sha256": "1f91379748814d0c04a54c822a8ba0859bcc473659ac9476e7324cc9990bdfee"
+  },
+  "fused_awq_decode": {
+    "implementation": "Second local ZML build using fused dequantization and FP32 projection for eight selected experts during single-token decode.",
+    "binary_sha256": "dd4c314100d43fceb63142deb65fa32c3e377300cb659dbd67d5a315ad01b39e",
+    "source_patch_sha256": "e3df5fc68a557b8725a79d3cd216d2f94bc557cd6f61b7eb61c5ebaf9a8b5fcf",
+    "projection_oracle": "Eight BF16 results on a tile of real checkpoint weights matched an independent CPU calculation exactly (absolute tolerance zero). Changing the FP32 reduction order can affect subsequent tokens.",
+    "visible_answer": "Paris (1 output token, EOS).",
+    "trials": [
+      {
+        "prompt_file": "run1.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 644408301,
+        "decode_ns": 1475538709,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to ensure the smooth operation of our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record essential information. Before the doors open, another team member ins",
+        "matching_output_ids_vs_first_build": 16,
+        "matching_output_prefix_vs_first_build": 16
+      },
+      {
+        "prompt_file": "run2.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 651343715,
+        "decode_ns": 1472996860,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by",
+        "matching_output_ids_vs_first_build": 64,
+        "matching_output_prefix_vs_first_build": 64
+      },
+      {
+        "prompt_file": "run3.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 647525490,
+        "decode_ns": 1474413148,
+        "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on",
+        "matching_output_ids_vs_first_build": 19,
+        "matching_output_prefix_vs_first_build": 16
+      }
+    ],
+    "medians": {
+      "prefill_tokens_per_s": 350.56534994475663,
+      "decode_tokens_per_s": 42.72886475914687
+    },
+    "decode_profile": {
+      "request": "Separate warm repeat of run2.txt, 227 input tokens and 63 timed decode steps.",
+      "order": [
+        "first local build",
+        "fused local build"
+      ],
+      "kernel_launch_count": [
+        108108,
+        83538
+      ],
+      "materialized_bf16_expert_weight_bytes_per_decode_layer_executable": [
+        50331648,
+        0
+      ],
+      "expert_projection_and_awq_gather_kernel_ms": [
+        1282.871,
+        694.087
+      ],
+      "profiled_decode_wall_ms": [
+        2140.021,
+        1554.642
+      ],
+      "cupti_dropped_records": [
+        0,
+        0
+      ]
+    }
   }
 }
