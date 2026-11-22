@@ -270,14 +270,15 @@ On a V100, `VF_CAPABILITY=7.0`, `8.0` or `12.0` explicitly sets the answer for
 direct clients, older CUDA runtimes and programs built for later GPUs. A caller
 with embedded Volta code retains 7.0 even with an explicit override. A caller is
 not told a later generation than the machine code it is given: when the code embedded
-in its file, or in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
-that use a CUDA runtime, the engines of cuDNN's graph library), runs from the
-translation of its sm_75 machine code, the caller is told 7.5 (8.0 for sm_80 code,
-when 9.0 or later is asked), and a line at the default log level says so. PyTorch is
-such a program: in its sm_75 code, the kernels it chooses for 8.0 print an error and
-write nothing, and some of those it chooses for 9.0 stop the GPU. A program whose code
-is PTX is told what was asked and given its PTX for that capability. The decision is
-taken when a caller first asks; a library loaded after that is not looked at. The proxy checks the queried
+in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
+that use a CUDA runtime), or, for cuDNN's graph library, in the library of cuDNN's
+precompiled engines beside it, runs from the translation of its sm_75 machine code,
+the caller is told 7.5 (8.0 for sm_80 code, when 9.0 or later is asked), and a line at
+the default log level says so. PyTorch is such a program: in its sm_75 code, the
+kernels it chooses for 8.0 print an error and write nothing, and some of those it
+chooses for 9.0 stop the GPU. A program whose code is PTX is told what was asked and
+given its PTX for that capability. The decision is taken when a caller first asks; a
+library loaded after that is not looked at. The proxy checks the queried
 device's physical major and minor before changing an answer. Other GPUs keep their
 physical values, including in a mixed-device process. A code-free client using the
 proxy without the launcher gets the physical capability by default.

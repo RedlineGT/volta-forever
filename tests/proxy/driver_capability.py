@@ -154,6 +154,11 @@ def run(proxy, directory):
     for name, code_sm in (("turing_only", 75), ("ampere_only", 80)):
         sm = limited(given, code_sm) or code_sm
         probe(api, c.CDLL(str(directory / name)), sm, sm)
+    # cuDNN's graph library, which has no code, chooses among the engines of the library beside it,
+    # which it loads later: told what that code allows.
+    told = limited(given, 75)
+    probe(api, c.CDLL(str(directory / "cudnn/libcudnn_graph.so.9")), told or (75 if launched else 70),
+          70 if launched else told or 70)
     for name, sm, binary in (
         ("libcudart.so.12", given or 70, given or 70),
         ("libcudart.so.13", given or 75, max(70, given or 75)),
@@ -211,6 +216,9 @@ def build(directory):
                           ("ampere_only", directory / "ampere_only.fatbin")):
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", directory / "plain", directory / name],
                        check=True)
+    (directory / "cudnn").mkdir()
+    shutil.copyfile(directory / "plain", directory / "cudnn/libcudnn_graph.so.9")
+    shutil.copyfile(directory / "turing_only", directory / "cudnn/libcudnn_engines_precompiled.so.9")
     runtimes = directory / "runtimes"
     runtimes.mkdir()
     for runtime, user, fixture in (("libcudart.so.13", "user_turing.so", directory / "turing_only.fatbin"),

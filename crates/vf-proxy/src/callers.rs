@@ -24,8 +24,9 @@
 //! PyTorch's, which has no PTX. Told 8.0, such a program launches its kernels for sm_80, which
 //! that code has not. A caller is told no later generation than the machine code that is given
 //! for its own embedded code, or for that of the libraries loaded with it as a dependency (a CUDA
-//! runtime answers for the programs that use it): 7.5 in this case (`vf_adapt::Policy::told_limit`),
-//! with a line at the default log level that says so.
+//! runtime answers for the programs that use it; cuDNN's graph library for the library of its
+//! precompiled engines): 7.5 in this case (`vf_adapt::Policy::told_limit`), with a line at the
+//! default log level that says so.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -239,41 +240,68 @@ fn runtime_version(file_name: &str) -> Option<u32> {
     file_name.strip_prefix("libcudart.so.")?.split('.').next()?.parse().ok()
 }
 
-/// The class of the caller whose file is `path`, and, when `limits`, the limit that its own
-/// embedded code sets to what it is told (`vf_adapt::Policy::told_limit_in`).
-fn classify(path: &CStr, limits: bool) -> (Caller, Option<u32>) {
+fn classify(path: &CStr) -> Caller {
     let policy = &config().policy;
     let name = path.to_string_lossy();
     let file_name = name.rsplit('/').next().unwrap_or(&name);
     if let Some(version) = runtime_version(file_name) {
-        let caller = if version >= FIRST_RUNTIME_WITHOUT_DEVICE && policy.retargetable(FIRST_SM_OF_THAT_RUNTIME) {
+        return if version >= FIRST_RUNTIME_WITHOUT_DEVICE && policy.retargetable(FIRST_SM_OF_THAT_RUNTIME) {
             Caller::From(FIRST_SM_OF_THAT_RUNTIME)
         } else {
             Caller::Other
         };
-        return (caller, None);
     }
-    let Some(file) = Mapped::open(path) else {
-        return (Caller::Other, None);
-    };
-    let caller = match policy.embedded(file.bytes()) {
-        Embedded::Usable => return (Caller::Native, None),
-        Embedded::Nothing if *UNDER_LAUNCHER => Caller::Direct,
-        Embedded::Other { lowest_sm } if policy.retargetable(lowest_sm) => Caller::From(lowest_sm),
+    match Mapped::open(path).map(|file| policy.embedded(file.bytes())) {
+        Some(Embedded::Usable) => Caller::Native,
+        Some(Embedded::Nothing) if *UNDER_LAUNCHER => Caller::Direct,
+        Some(Embedded::Other { lowest_sm }) if policy.retargetable(lowest_sm) => Caller::From(lowest_sm),
         _ => Caller::Other,
+    }
+}
+
+/// The limit that the code embedded in the file at `path` sets to what a caller that runs it is
+/// told (`vf_adapt::Policy::told_limit_in`), with the file.
+fn file_limit(path: &CStr, limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
+    let limit = *limits
+        .entry(path.to_owned())
+        .or_insert_with(|| Mapped::open(path).and_then(|file| config().policy.told_limit_in(file.bytes())));
+    limit.map(|sm| (sm, path.to_owned()))
+}
+
+/// The lower of two limits.
+fn lower(limit: Option<(u32, CString)>, other: Option<(u32, CString)>) -> Option<(u32, CString)> {
+    match (limit, other) {
+        (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The files read for what limits the caller of class `caller` whose file is `path`, besides the
+/// libraries loaded with it as a dependency: its own, when it embeds code; for cuDNN's graph
+/// library, which chooses the engines and loads the library of its precompiled ones only when it
+/// needs them (after it asked), that library, beside it.
+fn own_files(path: &CStr, caller: Caller) -> Vec<CString> {
+    let bytes = path.to_bytes();
+    let (directory, name) = match bytes.iter().rposition(|&b| b == b'/') {
+        Some(at) => bytes.split_at(at + 1),
+        None => (&b""[..], bytes),
     };
-    let limit = if limits && matches!(caller, Caller::From(_)) {
-        policy.told_limit_in(file.bytes())
-    } else {
-        None
-    };
-    (caller, limit)
+    let mut files = Vec::new();
+    if matches!(caller, Caller::From(_)) && runtime_version(&String::from_utf8_lossy(name)).is_none() {
+        files.push(path.to_owned());
+    }
+    if let Some(version) = name.strip_prefix(b"libcudnn_graph.so")
+        && let Ok(engines) = CString::new([directory, b"libcudnn_engines_precompiled.so", version].concat())
+    {
+        files.push(engines);
+    }
+    files
 }
 
 /// The limit that the code of the libraries loaded with the caller as a dependency (named in
 /// their `DT_NEEDED`) sets to what it is told, and the library that sets it: a CUDA runtime
-/// answers for the programs that use it, the graph library of cuDNN for its engines. Their files
-/// are read once each. A library loaded after the caller first asks is not seen.
+/// answers for the programs that use it. Their files are read once each. A library loaded after
+/// the caller first asks is not seen.
 fn dependents_limit(objects: &[Object], limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
     let caller = objects.iter().find(|object| object.holds)?;
     let file_name = caller.path.as_ref().map(|path| {
@@ -294,16 +322,8 @@ fn dependents_limit(objects: &[Object], limits: &mut HashMap<CString, Option<u32
         let Some(path) = &object.path else {
             continue;
         };
-        if !object.needed.iter().any(|needed| names.contains(&needed.as_slice())) {
-            continue;
-        }
-        let limit = *limits
-            .entry(path.clone())
-            .or_insert_with(|| Mapped::open(path).and_then(|file| config().policy.told_limit_in(file.bytes())));
-        if let Some(sm) = limit
-            && lowest.as_ref().is_none_or(|(lowest, _)| sm < *lowest)
-        {
-            lowest = Some((sm, path.clone()));
+        if object.needed.iter().any(|needed| names.contains(&needed.as_slice())) {
+            lowest = lower(lowest, file_limit(path, limits));
         }
     }
     lowest
@@ -343,15 +363,13 @@ fn caller(return_address: usize) -> Decision {
         .policy
         .told_sm
         .is_some_and(|sm| sm / 10 > FIRST_SM_OF_THAT_RUNTIME / 10);
-    let (caller, own) = classify(path, limits);
-    let mut limit = own.map(|sm| (sm, path.to_owned()));
+    let caller = classify(path);
+    let mut limit = None;
     if limits && caller != Caller::Native {
-        let dependents = dependents_limit(&objects, &mut cache.limits);
-        if let Some((sm, file)) = dependents
-            && limit.as_ref().is_none_or(|(lowest, _)| sm < *lowest)
-        {
-            limit = Some((sm, file));
+        for file in own_files(path, caller) {
+            limit = lower(limit, file_limit(&file, &mut cache.limits));
         }
+        limit = lower(limit, dependents_limit(&objects, &mut cache.limits));
     }
     let decision = Decision {
         caller,
