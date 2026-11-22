@@ -56,6 +56,10 @@ A local change to the ZML Qwen example loaded the same QuantTrio AWQ checkpoint 
 
 Strata CUDA 13 with VF and cuBLAS FP32 prompt projections reached **1894.8 prefill and 152.5 decode tokens/s** on Qwen3.5-35B-A3B-MTP. The default projections reached 1869.9 and 152.4 on the same V100. Each setting ran 15 uncached chats, with 227 prompt and 64 generated tokens each. [Ubuntu guide](../strata.md#5-benchmarks) · [Per-request results and native CUDA comparison](strata-results.json)
 
+## NInfer
+
+The official NInfer server ran its published Qwen3.6-35B-A3B quantization with all weights on the V100. Each measured chat processed 227 uncached tokens and returned 64. Median throughput was 431.60 tokens/s prefill and 117.08 tokens/s decode. Native llama.cpp on the same card measured 470.60 and 99.49 with Qwen3.5 Q4_K_M. The comparison uses different checkpoints and quantizations. [Ubuntu guide and commands](../ninfer.md#5-benchmarks) · [Phase timings and responses](ninfer-results.json)
+
 ## TensorFold
 
 The client reads TensorFold’s prefill and generation timers. The official 1.3.3 build measured 325.70 tokens/s prefill and 16.99 tokens/s decode. The same version with four local CUDA source changes reached 649.94 and 109.25. Both builds used MLX affine weights with 4-bit experts and 8-bit routers and generated identical token IDs. Native llama.cpp reached 474.57 and 99.77 on the same V100 with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [TensorFold measurements](tensorfold-experimental.json) · [Native reference](llamacpp-reference.json)

@@ -1,0 +1,321 @@
+{
+  "engine": "Neroued/ninfer",
+  "revision": "ebdc67e584bcd9ebe16ee63af9abeb2118bac6cd",
+  "server_sha256": "495ce2b4a670c89d12c71715985f575fc166cca2844cb2c07d0c3a5ae6853b51",
+  "build_preset": "rtx5090-release",
+  "cuda_compiler": "13.5.37",
+  "vf": "VF 0.1.1 distribution and audit library, with the source-built proxy for the warm benchmark",
+  "vf_capability": "12.0",
+  "vf_proxy_sha256": "74f1595f395ee535e59512f896dd38292256298438d81bf079b9cd57b6775b6c",
+  "vf_audit_sha256": "b2de7c1b83f321bbe89c457e169a4188a33d9b6fe96544e2454109e437bc46fa",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "driver": "580.178.04",
+  "gpu_index": 0,
+  "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+  "pci_bus_id": "00000000:18:00.0",
+  "gpu_numa_node": 0,
+  "cpu_affinity": "0-79",
+  "memory_nodes": "0-1",
+  "checkpoint": "neroued/Qwen3.6-35B-A3B-NInfer",
+  "checkpoint_revision": "f52a5a9984e29879c4af39b096325f93a1aff8d3",
+  "filename": "qwen3_6_35b_a3b.ninfer",
+  "size_bytes": 22790484480,
+  "sha256": "3e33297645dc33557751be1a3c407a74ed7c00f34909b5d4e8cfdce91b3dbe84",
+  "format": "NInfer mixed quantization: routed gate/up Q4, routed down Q5/Q6, embedding Q8",
+  "server_args": [
+    "--max-context",
+    "512",
+    "--host-cache-capacity",
+    "0B",
+    "--no-thinking",
+    "--no-prefix-reuse",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "9086"
+  ],
+  "temperature": 0,
+  "max_tokens": 64,
+  "concurrency": 1,
+  "requests": [
+    {
+      "label": "semantic",
+      "expected": "Paris",
+      "answer": "Paris",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 2,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 24,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 26
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 9.007839,
+        "predicted_n": 2,
+        "predicted_per_second": 111.01441755342208,
+        "predicted_per_token_ms": 9.007839,
+        "prompt_ms": 10106.448604000001,
+        "prompt_n": 24,
+        "prompt_per_second": 2.374721421974195,
+        "prompt_per_token_ms": 421.1020251666667
+      },
+      "wall_seconds": 10.1251
+    },
+    {
+      "label": "warmup",
+      "expected": "Lisbon",
+      "answer": "Lisbon, Portugal, serves as the welcoming hub for our volunteer group, where new members are immediately integrated into a structured yet supportive environment. Upon arrival, you will find our shared room conveniently located by the entrance, providing a central point for daily operations. Each morning begins with a specific ritual: one volunteer places a",
+      "finish_reason": "length",
+      "usage": {
+        "completion_tokens": 64,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 228,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 292
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 547.619471,
+        "predicted_n": 64,
+        "predicted_per_second": 115.04338931732397,
+        "predicted_per_token_ms": 8.692372555555556,
+        "prompt_ms": 50597.897967000004,
+        "prompt_n": 228,
+        "prompt_per_second": 4.506116047522405,
+        "prompt_per_token_ms": 221.92060511842107
+      },
+      "wall_seconds": 51.152
+    },
+    {
+      "label": "run1",
+      "expected": "Kyoto",
+      "answer": "Kyoto, Japan, serves as the welcoming hub for our volunteer group, where new members are immediately integrated into a culture of shared responsibility. Our operations begin in the shared room by the entrance, where one volunteer consistently places a red notebook on the long table each morning to serve as the central record-keeping tool. Before",
+      "finish_reason": "length",
+      "usage": {
+        "completion_tokens": 64,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 227,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 291
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 538.481942,
+        "predicted_n": 64,
+        "predicted_per_second": 116.99556677055662,
+        "predicted_per_token_ms": 8.547332412698413,
+        "prompt_ms": 526.1159680000001,
+        "prompt_n": 227,
+        "prompt_per_second": 431.46380989523584,
+        "prompt_per_token_ms": 2.3176914889867843
+      },
+      "wall_seconds": 1.0721
+    },
+    {
+      "label": "run2",
+      "expected": "Lyon",
+      "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room by the entrance provides a central hub for daily operations. Each morning begins with one volunteer placing a green binder on the long table, while another carefully checks the signs by the stairs to report any changes before the doors open. We",
+      "finish_reason": "length",
+      "usage": {
+        "completion_tokens": 64,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 227,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 291
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 538.113681,
+        "predicted_n": 64,
+        "predicted_per_second": 117.07563331771154,
+        "predicted_per_token_ms": 8.541487,
+        "prompt_ms": 525.406112,
+        "prompt_n": 227,
+        "prompt_per_second": 432.0467440622388,
+        "prompt_per_token_ms": 2.314564370044053
+      },
+      "wall_seconds": 1.0668
+    },
+    {
+      "label": "run3",
+      "expected": "Lima",
+      "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where we gather in a shared room located near the entrance. Each morning begins with one volunteer placing a yellow envelope on the long table, while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to",
+      "finish_reason": "length",
+      "usage": {
+        "completion_tokens": 64,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 227,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 291
+      },
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 538.020317,
+        "predicted_n": 64,
+        "predicted_per_second": 117.09594974273062,
+        "predicted_per_token_ms": 8.54000503174603,
+        "prompt_ms": 525.944234,
+        "prompt_n": 227,
+        "prompt_per_second": 431.60469366415754,
+        "prompt_per_token_ms": 2.3169349515418505
+      },
+      "wall_seconds": 1.0673
+    }
+  ],
+  "decode_timing": "The upstream server counts generation intervals after the first token for its decode rate (completion_tokens - 1 over predicted_ms).",
+  "median_prefill_tok_s": 431.60469366415754,
+  "median_decode_tok_s": 117.07563331771154,
+  "native_reference": {
+    "engine": "llama.cpp",
+    "source": "https://github.com/ggml-org/llama.cpp.git 13ec8f614cfef964fe97bbf872bc436dbc484a1f",
+    "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "checkpoint": {
+      "repo": "unsloth/Qwen3.5-35B-A3B-GGUF",
+      "revision": "bc014a17be43adabd7066b7a86075ff935c6a4e2",
+      "files": [
+        {
+          "name": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+          "size": 22016023168,
+          "hash": "3b46d1066bc91cc2d613e3bc22ce691dd77e6f0d33c9060690d24ce6de494375",
+          "algorithm": "sha256"
+        }
+      ]
+    },
+    "medians": {
+      "id": "median",
+      "prefill_tokens_per_s": 470.6038448541439,
+      "decode_tokens_per_s": 99.49038812305857,
+      "client_input_tokens_per_ttft_s": 462.90774212326886,
+      "client_decode_tokens_per_s": 99.51911397282181
+    },
+    "comparison": "Same physical GPU and prompts. Native llama.cpp used Qwen3.5 Q4_K_M; NInfer used Qwen3.6 mixed quantization.",
+    "requests": [
+      {
+        "id": "warmup",
+        "input_tokens": 228,
+        "output_tokens": 64,
+        "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a blue folder on the long table, while another inspects the signs by the stairs to report any changes before the doors open. Our records are",
+        "finish_reason": "length",
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 228,
+          "prompt_ms": 2597.631,
+          "prompt_per_token_ms": 11.39311842105263,
+          "prompt_per_second": 87.77228174440481,
+          "predicted_n": 64,
+          "predicted_ms": 682.101,
+          "predicted_per_token_ms": 10.827,
+          "predicted_per_second": 92.36168837166343
+        },
+        "first_s": 2.6839280950371176,
+        "output_span_s": 0.6555814719758928,
+        "request_s": 3.339845009148121,
+        "prefill_tokens_per_s": 87.77228174440481,
+        "decode_tokens_per_s": 92.36168837166343,
+        "client_input_tokens_per_ttft_s": 84.95011487885887,
+        "client_decode_tokens_per_s": 96.09789582692272
+      },
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "text": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. We",
+        "finish_reason": "length",
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 227,
+          "prompt_ms": 468.092,
+          "prompt_per_token_ms": 2.062079295154185,
+          "prompt_per_second": 484.94740350187567,
+          "predicted_n": 64,
+          "predicted_ms": 631.585,
+          "predicted_per_token_ms": 10.025158730158731,
+          "predicted_per_second": 99.74904407166098
+        },
+        "first_s": 0.47740765009075403,
+        "output_span_s": 0.6313947169110179,
+        "request_s": 1.109130087075755,
+        "prefill_tokens_per_s": 484.9474035018757,
+        "decode_tokens_per_s": 99.74904407166098,
+        "client_input_tokens_per_ttft_s": 475.48463028786375,
+        "client_decode_tokens_per_s": 99.77910538785606
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "text": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open. We",
+        "finish_reason": "length",
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 227,
+          "prompt_ms": 482.359,
+          "prompt_per_token_ms": 2.124929515418502,
+          "prompt_per_second": 470.6038448541439,
+          "predicted_n": 64,
+          "predicted_ms": 633.227,
+          "predicted_per_token_ms": 10.051222222222222,
+          "predicted_per_second": 99.49038812305857
+        },
+        "first_s": 0.49037849088199437,
+        "output_span_s": 0.6330442212056369,
+        "request_s": 1.123760943999514,
+        "prefill_tokens_per_s": 470.6038448541439,
+        "decode_tokens_per_s": 99.49038812305857,
+        "client_input_tokens_per_ttft_s": 462.90774212326886,
+        "client_decode_tokens_per_s": 99.51911397282181
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "text": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, a volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any changes before the doors open",
+        "finish_reason": "length",
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 227,
+          "prompt_ms": 486.801,
+          "prompt_per_token_ms": 2.144497797356828,
+          "prompt_per_second": 466.3096419276049,
+          "predicted_n": 64,
+          "predicted_ms": 635.196,
+          "predicted_per_token_ms": 10.082476190476191,
+          "predicted_per_second": 99.18198477320385
+        },
+        "first_s": 0.4947830450255424,
+        "output_span_s": 0.6351723170373589,
+        "request_s": 1.1302871708758175,
+        "prefill_tokens_per_s": 466.3096419276049,
+        "decode_tokens_per_s": 99.18198477320385,
+        "client_input_tokens_per_ttft_s": 458.7869416347553,
+        "client_decode_tokens_per_s": 99.18568286138726
+      }
+    ]
+  },
+  "vf_proxy_source": "d9f8083afe412da84e016040acb5424e9fde3602 with the executable-comparison change published in a9dd4cece3cfa38d051e23ea6f37ef4f535f745a",
+  "weights_placement": "Fully GPU-resident; model input file pre-staged in host RAM",
+  "prompt_file": "prompts.json",
+  "semantic_question": "What is the capital of France? Answer in one word."
+}

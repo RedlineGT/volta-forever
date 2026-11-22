@@ -30,10 +30,17 @@ fi
 
 ## 2. VF
 
+Build VF from the main branch for long prompts in the official NInfer server. [Required VF change](https://github.com/nbald/volta-forever/commit/a9dd4cece3cfa38d051e23ea6f37ef4f535f745a)
+
 ```sh
-sudo apt update && sudo apt install -y ca-certificates curl python3 xz-utils
-curl -fsSL https://raw.githubusercontent.com/nbald/volta-forever/main/install.sh | bash
-export PATH="$HOME/.local/bin:$PATH"
+sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3 xz-utils
+if ! command -v rustup >/dev/null; then
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+. "$HOME/.cargo/env"
+git clone --depth 1 https://github.com/nbald/volta-forever.git ~/volta-forever
+(cd ~/volta-forever && scripts/build.sh && scripts/fetch-all.sh redist && scripts/build-forwarders.sh)
+export PATH="$HOME/volta-forever/scripts:$PATH"
 vf doctor
 ```
 
@@ -67,22 +74,26 @@ The test returned **Paris** on a Tesla V100-SXM2-32GB with driver 580.178.04, VF
 
 ## 5. Benchmarks
 
-The CLI prints prefill and decode speeds after each request. For a warm benchmark, start the official server and send requests to `/v1/chat/completions`. Each response includes `timings.prompt_per_second`, `timings.predicted_per_second` and the token counts. [NInfer request timings](https://github.com/Neroued/ninfer/blob/master/docs/serving.md#llamacpp-compatible-request-observations)
+Start the official server from the same NInfer directory. Disable prefix reuse to measure each full prompt, and set the host cache capacity to zero for this single-client run.
 
 ```sh
 cmake --build build/rtx5090-release --parallel 4 --target ninfer-serve
 VF_CAPABILITY=12.0 vf ./build/rtx5090-release/apps/ninfer-serve qwen3_6_35b_a3b.ninfer \
-  --host 127.0.0.1 --port 9086 --max-context 512 --no-thinking --no-prefix-reuse
+  --host 127.0.0.1 --port 9086 --max-context 512 --no-thinking --no-prefix-reuse --host-cache-capacity 0B
 ```
 
 In a second terminal, run the shared warm-up and three measured chats. The client records the server’s prefill and decode times for each reply.
 
 ```sh
-base=https://raw.githubusercontent.com/nbald/volta-forever/main/docs/guides/benchmarks
-curl -fsSLO "$base/strata-ninfer.py"
-curl -fsSLO "$base/prompts.json"
-python3 strata-ninfer.py ninfer
+python3 ~/volta-forever/docs/guides/benchmarks/strata-ninfer.py ninfer
 ```
+
+After the warm-up, the three responses began with Kyoto, Lyon and Lima. Each used 227 input tokens, 64 output tokens and zero cached tokens. Both engines ran on the same Tesla V100-SXM2-32GB. [Per-request timings and replies](benchmarks/ninfer-results.json)
+
+| Engine and checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
+|---|---:|---:|
+| NInfer, Qwen3.6 mixed Q4/Q5/Q6/Q8 | 431.6 | 117.1 |
+| Native llama.cpp, Qwen3.5 Q4_K_M | 470.6 | 99.5 |
 
 ## 6. Additional notes
 
