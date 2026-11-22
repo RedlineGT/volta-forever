@@ -17,12 +17,12 @@ Each request produces one new observation in each vLLM phase histogram. The clie
 
 | Prompt | Input tokens | Output tokens | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: | ---: | ---: |
-| Kyoto | 227 | 64 | 1014.16 | 72.09 |
-| Lyon | 227 | 64 | 1016.32 | 72.13 |
-| Lima | 227 | 64 | 1014.26 | 72.17 |
-| **Median** | | | **1014.26** | **72.13** |
+| Kyoto | 227 | 64 | 1458.73 | 80.16 |
+| Lyon | 227 | 64 | 1473.00 | 79.71 |
+| Lima | 227 | 64 | 1468.21 | 80.24 |
+| **Median** | **227** | **64** | **1468.21** | **80.16** |
 
-The official vLLM 0.34.0 server used its compiler, Marlin experts and full and piecewise CUDA graphs on a Tesla V100-SXM2-32GB. The diagnostic run with eager execution and assembler optimization disabled measured 211.52 prefill and 9.23 decode tokens/s. [Graph run, responses and configuration](vllm-graphs.json) · [Diagnostic baseline](vllm-results.json) · [Checkpoint](https://huggingface.co/QuantTrio/Qwen3.5-35B-A3B-AWQ/tree/2f4fac011fc06e736782b0b59394577790da7d79)
+The official server used the V100 FP16 expert tiles, Marlin and full and piecewise CUDA graphs. Its default tiles reached 991.50 prefill and 72.18 decode tokens/s on the same GPU. The original diagnostic run using eager execution and disabled assembler optimization measured 211.52 and 9.23. [Paired results](vllm-expert-tiles.json) · [Earlier graph comparison](vllm-graphs.json) · [Diagnostic baseline](vllm-results.json)
 
 ## SGLang
 

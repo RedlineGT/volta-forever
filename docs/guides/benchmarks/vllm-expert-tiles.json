@@ -1,0 +1,204 @@
+{
+  "model": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+  "revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+  "quantization": "AWQ INT4 asymmetric group size 128; fused MoE experts in layer 0 use FP16 at inference.",
+  "vf_commit": "c5e6295",
+  "vllm": "0.34.0",
+  "pytorch": "2.14.0+cu130",
+  "cuda_toolkit": "13.5",
+  "driver": "580.178.04",
+  "gpu": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+  "device": "Tesla V100-SXM2-32GB",
+  "ubuntu": "24.04",
+  "request_concurrency": 1,
+  "warmup_requests": 1,
+  "decode_tokens_counted": "completion_tokens - 1",
+  "client": "vllm.py",
+  "prompts": "prompts.json",
+  "server_command": "vllm serve QuantTrio/Qwen3.5-35B-A3B-AWQ --served-model-name qwen --dtype float16 --language-model-only --safetensors-load-strategy lazy -cc.mode=3 --max-model-len 512 --max-num-seqs 1 --gpu-memory-utilization 0.9 --host 127.0.0.1 --port 8000",
+  "PTXAS_OPTIONS": "--override-directive-values --maxrregcount=192 --opt-level=3",
+  "order": [
+    "tuned",
+    "stock"
+  ],
+  "tuning_file": "tuning/vllm/E=256,N=512,device_name=Tesla_V100-SXM2-32GB.json",
+  "tuning_file_sha256": "18c0a2b9f3e09d38c21934254440cd6c23d3467bebefd74d129e41a0bcff5dab",
+  "runs": {
+    "tuned": {
+      "VLLM_TUNED_CONFIG_FOLDER": "tuning/vllm",
+      "graphs": [
+        "PIECEWISE",
+        "FULL"
+      ],
+      "quality_check": {
+        "answer": "Paris",
+        "prompt_tokens": 25,
+        "completion_tokens": 2
+      },
+      "warmup": {
+        "id": "warmup",
+        "input_tokens": 228,
+        "output_tokens": 64,
+        "prefill_s": 0.1562775420024991,
+        "decode_s": 0.7864826240111142,
+        "prefill_tokens_per_s": 1458.9428338740697,
+        "decode_tokens_per_s": 80.1034861758239,
+        "text": "Lisbon, Portugal, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one team member places a blue folder on the long table while another inspects the signs near the stairs to report any changes before the doors open. We meet after lunch to review the morning"
+      },
+      "measurements": [
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.15561463311314583,
+          "decode_s": 0.7859412860125303,
+          "prefill_tokens_per_s": 1458.731710885766,
+          "decode_tokens_per_s": 80.15865958592177,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.15410677599720657,
+          "decode_s": 0.7903263058979064,
+          "prefill_tokens_per_s": 1473.0046653115028,
+          "decode_tokens_per_s": 79.71390997598691,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.15461021498776972,
+          "decode_s": 0.7851928961463273,
+          "prefill_tokens_per_s": 1468.2082941153442,
+          "decode_tokens_per_s": 80.23506110307373,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a yellow envelope on this table to initiate"
+        }
+      ],
+      "median": {
+        "prefill_tokens_per_s": 1468.2082941153442,
+        "decode_tokens_per_s": 80.15865958592177
+      }
+    },
+    "stock": {
+      "VLLM_TUNED_CONFIG_FOLDER": null,
+      "graphs": [
+        "PIECEWISE",
+        "FULL"
+      ],
+      "quality_check": {
+        "answer": "Paris",
+        "prompt_tokens": 25,
+        "completion_tokens": 2
+      },
+      "warmup": {
+        "id": "warmup",
+        "input_tokens": 228,
+        "output_tokens": 64,
+        "prefill_s": 0.2288085101172328,
+        "decode_s": 0.873436416964978,
+        "prefill_tokens_per_s": 996.466433364657,
+        "decode_tokens_per_s": 72.12889086868255,
+        "text": "Lisbon, Portugal, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one team member places a blue folder on the long table while another inspects the signs near the stairs to report any changes before the doors open. We meet after lunch to review the morning"
+      },
+      "measurements": [
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.23001351486891508,
+          "decode_s": 0.8727910881862044,
+          "prefill_tokens_per_s": 986.8985312857269,
+          "decode_tokens_per_s": 72.1822219002302,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record essential information. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.22894690302200615,
+          "decode_s": 0.8732008619699627,
+          "prefill_tokens_per_s": 991.4962683648138,
+          "decode_tokens_per_s": 72.14834838558272,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs near"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.22882333910092711,
+          "decode_s": 0.8728079958818853,
+          "prefill_tokens_per_s": 992.031673394457,
+          "decode_tokens_per_s": 72.18082361441338,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on"
+        }
+      ],
+      "median": {
+        "prefill_tokens_per_s": 991.4962683648138,
+        "decode_tokens_per_s": 72.18082361441338
+      }
+    }
+  },
+  "layer_0_microbenchmark": {
+    "description": "Official vLLM fused_experts_impl on the checkpoint’s layer-0 expert weights and router. Five CUDA-event samples per shape and configuration. Relative L2 uses an independent FP32 CPU reference on up to three rows.",
+    "gpu": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+    "measurements": [
+      {
+        "tokens": 1,
+        "default_ms": 2.2159359455108643,
+        "tuned_ms": 0.6748160123825073,
+        "tuned_relative_l2": 0.00043255838681943715
+      },
+      {
+        "tokens": 8,
+        "default_ms": 13.289471626281738,
+        "tuned_ms": 3.2378880977630615,
+        "tuned_relative_l2": 0.0004316379490774125
+      },
+      {
+        "tokens": 16,
+        "default_ms": 20.542463302612305,
+        "tuned_ms": 4.195328235626221,
+        "tuned_relative_l2": 0.0004479550407268107
+      },
+      {
+        "tokens": 32,
+        "default_ms": 31.296512603759766,
+        "tuned_ms": 6.001664161682129,
+        "tuned_relative_l2": 0.0004256531537976116
+      },
+      {
+        "tokens": 64,
+        "default_ms": 44.040191650390625,
+        "tuned_ms": 7.912447929382324,
+        "tuned_relative_l2": 0.00043165573151782155
+      },
+      {
+        "tokens": 128,
+        "default_ms": 136.30975341796875,
+        "tuned_ms": 9.293824195861816,
+        "tuned_relative_l2": 0.000411518441978842
+      },
+      {
+        "tokens": 227,
+        "default_ms": 102.32832336425781,
+        "tuned_ms": 9.70751953125,
+        "tuned_relative_l2": 0.0004361891478765756
+      },
+      {
+        "tokens": 256,
+        "default_ms": 102.724609375,
+        "tuned_ms": 9.71571159362793,
+        "tuned_relative_l2": 0.00041310107917524874
+      },
+      {
+        "tokens": 512,
+        "default_ms": 104.89753723144531,
+        "tuned_ms": 14.07590389251709,
+        "tuned_relative_l2": 0.00043568891123868525
+      }
+    ]
+  }
+}

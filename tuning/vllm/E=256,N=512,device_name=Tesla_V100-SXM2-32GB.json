@@ -1,0 +1,20 @@
+{
+  "1": {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 32,
+    "GROUP_SIZE_M": 1,
+    "SPLIT_K": 1,
+    "num_warps": 4,
+    "num_stages": 2
+  },
+  "227": {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 32,
+    "GROUP_SIZE_M": 1,
+    "SPLIT_K": 1,
+    "num_warps": 4,
+    "num_stages": 2
+  }
+}
