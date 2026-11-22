@@ -477,5 +477,147 @@
       ],
       "durations": "Each family sums kernel durations, which can overlap. Wall time covers the instrumented prefill."
     }
+  },
+  "grouped_awq_decode": {
+    "implementation": "Fifth local build, with one-token AWQ expert projections grouped by quantization block, routed expert and output tile. Float32 partial sums are reduced before the BF16 cast.",
+    "binary_sha256": "b51a97a4990f1bdfdc9fda306eb520a64d7e93dd9b031dac6b0947fdd1a6499c",
+    "source_patch_sha256": "289a8e533466ee35a274820762a7f1d7d593ffb860fb11675c09c1d9b1243d11",
+    "layer_oracle": {
+      "layer": 1,
+      "prompt": "Lyon",
+      "embedding_rows": [
+        0,
+        1,
+        7,
+        31,
+        94,
+        150,
+        226
+      ],
+      "description": "Real checkpoint embeddings used as surrogate layer inputs. The router and all eight selected experts use the real layer weights. Independent CPU AWQ unpacking uses FP64 reductions and explicit BF16 intermediate rounding.",
+      "tolerance": {
+        "absolute": 1e-08,
+        "relative": 0.025
+      },
+      "stricter_tile_tolerance": {
+        "absolute": 1e-09,
+        "relative": 0.012
+      },
+      "baseline": {
+        "elements": 14336,
+        "exact": 4962,
+        "max_abs": 5.960464477539063e-08,
+        "mean_abs": 3.505628898281543e-09,
+        "rel_l2": 0.004650487139959491,
+        "layer_tolerance_failures": 69,
+        "tile_tolerance_failures": 1904
+      },
+      "grouped": {
+        "elements": 14336,
+        "exact": 14304,
+        "max_abs": 1.4901161193847656e-08,
+        "mean_abs": 7.194752606187738e-12,
+        "rel_l2": 0.00017490380427399329,
+        "layer_tolerance_failures": 0,
+        "tile_tolerance_failures": 3
+      },
+      "weight_rounding_check": {
+        "optimized_xla": "Both projections enter XLA with explicit FP16 to BF16 to FP32 conversion; optimized HLO converts packed-weight products directly from FP16 to FP32 before the reduction.",
+        "xla_matches_cpu_with_weight_bf16": 4962,
+        "xla_matches_cpu_without_weight_bf16": 14307,
+        "grouped_matches_cpu_with_weight_bf16": 14304,
+        "grouped_matches_cpu_without_weight_bf16": 4963,
+        "elements": 14336
+      },
+      "single_row_timing": {
+        "warmup": 1,
+        "samples": 50,
+        "xla_median_ns": 422554.5,
+        "grouped_median_ns": 184034.0
+      }
+    },
+    "visible_answer": "Paris (1 output token, EOS).",
+    "medians": {
+      "prefill_tokens_per_s": 536.3811350624427,
+      "decode_tokens_per_s": 66.84885824267002
+    },
+    "trials": [
+      {
+        "prompt_file": "run1.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 423339537,
+        "decode_ns": 942424473,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by",
+        "matching_prefix_vs_previous_build": 64
+      },
+      {
+        "prompt_file": "run2.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 423206532,
+        "decode_ns": 941273323,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by",
+        "matching_prefix_vs_previous_build": 64
+      },
+      {
+        "prompt_file": "run3.txt",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "decode_steps": 63,
+        "prefill_ns": 420450557,
+        "decode_ns": 946717946,
+        "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on",
+        "matching_prefix_vs_previous_build": 64
+      }
+    ],
+    "decode_profile": {
+      "request": "Second warm Lyon request; 63 decode steps, identical output IDs to the timed Lyon request.",
+      "order": [
+        "packed prefill, previous decode",
+        "plus grouped AWQ decode"
+      ],
+      "gpu_kernel_executions": [
+        83538,
+        78624
+      ],
+      "gpu_busy_union_ms": [
+        1293.000913,
+        793.435806
+      ],
+      "gpu_idle_gaps_ms": [
+        389.537704,
+        187.079704
+      ],
+      "wall_ms": [
+        1682.538617,
+        980.51551
+      ],
+      "gpu_kernel_families_ms": {
+        "fused expert AWQ projections": [
+          624.970229,
+          12.227606
+        ],
+        "expert AWQ gathers/dequant": [
+          62.412952,
+          6.489505
+        ],
+        "grouped expert AWQ decode projections": [
+          0.0,
+          142.331094
+        ],
+        "external dense matmul": [
+          303.363177,
+          305.642731
+        ],
+        "attention/GDN": [
+          295.177224,
+          293.512646
+        ]
+      },
+      "kernel_measure": "Family durations sum kernels and can overlap; wall time spans the instrumented decode."
+    }
   }
 }

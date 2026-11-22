@@ -45,7 +45,7 @@ Look for `platform: cuda` and `Tesla V100` in the device listing. The tested mod
 
 Read the final `decode` line after running the command above. On one Tesla V100-SXM2-32GB with driver 580.178.04 and VF 0.1.0, Qwen3.5-0.8B decoded at **96.1 tokens/s** over 0.458 seconds. This is a single run of the upstream example. [Tested ZML revision](https://github.com/zml/zml/commit/f430c3530fbc6d99f734b641eb8f3fd699868843)
 
-Four local ZML builds ran the split-expert AWQ checkpoint for Qwen3.5-35B-A3B. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
+Five local ZML builds ran the split-expert AWQ checkpoint for Qwen3.5-35B-A3B. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
 
 | Engine | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: |
@@ -53,9 +53,10 @@ Four local ZML builds ran the split-expert AWQ checkpoint for Qwen3.5-35B-A3B. E
 | Local ZML with fused AWQ decode projections | 350.57 | 42.73 |
 | Local ZML with fused decode and eight-step prefill recurrence | 448.27 | 42.74 |
 | Local ZML with packed AWQ prefill projections added | 535.35 | 36.39 |
+| Local ZML with grouped AWQ decode projections added | 536.38 | 66.85 |
 | Native 1Cat-vLLM | 1427.41 | 76.13 |
 
-Reading packed expert weights during prefill removed 1.5 GiB of intermediate BF16 weights per compiled layer. Prefill rose 19% and decode fell 15% in this run. All three 64-token answers matched the preceding build token for token. [Per-request text, times, numerical tolerances and GPU profiles](./benchmarks/zml-awq-experimental.json)
+Packed prefill removed 1.5 GiB of intermediate BF16 weights per compiled layer. The grouped decode kernel matched 14,304 of 14,336 CPU-oracle values exactly on seven layer inputs and met the numerical tolerance on all of them. [Per-request text, times, numerical tolerances and GPU profiles](./benchmarks/zml-awq-experimental.json)
 
 ## 6. Additional notes
 

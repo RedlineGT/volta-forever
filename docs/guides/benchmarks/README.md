@@ -52,7 +52,7 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 ## ZML
 
-An experimental ZML build loaded the same QuantTrio AWQ checkpoint as vLLM and SGLang. The latest local build reads packed expert weights during prefill. The three measured requests each read 227 uncached tokens and generated 64. Median prefill rose from 448.27 to 535.35 tokens/s and median decode fell from 42.74 to 36.39. The three responses matched the preceding build token for token. Native 1Cat-vLLM reached 1427.41 and 76.13 on the same card. The upstream ZML example still needs a loader for these weights. [Experimental phase timings and answers](zml-awq-experimental.json) · [Ubuntu guide](../zml.md)
+An experimental ZML build loaded the same QuantTrio AWQ checkpoint as vLLM and SGLang. The latest local build reads packed expert weights during prefill and groups expert projections during decode. The three measured requests each read 227 uncached tokens and generated 64. The grouped decode kernel increased median decode from 36.39 to 66.85 tokens/s. Median prefill measured 536.38 tokens/s and all 192 output token IDs matched the preceding build. Native 1Cat-vLLM reached 1427.41 and 76.13 on the same card. The upstream ZML example still needs a loader for these weights. [Experimental phase timings and answers](zml-awq-experimental.json) · [Ubuntu guide](../zml.md)
 
 ## Strata
 
