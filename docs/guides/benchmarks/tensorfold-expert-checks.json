@@ -1,0 +1,284 @@
+{
+  "engine": "TensorFold 1.3.3 (official unmodified source, sm80 with embedded PTX, x86-64-v2)",
+  "engine_sha256": "6ce4ee3108b3b67246ab1b82f59a7edf07f8f17d1d74675e04b5c5a92f45ab84",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+  "driver": "580.178.04",
+  "os": "Ubuntu 24.04",
+  "checkpoint": {
+    "repo": "henrybravo/Qwen3.5-35B-A3B-4bit",
+    "revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "quantization": "MLX affine 4-bit expert weights, group size 64, 8-bit routers",
+    "shard_sha256": {
+      "model-00001-of-00004.safetensors": "2f0b46971988739b06ab2f6e1e9a817068f5641570556385043f0d7cebd09451",
+      "model-00002-of-00004.safetensors": "1a53c8753b7a3314980f77aeca8f2a4736a0986451fee9059b2b54d54713950b",
+      "model-00003-of-00004.safetensors": "b813fcb8159dc7b008000f3c69970d42b328a4ca0f4898a05afb423b5fd60991",
+      "model-00004-of-00004.safetensors": "a863ceefd68bb5a81522cd9c7063fed2a3c14d7dc65c3a0c80b0923617548b88"
+    }
+  },
+  "environment": {
+    "VF_CAPABILITY": "8.0",
+    "VF_FIT_SHARED": "1",
+    "VF_BF16_TC_GROUPS": "1",
+    "VF_BF16_ROW": "tree",
+    "TF_QWEN_KV_PAGES": "0"
+  },
+  "server_options": [
+    "--backend",
+    "cuda",
+    "--context",
+    "512",
+    "--parallel",
+    "1",
+    "--prompt-cache-gib",
+    "0",
+    "--no-thinking",
+    "--no-update-check",
+    "--no-drafts",
+    "--prompt-precision",
+    "int8"
+  ],
+  "method": "Three different requests after a 228/64 warm-up, one request at a time, temperature zero. Both builds ran the same TensorFold binary with the same local weights on the same reserved V100. Each run used a fresh process and private empty driver and VF caches. All benchmark timings precede CUPTI activation. Phase medians are computed from the three native per-request rates.",
+  "model_checks": {
+    "capital_reply": "Paris",
+    "finish_reason": "stop",
+    "stop_sequence_Paris_reply": "",
+    "stop_sequence_finish_reason": "stop",
+    "one_token_reply": "one",
+    "one_token_finish_reason": "length",
+    "passed_in_all_modes": true
+  },
+  "reproduce": "../tensorfold.md#5-benchmarks",
+  "native_target": {
+    "engine": "llama.cpp native sm70",
+    "checkpoint": "Qwen3.5-35B-A3B GGUF Q4_K_M",
+    "reference": "ninfer-results.json",
+    "prefill_tokens_per_s": 470.6038448541439,
+    "decode_tokens_per_s": 99.49038812305857,
+    "reached": false
+  },
+  "client": "tensorfold.py",
+  "prompts": "prompts.json",
+  "client_sha256": "b1529971b4e929d3ad4ca825e39c74148bac42d59b767e56c9e2822bc1d99506",
+  "prompts_sha256": "c40ce4a6b25ec6821587480eb3e13bf0ba0186106c4a960e4f69d5c8ede3f4a9",
+  "measured_client": "https://github.com/nbald/volta-forever/blob/428354713cb0640c57ee688ae77b8585efbdb06d/docs/guides/benchmarks/tensorfold.py",
+  "measured_client_sha256": "8d0eabf0013da13e0c0b0ed9e612cd3951dbda4747f582a6a397656991d7ef74",
+  "client_versions": "The current guide client adds a drafts=false check to the measured client. Both use the same requests and phase formulas. The server reported drafts=false in all eight responses.",
+  "measurement": "Native prefill is uncached prompt tokens divided by TensorFold prefill_seconds. Decode is the number of output tokens after the first divided by TensorFold seconds. Each median excludes the warm-up.",
+  "sources": {
+    "engine": "https://github.com/ashhart/TensorFold/tree/1e4a32cb5e80f2908e4642f9e7ffe71ae63792cc",
+    "checkpoint": "https://huggingface.co/henrybravo/Qwen3.5-35B-A3B-4bit/tree/e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "control_vf": "9a119369df30fb69ebc78e1e13c34607a4558125",
+    "candidate_vf": "0a87425ce2d2a516fd46899ebfc5dc1fcad68d9b",
+    "previous_benchmark": "tensorfold-dense-bf16.json"
+  },
+  "build_provenance": "The candidate was built from the timed control plus the region change in candidate_vf. The intervening public commit changed documentation and benchmark metadata. Both timed builds use the ELF hashes below.",
+  "runs": {
+    "control": {
+      "vf_elf_sha256": {
+        "libcuda.so": "5a4c4e88b1c7123388f376c335ab00b700a2e85ebe61e730298838b4536b2043",
+        "libnvJitLink.so": "168b1459134b6448c20fcc580cdde4ec4fa21b607bc34e9175f81103644cfb6c",
+        "vf-translate": "14e8e54c6b4d27d76b205657ba44d32a4efa06dbdc44394a88cc44b854e542d2"
+      },
+      "requests": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open",
+          "prefill_tokens_per_s": 462.42662394839823,
+          "decode_tokens_per_s": 50.55988244220613,
+          "drafts": false,
+          "token_ids_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+          "prefill_seconds": 0.493051196,
+          "decode_seconds": 1.246047201
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, a designated volunteer places a red notebook on the long table to document daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+          "prefill_tokens_per_s": 463.00272027151976,
+          "decode_tokens_per_s": 50.55584936617939,
+          "drafts": false,
+          "token_ids_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+          "prefill_seconds": 0.490277897,
+          "decode_seconds": 1.246146604
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Lyon, France, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+          "prefill_tokens_per_s": 461.9286712048737,
+          "decode_tokens_per_s": 50.5669368714149,
+          "drafts": false,
+          "token_ids_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+          "prefill_seconds": 0.491417862,
+          "decode_seconds": 1.245873369
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, a designated volunteer places a yellow envelope on the long table to signal",
+          "prefill_tokens_per_s": 463.57033540314427,
+          "decode_tokens_per_s": 50.57157089152589,
+          "drafts": false,
+          "token_ids_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+          "prefill_seconds": 0.48967758,
+          "decode_seconds": 1.245759206
+        }
+      ],
+      "median": {
+        "prefill_tokens_per_s": 463.00272027151976,
+        "decode_tokens_per_s": 50.5669368714149
+      },
+      "cupti": {
+        "decode_graph_id": 2,
+        "graph_replays": 63,
+        "nodes_per_decode_graph": 594,
+        "decode_kernel_events": 37422,
+        "dropped": 0,
+        "invalid_events": 0,
+        "decode_stream_ids": [
+          13
+        ],
+        "union_kernel_ms_per_decode_step": 19.801865682539685,
+        "sum_kernel_ms_per_decode_step": 19.801865682539685
+      },
+      "kernel_family_ms_per_decode_step": {
+        "routed experts gate/up": 7.244558603174603,
+        "dense projections": 3.588387285714286,
+        "MoE routing and top-k": 2.424916301587302,
+        "routed experts down": 1.5965850476190475,
+        "attention": 1.432586857142857,
+        "grouped dense projection": 1.3842460158730159,
+        "gated delta net": 0.9260343333333334,
+        "other": 0.6202612063492063,
+        "normalization": 0.5842900317460317
+      }
+    },
+    "candidate": {
+      "vf_elf_sha256": {
+        "libcuda.so": "665fc6a38ccc6ec920d0078ffac963835ff416804de0646e05b5e631d1f8659c",
+        "libnvJitLink.so": "fb4a2901fde1c54c4804b5c35c452000c0fd69f57e3f739ab9277e68d6054345",
+        "vf-translate": "4dee700a9f4454a593bd1cb8e93938a14015ed4dba182c2d7a70e7ab23e6c899"
+      },
+      "requests": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open",
+          "prefill_tokens_per_s": 461.0501972466774,
+          "decode_tokens_per_s": 55.13525759075512,
+          "drafts": false,
+          "token_ids_sha256": "16758dac71fbad32c68ab08fcea8a73f2607592378a61a0e048e1f8da5135948",
+          "prefill_seconds": 0.494523159,
+          "decode_seconds": 1.142644521
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, a designated volunteer places a red notebook on the long table to document daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+          "prefill_tokens_per_s": 463.2206100603191,
+          "decode_tokens_per_s": 55.1521622813611,
+          "drafts": false,
+          "token_ids_sha256": "5f69604bf858bc073a939d66dfca5ce080070c6d4cf07f1ec9d0ab8ef4d0a371",
+          "prefill_seconds": 0.49004728,
+          "decode_seconds": 1.142294289
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Lyon, France, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a green binder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open to",
+          "prefill_tokens_per_s": 462.44823464980345,
+          "decode_tokens_per_s": 55.10366632628753,
+          "drafts": false,
+          "token_ids_sha256": "a70969fc119f218a14f6deda28be8848278f64e8e0fc0f80178953d21c10b863",
+          "prefill_seconds": 0.490865751,
+          "decode_seconds": 1.143299606
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_tokens": 0,
+          "finish_reason": "length",
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, please note that the team shares a room situated directly by the entrance, which serves as our central hub for the day. Each morning, a designated volunteer places a yellow envelope on the long table to signal",
+          "prefill_tokens_per_s": 462.31886016103755,
+          "decode_tokens_per_s": 55.03642943382072,
+          "drafts": false,
+          "token_ids_sha256": "2945161271b34b5738b2e3f4e6ab9f4b7e4d2be328a377cd5c0ae1ec40be82d7",
+          "prefill_seconds": 0.491003114,
+          "decode_seconds": 1.144696352
+        }
+      ],
+      "median": {
+        "prefill_tokens_per_s": 462.44823464980345,
+        "decode_tokens_per_s": 55.10366632628753
+      },
+      "cupti": {
+        "decode_graph_id": 2,
+        "graph_replays": 63,
+        "nodes_per_decode_graph": 594,
+        "decode_kernel_events": 37422,
+        "dropped": 0,
+        "invalid_events": 0,
+        "decode_stream_ids": [
+          13
+        ],
+        "union_kernel_ms_per_decode_step": 18.19022292063492,
+        "sum_kernel_ms_per_decode_step": 18.19022292063492
+      },
+      "kernel_family_ms_per_decode_step": {
+        "routed experts gate/up": 5.8753009841269845,
+        "dense projections": 3.6212985714285715,
+        "MoE routing and top-k": 2.4315331269841267,
+        "attention": 1.430367603174603,
+        "grouped dense projection": 1.384714888888889,
+        "routed experts down": 1.308378365079365,
+        "gated delta net": 0.9238668095238095,
+        "other": 0.6246002380952381,
+        "normalization": 0.5901623333333333
+      }
+    }
+  },
+  "change_percent": {
+    "prefill_tokens_per_s": -0.11975860992591292,
+    "decode_tokens_per_s": 8.971730809815393
+  },
+  "same_output_token_ids": {
+    "warmup": true,
+    "run1": true,
+    "run2": true,
+    "run3": true
+  },
+  "physical_checks": {
+    "rust_tests": 362,
+    "gpu_suite_cases_ordered": 104,
+    "gpu_suite_cases_tree": 104,
+    "new_driver_xid": false,
+    "expert_gate_up_outputs_matched_cpu": 4608,
+    "fallback_cases": 10,
+    "outputs_compared_per_fallback_case": 4608,
+    "register_test_cases": 52
+  }
+}
