@@ -62,7 +62,7 @@ vf venv "$HOME/.venvs/zml-download"
   --revision 2e19c6576db91e5d5a93455415619262218bf8a1 --local-dir "$MODEL"
 ```
 
-From the directory containing `llmd` and `llmd.runfiles`, start the server. The measured configuration uses XLA autotuning, tree accumulation and single-token decoding. To reproduce the other rows below, use `ordered` for scalar-order FP32 accumulation or `0` to disable the single-column optimization.
+From the directory containing `llmd` and `llmd.runfiles`, start the server. The measured configuration uses XLA autotuning, tree accumulation and single-token decoding. The two BF16 multiply measurements below both use `tree`.
 
 ```bash
 export VF_BF16_COLUMN=tree
@@ -75,7 +75,7 @@ VF_CAPABILITY=8.0 VF_BF16_TC_TILES=1 VF_PROXY_CACHE=0 \
   --cache-memory-fraction=0.97 --topk=1 --listen=127.0.0.1:8000
 ```
 
-In a second terminal, run the client against the idle server. For a paired comparison, stop LLMD, change `VF_BF16_COLUMN`, repeat the server command on the same card and rerun the client. For the separate GPU timings, start a fresh server with the CUPTI collector. [Common prompts](./benchmarks/prompts.json) · [CUPTI commands](./benchmarks/README.md#llmd-gpu-prefill)
+In a second terminal, run the client against the idle server. The client prints `decode_tokens_per_s` for the visible tokens after the first and `decode_steps_per_s` for LLMD’s internal steps. To repeat the before/after comparison, build VF at `f2326f6` and `c6f678c` in turn, restarting the server with the same options and fresh caches on the same card. For the separate GPU timings, start a fresh server with the CUPTI collector. [Common prompts](./benchmarks/prompts.json) · [CUPTI commands](./benchmarks/README.md#llmd-gpu-prefill)
 
 ```bash
 python3 "$HOME/volta-forever/docs/guides/benchmarks/zml.py"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure prompt tokens per server TTFT and decode steps per second on an idle LLMD server."""
+"""Measure prompt tokens per server TTFT and post-first-token decode throughput on an idle LLMD server."""
 import argparse
 import json
 import math
@@ -90,6 +90,7 @@ def measure(url, model, item):
     return {"id": item["id"], "input_tokens": n_in, "output_tokens": n_out,
             "server_ttft_s": ttft, "decode_steps": int(delta["decode_steps_total"]),
             "decode_s": decode, "prompt_tokens_per_ttft_s": n_in / ttft,
+            "decode_tokens_per_s": (n_out - 1) / decode,
             "decode_steps_per_s": delta["decode_steps_total"] / decode, "reply": text}
 
 
@@ -123,7 +124,7 @@ def main():
         if item["id"] != "warmup":
             measured.append(row)
     median = {k: statistics.median(row[k] for row in measured)
-              for k in ["prompt_tokens_per_ttft_s", "decode_steps_per_s"]}
+              for k in ["prompt_tokens_per_ttft_s", "decode_tokens_per_s", "decode_steps_per_s"]}
     print(json.dumps({"id": "median", **median}))
 
 

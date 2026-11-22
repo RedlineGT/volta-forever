@@ -58,7 +58,7 @@ tensorfold-native --version
 Download the 20.4 GB MLX checkpoint with 4-bit experts and 8-bit routers. TensorFold 1.3.2 and 1.3.3 accept this layout. It refuses GGUF files at startup. [Qwen3.5 checkpoint](https://huggingface.co/henrybravo/Qwen3.5-35B-A3B-4bit)
 
 ```sh
-hf download henrybravo/Qwen3.5-35B-A3B-4bit --local-dir ~/models/qwen35-4bit
+hf download henrybravo/Qwen3.5-35B-A3B-4bit --revision e18cfd9063b088420f58f25ff3db6c79e742768d --local-dir ~/models/qwen35-4bit
 VF_CAPABILITY=8.0 VF_FIT_SHARED=1 VF_BF16_TC_GROUPS=1 VF_BF16_ROW=tree TF_QWEN_KV_PAGES=0 \
   vf tensorfold-native serve ~/models/qwen35-4bit --backend cuda \
   --context 512 --parallel 1 --prompt-cache-gib 0 --name qwen --no-thinking \

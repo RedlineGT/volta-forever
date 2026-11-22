@@ -66,7 +66,7 @@ Download the original Qwen3.5 weights and text resources, then convert them usin
 
 ```sh
 cd ~/ninfer
-hf download Qwen/Qwen3.5-35B-A3B --local-dir "$HOME/models/Qwen3.5-35B-A3B" \
+hf download Qwen/Qwen3.5-35B-A3B --revision 2508b2437e382c605eb0fc52b83f5545960f6b4a --local-dir "$HOME/models/Qwen3.5-35B-A3B" \
   --include 'model.safetensors-*.safetensors' --include model.safetensors.index.json \
   --include config.json --include tokenizer.json --include tokenizer_config.json \
   --include chat_template.jinja --include generation_config.json

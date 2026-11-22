@@ -68,6 +68,7 @@ export FLASHINFER_USE_CUDA_NORM=1
 export SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
 export OMP_NUM_THREADS=4 MAX_JOBS=4
 python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
+  --revision 2f4fac011fc06e736782b0b59394577790da7d79 \
   --served-model-name qwen --dtype float16 --context-length 512 \
   --max-running-requests 1 --mem-fraction-static 0.85 --enable-metrics \
   --attention-backend triton --sampling-backend pytorch --chunked-prefill-size 256 \

@@ -58,7 +58,7 @@ On the same V100, the general BF16 multiply optimization took official LLMD from
 
 ### LLMD GPU prefill
 
-The ordinary client reports server decode and prompt tokens per second through the first token. To time the GPU prefill graph, start a fresh LLMD server with the CUPTI collector below. Use the same launch options as in the Ubuntu guide. The collector starts after warm-up and records the three measured requests. [LLMD launch command](../zml.md#5-benchmarks) · [NVIDIA CUPTI Activity API](https://docs.nvidia.com/cupti/12.9/main/main.html)
+The ordinary client reports post-first-token decode tokens/s, internal decode steps/s and prompt tokens per second through the first token. To time the GPU prefill graph, start a fresh LLMD server with the CUPTI collector below. Use the same launch options as in the Ubuntu guide. The collector starts after warm-up and records the three measured requests. [LLMD launch command](../zml.md#5-benchmarks) · [NVIDIA CUPTI Activity API](https://docs.nvidia.com/cupti/12.9/main/main.html)
 
 In the server terminal, build the collector from your VF checkout. The optional profiling dependencies are in NVIDIA’s Ubuntu CUDA repository. [Ubuntu 24.04 packages](https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/)
 
