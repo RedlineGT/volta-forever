@@ -18,6 +18,9 @@
 //     cache, is adapted when the program asks for the kernel; meanwhile a kernel of another
 //     library is given at once (the lock of all lazy libraries was held over the adaptation), and
 //     another thread that asks for the same kernel gets the same, once.
+//   - cache_temporaries: a write to the layer's cache that fails (a limit on the size of files)
+//     leaves no temporary file; the first use of the cache removes a temporary file that a write
+//     left an hour before, not one of now.
 //
 // usage: lifecycle CASE PROXY DIR
 // PROXY is the layer's libcuda.so.1, DIR a directory for the files of the case.
@@ -32,11 +35,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef int CUresult;
@@ -431,6 +437,61 @@ static int lazy_lock(const char *proxy, const char *dir) {
     return 0;
 }
 
+// ---- cache_temporaries ----
+
+// The temporary files in `dir` other than the two that the case made.
+static int temporaries_of_the_layer(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int count = 0;
+    for (struct dirent *e; (e = readdir(d));)
+        count += !strncmp(e->d_name, ".tmp-", 5) && strcmp(e->d_name, ".tmp-00000000000000aa")
+                 && strcmp(e->d_name, ".tmp-00000000000000bb");
+    closedir(d);
+    return count;
+}
+
+static int cache_temporaries(const char *proxy, const char *dir) {
+    char cache[4096], old[4200], fresh[4200];
+    snprintf(cache, sizeof cache, "%s/cache", dir);
+    snprintf(old, sizeof old, "%s/.tmp-00000000000000aa", cache);
+    snprintf(fresh, sizeof fresh, "%s/.tmp-00000000000000bb", cache);
+    if (mkdir(cache, 0700)) { perror("mkdir"); return 2; }
+    // Left by writes that did not end, an hour ago and now.
+    for (const char *path = old; path; path = path == old ? fresh : NULL) {
+        FILE *f = fopen(path, "w");
+        if (!f) { perror("fopen"); return 2; }
+        fputs("left", f);
+        fclose(f);
+    }
+    struct timeval hour_ago[2] = { { .tv_sec = time(NULL) - 3600 }, { .tv_sec = time(NULL) - 3600 } };
+    if (utimes(old, hour_ago)) { perror("utimes"); return 2; }
+    setenv("VF_PROXY_CACHE", cache, 1);
+    open_proxy(proxy);
+    LOAD(cuLibraryLoadData); LOAD(cuLibraryUnload);
+
+    // The layer writes what it found of the library to its cache: more than the limit.
+    struct rlimit limit;
+    getrlimit(RLIMIT_FSIZE, &limit);
+    struct rlimit small = { .rlim_cur = 100, .rlim_max = limit.rlim_max };
+    signal(SIGXFSZ, SIG_IGN);
+    if (setrlimit(RLIMIT_FSIZE, &small)) { perror("setrlimit"); return 2; }
+    void *library;
+    CUresult loaded = cuLibraryLoadData(&library, ptx, NULL, NULL, 0, NULL, NULL, 0);
+    setrlimit(RLIMIT_FSIZE, &limit);
+    if (loaded) { fprintf(stderr, "cache_temporaries: load failed (%d)\n", loaded); return 2; }
+    cuLibraryUnload(library);
+
+    char what[96];
+    int left = temporaries_of_the_layer(cache);
+    snprintf(what, sizeof what, "%d temporary files left by the layer (want 0)", left);
+    check("cache_failed_write", left == 0, what);
+    int gone = access(old, F_OK) != 0, kept = access(fresh, F_OK) == 0;
+    check("cache_stale_temporary_removed", gone, gone ? "the one of an hour ago is gone" : "the one of an hour ago is there");
+    check("cache_fresh_temporary_kept", kept, kept ? "the one of now is there" : "the one of now is gone");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) { fprintf(stderr, "usage: lifecycle CASE PROXY DIR\n"); return 2; }
     const char *name = argv[1], *proxy = argv[2], *dir = argv[3];
@@ -438,6 +499,7 @@ int main(int argc, char **argv) {
     if (!strcmp(name, "fork_exit")) status = fork_exit(proxy, dir);
     else if (!strcmp(name, "contexts")) status = contexts(proxy, dir);
     else if (!strcmp(name, "lazy_lock")) status = lazy_lock(proxy, dir);
+    else if (!strcmp(name, "cache_temporaries")) status = cache_temporaries(proxy, dir);
     else { fprintf(stderr, "unknown case: %s\n", name); return 2; }
     if (status) return status;
     printf("%s: %d checks, %d wrong\n", name, checks, wrong);

@@ -28,7 +28,9 @@
 //!
 //! Directories are created with mode 0700. Before use, the cache directory must be a real directory
 //! owned by the effective uid and not writable by group or others; otherwise the cache is off.
-//! Temporary files use a random suffix and `create_new` with mode 0600. Files are read only when
+//! Temporary files have a name of their own (`create_new`, and another name when one is taken) and
+//! mode 0600; a write that fails removes its own, and the first use of the directory in a process
+//! removes those that writes left more than ten minutes before. Files are read only when
 //! they are regular files owned by the effective uid. Each file carries a magic, format version,
 //! the full 128-bit key, the content length, and a checksum; anything that does not match is
 //! ignored and may be deleted.
@@ -57,6 +59,11 @@ const FORMAT_VERSION: u32 = 4;
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
 const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// A temporary file older than this was left by a write that did not end (its process was killed,
+/// or the disk was full before temporary files were removed on failure): a write takes less.
+const STALE_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(600);
+/// Names tried for a temporary file before a write gives up.
+const TEMPORARY_NAMES: usize = 16;
 
 static CACHE_STATE: OnceLock<Option<CacheState>> = OnceLock::new();
 
@@ -80,6 +87,7 @@ fn state() -> Option<&'static CacheState> {
                 log::warn(format_args!("proxy cache disabled: {reason}"));
                 return None;
             }
+            remove_stale_temporaries(&dir, uid);
             Some(CacheState { dir, max_bytes, uid })
         })
         .as_ref()
@@ -179,31 +187,86 @@ fn file_header(key: u128, data: &[u8]) -> [u8; HEADER_LEN] {
     hdr
 }
 
-/// Write `data` to `path` atomically: create a temporary file with a random name and mode 0600,
-/// write header + data, sync, rename. Returns the number of bytes written (header + data).
+/// Write `data` to `path` atomically: create a temporary file with a name of its own and mode 0600,
+/// write header + data, sync, rename. Returns the number of bytes written (header + data). Nothing
+/// stays of a write that fails (a full disk, a limit on the size of files).
 fn atomic_write(path: &Path, data: &[u8], key: u128) -> std::io::Result<u64> {
     let dir = path.parent().unwrap();
     std::fs::create_dir_all(dir)?;
-    // Random suffix: mix of pid and a counter, no external randomness needed.
-    let suffix = {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pid = std::process::id() as u64;
-        pid ^ (n.wrapping_mul(0x517cc1b727220a95))
-    };
-    let temp = dir.join(format!(".tmp-{suffix:016x}"));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)?;
-    let hdr = file_header(key, data);
-    file.write_all(&hdr)?;
-    file.write_all(data)?;
-    file.sync_data()?;
-    drop(file);
-    std::fs::rename(&temp, path)?;
+    let (temp, file) = create_temporary(dir, temporary_suffix)?;
+    if let Err(e) = write_entry(file, data, key).and_then(|()| std::fs::rename(&temp, path)) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
     Ok((HEADER_LEN + data.len()) as u64)
+}
+
+/// Header + data into `file`, synced; the file is closed on return.
+fn write_entry(mut file: std::fs::File, data: &[u8], key: u128) -> std::io::Result<()> {
+    file.write_all(&file_header(key, data))?;
+    file.write_all(data)?;
+    file.sync_data()
+}
+
+/// A new temporary file in `dir`, of this write's own: `.tmp-` and the 16 hexadecimal digits of
+/// `suffix()`, created with `create_new` and mode 0600. A name that is taken (by a write of another
+/// process, or a file left by a write that did not end) is passed over for the next.
+fn create_temporary(dir: &Path, mut suffix: impl FnMut() -> u64) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let mut taken = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+    for _ in 0..TEMPORARY_NAMES {
+        let temp = dir.join(format!(".tmp-{:016x}", suffix()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+        {
+            Ok(file) => return Ok((temp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => taken = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(taken)
+}
+
+/// The process id, a count of the process's writes and the time, mixed: in a container, where
+/// every start has the same process id, the first write of each start has a name of its own.
+fn temporary_suffix() -> u64 {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut h = twox_hash::XxHash64::with_seed(0x517cc1b727220a95);
+    h.write_u32(std::process::id());
+    h.write_u64(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    h.write_u128(now.as_nanos());
+    h.finish()
+}
+
+/// Remove the temporary files of the directory that are older than any write takes: a write that
+/// did not end left them.
+fn remove_stale_temporaries(dir: &Path, uid: u32) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_name().as_encoded_bytes().starts_with(b".tmp-") {
+            continue;
+        }
+        // (Not followed if it is a link.)
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STALE_TEMPORARY);
+        if meta.is_file() && meta.uid() == uid && stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Read and verify a cached file. Returns the content (without the header) on success.
@@ -811,6 +874,87 @@ mod tests {
         atomic_write(&path, data, key).unwrap();
         let read = checked_read(&path, key, uid).unwrap();
         assert_eq!(read, data);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temporary files of the directory.
+    fn temporaries(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn failed_write_leaves_nothing() {
+        // The rename fails: the name of the entry is a directory with something in it.
+        let dir = test_dir("failedrename");
+        let path = dir.join("entry");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("inside"), b"x").unwrap();
+        assert!(atomic_write(&path, &[7u8; 512], 1).is_err());
+        assert_eq!(temporaries(&dir), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_over_the_size_limit_leaves_nothing() {
+        // A limit on the size of files, in a process of its own (it holds for every thread): the
+        // write of the data fails (EFBIG), as on a full disk.
+        let dir = test_dir("sizelimitwrite");
+        let path = dir.join("entry");
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let limit = libc::rlimit {
+                rlim_cur: 100,
+                rlim_max: 100,
+            };
+            let ok = unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                libc::setrlimit(libc::RLIMIT_FSIZE, &limit) == 0
+            } && atomic_write(&path, &[7u8; 512], 1).is_err()
+                && temporaries(&dir).is_empty()
+                && !path.exists();
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "{status:#x}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporary_name_taken_is_passed_over() {
+        // A file left under the first name, as by a start of a container before this one.
+        let dir = test_dir("nametaken");
+        std::fs::write(dir.join(".tmp-0000000000000001"), b"left").unwrap();
+        let mut names = [1u64, 1, 2].into_iter();
+        let (temp, _file) = create_temporary(&dir, || names.next().unwrap()).unwrap();
+        assert_eq!(temp, dir.join(".tmp-0000000000000002"));
+        assert_eq!(std::fs::read(dir.join(".tmp-0000000000000001")).unwrap(), b"left");
+        // Every name taken: the write gives up.
+        let error = create_temporary(&dir, || 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_temporaries_removed() {
+        let dir = test_dir("staletemp");
+        let uid = unsafe { libc::geteuid() };
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for name in [".tmp-00000000000000aa", "0123.manifest"] {
+            let file = std::fs::File::create(dir.join(name)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        std::fs::write(dir.join(".tmp-00000000000000bb"), b"being written").unwrap();
+        remove_stale_temporaries(&dir, uid);
+        // The old temporary goes; one being written and an entry of the cache stay.
+        assert_eq!(temporaries(&dir), [".tmp-00000000000000bb"]);
+        assert!(dir.join("0123.manifest").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
