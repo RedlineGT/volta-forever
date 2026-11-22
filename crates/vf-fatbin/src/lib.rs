@@ -402,9 +402,11 @@ pub fn cubin_debug_ptx(bytes: &[u8]) -> Option<&[u8]> {
         }
     }
     let source = source?;
-    let (symbols, _) = cubin_symbols(bytes, sections)?;
-    if symbols.iter().any(|s| s[4] >> 4 != 0 && !is_kernel(s)) {
-        return None;
+    let symbols = cubin_symbols(bytes, sections)?;
+    for (index, symbol) in symbols.table.iter().enumerate() {
+        if symbol[4] >> 4 != 0 && !is_kernel(symbol) && !symbols.assembler_helper(index, sections) {
+            return None;
+        }
     }
     Some(source)
 }
@@ -413,7 +415,59 @@ fn is_kernel(symbol: &[u8; 24]) -> bool {
     symbol[4] & 0xf == 2 && symbol[5] & 0x10 != 0 && u16_at(symbol, 6) != 0
 }
 
-fn cubin_symbols<'a>(bytes: &'a [u8], sections: &[[u8; 64]]) -> Option<(&'a [[u8; 24]], &'a [u8])> {
+struct CubinSymbols<'a> {
+    table: &'a [[u8; 24]],
+    names: &'a [u8],
+    first_global: usize,
+}
+
+impl CubinSymbols<'_> {
+    /// CUDA 12 ptxas marks its out-of-line routines (for instance, 64-bit integer division)
+    /// as weak functions in the local portion of .symtab. Their machine code is inside the
+    /// owning kernel. CUDA 13 emits local functions for the same PTX operations.
+    fn assembler_helper(&self, index: usize, sections: &[[u8; 64]]) -> bool {
+        let symbol = &self.table[index];
+        if index >= self.first_global || symbol[4] != 0x22 || symbol[5] != 0 {
+            return false;
+        }
+        let Some((ordinal, routine)) = elf_string(self.names, u32_at(symbol, 0))
+            .and_then(|s| s.strip_prefix("$__internal_"))
+            .and_then(|s| s.split_once("_$__cuda_"))
+        else {
+            return false;
+        };
+        if ordinal.is_empty() || !ordinal.bytes().all(|b| b.is_ascii_digit()) || routine.is_empty() {
+            return false;
+        }
+        let section_index = u16_at(symbol, 6);
+        let Some(section) = sections.get(usize::from(section_index)) else {
+            return false;
+        };
+        // In CUDA ELF, the low 24 bits of a text section's sh_info name the owning function.
+        let owner_idx = (u32_at(section, 44) & 0x00ff_ffff) as usize;
+        let Some(owner) = self.table.get(owner_idx) else {
+            return false;
+        };
+        if u32_at(section, 4) != 1
+            || u64_at(section, 8) & 4 == 0
+            || !is_kernel(owner)
+            || u16_at(owner, 6) != section_index
+        {
+            return false;
+        }
+        let start = u64_at(symbol, 8);
+        let size = u64_at(symbol, 16);
+        let owner_start = u64_at(owner, 8);
+        let owner_size = u64_at(owner, 16);
+        size != 0
+            && start
+                .checked_sub(owner_start)
+                .and_then(|offset| offset.checked_add(size))
+                .is_some_and(|end| end <= owner_size)
+    }
+}
+
+fn cubin_symbols<'a>(bytes: &'a [u8], sections: &[[u8; 64]]) -> Option<CubinSymbols<'a>> {
     let symbols = sections.iter().find(|s| u32_at(*s, 4) == 2)?;
     if u64_at(symbols, 56) != 24 {
         return None;
@@ -422,16 +476,21 @@ fn cubin_symbols<'a>(bytes: &'a [u8], sections: &[[u8; 64]]) -> Option<(&'a [[u8
     if u32_at(strings, 4) != 3 {
         return None;
     }
-    let (symbols, trailing) = section_data(bytes, symbols)?.as_chunks::<24>();
-    trailing.is_empty().then_some((symbols, section_data(bytes, strings)?))
+    let first_global = u32_at(symbols, 44) as usize;
+    let (table, trailing) = section_data(bytes, symbols)?.as_chunks::<24>();
+    (trailing.is_empty() && first_global <= table.len()).then_some(CubinSymbols {
+        table,
+        names: section_data(bytes, strings)?,
+        first_global,
+    })
 }
 
 /// Entry points retained by the device linker in a little-endian 64-bit CUDA ELF.
 pub fn cubin_entries(bytes: &[u8]) -> Option<Vec<&str>> {
-    let (symbols, strings) = cubin_symbols(bytes, cubin_sections(bytes)?)?;
+    let symbols = cubin_symbols(bytes, cubin_sections(bytes)?)?;
     let mut entries = Vec::new();
-    for symbol in symbols.iter().filter(|s| is_kernel(s)) {
-        entries.push(elf_string(strings, u32_at(symbol, 0))?);
+    for symbol in symbols.table.iter().filter(|s| is_kernel(s)) {
+        entries.push(elf_string(symbols.names, u32_at(symbol, 0))?);
     }
     Some(entries)
 }

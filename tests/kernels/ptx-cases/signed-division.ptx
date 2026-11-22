@@ -1,0 +1,21 @@
+.version 8.0
+.target sm_80
+.address_size 64
+// The divisor depends on the lane, forcing ptxas to emit signed 64-bit division.
+.visible .entry k(.param .u64 output) {
+    .reg .u32 lane;
+    .reg .b64 divisor, dividend, quotient, remainder, out;
+    mov.u32 lane, %tid.x;
+    cvt.u64.u32 divisor, lane;
+    add.u64 divisor, divisor, 7;
+    mul.lo.s64 dividend, divisor, -1234567890123456;
+    add.s64 dividend, dividend, -3;
+    div.s64 quotient, dividend, divisor;
+    rem.s64 remainder, dividend, divisor;
+    xor.b64 quotient, quotient, -1234567890123456;
+    xor.b64 remainder, remainder, -3;
+    ld.param.u64 out, [output];
+    mad.wide.u32 out, lane, 16, out;
+    st.global.v2.u64 [out], {quotient, remainder};
+    ret;
+}

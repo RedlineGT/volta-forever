@@ -1241,6 +1241,34 @@ mod tests {
     }
 
     #[test]
+    fn only_compiler_helpers_inside_an_entry_may_be_weak_symbols() {
+        let input = include_bytes!("../../../tests/kernels/ptx-cases/signed-division.sm80.cubin");
+        let policy = Policy::default();
+        assert!(matches!(
+            policy.adapt_cubin(input).outcome,
+            Outcome::Retargeted { from_sm: 80, .. }
+        ));
+        for edit in 0..4 {
+            let mut elf = vf_sass::elf::Elf::parse(input).unwrap();
+            let mut symbols = elf.symbols().unwrap();
+            let index = symbols.iter().position(|s| s.name.ends_with("_div_s64")).unwrap();
+            let helper = &mut symbols[index];
+            assert_eq!(helper.info, 0x22);
+            match edit {
+                0 => helper.name_offset += 1, // outside ptxas's internal namespace
+                1 => helper.value = u64::MAX, // outside its entry's range
+                2 => helper.shndx = 0,        // external definition
+                _ => {
+                    let symtab = elf.section(".symtab").unwrap();
+                    elf.sections[symtab].info = index as u32; // public weak symbol
+                }
+            }
+            elf.set_symbols(&symbols);
+            assert!(policy.adapt_cubin(&elf.write()).image.is_none());
+        }
+    }
+
+    #[test]
     fn partial_mismatched_and_relocatable_debug_sources_are_left_alone() {
         let policy = Policy::default();
         let edit = |from: &[u8], to: &[u8]| {
