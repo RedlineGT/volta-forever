@@ -1020,3 +1020,120 @@ fn held_predicate_survives_in_the_frame_under_register_pressure() {
     assert_eq!(load.op_or_name("Rd", 255), test.op_or_name("Ra", 254));
     assert_eq!((away.op_or_name("Rb", 255), back.op_or_name("Rd", 255)), (2, 2));
 }
+
+#[test]
+fn graph_register_policy_only_rebudgets_an_entry_that_loses_a_legal_block() {
+    let original = include_bytes!("../../../../tests/kernels/k_fit_test.135.sm75.cubin");
+    let name = "k_fit_regs";
+    for (shape, expected_mode, expected_regs) in [
+        (None, 5, 64),
+        (Some((0x10, 128u32)), 7, 66),
+        (Some((0x05, 896)), 7, 66),
+        (Some((0x05, 897)), 5, 64),
+    ] {
+        let mut elf = crate::elf::Elf::parse(original).unwrap();
+        if let Some((kind, threads)) = shape {
+            let i = elf.section(&format!(".nv.info.{name}")).unwrap();
+            let info = &mut elf.sections[i].data;
+            info.extend([4, kind, 12, 0]);
+            for dim in [threads, 1, 1] {
+                info.extend(dim.to_le_bytes());
+            }
+        }
+        let data = elf.write();
+        let text = |borrow| {
+            let opts = Options {
+                borrow,
+                ..Options::default()
+            };
+            let result = translate_with_options(&data, false, &opts).unwrap();
+            let out = crate::elf::Elf::parse(&result.bytes).unwrap();
+            let i = out.section(&format!(".text.{name}")).unwrap();
+            (out.sections[i].info >> 24, out.sections[i].data.clone())
+        };
+        let (regs, code) = text(9);
+        assert_eq!(regs, expected_regs);
+        assert_eq!((regs, code), text(expected_mode));
+    }
+}
+
+#[test]
+fn graph_policy_keeps_the_default_borrowed_layout_if_it_already_fits() {
+    let original = include_bytes!("../../../../tests/kernels/k_groups.135.sm75.cubin");
+    let mut input = crate::elf::Elf::parse(original).unwrap();
+    let section = input.section(".text.g_after").unwrap();
+    // A write to an otherwise unused high register makes the ordinary matrix
+    // translation borrow registers. Its 245 registers still admit the source CTA.
+    let text = &mut input.sections[section];
+    let mut decoder = Decoder::new(75);
+    let nop = text
+        .data
+        .as_chunks_mut::<16>()
+        .0
+        .iter_mut()
+        .find(|bytes| {
+            let word = u128::from_le_bytes(**bytes);
+            decoder.decode(word).is_some_and(|op| op.name == "nop_")
+        })
+        .unwrap();
+    let mov = assemble::assemble_int("mov__RCR_RC", &[("Rd", 242)]).unwrap();
+    nop.copy_from_slice(&mov.to_le_bytes());
+    text.info = (255 << 24) | (text.info & 0x00ff_ffff);
+    let data = input.write();
+    let layout = |borrow| {
+        let opts = Options {
+            borrow,
+            ..Options::default()
+        };
+        let result = translate_with_options(&data, false, &opts).unwrap();
+        assert!(
+            result
+                .report
+                .iter()
+                .find(|f| f.name == "g_after")
+                .unwrap()
+                .refused
+                .is_none()
+        );
+        let output = crate::elf::Elf::parse(&result.bytes).unwrap();
+        let code = &output.sections[output.section(".text.g_after").unwrap()];
+        let info = &output.sections[output.section(".nv.info.g_after").unwrap()];
+        (code.info >> 24, code.data.clone(), info.data.clone())
+    };
+    let normal = layout(7);
+    assert_eq!(normal.0, 245);
+    assert_eq!(layout(9), normal);
+}
+
+#[test]
+fn graph_policy_preserves_a_relocation_on_the_stack_setup() {
+    let original = include_bytes!("../../../../tests/kernels/k_fit_test.135.sm75.cubin");
+    let mut e = crate::elf::Elf::parse(original).unwrap();
+    let target = e.section(".text.k_fit_regs").unwrap();
+    let slot = e.section(".rel.debug_frame").unwrap();
+    let names = e.section(".shstrtab").unwrap();
+    let name_offset = e.sections[names].data.len() as u32;
+    e.sections[names].data.extend(b".rel.text.k_fit_regs\0");
+    // Attach an ELF relocation to the original first instruction. The bounded
+    // layout inserts another stack instruction there, which follow() cannot carry.
+    let rel = &mut e.sections[slot];
+    rel.name_offset = name_offset;
+    rel.info = target as u32;
+    rel.data = [0u64.to_le_bytes(), 56u64.to_le_bytes()].concat();
+    let input = e.write();
+    let layout = |borrow| {
+        let opts = Options {
+            borrow,
+            ..Options::default()
+        };
+        let result = translate_with_options(&input, false, &opts).unwrap();
+        let entry = result.report.iter().find(|r| r.name == "k_fit_regs").unwrap();
+        let obj = crate::elf::Elf::parse(&result.bytes).unwrap();
+        let text = &obj.sections[obj.section(".text.k_fit_regs").unwrap()];
+        (entry.refused.clone(), text.info >> 24, text.data.clone())
+    };
+    let normal = layout(7);
+    assert_eq!(normal.0, None);
+    assert_eq!(normal.1, 66);
+    assert_eq!(layout(9), normal);
+}

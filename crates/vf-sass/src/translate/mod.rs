@@ -6,6 +6,7 @@
 
 mod ampere;
 mod attributes;
+mod block_registers;
 mod borrowed;
 mod context;
 mod cubin;
@@ -291,6 +292,7 @@ pub struct Options {
     /// made. 7 (`BORROW_DEFAULT`): what the layer does by itself: what 6 does, and a function
     /// with tensor-core products may be translated at level 3 (the lane read at the product,
     /// its registers taken at the instruction). 8: level 3 first for every kernel, for tests.
+    /// 9: try to preserve the source kernel’s register-limited maximum CTA size on GV100.
     pub borrow: u32,
 }
 

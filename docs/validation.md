@@ -782,10 +782,9 @@ test replaced the query, filled the output with NaNs and replayed the graph. All
 outputs were finite and agreed with the new CPU FP32 references within 0.00028 relative
 L2 error. [Replay test](../tests/gpu/sglang-decode-graph.py)
 
-The SGLang server also used batch-one graph replay on Qwen3.5-35B-A3B-AWQ. It answered three
-distinct prompts correctly with 227 uncached input tokens and 64 output tokens each. Its
-scheduler reported graph execution during decode on all three requests. Prefill ran outside
-the graph. [SGLang guide](guides/sglang.md)
+The stock SGLang server used CUDA graphs for prefill and decode on Qwen3.5-35B-A3B-AWQ. The three distinct prompts each used 227 uncached input tokens and returned 64 tokens. [SGLang results](guides/benchmarks/sglang-default-operators.json)
+
+A PyTorch FP32 `im2col` kernel translated with the default register policy used 69 registers. Its CUDA graph ran with 256 threads per block and returned error 701 at 1,024. With `VF_BORROW=9`, the same kernel used 64 registers and ran for three geometries at both block sizes on a V100. All 59,676 results matched the CPU reference bit for bit and all 384 surrounding guard values were intact. These runs measured correctness and block-size admission. [Register policy](architecture.md#translation-control) · [Graph API regression](../tests/proxy/graph_fit.sh)
 
 ### Through the launcher
 

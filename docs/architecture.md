@@ -501,9 +501,18 @@ below by purpose. For the full reference with defaults, see `INSTALL.md`.
 | Variable | Purpose |
 |---|---|
 | `VF_TRANSLATE` | `0` disables machine-code translation. `first` prefers machine code when PTX also exists. `force`: translate even where sm_70 code exists. |
-| `VF_BORROW` | Where the translation takes registers it needs. `7` (default): above the program's wherever that works; for a kernel refused for registers, among the program's own that hold nothing, then in local memory, kernels with products included. `0`: above the program's only. |
+| `VF_BORROW` | Where the translation takes registers it needs. `7` (default): above the program's wherever that works; for a kernel refused for registers, among the program's own that hold nothing, then in local memory, kernels with products included. `0`: above the program's only. `9`: for CUDA graphs, try to retain each independent entry's original maximum launchable block size when translating its module. |
 | `VF_PAIRS` | `0`: each Turing tensor-core product is done by itself in machine code; by default they are done two by two on whole rows where the program loads them that way. |
 | `VF_ALIGNED_ROWS` | `0`: do not assume programs keep the rows `ldmatrix` reads at multiples of 16; test addresses at run time (slower emulated tensor-core kernels). |
+
+For a CUDA graph that fails at instantiation with `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`,
+try `VF_BORROW=9 vf ./program`. A graph can record a launch before the driver checks its
+registers. The ordinary launch-time retry has no opportunity to select a second image here.
+Mode 9 keeps the default translation, including its register borrowing, unless it excludes a block size
+allowed by the source kernel on GV100. In that case it selects a bounded placement during
+module translation if that placement restores the full block size. Required and maximum block dimensions in the cubin limit this
+check. Entries with code relocations or jump tables keep their ordinary layout. A kernel that needs borrowing can run more slowly with small blocks. When no bounded
+placement restores the full size, the driver receives the default translation.
 
 ### Image adaptation
 

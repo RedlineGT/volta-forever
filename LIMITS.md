@@ -190,10 +190,7 @@ emulated kernels.
 
 ## CUDA graphs
 
-A Tesla V100 can capture and replay translated kernels. SGLang used a batch-one CUDA graph for
-decode with Qwen3.5-35B-A3B-AWQ. Its prefill ran outside the graph. A replayed launch that
-exceeds the register budget can return an error after capture, beyond the register retry
-described above. [GPU validation](docs/validation.md#cuda-graph-replay)
+A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ server used CUDA graphs for both prefill and decode. A graph can report error 701 when it is instantiated or replayed if the translated kernel needs too many registers for the recorded block size. For translated machine code, `VF_BORROW=9 vf …` can preserve a source block size that would otherwise be lost. Shared-memory limits still apply. [SGLang measurements](docs/guides/benchmarks/sglang-default-operators.json) · [GPU validation](docs/validation.md#cuda-graph-replay)
 
 ## SGLang tensor parallelism and NCCL
 

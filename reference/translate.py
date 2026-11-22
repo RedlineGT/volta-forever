@@ -127,6 +127,35 @@ def signed(field, word):
     return v - (1 << len(field)) if v >> (len(field) - 1) else v
 
 
+def graph_register_budget(registers, info):
+    """Largest register claim that retains all source launch block sizes on GV100."""
+    max_threads = 1024
+    pos = 0
+    while pos < len(info):
+        if pos + 4 > len(info):
+            max_threads = 1024
+            break
+        fmt, kind, size = struct.unpack_from('<BBH', info, pos)
+        size = size if fmt == 4 else 0
+        if pos + 4 + size > len(info):
+            max_threads = 1024
+            break
+        if kind in (0x05, 0x10):
+            if fmt != 4 or size != 12:
+                max_threads = 1024
+                break
+            x, y, z = struct.unpack_from('<3I', info, pos + 4)
+            if not 0 < x * y * z <= 0xffffffff:
+                max_threads = 1024
+                break
+            max_threads = min(max_threads, x * y * z)
+        pos += 4 + size
+    per_warp = ((32 * max(registers, 1) + 255) // 256) * 256
+    threads = min(max_threads, (16384 // per_warp) * 4 * 32)
+    groups = max(1, (threads + 127) // 128)
+    return min(255, (65536 // (128 * groups) // 8) * 8)
+
+
 def tables_of(data):
     """{offset of a branch through a register: the offsets it may lead to}, from the attributes of a
     function: the record of its jump tables (0x34) is, for each, the branch, a zero, how many
@@ -2840,11 +2869,12 @@ def translate(data, mc=None, listing=None, lives=None):
                 except Refused as why:
                     gave_up.append(str(why))
                     done = usual()
-            elif BORROW == 7 and alone:
+            elif BORROW in (7, 9) and alone:
                 # What 6 does, and a function with products may be translated at level 3.
                 # The chain: plain; levels 1, 2; level 3 with room and with products.
+                way = plain
                 try:
-                    done = plain()
+                    done = way()
                 except Refused as why:
                     if str(why) != 'more registers than there are':
                         raise
@@ -2860,6 +2890,25 @@ def translate(data, mc=None, listing=None, lives=None):
                         if os.environ.get('VF_BORROW_SAY'):
                             print('  refused\t%s\t%s\tand with borrowed registers: %s' % (fs[0].name, why, '; '.join(gave_up[1:])), file=sys.stderr)
                         raise why
+                if BORROW == 9:
+                    f = fs[0]
+                    info = e.section('.nv.info.' + f.name)
+                    limit = graph_register_budget(f.registers, info.data if info is not None else b'')
+                    if done[indices[0]][2] > limit and not relocations.get(indices[0]) and not f.tables:
+                        top = max(0, limit - 3 - f.save_slots)
+                        for bounded in (lambda: attempt(True, True, 1), lambda: attempt(True, True, 2),
+                                        lambda: attempt(False, False, 3, top)):
+                            try:
+                                candidate = bounded()
+                            except Refused:
+                                continue
+                            if candidate[indices[0]][2] <= limit:
+                                # Preserve all instruction boundaries used by attributes and symbols.
+                                done = candidate if candidate[indices[0]][1].keys() == done[indices[0]][1].keys() else way()
+                                break
+                        else:
+                            # Restore the instruction map, frame and relocations of the normal translation.
+                            done = way()
             elif BORROW == 6 and alone:
                 # What the layer does by itself. Wherever the translation of the switch off
                 # exists it is the one taken, byte for byte: nothing that runs today changes,

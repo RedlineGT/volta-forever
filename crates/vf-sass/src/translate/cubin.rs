@@ -604,12 +604,12 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                             usual(&mut attempt)
                         }
                     }
-                } else if opts.borrow == 7 && alone {
+                } else if matches!(opts.borrow, 7 | 9) && alone {
                     // What 6 does, and a function with products may be translated at level 3.
                     // The chain: plain; levels 1, 2; level 3 with room and with products.
                     let mut gave_up: Vec<String> = Vec::new();
                     let plain_result = plain(&mut attempt, &gave_up);
-                    match plain_result {
+                    let normal = match plain_result {
                         Ok(d) => Ok(d),
                         Err(original_why) if original_why.0 == "more registers than there are" => {
                             gave_up.push(original_why.0.clone());
@@ -637,7 +637,33 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                             }
                         }
                         Err(e) => Err(e),
+                    }?;
+                    if opts.borrow == 9 {
+                        let f = fs[0];
+                        let info = e.section(&format!(".nv.info.{}", f.name))
+                            .map_or(&[][..], |i| e.sections[i].data.as_slice());
+                        let limit = super::block_registers::budget(f.registers, info);
+                        // Relocations and jump tables are checked after placement. Keep the working
+                        // layout when a second placement could change how those sites are rewritten.
+                        if normal[0].1.count > limit && !relocations.contains_key(&indices[0]) && f.tables.is_empty() {
+                            let top = limit.saturating_sub(3).saturating_sub(saves);
+                            for (pairs, level, bound) in [(true, 1, None), (true, 2, None), (false, 3, Some(top))] {
+                                if let Ok(candidate) = attempt(pairs, level, bound, &gave_up)
+                                    && candidate[0].1.count <= limit
+                                {
+                                    // Attributes and symbols may point at any original instruction. Preserve
+                                    // every address that the ordinary translation could carry over.
+                                    let old = &normal[0].1.new_of;
+                                    let new = &candidate[0].1.new_of;
+                                    if old.len() == new.len() && old.keys().all(|offset| new.contains_key(offset)) {
+                                        return Ok(candidate);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
+                    Ok(normal)
                 } else if opts.borrow == 6 && alone {
                     // What the layer does by itself. Wherever the translation of the
                     // switch off exists it is the one taken, byte for byte. A kernel that is
