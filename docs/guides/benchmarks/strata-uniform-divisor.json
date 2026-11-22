@@ -427,5 +427,74 @@
     "median_prefill_tok_s": 1950.2,
     "median_decode_tok_s": 99.04103128438925,
     "source": "strata-no-drafts.json"
+  },
+  "source_build_reproduction": {
+    "vf_commit": "85509ebcc02a759b777c14cc2c44bbe1419071d1",
+    "ubuntu_24_04_image_config_sha256": "d9b8c34d61a9b9a3c44cab883d7d2f2619d674966ab520186f799cf32e3e0377",
+    "build": "A fresh Ubuntu 24.04 container built the complete source archive with scripts/build.sh and scripts/build-forwarders.sh. The Cargo target was empty. Rust 1.100.0 and the official CUDA 12.9.2 and 13.5.0 toolkits were mounted read-only. All 22 forwarders passed verification and vf doctor passed.",
+    "run": "A second fresh container from the same Ubuntu image verified the 26 build artifact hashes and ran vf doctor. The signed Strata 0.2.18 terminal and CUDA 13 engine 0.1.64 were mounted read-only. The server loaded the rebuilt driver proxy, audit library and cuBLAS 13 forwarder, backed by CUDA 12.9.2. The public client used the checkpoint, GPU, prompts and no-drafting settings above.",
+    "engine_sha256": "2c4bdf8f03e4634d8a94d067e5f6e9f93322e9e5dd6e55359c637c7e654bbf14",
+    "build_sha256": {
+      "dist/bin/vf-translate": "c1e04df1b015e8e2b416aab68c355b2b2a0092959e2f63d5c00404dd7e588b23",
+      "dist/lib/libcuda.so.1": "90926e811bfb78de58007d847449d3bd6a0e007c709139a931fe44689f7ba2cc",
+      "dist/lib/libnvJitLink.so.13": "46483ec5a48f005e2c85e295d86e8ae360141600ce980ada43eb8d4d5b9b03c9",
+      "dist/lib/libvf_audit.so": "ba10319621f332b08f1fc4f88e5040acafbfe1259a2147a78a10b83998418e40",
+      "dist/forward/libcublas.so.13": "769c44c69b840df55f38974f35eacb6c49f9296cc31533cbfde0f76fe49c7f81"
+    },
+    "semantic_answer": "Paris",
+    "warmup": {
+      "id": "warmup",
+      "first_word": "Lisbon",
+      "prompt_n": 228,
+      "predicted_n": 64,
+      "cache_n": 0,
+      "draft_n": 0,
+      "draft_n_accepted": 0
+    },
+    "measured_requests": [
+      {
+        "id": "run1",
+        "first_word": "Kyoto",
+        "prompt_n": 227,
+        "predicted_n": 64,
+        "cache_n": 0,
+        "draft_n": 0,
+        "draft_n_accepted": 0,
+        "prompt_ms": 114.6,
+        "predicted_ms": 604.5,
+        "prefill_tok_s": 1980.8,
+        "decode_tok_s": 104.21836228287842
+      },
+      {
+        "id": "run2",
+        "first_word": "Lyon",
+        "prompt_n": 227,
+        "predicted_n": 64,
+        "cache_n": 0,
+        "draft_n": 0,
+        "draft_n_accepted": 0,
+        "prompt_ms": 114.5,
+        "predicted_ms": 604.2,
+        "prefill_tok_s": 1982.5,
+        "decode_tok_s": 104.27010923535252
+      },
+      {
+        "id": "run3",
+        "first_word": "Lima",
+        "prompt_n": 227,
+        "predicted_n": 64,
+        "cache_n": 0,
+        "draft_n": 0,
+        "draft_n_accepted": 0,
+        "prompt_ms": 115.2,
+        "predicted_ms": 605.8,
+        "prefill_tok_s": 1970.5,
+        "decode_tok_s": 103.99471772862331
+      }
+    ],
+    "median": {
+      "median_prefill_tok_s": 1980.8,
+      "median_decode_tok_s": 104.21836228287842
+    }
   }
 }

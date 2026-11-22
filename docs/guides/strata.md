@@ -75,6 +75,8 @@ python3 strata-ninfer.py strata
 | Strata CUDA 13 with VF from main | **1982.5** | **104.25** |
 | Native Strata CUDA 12 | 1948.5 | 99.07 |
 
+A fresh Ubuntu 24.04 build of VF commit `85509eb` served the same three requests at medians of **1980.80 tokens/s prefill** and **104.22 tokens/s decode**. [Build and request records](./benchmarks/strata-uniform-divisor.json)
+
 The performance targets set before this run were 1950.2 prefill and 99.04 decode tokens/s. To repeat the native comparison, stop the VF server, select the CUDA 12 engine, and repeat section 4 with `STRATA_CUDA=12 strata launch`. Use the same model file and launch options.
 
 ```sh
