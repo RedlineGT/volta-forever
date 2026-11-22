@@ -121,7 +121,18 @@ pub(super) fn translate_function(
         }
         // Level 3: load from memory before the instruction.
         let before_mem = ctx.loads_before(i, d)?;
-        let mut new_items = translate_one(&mut ctx, i, d)?;
+        let mut new_items = if fd.ampere && d.mnemonic == "F2F" {
+            super::ampere::pack(i, d)?
+        } else {
+            translate_one(&mut ctx, i, d)?
+        };
+        // The source compiler scheduled even shared opcodes for Ampere. Volta's
+        // fixed-pipeline latency differs, including LEA.HI.X -> LDG and HADD2 -> FADD.
+        if fd.ampere {
+            for item in &mut new_items {
+                item.changed = true;
+            }
+        }
         // Level 3: insert lane S2R where a sequence goes by it.
         if let Some(&lane_r) = ctx.lane_taken.get(&i) {
             let word = assemble::assemble(

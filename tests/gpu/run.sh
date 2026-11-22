@@ -238,6 +238,9 @@ VF_CAPABILITY=7.5 drv cubin-sm75-told-7.5 "$G/k_basic.135.sm75.cubin" "machine c
 # and is refused at the lookup, with the reason; the six others run.
 drv cubin-sm75-damaged "$G/k_basic.135.sm75.damaged.cubin" "machine code for sm_75 translated \(7 functions\)" "saxpy +ok" "mathk +ok" "block_sum +ok" "histo +ok" "half_dot +ok" "dbl +ok" \
     "kernel warp_sum cannot run on this GPU and is not given to the program: its machine code for sm_75 is not translated \(the instruction ffffffffffffffffffffffffffffffff at 0x0 is not one of the sm_75 description\)"
+# Both entry points belong to the same stripped Ampere image. Only the supported one may be launched.
+DRVRUN_KERNELS=memory_check drv cubin-sm80-strided-half "$G/translate/k_ampere.sm80.cubin" \
+    "machine code for sm_80 translated" "memory_check +ok" "lookup unsupported_atomic -> 218 CUDA_ERROR_INVALID_PTX"
 # The same code in a fat binary that also has PTX, which is what is taken unless told otherwise.
 VF_TRANSLATE=first drv fatbin-elf75-first "$W/crates/vf-fatbin/tests/data/elf75-ptx75-zstd.fatbin" "fat binary without sm_70 code: machine code" "${translated[@]}"
 VF_TRANSLATE=0 drv cubin-sm75-as-is "$G/k_basic.135.sm75.cubin" "cubin with machine code for sm_75 and later only" "-> 209 CUDA_ERROR_NO_BINARY_FOR_GPU"

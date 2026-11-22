@@ -22,7 +22,7 @@ pub enum Origin {
     Native,
     /// PTX for a later GPU, rewritten by the layer.
     PtxRewritten,
-    /// Machine code for sm_75, translated to sm_70.
+    /// Machine code translated to sm_70.
     MachineCodeTranslated,
     /// Loaded from the proxy cache.
     CacheHit,

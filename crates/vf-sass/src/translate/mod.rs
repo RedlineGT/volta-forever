@@ -1,9 +1,10 @@
-//! The sm_75 -> sm_70 machine code translator.
+//! The machine code translator for Volta.
 //!
 //! A faithful port of `reference/translate.py`. It translates one cubin at a time,
 //! function by function. Functions that call one another share their uniform register placement.
 //! What it cannot do it refuses, and a refused function is left as a trap.
 
+mod ampere;
 mod attributes;
 mod borrowed;
 mod context;

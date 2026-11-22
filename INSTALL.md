@@ -361,8 +361,8 @@ ok
 | `VF_EMULATION_WARNINGS` | `20` | How many kernels with emulated instructions are listed; 0 for none |
 | `VF_PROXY_CACHE` | `~/.cache/volta-forever/proxy` | Directory for the proxy's cache (translated machine code, adapted PTX); `0` to disable. Must be a directory only the user can write (mode 0700; group- or world-writable directories are refused). The cache can grow to 2 GB (`VF_PROXY_CACHE_MAX`). On a system whose home directory is on a RAM filesystem, this is memory. |
 | `VF_PROXY_CACHE_MAX` | `2147483648` (2 GB) | Maximum size of the cache in bytes |
-| `VF_CAPABILITY` | auto | Compute capability reported to callers without Volta code (default: the lowest the program has code for, which is 7.5 for programs with only sm_75 machine code). `VF_CAPABILITY=8.0` tells programs they run on Ampere: the code taken from them is then their PTX for the highest target not above 8.0, not their sm_75 machine code. On `main`, VF can also read complete PTX kept with line information inside an sm_80 cubin. See `docs/architecture.md` for image selection. |
-| `VF_TRANSLATE` | `1` | `0`: do not translate sm_75 machine code; `first`: translate even where PTX exists; `force`: translate even where sm_70 code exists |
+| `VF_CAPABILITY` | auto | Compute capability reported to callers without Volta code (default: the lowest the program has code for, which is 7.5 for programs with only sm_75 machine code). `VF_CAPABILITY=8.0` reports Ampere and prefers compatible PTX for the highest target up to 8.0. On `main`, VF can read complete PTX retained with line information and translate supported instructions in stripped sm_80 executables. See `docs/architecture.md` for image selection. |
+| `VF_TRANSLATE` | `1` | `0`: disable machine-code translation; `first`: translate even where PTX exists; `force`: translate even where sm_70 code exists |
 | `VF_BORROW` | `7` | Where the translation of machine code takes the registers it needs. `7`: above the program's own wherever that translates, and for a kernel that would otherwise be refused for want of registers, among the program's registers that hold nothing, then in the thread's local memory, kernels with tensor-core products included. `6`: the same, such kernels with products refused (the default until 2026-11-20). `0`: above the program's only (kernels that name nearly every register are refused). Other values are for experiments (`docs/translator.md`, "Registers") |
 | `VF_FIT` | `1` | `0`: a launch that the driver refuses for its registers (`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`) is refused to the program. By default the kernel is then launched from a second translation of its module in which no kernel takes more registers than it declared (slower code; made once, at the first refused launch). Not for a kernel that can reach data of its module (`docs/architecture.md`, "Launch") |
 | `VF_FIT_SHARED` | `0` | Set to `1` to retry a rejected dynamic shared-memory opt-in on a V100 at the physical maximum available to that kernel. Each launch must still fit its static and dynamic allocation within the device limit. |
@@ -398,8 +398,8 @@ The first time a program runs through the layer, the proxy:
 1. **Adapts** each module's PTX for Volta (rewrites instructions Volta lacks) and **analyses**
    what each kernel depends on. For llama.cpp (12 modules of 14-20 MB each), this takes about
    5.6 seconds (3.1 s for the rewriting, 2.5 s for the analysis).
-2. **Translates** sm_75 machine code to sm_70, function by function (a stock PyTorch wheel has
-   only machine code, no PTX).
+2. **Translates** sm_75 machine code and supported sm_80 functions to sm_70. A stock PyTorch
+   wheel includes kernels that are distributed as machine code only.
 3. The **driver compiles** the rewritten PTX. Large attention kernels take 1.1 to 1.8 seconds
    each when the driver's own cache of compiled kernels is empty.
 
@@ -437,5 +437,5 @@ The offline tool is `bin/vf-translate`; the launcher has its four functions as s
 vf inspect FILE...                  # which architectures a file carries
 vf extract FILE DIR [SM]            # extract the code from a fat binary
 vf adapt IN OUT                     # adapt PTX for Volta (what the proxy does)
-vf translate IN OUT [MAP [REPORT]]  # translate sm_75 machine code to sm_70
+vf translate IN OUT [MAP [REPORT]]  # translate supported sm_75 and sm_80 machine code to sm_70
 ```

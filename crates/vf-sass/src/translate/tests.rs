@@ -295,6 +295,7 @@ fn make_borrow_func(instrs: &[Uses], registers: u32, uniform: &[u32], pairs: &[u
         needs_lane: false,
         product_count: 0,
         entered_inside: false,
+        ampere: false,
     }
 }
 
@@ -830,6 +831,7 @@ fn r1_depth_through_iadd3() {
         needs_lane: false,
         product_count: 0,
         entered_inside: false,
+        ampere: false,
     };
     let b = Borrowed::new(&fd, false, None).unwrap();
     // After instruction 0 (which sets R1), depth at instruction 1 should be 0.

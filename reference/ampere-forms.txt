@@ -1,0 +1,45 @@
+# Shared sm80/sm75 instruction forms. Each row names a class (sm80/sm75 when names differ),
+# its variable operands, and fixed modifiers. Other operands are encoded as zero.
+# The descriptions supply opcodes, reserved bits, class defaults, operand positions and enums.
+# Scheduler controls are checked separately by the translator.
+bra_ Pg sImm | Pp=PT
+bra_ Pg sImm | Pg.not=1 Pp=PT
+bssy_ Sa | Pg=PT Pp=PT
+bsync_  | Pg=PT Pp=PT
+exit_ Pg | Pp=PT
+fadd__RRR_RR Rd Ra Rc | Pg=PT
+fadd__RRI_RI Rd Ra Sc | Pg=PT ftz=FTZ
+fadd__RRR_RR Rd Ra Rc | Pg=PT ftz=FTZ
+fmul__RCR_RC Rd Ra Sb_addr | Pg=PT scale=noscale
+fmul__RCR_RC Rd Ra Sb_addr | Pg=PT fmz=FTZ scale=noscale
+hadd2__RR Rd Rc | Pg=PT ofmt=F32 Ra=RZ Ra.negate=1 iswzB_as_C=H0_H0
+iadd3_noimm__RCR_RCR Rd Ra Sb_addr | Pg=PT Pu=PT Pv=PT Rc=RZ
+iadd3_noimm__RUR_RUR Rd Pu Ra URb | Pg=PT Pv=PT Rc=RZ
+iadd3_x_noimm__RUR_RUR Rd Ra URb Pp | Pg=PT X=X Pu=PT Pv=PT Rc=RZ Pq=PT Pq.not=1
+imad__RCR_RCR Rd Ra Sb_addr Rc | Pg=PT fmt=S32
+imad__RCR_RCR Rd Ra Sb_addr Rc | Pg=PT fmt=S32 reuse_src_a=reuse
+imad__RsIR_RIR Rd Ra Sb Rc | Pg=PT fmt=S32
+imad__RRC_RRC Rd Sc_addr | Pg=PT Ra=RZ Rb=RZ
+imad__RRR_RRR Rd Rc | Pg=PT Ra=RZ Rb=RZ
+imad__RRR_RRR Rd Rc | Pg=PT Ra=RZ Rb=RZ reuse_src_c=reuse
+imad_wide__RCR_RCR Rd Ra Sb_addr Rc | Pg=PT Pu=PT
+imad_wide__RRC_RRC Rd Ra Rb Sc_addr | Pg=PT Pu=PT
+imad_wide__RsIR_RIR Rd Ra Sb Rc | Pg=PT Pu=PT
+isetp__RCR_RCR_EX/isetp__RCR_RCR Pu Ra Sb_addr Pr | Pg=PT icmp=GE fmt=S32 ex=EX Pv=PT Pp=PT
+isetp__RCR_RCR_noEX/isetp__RCR_RCR Pu Ra Sb_addr | Pg=PT icmp=GE Pv=PT Pp=PT sm75.Pr=PT
+lea_lo_noimm__RCR_RCR Rd Pu Ra Sb_addr | Pg=PT scaleU5=1
+lea_hi_noimm_x__RCR_RCR Rd Ra Sb_addr Rc Pp | Pg=PT hilo=HI X=X Pu=PT scaleU5=1
+lop3_lut__RuIR_RIR Rd Ra Sb Rc imm8 | Pg=PT Pu=PT Pp=PT Pp.not=1
+mov__RC Rd Sb_addr | Pg=PT PixMaskU04=15
+nop_  | Pg=PT
+s2r_ Rd | Pg=PT SRa=SR33
+s2r_ Rd | Pg=PT SRa=SR37
+s2r_ Rd | Pg=PT SRa=SR38
+shf__RCR_RCR Rd Ra Sb_addr | Pg=PT fmt=U32 Rc=RZ reuse_src_a=reuse
+shf__RuIR_RIR Rd Sb Rc | Pg=PT dir=R fmt=S32 hilo=HI Ra=RZ
+shf__RuIR_RIR Rd Sb Rc | Pg=PT dir=R fmt=S32 hilo=HI Ra=RZ reuse_src_c=reuse
+shf__RuIR_RIR Rd Sb Rc | Pg=PT dir=R fmt=U32 hilo=HI Ra=RZ
+uldc_const__RCR URd Sa_addr | UPg=UPT sz=_64
+umov__UI URd Sb | UPg=UPT
+ushf__URuIUR_URIR URd URa Sb | UPg=UPT fmt=U32 URc=URZ
+ushf__URURUR_URURUR URd URa URb URc | UPg=UPT fmt=U64 hilo=HI

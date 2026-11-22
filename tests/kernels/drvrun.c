@@ -218,6 +218,32 @@ static void run_all(CUmodule mod) {
         verdict("tanhk", bad, N, maxabs);
         if (!quiet) printf("             max relative error %.3g\n", maxrel);
     }
+    if (want("memory_check") && !cuModuleGetFunction(&f, mod, "memory_check")) {
+        // Place each half between sentinels and check the entire destination after one warp.
+        enum { lanes = 32, words = 2 * lanes + 1 };
+        uint16_t input[words], result[words], expected[words];
+        for (int i = 0; i < words; i++)
+            input[i] = result[i] = expected[i] = 0x3555;
+        float multiplier = 2.0f;
+        uint32_t step = 2 * sizeof(uint16_t);
+        for (int i = 0; i < lanes; i++) {
+            float x = (float)(i - 16) * 0.25f;
+            input[2 * i + 1] = f2h(x);
+            expected[2 * i + 1] = f2h((x + 0.75f) * multiplier);
+        }
+        CK(cuMemcpyHtoD_v2(dx, input, sizeof input));
+        CK(cuMemcpyHtoD_v2(dy, result, sizeof result));
+        CUdeviceptr src = dx + sizeof(uint16_t), dst = dy + sizeof(uint16_t);
+        void* args[] = {&src, &dst, &step, &multiplier};
+        CK(cuLaunchKernel(f, 1, 1, 1, lanes, 1, 1, 0, NULL, args, NULL));
+        CK(cuCtxSynchronize());
+        CK(cuMemcpyDtoH_v2(result, dy, sizeof result));
+        long bad = 0;
+        for (int i = 0; i < words; i++) bad += result[i] != expected[i];
+        verdict("memory_check", bad, words, 0);
+        CUresult refused = cuModuleGetFunction(&f, mod, "unsupported_atomic");
+        printf("lookup unsupported_atomic -> %d %s\n", refused, ename(refused));
+    }
     CK(cuMemFree_v2(dx)); CK(cuMemFree_v2(dy)); CK(cuMemFree_v2(dz));
     free(x); free(y);
 }

@@ -156,7 +156,7 @@ pub enum CodeOrigin {
     Native,
     /// PTX for a later GPU, rewritten for Volta by the layer.
     PtxRewritten,
-    /// Machine code for sm_75, translated to sm_70 in the proxy.
+    /// Machine code translated to sm_70 in the proxy.
     MachineCodeTranslated,
     /// Taken from the proxy's cache (may be PTX-rewritten or translated).
     CacheHit,

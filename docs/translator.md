@@ -21,15 +21,21 @@ When a program has PTX, the layer's PTX lowering (`crates/vf-ptx`) rewrites
 what Volta lacks and the driver compiles the result. When it has only machine
 code, the translator is the only path.
 
-**What is translated.** Cubins for sm_75 (compute capability 7.5, Turing).
-Later architectures (sm_80 and above) use instructions and encodings that the
-translator does not handle; their machine code is not translated. A program that
-carries PTX besides its sm_75 machine code uses the PTX path by default
-(`VF_TRANSLATE=first` overrides that).
+**What is translated.** VF translates Turing (sm_75) executables and a subset of
+Ampere (sm_80) executables. A program that also carries compatible PTX uses the
+PTX path by default. `VF_TRANSLATE=first` gives machine code precedence.
+
+For sm_80, the generator checks the opcode, modifiers and positions of the variable
+operands against both architectures' instruction descriptions. The translator
+also lowers specific global loads and stores and a packed FP32-to-FP16 conversion.
+It verifies the system descriptor along every path to a memory access. Supported
+functions then pass through the existing register allocator and Volta scheduler.
+A function outside this subset is refused at lookup. The supported forms are
+listed in `reference/ampere-forms.txt` and `reference/ampere_forms.py`.
 
 **Where the translation happens.** The proxy (`crates/vf-proxy`, by the
 decisions of `crates/vf-adapt`) calls the translator when a program loads a
-module whose only usable code is sm_75 machine code. The translation is done on the host CPU, before the driver sees the
+module whose only usable code is supported machine code. The translation is done on the host CPU, before the driver sees the
 module. It is also available as a command:
 
 ```

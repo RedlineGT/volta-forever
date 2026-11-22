@@ -766,6 +766,8 @@ def emit_assembly(f, mc, fc, onc):
         if c.name.startswith('imad_wide__') and c.name not in ASM_CLASSES:
             ASM_CLASSES.append(c.name)
 
+    ASM_CLASSES.extend(['ldg__sImmOffset', 'stg__sImmOffset', 'f2f_f32_downconvert__RRR_RRR', 'prmt__RuIR_RIR'])
+
     templates = []
     all_setters = []
     all_enum_entries = []
@@ -976,6 +978,7 @@ def emit_mod(f):
     lines.append('pub mod classes;')
     lines.append('pub mod rules;')
     lines.append('pub mod assembly;')
+    lines.append('pub mod ampere;')
     lines.append('pub mod distances;')
     lines.append('pub mod special;')
     lines.append('')
@@ -1022,6 +1025,9 @@ def main():
     print('Fields: %d unique, operand names: %d' % (len(fc.fields), len(onc.names)))
 
     os.makedirs(OUT, exist_ok=True)
+
+    import ampere_forms
+    ampere_forms.write(os.path.join(OUT, 'ampere.rs'), HEADER)
 
     print('Writing lib.rs...')
     with open(os.path.join(OUT, 'lib.rs'), 'w') as f:

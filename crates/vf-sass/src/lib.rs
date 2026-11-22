@@ -1,5 +1,5 @@
-//! The translator of sm_75 machine code (Turing) to sm_70 machine code (Volta): a cubin in, a cubin
-//! out, function by function; what it cannot do it refuses, with a reason.
+//! Translates Turing (sm_75) cubins and selected executable Ampere (sm_80) instructions
+//! into Volta (sm_70) cubins. Each refused function has a reason in the output report.
 //!
 //! It is the reference translator `reference/translate.py` carried over, and must give the same bytes:
 //! `tests/sass/compare.sh` compares the two on real code, `tests/sass/fuzz.py` on damaged code. A

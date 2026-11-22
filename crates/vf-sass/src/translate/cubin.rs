@@ -17,16 +17,17 @@ use super::{
     FunctionReport, MapEntry, Options, Refused, Relocation, STAY, TRAP, TransResult, TranslateResult, with_stall,
 };
 
-/// Translate an sm_75 cubin to sm_70.
+/// Translate an sm_75 or supported sm_80 cubin to sm_70.
 pub fn translate(data: &[u8], want_map: bool) -> Result<TranslateResult, String> {
     translate_with_options(data, want_map, &Options::default())
 }
 
-/// Translate an sm_75 cubin to sm_70 with the given options.
+/// Translate an sm_75 or supported sm_80 cubin to sm_70 with the given options.
 pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Result<TranslateResult, String> {
     let mut dec75 = Decoder::new(75);
     let mut dec70 = Decoder::new(70);
     let mut e = Elf::parse(data)?;
+    let arch = super::ampere::source(&e.header)?;
     let symbols = e.symbols()?;
 
     let texts: Vec<usize> = e
@@ -164,7 +165,24 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
             Some(ii) => tables_of(&e.sections[ii].data),
             None => Ok(Vec::new()),
         };
-        match tables.and_then(|tables| parse_function(&mut dec75, &name, &e.sections[si].data, registers, tables)) {
+        let parsed = tables.and_then(|tables| {
+            let code = &e.sections[si].data;
+            if arch != 80 {
+                return parse_function(&mut dec75, &name, code, registers, tables);
+            }
+            if relocations.contains_key(&si)
+                || symbols
+                    .iter()
+                    .any(|s| s.shndx as usize == si && s.info & 15 == 2 && s.value != 0)
+            {
+                return Err(Refused("a relocation or secondary entry in sm_80 code".into()));
+            }
+            let words = super::ampere::normalize(code, &mut dec75)?;
+            let mut fd = parse_function(&mut dec75, &name, &words, registers, tables)?;
+            fd.ampere = true;
+            Ok(fd)
+        });
+        match parsed {
             Ok(fd) => {
                 functions.insert(si, fd);
                 report.push((name, None));
@@ -1006,7 +1024,7 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
         // `cudaFuncGetAttributes` gives as `ptxVersion`): a program chooses by it among what it
         // was built with (the algorithms of Thrust and CUB answer "invalid device function" to an
         // architecture below the lowest of theirs), and it was built for nothing below.
-        let elf_flags = (75u32 << 16) | 0x0500 | 70;
+        let elf_flags = (u32::from(arch) << 16) | 0x0500 | 70;
         e.header[0x30..0x34].copy_from_slice(&elf_flags.to_le_bytes());
         for s in &mut e.sections {
             if s.name == ".note.nv.tkinfo" || s.name == ".note.nv.cuinfo" {

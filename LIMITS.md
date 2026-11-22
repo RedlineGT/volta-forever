@@ -72,8 +72,13 @@ have code for Volta, behind their names (`INSTALL.md`).
 `.nv_debug_ptx_txt` with line information. It checks the architecture and the kernel names
 before compiling that PTX for Volta. This covers standalone cubins from Triton and cubins in
 fat binaries. For sm_75, VF also tries retained PTX when its default machine-code translation
-refuses every kernel in the image. Stripped cubins still need a separate PTX image or a
-supported machine-code target.
+refuses every kernel in the image.
+
+Builds from `main` also translate a subset of stripped `sm_80` executables. VF checks each function's
+instruction forms, branches and memory addressing. The FP16 loads and FP16/32-bit stores require
+the CUDA system descriptor on every path leading to the access. The subset runs SGLang's top-eight
+expert sum on a V100. Unsupported functions are refused individually. Other stripped targets above
+`sm_75`, including `sm_86`, still require compatible PTX or a second supported image.
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of
 blocks, Hopper's barriers, tensor maps (`docs/emulations.md`, "Other instructions").

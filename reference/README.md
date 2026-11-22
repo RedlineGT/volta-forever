@@ -1,4 +1,4 @@
-# The reference: machine code of sm_75 as machine code of sm_70, in Python
+# The Python reference for translating machine code to sm_70
 
 Offline tools, written to find out what a trustworthy translator needs and to check the one the
 layer has. The translator of the layer (`crates/vf-sass`) is `translate.py` carried over to
@@ -6,9 +6,9 @@ Rust, on tables that `generate.py` writes from the same descriptions; the two mu
 bytes (`tests/sass/compare.sh`, `tests/sass/fuzz.py`), so a change to what one translates is a
 change to both. `docs/translator.md` describes the translation, `docs/validation.md` the checks.
 
-They read the descriptions of the two instruction sets that the
+They read the instruction descriptions that the
 [denvdis](https://github.com/redplait/denvdis) project extracted from NVIDIA's disassembler
-(`src/denvdis/data/sm70_*.txt`, `sm75_*.txt`: fetched by `scripts/fetch-all.sh denvdis`, not in
+(`src/denvdis/data/sm70_*.txt`, `sm75_*.txt` and `src/denvdis/data12/sm80_1.txt`, fetched by `scripts/fetch-all.sh denvdis`, not in
 this repository), and some use `toolkits/cuda-12.9.2/bin/nvdisasm` (fetched by
 `scripts/fetch-all.sh redist`) as the judge of what an instruction word means on each
 architecture. Run them with `python3 -I`.
@@ -22,6 +22,8 @@ architecture. Run them with `python3 -I`.
 | `machine.py`, `translate.py IN OUT [MAP]` | The reference translator. `VF_BORROW`, `VF_PAIRS` as in the layer; `VF_BORROW_SAY=1` says what it borrowed |
 | `pairing.py CUBIN...` | The plan of pairs of products on whole rows for each function (`docs/pairs.md`, section 11): which loads, which products, which conversions where; printed |
 | `batch.py OUT_DIR CUBIN...` | The translator on many cubins in one process (what `tests/sass/compare.sh` compares with) |
+| `ampere.py` | Checks and lowers supported sm80 instructions before the ordinary Turing-to-Volta translation. |
+| `ampere_forms.py` | Projects the selected sm80 forms from denvdis `data12/` and checks the shared forms against the sm75 description used by the translator. |
 | `generate.py` | Writes the tables of `crates/vf-tables/src/` (then `cargo fmt -p vf-tables`) |
 
 ## The checks

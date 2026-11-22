@@ -26,7 +26,7 @@
 //!   of 16, as the PTX manual requires and as the layer assumes: test the addresses when the code
 //!   runs. Slower emulated tensor-core kernels; for a program that stops with a misaligned-address
 //!   fault (error 716) without it;
-//! - `VF_TRANSLATE=0`: do not translate machine code for sm_75 (an image with nothing else is then
+//! - `VF_TRANSLATE=0`: disable machine-code translation (an image with nothing else is then
 //!   loaded as it is, and the driver refuses it); `VF_TRANSLATE=first`: translate it also where
 //!   the image has PTX that would otherwise be rewritten;
 //! - `VF_EMULATION_WARNINGS=N`: list the first N kernels given to the program with emulated

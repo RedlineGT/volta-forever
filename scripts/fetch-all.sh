@@ -111,7 +111,7 @@ src() {
 }
 
 denvdis() {
-    # The descriptions of the instruction sets (data/sm70_*.txt, sm75_*.txt): at the commit that the
+    # The descriptions of the instruction sets (data/sm70_*.txt, sm75_*.txt and data12/sm80_1.txt): at the commit that the
     # tables of crates/vf-tables were generated from, so that reference/generate.py gives them back.
     local commit=3769cb8a628fb9343d5466b3256c418537f7bb2a
     mkdir -p "$W/src/denvdis" && cd "$W/src/denvdis"

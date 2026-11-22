@@ -9,7 +9,7 @@
 //!   instructions, which `vf_ptx::lower_to_volta` replaces by sequences Volta has (`tanh`, the
 //!   Turing tensor-core instructions). A function that uses a form without such a sequence is made
 //!   to trap, and the kernels that need it are listed: they are not to be given to the program.
-//! - Where there is no PTX, machine code for sm_75 is translated to machine code for sm_70
+//! - Where there is no PTX, supported sm_75 and sm_80 instructions are translated to sm_70
 //!   (`vf_sass`), function by function. The functions the translator refuses are left as stubs,
 //!   and listed: their kernels are not to be given to the program either.
 //! - When the driver's compiler still refuses functions of an adapted image, `without_refused` makes
@@ -20,7 +20,7 @@ pub mod emulation;
 use vf_fatbin::{self as fatbin, Entry, FatBinary, KIND_ELF, KIND_PTX, NewEntry};
 pub use vf_ptx::{Emulated, EmulatedCounts, Refused, RefusedFunction, Trapped};
 
-/// The architecture whose machine code is translated for sm_70: Turing.
+/// The lowest CUDA 13 machine-code target and the default capability reported on Volta.
 pub const TRANSLATED_FROM: u32 = 75;
 
 /// The GPU and the driver the image is adapted for.
@@ -36,7 +36,7 @@ pub struct Policy {
     /// (`VF_CAPABILITY`): the code taken from a fat binary is then the code for that architecture.
     /// `None`: a program is told the lowest architecture it has code for, and that code is taken.
     pub told_sm: Option<u32>,
-    /// When machine code for Turing is translated for the device.
+    /// When supported machine code is translated for the device.
     pub translate: Translate,
     /// Whether pairs of products on whole rows are translated as such (`VF_PAIRS=0`: they are not).
     pub pairs: bool,
@@ -74,15 +74,15 @@ pub fn capability_sm(text: &str) -> Option<u32> {
 }
 
 /// With `VF_TRANSLATE_DUMP=DIR`, every cubin given to the translator is written to
-/// `DIR/<pid>-<number>.sm_75.cubin` as it was received: the machine code a program really loads,
+/// `DIR/<pid>-<number>.sm_<target>.cubin` as it was received: the machine code a program really loads,
 /// to be translated and checked apart (`reference/validate.py`). Libraries keep some of
 /// theirs where `vf extract` does not find it. (The directory must exist; what cannot be
 /// written is left out, and there is nowhere here to say so.)
-fn dump_cubin(cubin: &[u8]) {
+fn dump_cubin(cubin: &[u8], sm: u32) {
     static NUMBER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     if let Ok(dir) = std::env::var("VF_TRANSLATE_DUMP") {
         let number = NUMBER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = std::fs::write(format!("{dir}/{}-{number:04}.sm_75.cubin", std::process::id()), cubin);
+        let _ = std::fs::write(format!("{dir}/{}-{number:04}.sm_{sm}.cubin", std::process::id()), cubin);
     }
 }
 
@@ -370,12 +370,15 @@ impl Policy {
 
     /// Machine code for `sm` can be translated for the device.
     fn translatable(&self, sm: u32) -> bool {
-        self.translate != Translate::Never && self.device_sm == 70 && sm == TRANSLATED_FROM
+        self.translate != Translate::Never && self.device_sm == 70 && matches!(sm, 75 | 80)
     }
 
-    /// `cubin`, machine code for Turing, as machine code for the device.
-    fn translate_cubin(&self, cubin: &[u8]) -> Result<Translation, String> {
-        dump_cubin(cubin);
+    /// Translate one image of the selected architecture into machine code for the device.
+    fn translate_cubin(&self, cubin: &[u8], sm: u32) -> Result<Translation, String> {
+        if fatbin::cubin_sm(cubin) != Some(sm) {
+            return Err(format!("the cubin header does not match sm_{sm}"));
+        }
+        dump_cubin(cubin, sm);
         let opts = vf_sass::translate::Options {
             pairs: self.pairs,
             aligned_rows: self.lowering.aligned_rows,
@@ -388,7 +391,7 @@ impl Policy {
                 Some(reason) => refused.push(Refused {
                     kernel: function.name.clone(),
                     function: function.name.clone(),
-                    reason: format!("its machine code for sm_{TRANSLATED_FROM} is not translated ({reason})"),
+                    reason: format!("its machine code for sm_{sm} is not translated ({reason})"),
                 }),
                 None if function.after > function.before => emulated.push(Emulated {
                     kernel: function.name.clone(),
@@ -409,14 +412,23 @@ impl Policy {
         })
     }
 
-    /// Adapt a cubin, all of it: machine code for Turing is translated for the device. (A cubin for
-    /// the device is recognised from its header alone.) Later executables may carry their original PTX.
+    /// Adapt a cubin. Native images need only their header. Later executables can retain PTX or
+    /// use an instruction set the machine-code translator understands.
     pub fn adapt_cubin(&self, cubin: &[u8]) -> Adapted {
         match fatbin::cubin_sm(cubin) {
             Some(sm) if self.runs(sm) => Adapted::unchanged(Outcome::Native),
-            Some(sm) if self.translatable(sm) => match self.translate_cubin(cubin) {
+            // Ampere images with retained PTX already run through the PTX lowerer.
+            Some(80)
+                if self.device_sm == 70
+                    && self.translate == Translate::WithoutPtx
+                    && let Some((text, _)) = embedded_ptx(cubin, 80) =>
+            {
+                self.adapt_ptx(&text)
+            }
+            Some(sm) if self.translatable(sm) => match self.translate_cubin(cubin, sm) {
                 Ok(translation)
-                    if self.translate == Translate::WithoutPtx
+                    if sm == 75
+                        && self.translate == Translate::WithoutPtx
                         && translation.all_entries_refused(cubin)
                         && let Some(recovered) = embedded_ptx(cubin, sm)
                             .map(|(text, _)| self.adapt_ptx(&text))
@@ -450,19 +462,26 @@ impl Policy {
         fatbin::cubin_sm(header).is_some_and(|sm| !self.runs(sm) && (self.translatable(sm) || self.retargetable(sm)))
     }
 
-    /// `fat`, which has no PTX to rewrite, with its machine code for Turing translated for the device;
-    /// the other entries are kept. `None` when it has no such code.
+    /// Translate the machine code for one target, keeping entries for other GPUs. With the
+    /// default policy, use a later target's complete retained PTX when it is available.
     fn translate_fatbin(&self, fat: &FatBinary<'_>) -> Result<Option<Adapted>, fatbin::Error> {
-        let ours = |entry: &Entry<'_>| entry.kind() == KIND_ELF && self.translatable(entry.sm());
-        if !fat.entries.iter().any(ours) {
+        let Some(source) = self.machine_source(fat) else {
             return Ok(None);
+        };
+        if self.translate == Translate::WithoutPtx
+            && let Some(sm) = self.source_of(fat, KIND_ELF).filter(|&sm| sm >= 80)
+        {
+            let recovered = self.retarget_fatbin(fat, KIND_ELF, sm)?;
+            if matches!(recovered.outcome, Outcome::Retargeted { .. }) {
+                return Ok(Some(recovered));
+            }
         }
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut translated, mut functions, mut refused, mut emulated) = (0, 0, Vec::new(), Vec::new());
         let mut over_budget = false;
-        let mut all_refused = self.translate == Translate::WithoutPtx;
+        let mut all_refused = source == 75 && self.translate == Translate::WithoutPtx;
         for entry in &fat.entries {
-            if !ours(entry) {
+            if entry.kind() != KIND_ELF || entry.sm() != source {
                 // In Force mode, drop native sm_70 entries so the driver uses the translated ones.
                 if self.translate == Translate::Force && entry.kind() == KIND_ELF && self.runs(entry.sm()) {
                     continue;
@@ -471,7 +490,7 @@ impl Policy {
                 continue;
             }
             let payload = entry.payload()?;
-            match self.translate_cubin(&payload) {
+            match self.translate_cubin(&payload, source) {
                 Ok(translation) => {
                     all_refused = all_refused && translation.all_entries_refused(&payload);
                     entries.push(NewEntry::replace(
@@ -495,7 +514,7 @@ impl Policy {
             }
         }
         if all_refused {
-            let recovered = self.retarget_fatbin(fat, KIND_ELF, TRANSLATED_FROM)?;
+            let recovered = self.retarget_fatbin(fat, KIND_ELF, source)?;
             if recovered.complete_ptx() {
                 return Ok(Some(recovered));
             }
@@ -503,7 +522,7 @@ impl Policy {
         Ok(Some(Adapted {
             outcome: Outcome::Translated {
                 entries: translated,
-                from_sm: TRANSLATED_FROM,
+                from_sm: source,
                 functions,
                 refused,
                 emulated,
@@ -524,19 +543,41 @@ impl Policy {
     /// PTX at or below the device target in a dialect too new for the driver, else the nearest
     /// target above. The same when nothing reaches what the user chose.
     fn source_of(&self, fat: &FatBinary<'_>, kind: u16) -> Option<u32> {
-        let targets = || {
+        self.preferred_sm(
             fat.entries
                 .iter()
-                .filter(|e| e.kind() == kind && (e.sm() <= self.device_sm || self.retargetable(e.sm())))
-                .map(|e| e.sm())
-        };
-        let nearest = targets().min_by_key(|&sm| if sm <= self.device_sm { 0 } else { sm });
-        let told = self.told_sm.and_then(|told| targets().filter(|&sm| sm <= told).max());
+                .filter(|e| e.kind() == kind)
+                .map(Entry::sm)
+                .filter(|&sm| sm <= self.device_sm || self.retargetable(sm)),
+        )
+    }
+
+    fn machine_source(&self, fat: &FatBinary<'_>) -> Option<u32> {
+        let targets = fat
+            .entries
+            .iter()
+            .filter(|e| e.kind() == KIND_ELF)
+            .map(Entry::sm)
+            .filter(|&sm| self.translatable(sm));
+        // The default Turing translation is the established path for multi-target libraries,
+        // including PyTorch. Ampere's supported instruction set is currently narrower.
+        if self.translate == Translate::WithoutPtx {
+            targets.min()
+        } else {
+            self.preferred_sm(targets)
+        }
+    }
+
+    fn preferred_sm(&self, targets: impl Iterator<Item = u32> + Clone) -> Option<u32> {
+        let told = self
+            .told_sm
+            .and_then(|told| targets.clone().filter(|&sm| sm <= told).max());
+        let nearest = targets.min_by_key(|&sm| if sm <= self.device_sm { 0 } else { sm });
         told.or(nearest)
     }
 
     /// Adapt a fat binary: when nothing in it is for the device, rewrite the PTX entries of one
-    /// architecture (`source_of`) as device PTX; without PTX, translate its machine code for Turing.
+    /// architecture (`source_of`) as device PTX. Without PTX, select one machine-code target.
     /// An executable for a later target can supply the PTX that ptxas kept with its line information.
     /// The other entries are kept.
     pub fn adapt_fatbin(&self, fat: &FatBinary<'_>) -> Result<Adapted, fatbin::Error> {
@@ -729,11 +770,14 @@ impl Policy {
             return Some(original.to_vec());
         }
         let fat = fatbin::parse(original).ok()?;
-        let ours = fat
-            .entries
-            .iter()
-            .find(|entry| entry.kind() == KIND_ELF && self.translatable(entry.sm()))?;
-        Some(fatbin::build(&[NewEntry::copy_of(ours)]))
+        let source = self.machine_source(&fat)?;
+        let mut entries = fat.entries.iter().filter(|e| e.kind() == KIND_ELF && e.sm() == source);
+        let only = entries.next()?;
+        // One module handle cannot identify which of several cubins owns a kernel.
+        entries
+            .next()
+            .is_none()
+            .then(|| fatbin::build(&[NewEntry::copy_of(only)]))
     }
 }
 
@@ -762,8 +806,14 @@ pub fn kept_cubin(kept: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
 ///   kernel all the same;
 /// - an instruction of the function cannot be decoded, or the cubin cannot be read.
 ///
-/// False for a name that the cubin has no function of.
+/// On Turing, false for a name that the cubin has no function of. Other architectures require
+/// a separate analysis of their constant-bank operands and stay in the original module.
 pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
+    // Constant-bank operands have only been audited for Turing. Keep other kernels in their
+    // original module, where writable globals cannot diverge between two translations.
+    if fatbin::cubin_sm(cubin) != Some(75) {
+        return true;
+    }
     let Ok(elf) = vf_sass::elf::Elf::parse(cubin) else {
         return true;
     };
@@ -789,7 +839,6 @@ pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
             tainted.push(bank);
         }
     }
-    let sm = fatbin::cubin_sm(cubin).unwrap_or(75);
     let mut seen = vec![kernel_name.to_string()];
     let mut work = vec![kernel_name.to_string()];
     while let Some(function) = work.pop() {
@@ -827,7 +876,7 @@ pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
         if !code.len().is_multiple_of(16) {
             return true;
         }
-        let mut decoder = vf_sass::decode::Decoder::new(sm);
+        let mut decoder = vf_sass::decode::Decoder::new(75);
         for word in code.as_chunks::<16>().0 {
             let word = u128::from_le_bytes(*word);
             let Some(d) = decoder.decode(word) else {
@@ -1277,6 +1326,122 @@ mod tests {
     }
 
     #[test]
+    fn choose_one_machine_target_and_keep_the_same_cubin_for_launch_retries() {
+        let turing = fatbin::parse(ELF75_PTX75).unwrap().entries[0];
+        let ampere = || NewEntry::replace(&turing, DEBUG_CUBIN.to_vec(), 80, (1, 7));
+        let policy = Policy::default();
+        let told_ampere = Policy {
+            told_sm: Some(80),
+            ..policy
+        };
+        for order in [true, false] {
+            let turing_entry = NewEntry::copy_of(&turing);
+            let entries = if order {
+                [turing_entry, ampere()]
+            } else {
+                [ampere(), turing_entry]
+            };
+            let image = fatbin::build(&entries);
+            let fat = fatbin::parse(&image).unwrap();
+            assert_eq!(policy.machine_source(&fat), Some(75));
+            assert_eq!(policy.adapt_fatbin(&fat).unwrap().outcome, translated_fixture(1));
+            assert_eq!(told_ampere.machine_source(&fat), Some(75));
+            assert!(matches!(
+                told_ampere.adapt_fatbin(&fat).unwrap().outcome,
+                Outcome::Retargeted { from_sm: 80, .. }
+            ));
+            let first = Policy {
+                translate: Translate::First,
+                ..told_ampere
+            };
+            assert_eq!(first.machine_source(&fat), Some(80));
+            assert_eq!(
+                kept_cubin(&first.kept_for_second(&image).unwrap()).as_deref(),
+                Some(DEBUG_CUBIN)
+            );
+            assert_eq!(
+                kept_cubin(&policy.kept_for_second(&image).unwrap()).as_deref(),
+                Some(&*turing.payload().unwrap())
+            );
+        }
+        let mut stripped = vf_sass::elf::Elf::parse(DEBUG_CUBIN).unwrap();
+        let section = stripped.section(".nv_debug_ptx_txt").unwrap();
+        stripped.sections[section].data.fill(0);
+        let mixed = fatbin::build(&[
+            NewEntry::replace(&turing, stripped.write(), 80, (1, 7)),
+            NewEntry::copy_of(&turing),
+        ]);
+        assert_eq!(
+            told_ampere
+                .adapt_fatbin(&fatbin::parse(&mixed).unwrap())
+                .unwrap()
+                .outcome,
+            translated_fixture(1)
+        );
+        let duplicate = fatbin::build(&[ampere(), ampere()]);
+        assert!(told_ampere.kept_for_second(&duplicate).is_none());
+        assert!(kernel_names_global_data(DEBUG_CUBIN, "k"));
+        let newer_device = Policy {
+            device_sm: 90,
+            ..policy
+        };
+        assert_eq!(
+            newer_device.adapt_cubin(DEBUG_CUBIN).outcome,
+            Outcome::NeedsTranslation { lowest_sm: 80 }
+        );
+        let native_ampere = Policy {
+            device_sm: 80,
+            ..policy
+        };
+        assert_eq!(native_ampere.adapt_cubin(DEBUG_CUBIN).outcome, Outcome::Native);
+    }
+
+    #[test]
+    fn stripped_ampere_code_keeps_its_per_kernel_refusals_through_the_public_policy() {
+        let cubin = include_bytes!("../../../tests/kernels/translate/k_ampere.sm80.cubin");
+        let policy = Policy::default();
+        let bare = policy.adapt_cubin(cubin);
+        assert!(
+            matches!(&bare.outcome, Outcome::Translated { from_sm: 80, functions: 2, refused, .. }
+            if refused.len() == 1 && refused[0].kernel == "unsupported_atomic")
+        );
+        let native = fatbin::parse(ELF70_ELF75_PTX70).unwrap().entries[0];
+        let ampere = || NewEntry::replace(&native, cubin.to_vec(), 80, (1, 7));
+        let single = fatbin::build(&[ampere()]);
+        let single = fatbin::parse(&single).unwrap();
+        assert_eq!(policy.adapt_fatbin(&single).unwrap().outcome, bare.outcome);
+        let never = Policy {
+            translate: Translate::Never,
+            ..policy
+        };
+        assert_eq!(
+            never.adapt_fatbin(&single).unwrap().outcome,
+            Outcome::NeedsTranslation { lowest_sm: 80 }
+        );
+        assert_eq!(
+            never.adapt_cubin(cubin).outcome,
+            Outcome::NeedsTranslation { lowest_sm: 80 }
+        );
+        let mixed = fatbin::build(&[NewEntry::copy_of(&native), ampere()]);
+        let mixed = fatbin::parse(&mixed).unwrap();
+        let first = Policy {
+            translate: Translate::First,
+            ..policy
+        };
+        assert_eq!(first.adapt_fatbin(&mixed).unwrap().outcome, Outcome::Native);
+        let force = Policy {
+            translate: Translate::Force,
+            ..policy
+        };
+        let forced = force.adapt_fatbin(&mixed).unwrap();
+        assert_eq!(forced.outcome, bare.outcome);
+        let bytes = forced.image.unwrap();
+        let fat = fatbin::parse(&bytes).unwrap();
+        assert_eq!(fat.entries.len(), 1);
+        assert_eq!(fat.entries[0].sm(), 70);
+    }
+
+    #[test]
     fn recover_turing_ptx_only_when_no_translated_entry_can_run() {
         // ptxas predicates the Turing HMMA, but the retained PTX branches around the MMA.
         let cubin = include_bytes!("../../../tests/kernels/ptx-cases/guarded-mma.sm75.cubin");
@@ -1315,7 +1480,10 @@ mod tests {
     #[test]
     fn only_compiler_helpers_inside_an_entry_may_be_weak_symbols() {
         let input = include_bytes!("../../../tests/kernels/ptx-cases/signed-division.sm80.cubin");
-        let policy = Policy::default();
+        let policy = Policy {
+            translate: Translate::Never,
+            ..Policy::default()
+        };
         assert!(matches!(
             policy.adapt_cubin(input).outcome,
             Outcome::Retargeted { from_sm: 80, .. }
@@ -1342,7 +1510,10 @@ mod tests {
 
     #[test]
     fn partial_mismatched_and_relocatable_debug_sources_are_left_alone() {
-        let policy = Policy::default();
+        let policy = Policy {
+            translate: Translate::Never,
+            ..Policy::default()
+        };
         let edit = |from: &[u8], to: &[u8]| {
             let mut elf = vf_sass::elf::Elf::parse(DEBUG_CUBIN).unwrap();
             let index = elf.section(".nv_debug_ptx_txt").unwrap();
@@ -1428,12 +1599,12 @@ mod tests {
         );
         assert_eq!(fatbin::cubin_sm(&adapted.image.unwrap()), Some(70));
         // For an architecture nothing translates.
-        let mut ampere = fat.entries[1].stored.to_vec();
-        ampere[0x30] = 80;
-        assert_eq!(fatbin::cubin_sm(&ampere), Some(80));
+        let mut later = fat.entries[1].stored.to_vec();
+        later[0x30] = 86;
+        assert_eq!(fatbin::cubin_sm(&later), Some(86));
         assert_eq!(
-            policy.adapt_cubin(&ampere).outcome,
-            Outcome::NeedsTranslation { lowest_sm: 80 }
+            policy.adapt_cubin(&later).outcome,
+            Outcome::NeedsTranslation { lowest_sm: 86 }
         );
         assert_eq!(policy.adapt_cubin(b"\x7fELF").outcome, Outcome::Unknown);
     }

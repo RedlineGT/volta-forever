@@ -18,6 +18,7 @@
 //   cd REPO_ROOT && python3 -I reference/generate.py && cargo fmt -p vf-tables
 #![allow(clippy::unreadable_literal, clippy::type_complexity)]
 
+pub mod ampere;
 pub mod assembly;
 pub mod classes;
 pub mod distances;

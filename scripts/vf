@@ -17,7 +17,7 @@
 #   vf inspect FILE...                    which GPU code a file carries
 #   vf extract FILE DIR [SM]              take the code out of its fat binaries
 #   vf adapt IN OUT                       what the layer gives the driver in place of IN
-#   vf translate IN OUT [MAP [REPORT]]    sm_75 machine code translated to sm_70
+#   vf translate IN OUT [MAP [REPORT]]    translate supported sm_75 and sm_80 machine code to sm_70
 #                                         (these four are the program vf-translate)
 #
 # Options of run, the prefix form and env:
@@ -664,7 +664,7 @@ vf (also installed as volta-forever): run CUDA 13 programs on a Tesla V100
   vf inspect FILE...                    which GPU code a file carries
   vf extract FILE DIR [SM]              take the code out of its fat binaries
   vf adapt IN OUT                       what the layer gives the driver in place of IN
-  vf translate IN OUT [MAP [REPORT]]    sm_75 machine code translated to sm_70
+  vf translate IN OUT [MAP [REPORT]]    translate supported sm_75 and sm_80 machine code to sm_70
                                         (these four are the program vf-translate)
 
 Options of run, the prefix form and env:

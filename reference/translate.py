@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""translate.py IN.cubin OUT.cubin [MAP]: sm_75 machine code rewritten as sm_70 machine code.
+"""translate.py IN.cubin OUT.cubin [MAP]: rewrite sm_75 or supported sm_80 machine code for sm_70.
 
 A prototype of the translator, written to be checked: every decision comes from the descriptions of
 the two instruction sets (md.py), from rules that nvdisasm confirmed (remap.py) and from distances
 measured in native sm_70 code (latency.py). What it does not know how to do, it refuses, function by
 function: a refused function is left out of the result as a trap, and listed.
+
+For an executable sm_80 cubin, ampere.py validates each accepted instruction and the global memory
+descriptors on every incoming path. It normalizes the operands before the ordinary translation
+steps and requests Volta scheduling for every resulting instruction.
 
 For each function (a `.text` section):
 1. every instruction is decoded with the sm_75 description; one that is, bit for bit, an sm_70
@@ -26,6 +30,7 @@ what was done), for validate.py.
 import collections, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import elf
+import ampere
 import machine as MC
 import pairing
 from machine import ZERO, USCHED, WRITE_BARRIER, READ_BARRIER, WAIT, REUSE, NOP, marked, stall_of, with_stall
@@ -474,6 +479,7 @@ def placement(base, uniform, pairs, pool, saves, lane=False, scratch=0, product=
 class Function:
     def __init__(self, mc, name, code, registers, tables=None):
         self.mc, self.name, self.registers = mc, name, registers
+        self.ampere = False
         self.tables = tables or {}
         if len(code) % 16:
             raise Refused('code that is not a whole number of instructions')
@@ -776,7 +782,18 @@ class Function:
             # Level 3: the uniform registers of the frame that the instruction reads are loaded
             # before it, those it writes are stored after it.
             before = self.from_memory(i, d)
-            new = self.one(i, d)
+            if self.ampere and d.mnemonic == 'F2F':
+                rd = d.ops['Rd']
+                first = Item((d.word & ~(7 << WRITE_BARRIER)) | (ARRIVES << WRITE_BARRIER) | (63 << WAIT),
+                             i, 'sm80: convert low half')
+                first.then = ARRIVES
+                permute = self.mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=rd, Sb=0x5410, Rc=255)
+                new = [first, Item(permute, i, 'sm80: zero high half')]
+            else:
+                new = self.one(i, d)
+            if self.ampere:
+                for item in new:
+                    item.changed = True
             if i in self._lane_taken:
                 # Level 3: the lane is read where a sequence goes by it, and what follows waits.
                 lane = Item(mc.assemble('s2r_', Rd=self._lane_taken[i], SRa='SR_LANEID', dst_wr_sb=SEQUENCE), i, 'lane')
@@ -2516,6 +2533,11 @@ def translate(data, mc=None, listing=None, lives=None):
     life, the old offsets of the life): what validate.py checks."""
     mc = mc or MC.Machine()
     e = elf.Elf(data)
+    arch = e.header[0x31 if e.header[8] >= 8 else 0x30]
+    if arch not in (75, 80):
+        raise Refused(f'unsupported machine-code target sm_{arch}')
+    if arch == 80 and (tuple(e.header[7:9]) not in ((0x33, 7), (0x41, 8)) or e.header[16:20] != bytes((2,0,190,0))):
+        raise Refused('sm_80 translation requires an executable CUDA ELF with a known ABI')
     symbols = e.symbols()
     texts = [s for s in e.sections if s.name.startswith('.text.') and s.type == 1]
     assert len({s.name for s in texts}) == len(texts), 'two sections of code with the same name'
@@ -2556,7 +2578,14 @@ def translate(data, mc=None, listing=None, lives=None):
         name = s.name[len('.text.'):]
         try:
             info = e.section('.nv.info.' + name)
-            functions[e.index(s)] = Function(mc, name, s.data, s.info >> 24, tables_of(info.data) if info is not None else {})
+            sec = e.index(s)
+            code = s.data
+            if arch == 80:
+                if relocations.get(sec) or any(y[3] == sec and y[1] & 15 == 2 and y[4] for y in symbols):
+                    raise Refused('a relocation or secondary entry in sm_80 code')
+                code = ampere.normalize(code, mc, relative, signed, Refused)
+            functions[sec] = Function(mc, name, code, s.info >> 24, tables_of(info.data) if info is not None else {})
+            functions[sec].ampere = arch == 80
             report[name] = None
         except Refused as why:
             report[name] = str(why)
@@ -2991,7 +3020,7 @@ def translate(data, mc=None, listing=None, lives=None):
     if e.header[7] == 0x41:
         e.header[7], e.header[8] = 0x33, 7
         e.header[0x14:0x18] = struct.pack('<I', 0x80)
-        e.header[0x30:0x34] = struct.pack('<I', (75 << 16) | 0x0500 | 70)
+        e.header[0x30:0x34] = struct.pack('<I', (arch << 16) | 0x0500 | 70)
         for s in e.sections:
             if s.name in ('.note.nv.tkinfo', '.note.nv.cuinfo'):
                 s.type, s.data, s.size = 0, b'', 0

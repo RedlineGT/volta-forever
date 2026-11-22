@@ -1,6 +1,6 @@
 [package]
 name = "vf-tables"
-description = "The sm_70 and sm_75 instruction sets as tables, generated from the instruction descriptions of the denvdis project"
+description = "Volta, Turing and selected Ampere instruction forms generated from denvdis descriptions"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

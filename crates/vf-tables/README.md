@@ -11,10 +11,11 @@ reader. The code that reads them is in `crates/vf-sass`.
 Every file of `src/` is written by `reference/generate.py` (then formatted by
 `cargo fmt -p vf-tables`) from:
 
-- the instruction descriptions in the `data/` directory of the
-  [denvdis](https://github.com/redplait/denvdis) project (`vf_*.txt`, `sm75_*.txt`), which that
+- the instruction descriptions in the `data/` and `data12/` directories of the
+  [denvdis](https://github.com/redplait/denvdis) project (`sm70_*.txt`, `sm75_*.txt` and `sm80_*.txt`), which that
   project extracted from NVIDIA's disassembler; the tables committed here were generated from its
   commit `3769cb8a628f`;
+- `reference/ampere-forms.txt`, the instruction classes and operands whose encoding `reference/ampere_forms.py` checks against both the Turing and Ampere descriptions;
 - `reference/rules-sm75.tsv` and `reference/distances-sm70.tsv`, this project's own tables, made by
   the scripts of `reference/` from machine code that NVIDIA's compilers produced.
 

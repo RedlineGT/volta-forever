@@ -61,7 +61,7 @@ A program's other CUDA 13 libraries (the cuFFT, cuSOLVER and cuSPARSE of a PyTor
 translated like the rest of its code. `vf fetch --all` downloads their CUDA 12.9.2 builds too
 (2.7 GB in all), which still have code for Volta, and the layer then uses those instead.
 
-### Running Ampere PTX on a V100 (`sm_80`)
+### Running Ampere kernels on a V100 (`sm_80`)
 
 To select a program's Ampere kernels, have `vf` report compute capability 8.0 to the program:
 
@@ -69,10 +69,10 @@ To select a program's Ampere kernels, have `vf` report compute capability 8.0 to
 VF_CAPABILITY=8.0 vf ./my_program
 ```
 
-VF needs compatible PTX to compile for Volta (`sm_70`). It can read a standalone PTX module or
-a PTX entry in a fat binary. Builds from `main` also recognize complete PTX retained inside an
-Ampere cubin by NVIDIA's assembler, including cubins from Triton. A stripped Ampere cubin needs
-a separate PTX image. [Supported images](LIMITS.md)
+VF compiles compatible PTX for Volta (`sm_70`). It reads standalone PTX, PTX entries in fat
+binaries, and, in builds from `main`, complete PTX retained inside a cubin by NVIDIA's assembler.
+Builds from `main` can also translate certain stripped `sm_80` kernels directly, including the
+FP16 sum of expert outputs in SGLang. VF checks the instructions of each kernel before use. [Supported images](LIMITS.md)
 
 On a V100 with this setting, ZML reported capability 8.0 and answered the test prompt with
 the expected word using Qwen3.5-9B. [Validation results](docs/validation.md#vllm-sglang-zml).
@@ -212,6 +212,8 @@ to code for later GPUs, which would be translated or emulated.
 - **Machine code for `sm_75`** is translated to machine code for `sm_70`, function by function.
   If the default translation refuses every kernel, builds from `main` can compile the PTX retained
   by NVIDIA's assembler in the same image.
+- **Machine code for `sm_80`** can use the same translator on builds from `main`. It supports a
+  narrower set of instructions, including the loads, stores and conversions used in FP16 reductions.
 - **NVIDIA's CUDA 13 libraries** are served by their CUDA 12.9 builds.
 
 The documents:

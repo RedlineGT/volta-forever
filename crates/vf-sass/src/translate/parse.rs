@@ -67,6 +67,7 @@ pub(super) struct FuncData {
     pub(super) product_count: u32,
     /// A symbol of another function points into it: it can be entered elsewhere than at its start.
     pub(super) entered_inside: bool,
+    pub(super) ampere: bool,
 }
 
 impl FuncData {
@@ -186,6 +187,7 @@ pub(super) fn parse_function(
         needs_lane,
         product_count,
         entered_inside: false,
+        ampere: false,
     })
 }
 

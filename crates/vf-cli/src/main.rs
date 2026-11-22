@@ -1,4 +1,4 @@
-//! `vf-translate`: look at the GPU code a file carries, adapt an image offline, or translate sm_75 machine
+//! `vf-translate`: look at the GPU code a file carries, adapt an image offline, or translate supported machine
 //! code to sm_70.
 //!
 //! ```text
@@ -7,7 +7,7 @@
 //!                             (NNNN.sm_75.ptx, NNNN.sm_86.cubin ...), all or those for architecture SM
 //! vf-translate adapt IN OUT           write the image a Volta driver should load in place of IN
 //! vf-translate translate IN OUT [MAP [REPORT]]
-//!                             write the sm_70 cubin for the sm_75 cubin IN; MAP gets one line per
+//!                             write the sm_70 cubin for a supported sm_75 or sm_80 cubin IN; MAP gets one line per
 //!                             instruction of the result (function, new offset, old offset, what was
 //!                             done), REPORT one per function (`ok` or why it was refused, the name)
 //! ```
@@ -179,7 +179,7 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
     std::fs::write(output, adapted.image.as_deref().unwrap_or(&bytes)).map_err(|e| format!("{output}: {e}"))
 }
 
-/// The sm_70 cubin for an sm_75 cubin, with what was refused on standard output.
+/// The sm_70 cubin for a supported cubin, with what was refused on standard output.
 fn translate(input: &str, output: &str, map: Option<&str>, report: Option<&str>) -> Result<(), String> {
     let bytes = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
     if !vf_fatbin::is_elf(&bytes) {

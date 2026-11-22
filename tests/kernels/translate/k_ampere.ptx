@@ -1,0 +1,47 @@
+// ptxas -arch=sm_80 k_ampere.ptx -o k_ampere.sm80.cubin
+// Each active thread reads and writes one binary16 at the given byte stride.
+.version 8.6
+.target sm_80
+.address_size 64
+
+.visible .entry memory_check(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 step,
+    .param .f32 multiplier
+) {
+    .reg .u32 %r<5>;
+    .reg .b16 %h<3>;
+    .reg .b32 %packed;
+    .reg .f32 %f<3>;
+    .reg .u64 %d<5>;
+
+    ld.param.u64 %d0, [input];
+    ld.param.u64 %d1, [output];
+    ld.param.u32 %r4, [step];
+    ld.param.f32 %f2, [multiplier];
+    mov.u32 %r0, %tid.x;
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mad.lo.u32 %r3, %r1, %r2, %r0;
+    mul.wide.u32 %d2, %r3, %r4;
+    add.u64 %d3, %d0, %d2;
+    add.u64 %d4, %d1, %d2;
+    ld.global.nc.u16 %h0, [%d3];
+    cvt.f32.f16 %f0, %h0;
+    add.rn.ftz.f32 %f1, %f0, 0f3f400000;
+    mul.rn.ftz.f32 %f1, %f1, %f2;
+    cvt.rn.f16x2.f32 %packed, 0f00000000, %f1;
+    mov.b32 {%h1, %h2}, %packed;
+    st.global.u16 [%d4], %h1;
+    ret;
+}
+
+// Atomics are outside the supported sm_80 forms.
+.visible .entry unsupported_atomic(.param .u64 output) {
+    .reg .u64 %address;
+    .reg .u32 %previous;
+    ld.param.u64 %address, [output];
+    atom.global.add.u32 %previous, [%address], 1;
+    ret;
+}
