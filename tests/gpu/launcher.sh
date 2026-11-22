@@ -60,7 +60,10 @@ c_gpu = torch.mm(a, b)
 c_cpu = torch.mm(a.cpu(), b.cpu())
 diff = (c_gpu.cpu() - c_cpu).abs().max().item()
 print("max matmul diff:", diff)
-if diff > 1.0:
+# (The GPU and the CPU add the 256 products of an element in other orders: they are about 6e-5
+# apart at most, for elements of up to about 80. 1e-3 leaves a factor of 15 over that, and a
+# result off by 0.001 anywhere fails.)
+if diff > 1e-3:
     print("FAIL: matmul difference too large")
     sys.exit(1)
 # Check /proc/self/maps for the forwarding cuBLAS.
@@ -174,7 +177,7 @@ try:
     print("what the builder of extensions gives nvcc:", cpp_extension._get_cuda_arch_flags())
 except Exception as error:
     print("what the builder of extensions gives nvcc: not read (%s)" % error)
-ok = os.environ.get("VOLTA_FOREVER") == layer.volta_forever_version().decode() and layer.volta_forever_abi() == 1 and diff < 1.0
+ok = os.environ.get("VOLTA_FOREVER") == layer.volta_forever_version().decode() and layer.volta_forever_abi() == 1 and diff <= 1e-3
 print("ok" if ok else "FAIL")
 sys.exit(0 if ok else 1)
 ' >"$out/launcher-caches/venv-launcher.out" 2>"$out/launcher-caches/venv-launcher.err"
