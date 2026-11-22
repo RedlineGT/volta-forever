@@ -89,11 +89,11 @@ The three measured requests each read 227 uncached tokens and generated 64. The 
 
 | Build | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| TensorFold with the previous VF build | 464.29 | 55.22 |
-| TensorFold with VF from section 4 | **464.25** | **57.67** |
+| TensorFold with VF before the Q4 projection change | 463.54 | 57.69 |
+| TensorFold with VF from section 4 | **464.88** | **69.18** |
 | Native llama.cpp reference, Qwen3.5-35B-A3B GGUF Q4_K_M | 468.67 | 99.67 |
 
-With the same `VF_BF16_ROW=tree` setting, VF keeps expert projection accumulators in the lanes that update them across consecutive matrix operations. Median decode rose by 4.43%. Native llama.cpp used the same physical V100 and the same three 227/64-token requests with its GGUF Q4_K_M checkpoint. [VF accumulator change](https://github.com/nbald/volta-forever/commit/f1995c4) · [Same-card native reference](./benchmarks/llamacpp-reference.json)
+VF recognizes a pair of one-row affine Q4 expert projections and keeps one output column in each warp lane when the shape and inputs satisfy its checks. On the same V100 this raised decode by **19.9%**. All four replies matched byte for byte. The llama.cpp reference used the same GPU and prompts with GGUF Q4_K_M. [Per-request timings and validation](./benchmarks/tensorfold-affine-q4.json) · [VF change](https://github.com/nbald/volta-forever/commit/ecd927d7f6a43225f60a086c6f8fdb654df3462a) · [Same-card native reference](./benchmarks/llamacpp-reference.json)
 
 Earlier measurements cover shared operand checks, dense projections, FP32 operand forwarding and two- and four-product groups. [Shared operand checks](./benchmarks/tensorfold-expert-checks.json) · [Dense projections](./benchmarks/tensorfold-dense-bf16.json) · [Operand forwarding](./benchmarks/tensorfold-bf16-forwarding.json) · [Four-product groups](./benchmarks/tensorfold-four-products.json) · [Two-product groups](./benchmarks/tensorfold-bf16-row.json)
 

@@ -1,0 +1,199 @@
+{
+  "engine": "TensorFold 1.3.3 official",
+  "checkpoint": {
+    "repository": "henrybravo/Qwen3.5-35B-A3B-4bit",
+    "revision": "e18cfd9063b088420f58f25ff3db6c79e742768d",
+    "format": "MLX affine 4-bit routed experts and 8-bit routers"
+  },
+  "gpu": "GPU-148f2829-a481-44be-5c82-fa58cb185712, 00000000:3B:00.0, Tesla V100-SXM2-32GB, 580.178.04",
+  "concurrency": 1,
+  "drafts": false,
+  "prompt_set": "prompts.json",
+  "settings": {
+    "VF_BF16_TC_GROUPS": "1",
+    "VF_BF16_ROW": "tree"
+  },
+  "control_vf_commit": "f1995c439dd70f14911eee65dbf7e27d254335a0",
+  "candidate_vf_commit": "ecd927d7f6a43225f60a086c6f8fdb654df3462a",
+  "runs": {
+    "control": {
+      "semantic_checks": [
+        [
+          "Paris",
+          "stop"
+        ],
+        [
+          "",
+          "stop"
+        ],
+        [
+          "one",
+          "length"
+        ]
+      ],
+      "requests": [
+        {
+          "id": "warmup",
+          "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 463.496357409571,
+          "decode_tokens_per_s": 57.69220604413513
+        },
+        {
+          "id": "run1",
+          "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 463.5395427379262,
+          "decode_tokens_per_s": 57.698232011507386
+        },
+        {
+          "id": "run2",
+          "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 462.79744812590053,
+          "decode_tokens_per_s": 57.69455619498402
+        },
+        {
+          "id": "run3",
+          "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 465.8104612103264,
+          "decode_tokens_per_s": 57.6889481563369
+        }
+      ],
+      "server_phase_medians": {
+        "prefill_tokens_per_s": 463.5395427379262,
+        "decode_tokens_per_s": 57.69455619498402
+      },
+      "gpu_profile": {
+        "activity": {
+          "decode_graph_id": 2,
+          "graph_replays": 63,
+          "nodes_per_decode_graph": 594,
+          "decode_kernel_events": 37422,
+          "dropped": 0,
+          "invalid_events": 0,
+          "decode_stream_ids": [
+            13
+          ],
+          "union_kernel_ms_per_decode_step": 17.50256580952381,
+          "sum_kernel_ms_per_decode_step": 17.50256580952381
+        },
+        "families_ms_per_decode_step": {
+          "routed experts gate/up": 5.329429015873016,
+          "dense projections": 3.5907505555555557,
+          "MoE routing and top-k": 2.42271826984127,
+          "attention": 1.4292866825396826,
+          "grouped dense projection": 1.3857156031746032,
+          "routed experts down": 1.2201003492063491,
+          "gated delta net": 0.923197,
+          "other": 0.622275,
+          "normalization": 0.5790933333333333
+        }
+      }
+    },
+    "exact": {
+      "semantic_checks": [
+        [
+          "Paris",
+          "stop"
+        ],
+        [
+          "",
+          "stop"
+        ],
+        [
+          "one",
+          "length"
+        ]
+      ],
+      "requests": [
+        {
+          "id": "warmup",
+          "text_sha256": "2481f95b2509a939b454e912dc73c0f90f5cdd674a10f553e3229c957bb58171",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 463.5102915538079,
+          "decode_tokens_per_s": 69.16008951928298
+        },
+        {
+          "id": "run1",
+          "text_sha256": "c1503377a02e521a1ebbe927d53c939935f3fc494bf5c016fb72bf6e04dc40ea",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 464.8790683456482,
+          "decode_tokens_per_s": 69.13833628957885
+        },
+        {
+          "id": "run2",
+          "text_sha256": "bde8eff7d428ac5c7280911aab52ce33bcb338f86d3e657c585124b19ca2bc88",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 464.7428355142111,
+          "decode_tokens_per_s": 69.17602644016655
+        },
+        {
+          "id": "run3",
+          "text_sha256": "ff188d7416ba8bced141dc8567aaea95854ae334b08a808e13b78cb82c08c5ae",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "cached_input_tokens": 0,
+          "prefill_tokens_per_s": 464.92434404940525,
+          "decode_tokens_per_s": 69.1917493420941
+        }
+      ],
+      "server_phase_medians": {
+        "prefill_tokens_per_s": 464.8790683456482,
+        "decode_tokens_per_s": 69.17602644016655
+      },
+      "gpu_profile": {
+        "activity": {
+          "decode_graph_id": 2,
+          "graph_replays": 63,
+          "nodes_per_decode_graph": 594,
+          "decode_kernel_events": 37422,
+          "dropped": 0,
+          "invalid_events": 0,
+          "decode_stream_ids": [
+            13
+          ],
+          "union_kernel_ms_per_decode_step": 14.940619190476191,
+          "sum_kernel_ms_per_decode_step": 14.940643063492063
+        },
+        "families_ms_per_decode_step": {
+          "dense projections": 3.5686281587301587,
+          "routed experts gate/up": 2.7095964126984127,
+          "MoE routing and top-k": 2.423102507936508,
+          "attention": 1.4280663333333332,
+          "grouped dense projection": 1.385914888888889,
+          "routed experts down": 1.205593857142857,
+          "gated delta net": 0.9226677777777778,
+          "normalization": 0.6679954126984127,
+          "other": 0.6290777142857144
+        }
+      }
+    }
+  },
+  "all_visible_replies_identical": true,
+  "kernel_validation": {
+    "identical_entire_cubin_sha256": "7435afb0b5328376ea7af56738be636b50860572b20d9d0abc487dfc1f7481b8",
+    "negative_module_mutations": 18,
+    "real_weight_gate_up_values": 4608,
+    "corner_configurations": 20,
+    "corners_compared_slots": 184320,
+    "canary_bytes_per_case": 128,
+    "scope": "The server comparison used the initial verifier. Hardening the shape and control-flow checks preserved the entire 12-entry CUDA binary. The integrated translator reproduced its PTX byte for byte, and the hardware regression suite passed with the options off and on."
+  },
+  "native_reference": "llamacpp-reference.json"
+}

@@ -66,7 +66,7 @@ The official NInfer server processed each 227-token prompt without a prefix-cach
 
 ## TensorFold
 
-The official TensorFold 1.3.3 server read 227 uncached input tokens and produced 64 output tokens on each measured prompt with drafting disabled. Carrying expert accumulators between bounded BF16 updates brought its median decode rate from **55.22 to 57.67 tokens/s**, with identical output tokens and a median prefill rate of **464.25 tokens/s**. Native llama.cpp on the same V100 measured **468.67 / 99.67** with GGUF Q4_K_M. [Ubuntu guide and reproduction](../tensorfold.md#5-benchmarks) · [Native reference](llamacpp-reference.json) · [Earlier expert checks](tensorfold-expert-checks.json)
+The official TensorFold 1.3.3 server generated 64 tokens from each 227-token uncached prompt with drafting disabled. VF’s single-row affine Q4 projection raised decode from **57.69 to 69.18 tokens/s (+19.9%)** and prefill from **463.54 to 464.88 tokens/s**. All four replies matched the control byte for byte. Native llama.cpp measured **468.67 / 99.67** on the same V100 using GGUF Q4_K_M. [Ubuntu guide and reproduction](../tensorfold.md#5-benchmarks) · [Paired results and kernel profile](tensorfold-affine-q4.json) · [Native reference](llamacpp-reference.json)
 
 ## llama.cpp
 
