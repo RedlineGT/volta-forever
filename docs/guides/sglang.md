@@ -96,6 +96,8 @@ The client checks SGLang’s phase timers and token counts. Each measured reques
 
 The command above measured **2,015.34 tokens/s in prefill** and **77.36 tokens/s in decode**. Each 227-token prompt ran in a single CUDA graph. Native 1Cat-vLLM measured 1,427.41 and 76.13 on the same physical V100, checkpoint and prompts. Omitting `--attention-backend triton --sampling-backend pytorch` selects FlashInfer and measured 1,995.78 prefill and 75.15 decode tokens/s on the same V100. [SGLang measurements](./benchmarks/sglang-stock-marlin.json) · [1Cat reference](./benchmarks/vllm-expert-tiles.json)
 
+A fresh Ubuntu 24.04 virtual environment installed all 207 packages from verified PyPI wheels. The command above reproduced **2,002.22 prefill and 77.20 decode tokens/s**. With `FLASHINFER_USE_CUDA_NORM` unset and `CUTE_DSL_LINEINFO=1`, FlashInfer’s default CuTe normalization reached **1,994.89 and 75.84** on the same card. Both runs answered Paris. [Fresh installation and individual results](./benchmarks/sglang-fresh-venv.json)
+
 In a separate paired run on the same V100, Marlin measured 2,001.75 prefill and 77.39 decode tokens/s at a 256-token chunk, and 1,565.10 and 77.38 at a 128-token chunk. Native 1Cat-vLLM on that card measured 1,361.25 and 76.31. The earlier Triton WNA16 expert backend measured 311.97 and 52.68 tokens/s at a 32-token chunk. [Earlier WNA16 results](./benchmarks/sglang-stock-sm80.json)
 
 ## 6. Additional notes
