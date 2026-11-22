@@ -117,6 +117,10 @@ main() {
     exec 9>>"$prefix/.vf-install.lock"
     flock -x 9 || fail "cannot lock $prefix"
     mkdir -p -- "$prefix/.releases"
+    # What killed installers left (the others remove their own): the directories not changed
+    # for a day. A younger one may be another installer's, unpacking without the lock.
+    find "$prefix/." "$bin/." ! -name . -prune -type d \( -name '.vf-install.????????' -o -name '.vf-links.????????' \) \
+        -mtime +0 -exec rm -rf -- {} + || true
     release=$prefix/.releases/$name-$got
     if [ ! -e "$pkg/cuda-12.9.2" ] && [ ! -L "$pkg/cuda-12.9.2" ]; then
         cuda=$prefix/cuda-12.9.2

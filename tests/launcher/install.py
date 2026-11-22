@@ -230,6 +230,21 @@ sys.exit(rc)
     def test_concurrent_versions(self):
         self.concurrent_publishers("1.0.0")
 
+    def test_leftovers_of_killed_installers_are_removed(self):
+        # Those not changed for a day; a younger one may be another installer's.
+        self.prefix.mkdir()
+        self.bin.mkdir()
+        old = [self.prefix / ".vf-install.Old12345", self.bin / ".vf-links.Old12345"]
+        young = [self.prefix / ".vf-install.New12345", self.bin / ".vf-links.New12345"]
+        for path in old + young:
+            (path / "volta-forever-0.0.1-linux-x86_64").mkdir(parents=True)
+        for path in old:
+            os.utime(path, (time.time() - 2 * 86400,) * 2)
+        self.success(self.install("1.0.0"))
+        self.assertEqual([path for path in old if os.path.lexists(path)], [])
+        self.assertEqual([path for path in young if not path.is_dir()], [])
+        self.assertTrue((self.prefix / ".vf-install.lock").is_file())
+
     def test_plain_http_refused_unless_allowed(self):
         asked = []
         base = f"http://127.0.0.1:{self.serve(asked)}"
