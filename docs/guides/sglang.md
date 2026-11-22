@@ -103,6 +103,8 @@ Each prompt fit in a single CUDA graph. The server answered Paris and returned t
 
 ## 6. Additional notes
 
+SGLang’s upstream AWQ CUDA kernels require at least compute capability 7.5. A native V100 reports 7.0. [Upstream AWQ requirement](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/layers/quantization/awq/awq.py#L100-L108)
+
 The run used VF main at `1740d8f`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. [Tested VF source](https://github.com/nbald/volta-forever/commit/1740d8fc1f6291b5838112b2d17d7d9e10dd787c)
 
 The launch command selects FlashInfer’s CUDA normalization on V100. To reproduce the CuTe result, unset `FLASHINFER_USE_CUDA_NORM` before starting the server. Both runs use the wheel’s default expert router.
