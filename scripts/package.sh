@@ -9,6 +9,7 @@
 #                     bin/volta-forever to it
 #   bin/vf-translate  the offline tool (inspect, extract, adapt, translate)
 #   scripts/        fetch-redist.py (to download the CUDA 12.9 libraries the user needs)
+#   tuning/         measured kernel configurations in the format read by each engine
 #   INSTALL.md      installation and usage
 #   LIMITS.md       known limits and measurements
 #   docs/           how the layer works, what it computes, how it is checked, what it costs
@@ -110,6 +111,9 @@ cp "$out/forward/REPORT.txt" "$pkg/forward/"
 # scripts/: what a user needs to fetch the CUDA 12.9 libraries
 cp "$root/scripts/fetch-redist.py" "$pkg/scripts/"
 chmod +x "$pkg/scripts/fetch-redist.py"
+
+# Keep the directory structure expected by the engines when reading their tuning data.
+(cd "$root" && find tuning -type f -name '*.json' -exec cp --parents -t "$pkg" {} +)
 
 # Documentation
 for doc in INSTALL.md LIMITS.md; do

@@ -30,14 +30,18 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-The installer fetches the CUDA 12.9.2 cuBLAS libraries used by `vf`. If an existing installation lacks them, run `vf fetch`.
+Build VF from the main branch for the 8.0 capability profile used below. VF translates the PTX retained in SGLang’s CUDA kernels for the V100.
 
 ```sh
-sudo apt update
-sudo apt install -y ca-certificates curl python3 python3-venv xz-utils
-curl -fsSLo /tmp/vf-install.sh https://raw.githubusercontent.com/nbald/volta-forever/main/install.sh
-bash /tmp/vf-install.sh
-export PATH="$HOME/.local/bin:$PATH"
+sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils
+if ! command -v rustup >/dev/null; then
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+. "$HOME/.cargo/env"
+git clone --depth 1 https://github.com/nbald/volta-forever.git ~/volta-forever
+(cd ~/volta-forever && scripts/build.sh && scripts/fetch-all.sh redist && scripts/build-forwarders.sh)
+export PATH="$HOME/volta-forever/scripts:$PATH"
+vf doctor
 ```
 
 ## 3. Engine
@@ -58,7 +62,9 @@ Start the official SGLang server in the active environment on a 32 GiB V100. It 
 ```sh
 export PATH="$CUDA_HOME/bin:$PATH"
 export PTXAS_OPTIONS='--override-directive-values --maxrregcount=192 --opt-level=3'
-export NVCC_APPEND_FLAGS='-gencode=arch=compute_75,code=compute_75'
+export VF_CAPABILITY=8.0
+export SGLANG_MOE_CONFIG_DIR="$HOME/volta-forever/tuning/sglang"
+export NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80'
 export SGLANG_MAMBA_CONV_DTYPE=float16 FLASHINFER_USE_CUDA_NORM=1
 export SGLANG_EXPERIMENTAL_LORA_OPTI=1 SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN=1
 export SGLANG_OPT_LORA_FUSED_TOPK_PACK=0
@@ -86,9 +92,9 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-The 32-token configuration above measured **181.48 tokens/s in prefill** and **38.83 tokens/s in decode**. SGLang uses its own JIT expert router and standard top-k layout. [32-token results](./benchmarks/sglang-stock-compile.json) · [Earlier run with Torch compilation disabled](./benchmarks/sglang-stock-jit32.json)
+The command above measured **225.57 tokens/s in prefill** and **52.99 tokens/s in decode**. The SGLang configuration directory selects the W4A16 kernel tile sizes for this V100. The same model with SGLang’s default tiles measured 219.92 and 45.01 tokens/s. [Per-request results](./benchmarks/sglang-stock-sm80.json)
 
-To isolate CUDA graphs, we also compared the same two launches at a smaller eight-token chunk size.
+An earlier VF 0.1.1 run at capability 7.5 measured **181.48 prefill** and **38.83 decode** tokens/s at 32 tokens per chunk. At eight tokens per chunk we compared the effect of decode graphs on the same card. [Earlier 32-token results](./benchmarks/sglang-stock-compile.json)
 
 | Decode CUDA graph | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
@@ -99,6 +105,6 @@ The two servers ran in sequence on the same V100. Changing `--cuda-graph-backend
 
 ## 6. Additional notes
 
-The stock run used VF 0.1.1, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA toolkit 13.5 and driver 580.178.04. The command selects WNA16 at VF’s default capability of 7.5. The experimental LoRA configuration switches select the wheel’s CUDA JIT expert router for 32-token chunks. The run used the checkpoint’s own weights.
+The 8.0 run used VF main at `883e420`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA toolkit 13.5 and driver 580.178.04. Triton selects FP16 tensor-core operations for the quantized experts at this capability. The experimental LoRA switches select SGLang’s JIT expert router and standard top-k layout. [Tested VF source](https://github.com/nbald/volta-forever/commit/883e4209021f411c5fadd67b9313717cf60409a1)
 
 SGLang also answered **Paris** with the checkpoint’s own prediction head and four speculative steps (NEXTN). A VF source build at `a381fc7` measured **171.66 tokens/s in prefill** and **37.60 in decode**. Decode includes draft generation, target verification and draft extension. [NEXTN settings and per-request results](./benchmarks/sglang-stock-mtp.json)
