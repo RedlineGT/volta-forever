@@ -252,6 +252,14 @@ fn embedded_ptx(cubin: &[u8], sm: u32) -> Option<(Vec<u8>, vf_ptx::Header)> {
 }
 
 impl Policy {
+    /// Offline CUDA 12.9 tools accept PTX ISA through 8.8 on Volta.
+    pub fn cuda_12_9() -> Self {
+        Self {
+            ptx_max: (8, 8),
+            ..Self::default()
+        }
+    }
+
     /// This policy with what the environment asks for. `VF_ALIGNED_ROWS=0`: do not take the rows
     /// that `ldmatrix` reads to be at multiples of 16; test their addresses when the code runs, for a
     /// program that does not follow the PTX manual there (slower: see `Policy::default`).

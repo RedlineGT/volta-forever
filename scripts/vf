@@ -14,6 +14,7 @@
 #   vf doctor                             say what is there and what is missing
 #   vf version | help
 #
+#   vf ptxas ARGS...                     assemble file-backed PTX for the V100 with CUDA 12.9
 #   vf inspect FILE...                    which GPU code a file carries
 #   vf extract FILE DIR [SM]              take the code out of its fat binaries
 #   vf adapt IN OUT                       what the layer gives the driver in place of IN
@@ -335,10 +336,40 @@ cmd_env() {
     printf 'export VOLTA_FOREVER_HOME=%s\n' "$(quoted "$home")"
 }
 
+# Bazel applications can select their own CUDA toolkit after startup. Give them a
+# runfiles directory with VF's assembler and links to their installed resources.
+setup_runfiles() {
+    [ -z "${RUNFILES_MANIFEST_FILE:-}" ] || return 0
+    _compiler=${tool%/*}/vf-ptxas
+    [ -x "$_compiler" ] || return 0
+    _runfiles=${RUNFILES_DIR:-}
+    if [ -z "$_runfiles" ]; then
+        case $1 in
+            */*) _exe=$1 ;;
+            *) _exe=$(command -v "$1") || return 0 ;;
+        esac
+        if [ ! -d "$_exe.runfiles" ] && [ -L "$_exe" ]; then
+            _exe=$(readlink -f "$_exe") || return 0
+        fi
+        _runfiles=$_exe.runfiles
+    fi
+    [ -d "$_runfiles" ] || return 0
+    _has_ptxas=0
+    for _candidate in "$_runfiles"/*/sandbox/bin/ptxas "$_runfiles"/*/bin/ptxas; do
+        if [ -f "$_candidate" ]; then _has_ptxas=1; break; fi
+    done
+    [ "$_has_ptxas" = 1 ] || return 0
+    _cache=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/runfiles-v1
+    RUNFILES_DIR=$("$_compiler" --vf-runfiles "$_runfiles" "$_cache") || exit 1
+    export RUNFILES_DIR
+}
+
 # --- subcommand: run (prefix form) ---------------------------------------------
 
 cmd_run() {
     setup_env
+    setup_runfiles "$1"
+    [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
     export LD_LIBRARY_PATH="$_ldpath"
     if [ "$_with_audit" = 1 ]; then
         export LD_AUDIT="$_audit"
@@ -661,6 +692,7 @@ vf (also installed as volta-forever): run CUDA 13 programs on a Tesla V100
   vf doctor                             say what is there and what is missing
   vf version | help
 
+  vf ptxas ARGS...                     assemble file-backed PTX for the V100 with CUDA 12.9
   vf inspect FILE...                    which GPU code a file carries
   vf extract FILE DIR [SM]              take the code out of its fat binaries
   vf adapt IN OUT                       what the layer gives the driver in place of IN
@@ -712,6 +744,11 @@ while [ $# -gt 0 ]; do
             subcmd=env; shift; break ;;
         venv)
             subcmd=venv; shift; break ;;
+        ptxas)
+            shift
+            _cuda12=$(find_cuda12) || _cuda12=
+            [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
+            exec "${tool%/*}/vf-ptxas" "$@" ;;
         inspect|extract|adapt|translate)
             # The offline tool, which needs nothing of the environment.
             if [ ! -x "$tool" ]; then

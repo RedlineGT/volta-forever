@@ -47,7 +47,7 @@ version_string="$version $commit$dirty"
 out=${DIST:-$root/dist}
 
 # ---- check that the tree is built and not stale -------------------------------------------------------
-bins=("$out/lib/libcuda.so.1" "$out/lib/libnvJitLink.so.13" "$out/lib/libvf_audit.so" "$out/bin/vf-translate")
+bins=("$out/lib/libcuda.so.1" "$out/lib/libnvJitLink.so.13" "$out/lib/libvf_audit.so" "$out/bin/vf-translate" "$out/bin/vf-ptxas")
 for f in "${bins[@]}"; do
     [ -f "$f" ] || { echo "error: $f not found (run scripts/build.sh first)"; exit 2; }
 done
@@ -97,7 +97,7 @@ cp "$out/lib/libnvJitLink.so.13" "$pkg/lib/"
 cp "$out/lib/libvf_audit.so"   "$pkg/lib/"
 
 # bin/: the launcher under its two names, and the offline tool
-cp "$out/bin/vf-translate" "$pkg/bin/"
+cp "$out/bin/vf-translate" "$out/bin/vf-ptxas" "$pkg/bin/"
 cp "$root/scripts/vf" "$pkg/bin/vf"
 chmod +x "$pkg/bin/vf"
 ln -s vf "$pkg/bin/volta-forever"
@@ -135,7 +135,7 @@ cp "$root/crates/vf-tables/LICENSE" "$pkg/LICENSE.LGPL-2.1"
 # ---- verify: only expected files, and forwarding libraries need libc only ------------------------------
 echo "--- verifying archive contents ---"
 expected_lib="libcuda.so.1 libnvJitLink.so.13 libvf_audit.so"
-expected_bin="vf vf-translate volta-forever"
+expected_bin="vf vf-ptxas vf-translate volta-forever"
 fail=0
 
 # Check lib/: only the three expected files

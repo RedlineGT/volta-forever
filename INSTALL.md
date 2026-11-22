@@ -156,6 +156,7 @@ eval "$(vf env)"
 | `vf env [OPTIONS]` | print the environment as `export` lines |
 | `vf venv [--python PYTHON] DIR [-- OPTIONS]`, `vf venv --off DIR` | a virtual environment of Python that runs through the layer by itself |
 | `vf fetch [--all \| --only REGEX] [--to DIR]` | download the CUDA 12.9.2 libraries |
+| `vf ptxas ARGS...` | assemble file-backed PTX for the V100 using the CUDA 12.9 assembler |
 | `vf doctor` | check the installation |
 | `vf inspect`, `extract`, `adapt`, `translate` | the offline tool (`bin/vf-translate`; "Tools", below) |
 | `vf version`, `help` | |
@@ -175,6 +176,8 @@ eval "$(vf env)"
   in `VF_AUDIT_MAP` stay first.
 - `VOLTA_FOREVER` (the version) and `VOLTA_FOREVER_HOME` (the archive's directory): how a
   script can tell that it runs through the launcher.
+
+A Bazel program that ships a CUDA toolkit in its runfiles can invoke an external assembler through an absolute path. When you start it with `vf`, the launcher prepares a private runfiles directory with the VF assembler and links to the program's other resources. It uses the local temporary directory when the user's cache cannot store private links. Install NVIDIA's `cuda-nvcc-12-9` package for this path. VF looks for `bin/ptxas` beside the selected CUDA 12.9 libraries and under `/usr/local/cuda-12.9`. Set `VF_PTXAS_REAL` to the absolute path of the CUDA 12.9 assembler to select another installation. For a file on disk, run `vf ptxas -arch=sm_80 kernel.ptx -o kernel.cubin` to produce code for sm_70.
 
 **When only some of the CUDA 12.9.2 libraries are there** (cuBLAS alone, after `vf fetch`
 without `--all`), a forwarding library that has nothing to forward to is not used: it is left

@@ -203,12 +203,7 @@ fn real() -> Result<&'static RealLib, c_int> {
 /// The PTX adaptation policy for nvJitLink: ptx_max is (8,8) because ptxas/nvJitLink 12.9.2 only
 /// accepts up to PTX ISA 8.8 (the driver JIT accepts 9.0, but we are not using the driver JIT here).
 fn jitlink_policy() -> vf_adapt::Policy {
-    vf_adapt::Policy {
-        device_sm: 70,
-        ptx_max: (8, 8),
-        ..vf_adapt::Policy::default()
-    }
-    .with_environment()
+    vf_adapt::Policy::cuda_12_9().with_environment()
 }
 
 // --- Option rewriting ---

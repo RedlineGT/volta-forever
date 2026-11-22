@@ -19,7 +19,7 @@ stage=$(mktemp -d "$out/.installer-fixture.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 pkg=$stage/$name
 mkdir -p "$pkg/bin" "$pkg/lib" "$pkg/scripts"
-for file in bin/vf-translate lib/libcuda.so.1 lib/libnvJitLink.so.13 lib/libvf_audit.so; do
+for file in bin/vf-translate bin/vf-ptxas lib/libcuda.so.1 lib/libnvJitLink.so.13 lib/libvf_audit.so; do
     if [ ! -s "$root/dist/$file" ]; then
         echo "missing or empty dist/$file (run scripts/build.sh first)" >&2
         exit 1
