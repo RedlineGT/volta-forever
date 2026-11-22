@@ -92,7 +92,7 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-The command above measured **311.97 tokens/s in prefill** and **52.68 tokens/s in decode** with Triton’s default assembler options. SGLang captures graphs for prefill chunks of 8, 16 and 32 tokens and uses V100-specific W4A16 expert tiles. An earlier graph run with a 192-register cap on another V100 measured 318.60 and 52.91 tokens/s. A separate eager-prefill run measured 255.19 and 53.44. [Per-request results and tile comparison](./benchmarks/sglang-stock-sm80.json)
+The command above measured **311.97 tokens/s in prefill** and **52.68 tokens/s in decode** with Triton’s default assembler options. SGLang captures graphs for prefill chunks of 8, 16 and 32 tokens and uses V100-specific W4A16 expert tiles. On the same V100, two consecutive runs with fresh caches measured 321.98 prefill and 52.97 decode with the default assembler, and 315.18 and 53.04 with a 192-register cap. A separate eager-prefill run measured 255.19 and 53.44. [Per-request results and tile comparison](./benchmarks/sglang-stock-sm80.json)
 
 An earlier VF 0.1.1 run at capability 7.5 measured **181.48 prefill** and **38.83 decode** tokens/s at 32 tokens per chunk. At eight tokens per chunk we compared the effect of decode graphs on the same card. [Earlier 32-token results](./benchmarks/sglang-stock-compile.json)
 
