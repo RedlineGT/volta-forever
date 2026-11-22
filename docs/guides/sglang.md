@@ -57,7 +57,7 @@ pip install sglang
 
 ## 4. Test
 
-Start SGLang in the active environment. It downloads the 4-bit AWQ checkpoint and selects Marlin for its quantized experts. [Tested checkpoint](https://huggingface.co/QuantTrio/Qwen3.5-35B-A3B-AWQ/tree/2f4fac011fc06e736782b0b59394577790da7d79)
+Start SGLang in the active environment. It downloads the 4-bit AWQ checkpoint and selects Marlin for its quantized experts. Both capability variables are needed: section 6 says why, and what they rule out. [Tested checkpoint](https://huggingface.co/QuantTrio/Qwen3.5-35B-A3B-AWQ/tree/2f4fac011fc06e736782b0b59394577790da7d79)
 
 ```sh
 export PATH="$CUDA_HOME/bin:$PATH"
@@ -77,7 +77,7 @@ python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
   --host 127.0.0.1 --port 8000
 ```
 
-Once SGLang reports that the server is ready, use a second terminal to send the question below. The V100 returned **Paris** in two output tokens.
+On its first start SGLang compiles kernels while it captures the prefill CUDA graphs, for minutes without a line of output: with empty caches the server was ready 13 minutes after the checkpoint was loaded. Once SGLang prints `The server is fired up and ready to roll!`, use a second terminal to send the question below. The V100 returned **Paris** in two output tokens.
 
 ```sh
 curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' \
@@ -106,7 +106,9 @@ Each prompt fit in a single CUDA graph. The server answered Paris and returned t
 
 SGLang’s upstream AWQ CUDA kernels require at least compute capability 7.5. A native V100 reports 7.0. [Upstream AWQ requirement](https://github.com/sgl-project/sglang/blob/v0.5.23/python/sglang/srt/layers/quantization/awq/awq.py#L100-L108)
 
-SGLang selects its AWQ Marlin experts from PyTorch’s capability, which must be 8.0. PyTorch’s own kernels run from their `sm_75` machine code, so with `VF_CAPABILITY=8.0` alone VF still tells PyTorch 7.5. `VF_CAPABILITY_ALL=1` tells it 8.0 as well. PyTorch’s attention kernels for 8.0 then compute nothing: keep `--attention-backend triton`, not `torch_native`.
+SGLang selects its AWQ Marlin experts from PyTorch’s capability, which must be 8.0, and builds its JIT kernels for that capability, which must match the `compute_80` of `NVCC_APPEND_FLAGS`. PyTorch’s own kernels run from their `sm_75` machine code, so with `VF_CAPABILITY=8.0` alone VF tells PyTorch 7.5 and prints `[volta-forever] …/libcudart.so.13 is told compute capability 7.5, not the 8.0 that VF_CAPABILITY asks: …`. SGLang then logs `awq quantization is not fully optimized yet` where it logs `Using awq_marlin kernel` at 8.0, keeps the experts in float16, and stops while it builds the model with `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 512.00 MiB.` `VF_CAPABILITY_ALL=1` tells PyTorch 8.0 as well, and VF prints `[volta-forever] …/libcudart.so.13 is told compute capability 8.0, as VF_CAPABILITY and VF_CAPABILITY_ALL ask, although …` at startup.
+
+With `VF_CAPABILITY_ALL=1`, PyTorch chooses kernels for 8.0 that VF can only give it as translations of their `sm_75` code. Two kinds compute wrong results while the program goes on: PyTorch’s own attention leaves its output unwritten (with `--attention-backend torch_native` the server answers with HTTP 200 and wrong text from the first token), and cuDNN’s convolutions can return zeros (VF prints `kernel … cannot run on this GPU and is not given to the program`, and cuDNN reports success). Keep `--attention-backend triton`. Do not use `torch_native` or cuDNN convolutions with `VF_CAPABILITY_ALL=1`, and do not set it for other PyTorch programs.
 
 The run used VF main at `1740d8f`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. [Tested VF source](https://github.com/nbald/volta-forever/commit/1740d8fc1f6291b5838112b2d17d7d9e10dd787c)
 
