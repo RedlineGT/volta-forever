@@ -28,7 +28,9 @@ On another V100, a paired comparison with a 192-register cap measured 1468.21 pr
 
 ## SGLang
 
-The official SGLang server with V100 expert tiles and CUDA graphs for prefill and decode reached **311.97 prefill and 52.68 decode tokens/s** with Triton's default assembler options. It captured prefill chunks of 8, 16 and 32 tokens. A separate run with eager prefill reached 255.19 and 53.44. [Configurations, responses and phase timers](sglang-stock-sm80.json)
+The official SGLang server selected Marlin for the AWQ experts and used CUDA graphs in both phases. It processed each 227-token prompt in one prefill chunk and generated 64 tokens. Median GPU throughput was **2015.34 tokens/s prefill** and **77.36 tokens/s decode** on the same V100 where native 1Cat reached 1427.41 and 76.13. A separate same-GPU comparison of 128- and 256-token chunks measured 1565.10 and 2001.75 prefill tokens/s. Decode held at 77.38 and 77.39. [Marlin responses, timers and native references](sglang-stock-marlin.json)
+
+An earlier WNA16 configuration with 32-token chunks measured 311.97 prefill and 52.68 decode tokens/s. [WNA16 results](sglang-stock-sm80.json)
 
 With eight-token chunks, a paired series using the same cache salts measured **62.55/38.25** with graphs and **72.97/12.27** with graphs disabled. The server processed 227 uncached tokens and returned 64 for each of the three requests. [Same-GPU measurements](sglang-stock-graphs.json) · [Eager diagnostic](sglang-stock-results.json)
 

@@ -30,7 +30,7 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-Build VF from the main branch for the 8.0 capability profile used below. VF translates the PTX retained in SGLang’s CUDA kernels for the V100.
+Build VF from the main branch for the 8.0 capability profile used below. VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils
@@ -57,31 +57,27 @@ pip install sglang
 
 ## 4. Test
 
-Start the official SGLang server in the active environment on a 32 GiB V100. It downloads the 4-bit AWQ checkpoint on first use. The checkpoint keeps attention projections in floating point. SGLang's model override names those projections so its WNA16 loader can initialize the attention layers. [Tested checkpoint](https://huggingface.co/QuantTrio/Qwen3.5-35B-A3B-AWQ/tree/2f4fac011fc06e736782b0b59394577790da7d79)
+Start SGLang in the active environment. It downloads the 4-bit AWQ checkpoint and selects Marlin for its quantized experts. [Tested checkpoint](https://huggingface.co/QuantTrio/Qwen3.5-35B-A3B-AWQ/tree/2f4fac011fc06e736782b0b59394577790da7d79)
 
 ```sh
 export PATH="$CUDA_HOME/bin:$PATH"
 export VF_CAPABILITY=8.0
-export SGLANG_MOE_CONFIG_DIR="$HOME/volta-forever/tuning/sglang"
 export NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80'
 export SGLANG_MAMBA_CONV_DTYPE=float16 FLASHINFER_USE_CUDA_NORM=1
 export SGLANG_EXPERIMENTAL_LORA_OPTI=1 SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN=1
 export SGLANG_OPT_LORA_FUSED_TOPK_PACK=0
 export SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
 export OMP_NUM_THREADS=4 MAX_JOBS=4
-awq='{"quantization_config":{"quant_method":"awq","bits":4,"group_size":128,"version":"gemm","zero_point":true,"modules_to_not_convert":["visual","linear_attn","self_attn.qkv_proj","self_attn.o_proj","shared_expert","mlp.gate","model.layers.0.","mtp"]}}'
 python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
-  --served-model-name qwen --dtype float16 --quantization moe_wna16 \
-  --json-model-override-args "$awq" --attention-backend triton --sampling-backend pytorch \
-  --context-length 512 --max-running-requests 1 --chunked-prefill-size 32 \
-  --mem-fraction-static 0.85 \
-  --cuda-graph-backend-prefill breakable --cuda-graph-bs-prefill 8 16 32 \
+  --served-model-name qwen --dtype float16 --context-length 512 \
+  --max-running-requests 1 --mem-fraction-static 0.85 --enable-metrics \
+  --attention-backend triton --sampling-backend pytorch --chunked-prefill-size 256 \
+  --cuda-graph-backend-prefill breakable --cuda-graph-bs-prefill 8 16 32 64 128 192 256 \
   --cuda-graph-backend-decode full --cuda-graph-bs-decode 1 \
-  --enable-metrics \
   --host 127.0.0.1 --port 8000
 ```
 
-The first request compiles kernels. From a second terminal, send the question below. The V100 returned **Paris** in two output tokens.
+Once SGLang reports that the server is ready, use a second terminal to send the question below. The V100 returned **Paris** in two output tokens.
 
 ```sh
 curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' \
@@ -90,21 +86,20 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 ## 5. Benchmarks
 
-With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
+With the server running, send one warm-up and three distinct requests from the second terminal.
 
-The command above measured **311.97 tokens/s in prefill** and **52.68 tokens/s in decode** with Triton’s default assembler options. SGLang captures graphs for prefill chunks of 8, 16 and 32 tokens and uses V100-specific W4A16 expert tiles. On the same V100, two consecutive runs with fresh caches measured 321.98 prefill and 52.97 decode with the default assembler, and 315.18 and 53.04 with a 192-register cap. A separate eager-prefill run measured 255.19 and 53.44. [Per-request results and tile comparison](./benchmarks/sglang-stock-sm80.json)
+```sh
+python3 ~/volta-forever/docs/guides/benchmarks/sglang.py
+```
 
-An earlier VF 0.1.1 run at capability 7.5 measured **181.48 prefill** and **38.83 decode** tokens/s at 32 tokens per chunk. At eight tokens per chunk we compared the effect of decode graphs on the same card. [Earlier 32-token results](./benchmarks/sglang-stock-compile.json)
+The client checks SGLang’s phase timers and token counts. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-| Decode CUDA graph | Median prefill (tokens/s) | Median decode (tokens/s) |
-| --- | ---: | ---: |
-| Enabled | 62.55 | 38.25 |
-| Disabled | 72.97 | 12.27 |
+The command above measured **2,015.34 tokens/s in prefill** and **77.36 tokens/s in decode**. Each 227-token prompt ran in a single CUDA graph. Native 1Cat-vLLM measured 1,427.41 and 76.13 on the same physical V100, checkpoint and prompts. [SGLang measurements](./benchmarks/sglang-stock-marlin.json) · [1Cat reference](./benchmarks/vllm-expert-tiles.json)
 
-The two servers ran in sequence on the same V100. Changing `--cuda-graph-backend-decode full` to `disabled` was the only configuration change. Decode ran **3.12× faster** with CUDA graphs. [Paired results](./benchmarks/sglang-stock-graphs.json) · [Initial eager baseline](./benchmarks/sglang-stock-results.json)
+In a separate paired run on the same V100, Marlin measured 2,001.75 prefill and 77.39 decode tokens/s at a 256-token chunk, and 1,565.10 and 77.38 at a 128-token chunk. Native 1Cat-vLLM on that card measured 1,361.25 and 76.31. The earlier Triton WNA16 expert backend measured 311.97 and 52.68 tokens/s at a 32-token chunk. [Earlier WNA16 results](./benchmarks/sglang-stock-sm80.json)
 
 ## 6. Additional notes
 
-The 8.0 run used VF main at `883e420`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA toolkit 13.5 and driver 580.178.04. Triton selects FP16 tensor-core operations for the quantized experts at this capability. The experimental LoRA switches select SGLang’s JIT expert router and standard top-k layout. [Tested VF source](https://github.com/nbald/volta-forever/commit/883e4209021f411c5fadd67b9313717cf60409a1)
+The run used VF main at `d9f8083`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. The stock wheel contains an Ampere binary for the expert reduction. VF translates it to Volta. The LoRA settings select SGLang's JIT expert router and the three-field output expected by the floating-point layer. FlashInfer uses its CUDA normalization kernel. [Tested VF source](https://github.com/nbald/volta-forever/commit/d9f8083afe412da84e016040acb5424e9fde3602)
 
 SGLang also answered **Paris** with the checkpoint’s own prediction head and four speculative steps (NEXTN). A VF source build at `a381fc7` measured **171.66 tokens/s in prefill** and **37.60 in decode**. Decode includes draft generation, target verification and draft extension. [NEXTN settings and per-request results](./benchmarks/sglang-stock-mtp.json)

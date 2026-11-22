@@ -1,0 +1,425 @@
+{
+  "engine": "SGLang 0.5.23",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "driver": "580.178.04",
+  "toolkit": "CUDA 13.5",
+  "torch": "2.14.1+cu130",
+  "triton": "3.8.0",
+  "checkpoint": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+  "checkpoint_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+  "number_of_safetensors_shards": 9,
+  "volta_forever": "d9f8083afe412da84e016040acb5424e9fde3602",
+  "stock_sgl_kernel_sm100_common_ops_sha256": "a75fb56d461b9ba40fe96f62ae88a2cc622ea3cb2930e152f8e2028d519fad68",
+  "method": "Automatic AWQ Marlin, FP16 activations, one concurrent greedy request, one warmup plus three salted requests, 227 input and 64 output tokens. SGLang forward timers count 227 prefill tokens and 63 decode intervals.",
+  "sequence": "Two separate paired reservations. The integrated prototype and final VF used the same mixed-target policy. Final VF generates its verified Ampere instruction table from ISA descriptions.",
+  "runs": {
+    "integrated-marlin128": {
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "gpu_pci_address": "0000:86:00.0",
+      "warmup_tokens": 228,
+      "test_prompt_tokens": 227,
+      "generation_tokens": 64,
+      "cache_hits": 0,
+      "chat": "Paris",
+      "new_driver_xid": false,
+      "results": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.14517862701416018,
+          "decode_s": 0.8142530546188387,
+          "prefill_tokens_per_s": 1570.4791034961486,
+          "decode_tokens_per_s": 77.3715242978008,
+          "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member inspects the signs"
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.14503833770751973,
+          "decode_s": 0.8142479343414317,
+          "prefill_tokens_per_s": 1565.1034311890824,
+          "decode_tokens_per_s": 77.37201083715951,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.14539058685302741,
+          "decode_s": 0.8141680660247799,
+          "prefill_tokens_per_s": 1561.3115327023888,
+          "decode_tokens_per_s": 77.379600882163,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.14478131103515635,
+          "decode_s": 0.8140410871505752,
+          "prefill_tokens_per_s": 1567.8819205116813,
+          "decode_tokens_per_s": 77.39167100339093,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on"
+        },
+        {
+          "id": "median",
+          "prefill_tokens_per_s": 1565.1034311890824,
+          "decode_tokens_per_s": 77.379600882163
+        }
+      ],
+      "http": [
+        {
+          "id": "warmup",
+          "first_s": 0.242490153061226,
+          "output_span_s": 0.756006000097841
+        },
+        {
+          "id": "run1",
+          "first_s": 0.16358101996593177,
+          "output_span_s": 0.8155253359582275
+        },
+        {
+          "id": "run2",
+          "first_s": 0.16400176100432873,
+          "output_span_s": 0.8154313529375941
+        },
+        {
+          "id": "run3",
+          "first_s": 0.1628465650137514,
+          "output_span_s": 0.8156938119791448
+        }
+      ],
+      "chunked_prefill_size": 128,
+      "prefill_graph_token_buckets": [
+        8,
+        16,
+        32,
+        64,
+        96,
+        128
+      ],
+      "decode_graph_batch_size": 1,
+      "attention_backend": "triton",
+      "sampling_backend": "pytorch",
+      "SGLANG_OPT_LORA_FUSED_TOPK_PACK": "0",
+      "vf_proxy_sha256": "60356c43c6eabd71c6685ff26a581a275a394f37d9a0dfe498ee58cf7bc39ed3"
+    },
+    "integrated-marlin256": {
+      "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "gpu_pci_address": "0000:86:00.0",
+      "warmup_tokens": 228,
+      "test_prompt_tokens": 227,
+      "generation_tokens": 64,
+      "cache_hits": 0,
+      "chat": "Paris",
+      "new_driver_xid": false,
+      "results": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.11425587463378939,
+          "decode_s": 0.8143556137084951,
+          "prefill_tokens_per_s": 1995.521024461814,
+          "decode_tokens_per_s": 77.36178020939062,
+          "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member inspects the signs"
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11340099334716847,
+          "decode_s": 0.8140096626281741,
+          "prefill_tokens_per_s": 2001.7461337843565,
+          "decode_tokens_per_s": 77.39465867836674,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record activities. Before the doors open, another team member inspects the signs by the"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11251261138916036,
+          "decode_s": 0.8141205787658716,
+          "prefill_tokens_per_s": 2017.5516077468765,
+          "decode_tokens_per_s": 77.38411439679112,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11402377319335955,
+          "decode_s": 0.814029601097106,
+          "prefill_tokens_per_s": 1990.8129124534173,
+          "decode_tokens_per_s": 77.3927630089765,
+          "text": "Lima, Peru, is the meeting place where our volunteer group gathers in a shared room located by the entrance. Each morning, one volunteer places a yellow envelope on the long table while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to review the morning and agree on"
+        },
+        {
+          "id": "median",
+          "prefill_tokens_per_s": 2001.7461337843565,
+          "decode_tokens_per_s": 77.3927630089765
+        }
+      ],
+      "http": [
+        {
+          "id": "warmup",
+          "first_s": 0.13481009704992175,
+          "output_span_s": 0.8221364361234009
+        },
+        {
+          "id": "run1",
+          "first_s": 0.12564470409415662,
+          "output_span_s": 0.8185364939272404
+        },
+        {
+          "id": "run2",
+          "first_s": 0.12567492597736418,
+          "output_span_s": 0.8153766170144081
+        },
+        {
+          "id": "run3",
+          "first_s": 0.12483379198238254,
+          "output_span_s": 0.8160221730358899
+        }
+      ],
+      "chunked_prefill_size": 256,
+      "prefill_graph_token_buckets": [
+        8,
+        16,
+        32,
+        64,
+        128,
+        192,
+        256
+      ],
+      "decode_graph_batch_size": 1,
+      "attention_backend": "triton",
+      "sampling_backend": "pytorch",
+      "SGLANG_OPT_LORA_FUSED_TOPK_PACK": "0",
+      "vf_proxy_sha256": "60356c43c6eabd71c6685ff26a581a275a394f37d9a0dfe498ee58cf7bc39ed3"
+    },
+    "final-marlin-triton": {
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "gpu_pci_address": "0000:18:00.0",
+      "warmup_tokens": 228,
+      "test_prompt_tokens": 227,
+      "generation_tokens": 64,
+      "cache_hits": 0,
+      "chat": "Paris",
+      "new_driver_xid": false,
+      "results": [
+        {
+          "id": "warmup",
+          "input_tokens": 228,
+          "output_tokens": 64,
+          "prefill_s": 0.11457536315917949,
+          "decode_s": 0.8144742412567152,
+          "prefill_tokens_per_s": 1989.956598987513,
+          "decode_tokens_per_s": 77.35051252546972,
+          "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to ensure smooth operations for our visitors. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member ins"
+        },
+        {
+          "id": "run1",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11233689880371145,
+          "decode_s": 0.8143943672180152,
+          "prefill_tokens_per_s": 2020.7073759143175,
+          "decode_tokens_per_s": 77.35809889649539,
+          "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by"
+        },
+        {
+          "id": "run2",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11263590240478472,
+          "decode_s": 0.8143349733352689,
+          "prefill_tokens_per_s": 2015.3432001123397,
+          "decode_tokens_per_s": 77.36374104377603,
+          "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+        },
+        {
+          "id": "run3",
+          "input_tokens": 227,
+          "output_tokens": 64,
+          "prefill_s": 0.11318169403076084,
+          "decode_s": 0.8143278083801304,
+          "prefill_tokens_per_s": 2005.6246899636023,
+          "decode_tokens_per_s": 77.36442173738396,
+          "text": "Lima, Peru, is the location where our volunteer group convenes daily in a shared room situated near the main entrance. Each morning, one team member places a yellow envelope on the long table to initiate the day's activities, while another volunteer inspects the signs by the stairs to report any necessary changes before the doors"
+        },
+        {
+          "id": "median",
+          "prefill_tokens_per_s": 2015.3432001123397,
+          "decode_tokens_per_s": 77.36374104377603
+        }
+      ],
+      "http": [
+        {
+          "id": "warmup",
+          "first_s": 0.13562856102362275,
+          "output_span_s": 0.820634885923937
+        },
+        {
+          "id": "run1",
+          "first_s": 0.12676891614682972,
+          "output_span_s": 0.8167265658266842
+        },
+        {
+          "id": "run2",
+          "first_s": 0.12381968484260142,
+          "output_span_s": 0.8168287160806358
+        },
+        {
+          "id": "run3",
+          "first_s": 0.1248662720900029,
+          "output_span_s": 0.8162447230424732
+        }
+      ],
+      "chunked_prefill_size": 256,
+      "prefill_graph_token_buckets": [
+        8,
+        16,
+        32,
+        64,
+        128,
+        192,
+        256
+      ],
+      "decode_graph_batch_size": 1,
+      "attention_backend": "triton",
+      "sampling_backend": "pytorch",
+      "SGLANG_OPT_LORA_FUSED_TOPK_PACK": "0",
+      "vf_proxy_sha256": "6360a2d5ef63aaf65e9898828530f1cbbf5b2f1e9178768a071297210e29e18f"
+    }
+  },
+  "native_reference_gpu0": {
+    "engine": "1Cat-vLLM",
+    "revision": "6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc",
+    "pytorch": "2.10.0+cu128",
+    "gpu": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "model_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+    "speculative_decoding": false,
+    "prefix_caching": false,
+    "quality_check": {
+      "answer": "Paris",
+      "prompt_tokens": 25,
+      "completion_tokens": 2
+    },
+    "server_command": "vllm serve QuantTrio/Qwen3.5-35B-A3B-AWQ --served-model-name qwen --host 127.0.0.1 --port 18941 --tensor-parallel-size 1 --dtype half --language-model-only --max-model-len 512 --max-num-seqs 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching",
+    "warmup": {
+      "id": "warmup",
+      "input_tokens": 228,
+      "output_tokens": 64,
+      "prefill_s": 0.8403371120803058,
+      "decode_s": 0.8393507529981434,
+      "prefill_tokens_per_s": 271.3196843533092,
+      "decode_tokens_per_s": 75.05801332156469,
+      "text": "Lisbon, Portugal, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one team member places a blue folder on the long table while another inspects the signs near the stairs to report any changes before the doors open. We meet after lunch to review the morning"
+    },
+    "measurements": [
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.16194482217542827,
+        "decode_s": 0.8287737530190498,
+        "prefill_tokens_per_s": 1401.711996411346,
+        "decode_tokens_per_s": 76.01592083545619,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record activities. Before the doors open, another team member inspects the signs by the"
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.15820683911442757,
+        "decode_s": 0.8275180419441313,
+        "prefill_tokens_per_s": 1434.8305121993862,
+        "decode_tokens_per_s": 76.13127062703167,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.15902886493131518,
+        "decode_s": 0.8275062669999897,
+        "prefill_tokens_per_s": 1427.4138226292546,
+        "decode_tokens_per_s": 76.1323539317688,
+        "text": "Lima, Peru, is the meeting place where our volunteer group gathers in a shared room located by the entrance. Each morning, one volunteer places a yellow envelope on the long table while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to review the morning and agree on"
+      }
+    ],
+    "median": {
+      "prefill_tokens_per_s": 1427.4138226292546,
+      "decode_tokens_per_s": 76.13127062703167
+    }
+  },
+  "native_reference_gpu2": {
+    "engine": "1Cat-vLLM",
+    "revision": "6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc",
+    "pytorch": "2.10.0+cu128",
+    "model_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+    "speculative_decoding": false,
+    "prefix_caching": false,
+    "server_command": "vllm serve QuantTrio/Qwen3.5-35B-A3B-AWQ --served-model-name qwen --host 127.0.0.1 --port 18941 --tensor-parallel-size 1 --dtype half --language-model-only --max-model-len 512 --max-num-seqs 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching",
+    "gpu": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+    "quality_check": {
+      "completion": "Paris"
+    },
+    "warmup": {
+      "id": "warmup",
+      "input_tokens": 228,
+      "output_tokens": 64,
+      "prefill_s": 0.8874574599321932,
+      "decode_s": 0.843419810058549,
+      "prefill_tokens_per_s": 256.91372296021996,
+      "decode_tokens_per_s": 74.69589787750732,
+      "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member inspects the signs"
+    },
+    "measurements": [
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.1933734950143844,
+        "decode_s": 0.8255664359312505,
+        "prefill_tokens_per_s": 1173.8940746926783,
+        "decode_tokens_per_s": 76.31124190379073,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record activities. Before the doors open, another team member inspects the signs by the"
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.13342034886591136,
+        "decode_s": 0.8257396370172501,
+        "prefill_tokens_per_s": 1701.3896450543464,
+        "decode_tokens_per_s": 76.29523541775178,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.16675863601267338,
+        "decode_s": 0.8255837641190737,
+        "prefill_tokens_per_s": 1361.2488410060416,
+        "decode_tokens_per_s": 76.30964020619176,
+        "text": "Lima, Peru, is the meeting place where our volunteer group gathers in a shared room located by the entrance. Each morning, one volunteer places a yellow envelope on the long table while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to review the morning and agree on"
+      }
+    ],
+    "median": {
+      "id": "median",
+      "prefill_tokens_per_s": 1361.2488410060416,
+      "decode_tokens_per_s": 76.30964020619176
+    }
+  },
+  "requirements_checked": {
+    "FLASHINFER_USE_CUDA_NORM=1": "Without the override, the full wheel environment selected CuTe DSL gemma_rmsnorm and failed at graph capture with cudaErrorInvalidPtx.",
+    "SGLANG_EXPERIMENTAL_LORA_OPTI=1 and SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN=1": "The default AOT alignment for the unquantized layer failed an independent expert-index and token-permutation check on V100. The JIT path passed.",
+    "SGLANG_OPT_LORA_FUSED_TOPK_PACK=0": "The default fused pack returned a four-field TopK output. The unquantized layer in triton_utils/fused_moe.py expected three fields and graph capture raised ValueError.",
+    "reduction": "The stock compiled PyTorch operator returned 2,671,174 exact FP16 outputs and canary checks vs CPU with generated-table VF, including 1, 32, 128, 129 and 227 tokens."
+  }
+}
