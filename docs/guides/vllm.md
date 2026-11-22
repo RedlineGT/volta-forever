@@ -64,6 +64,7 @@ Start the official vLLM server in the active environment. It downloads the 4-bit
 export PATH="$CUDA_HOME/bin:$PATH"
 export VLLM_TUNED_CONFIG_FOLDER="$HOME/volta-forever/tuning/vllm"
 vllm serve QuantTrio/Qwen3.5-35B-A3B-AWQ --served-model-name qwen \
+  --revision 2f4fac011fc06e736782b0b59394577790da7d79 \
   --dtype float16 --language-model-only --safetensors-load-strategy lazy -cc.mode=3 \
   --max-model-len 512 --max-num-seqs 1 --gpu-memory-utilization 0.9 \
   --host 127.0.0.1 --port 8000
@@ -92,7 +93,7 @@ Each measured request processed 227 uncached prompt tokens and generated 64 outp
 | Official vLLM with the command above | **1449.98** | **80.23** |
 | Native 1Cat-vLLM reference | 1443.33 | 76.09 |
 
-Both runs used the same nine AWQ shards and the same prompts. The guide run used vLLM 0.34.0, PyTorch 2.14.0+cu130, VF’s retained-PTX fix and the default assembler settings. [Commands, timings and responses](./benchmarks/vllm-default-assembler.json) · [Native reference](./benchmarks/vllm-graphs.json)
+Both runs loaded the same nine QuantTrio AWQ W4A16 shards (group size 128, zero points) and processed the same prompts. Use the `--revision` from section 4 for both servers to reproduce the comparison. The guide run used vLLM 0.34.0, PyTorch 2.14.0+cu130, VF’s retained-PTX fix and the default assembler settings. [Commands, timings and responses](./benchmarks/vllm-default-assembler.json) · [Native reference](./benchmarks/vllm-graphs.json)
 
 An earlier comparison isolated the expert tile settings on another V100. With the assembler capped at 192 registers in both runs, the V100 tiles reached 1468.21 prefill and 80.16 decode, compared with 991.50 and 72.18 for vLLM’s default tiles. [Tile comparison](./benchmarks/vllm-expert-tiles.json)
 

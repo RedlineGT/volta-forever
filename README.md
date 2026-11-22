@@ -102,12 +102,14 @@ rather set it by hand.
 
 ## Inference engines on Ubuntu
 
-Both native V100 builds below ran **without Volta-Forever** on Qwen3.5-35B-A3B in 4 bits. All 35B comparisons use one request at a time with **MTP and all other speculative decoding disabled**. After a warm-up, each build processed the same three prompts of 227 tokens and generated 64 tokens per prompt.
+Each row compares a native build **without VF** with a build **running under VF** on the same Tesla V100-SXM2-32GB, using the **same quantized Qwen3.5-35B-A3B weights within that row**. The vLLM pair loaded the same nine QuantTrio AWQ shards. The Strata pair loaded the same Unsloth GGUF file. All four runs used one request at a time with **MTP and all other speculative decoding disabled**. After a warm-up, each build processed the same three 227-token prompts and generated 64 tokens per prompt.
 
-| Native reference on a Tesla V100-SXM2-32GB | 4-bit checkpoint format | Median prefill (tokens/s) | Median decode (tokens/s) | Measurements |
-|---|---|---:|---:|---|
-| [1Cat-vLLM, native V100 build](https://github.com/1CatAI/1Cat-vLLM/commit/6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc), CUDA 12.8 | QuantTrio AWQ W4A16 | 1,443.33 | 76.09 | [1Cat-vLLM results](docs/guides/benchmarks/vllm-graphs.json) |
-| [Strata, upstream 0.1.64](https://github.com/Niko1221/Strata), CUDA 12.9 | Unsloth GGUF UD-Q4_K_XL | 1,948.50 | 99.07 | [Strata results](docs/guides/benchmarks/strata-uniform-divisor.json) |
+| Engine builds (native / with VF) | Shared checkpoint and revision | Native prefill (tok/s) | VF prefill (tok/s) | Native decode (tok/s) | VF decode (tok/s) |
+|---|---|---:|---:|---:|---:|
+| [1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM/commit/6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc) CUDA 12.8 / official vLLM (CUDA 13.5 toolkit) | [QuantTrio AWQ W4A16 · `2f4fac0`](https://huggingface.co/QuantTrio/Qwen3.5-35B-A3B-AWQ/tree/2f4fac011fc06e736782b0b59394577790da7d79) | 1,443.33 | 1,449.98 | 76.09 | 80.23 |
+| [Upstream Strata 0.1.64](https://github.com/Niko1221/Strata) CUDA 12.9 / same release CUDA 13 | [Unsloth GGUF UD-Q4_K_XL · `63af837`](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/blob/63af8373893a7a73c6dfcb84cb63d815981da5e0/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf) | 1,948.50 | 1,982.50 | 99.07 | 104.25 |
+
+The table reports medians. Per-request timings are available for [native 1Cat-vLLM](docs/guides/benchmarks/vllm-graphs.json), [vLLM with VF](docs/guides/benchmarks/vllm-default-assembler.json) and [both Strata builds](docs/guides/benchmarks/strata-uniform-divisor.json).
 
 Each Ubuntu 24.04 guide checks for the NVIDIA R580 driver, explains which CUDA components the engine needs, and gives commands to install `vf` and test a model.
 

@@ -48,7 +48,8 @@ Download the 22.85 GB Qwen3.5-35B-A3B MTP GGUF. Strata calls the compatible engi
 ```sh
 model=Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf
 curl -fL --retry 3 -o "$model" \
-  "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/resolve/63af8373893a7a73c6dfcb84cb63d815981da5e0/$model"
+  "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/resolve/63af8373893a7a73c6dfcb84cb63d815981da5e0/$model" &&
+printf '%s  %s\n' 26445264c88d8bd4bf465763962b222cc8f816f9abe3717421f916ec4661fa9e "$model" | sha256sum --check &&
 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch --family qwen36 --model UD-Q4_K_XL \
   --model-path "$PWD/$model" --context 8k --parallel 1 --vision off --drafting off --mtp off --tune skip --set STRATA_Q36_BLAS_F32=1 \
   --set prompt-cache=0 --set conversation-cache-mib=0 --access local --port 9085 \
@@ -73,11 +74,11 @@ python3 strata-ninfer.py strata
 | On the same V100-SXM2-32GB, same checkpoint and cuBLAS setting | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
 | Strata CUDA 13 with VF from main | **1982.5** | **104.25** |
-| Native Strata CUDA 12 | 1948.5 | 99.07 |
+| Native Strata CUDA 12.9 | 1948.5 | 99.07 |
 
 A fresh Ubuntu 24.04 build of VF commit `85509eb` served the same three requests at medians of **1980.80 tokens/s prefill** and **104.22 tokens/s decode**. [Build and request records](./benchmarks/strata-uniform-divisor.json)
 
-The performance targets set before this run were 1950.2 prefill and 99.04 decode tokens/s. To repeat the native comparison, stop the VF server, select the CUDA 12 engine, and repeat section 4 with `STRATA_CUDA=12 strata launch`. Use the same model file and launch options.
+The performance targets set before this run were 1950.2 prefill and 99.04 decode tokens/s. To repeat the native comparison, stop the VF server, select the CUDA 12 engine, and repeat section 4 with `STRATA_CUDA=12 strata launch`. Keep `--model-path` pointed at the GGUF verified in section 4 and keep all other launch options the same.
 
 ```sh
 strata launch --stop --no-tui --yes

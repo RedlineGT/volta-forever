@@ -1,6 +1,17 @@
 {
   "model": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
   "revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+  "weight_shards_sha256": {
+    "model-00001-of-00009.safetensors": "e561015778a08e9e2324c1e893cee6fb0b54da66d45ab084ffb87a0d8be7c563",
+    "model-00002-of-00009.safetensors": "e6a41cb0e352ab1d87e919b5db1567f7a0aa230dd6e963602d9a7e5d3c23f7ef",
+    "model-00003-of-00009.safetensors": "94268fa039cb9739529aae64fa342cedc056722fc744a5248c220c68dee8341a",
+    "model-00004-of-00009.safetensors": "b6f2b384bb4d8bb650adc02d75973228170ce165668832754111655ffda991ee",
+    "model-00005-of-00009.safetensors": "842512ac31fdc0f3166855aaea78c96d491421b5e3a91e4d06eac407f2956c32",
+    "model-00006-of-00009.safetensors": "2ae6d4effcf9518e15fd35ade722c0183fb2bc73498e053664f1deefbd43c95a",
+    "model-00007-of-00009.safetensors": "24e556456ab50bdbd9255baa1c5e988b7f9bf6bc4643f8bd6e5e0dee2f526e5b",
+    "model-00008-of-00009.safetensors": "5e513dfbbbdf64efef65efc9f30796045fffe8cf6cd4ffc7559f580038cecaeb",
+    "model-00009-of-00009.safetensors": "ad451187a3ed8f296575c13f726a72b1b592f598f7c1c9820b720fd31e1a1d9a"
+  },
   "quantization": "AWQ INT4 asymmetric group size 128; fused MoE experts in layer 0 use FP16 at inference.",
   "vllm": "0.34.0",
   "pytorch": "2.14.0+cu130",
