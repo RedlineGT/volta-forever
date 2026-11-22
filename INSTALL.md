@@ -172,7 +172,8 @@ eval "$(vf env)"
 
 - `LD_LIBRARY_PATH`: the layer's `lib` (the proxy `libcuda.so.1`, the nvJitLink adapter), its
   `forward` (the libraries with CUDA 13's names), the CUDA 12.9.2 directory, then what was there.
-- `LD_AUDIT` = the audit library, and `VF_AUDIT_MAP` = its table of substitutions: for each
+- `LD_AUDIT` = the audit library (then those that were in `LD_AUDIT`, which see the names it
+  chose), and `VF_AUDIT_MAP` = its table of substitutions: for each
   forwarding library whose CUDA 12.9.2 library is there, its name to the forwarding library,
   and the name of the CUDA 12.9.2 library that it calls to that library. So a program that
   carries CUDA 13 libraries of its own and finds them by a recorded path (a PyTorch wheel) or

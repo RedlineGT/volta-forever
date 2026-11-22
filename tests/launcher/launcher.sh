@@ -226,6 +226,24 @@ case $lda in
         fail "$name" "got: $lda" ;;
 esac
 
+# An LD_AUDIT that was there is kept, after the layer's audit library (the loader asks them in
+# their order, and the user's sees what the layer substituted), without an audit library of the
+# layer a second time (this installation's, or another's) and without empty entries; doctor
+# says so.
+name="ld-audit-kept"
+want="$arch/lib/libvf_audit.so:/my/audit.so"
+lda1=$(LD_AUDIT=/my/audit.so get_var "$vf" LD_AUDIT)
+lda2=$(LD_AUDIT=":$arch/lib/libvf_audit.so::/other/lib/libvf_audit.so:/my/audit.so:" run_var "$vf" LD_AUDIT)
+out=$(LD_AUDIT=/my/audit.so "$vf" doctor 2>&1) || true
+if [ "$lda1" = "$want" ] && [ "$lda2" = "$want" ]; then
+    case $out in
+        *"LD_AUDIT would be: $want"*"then those that were in LD_AUDIT"*) pass "$name" ;;
+        *) fail "$name" "doctor said: $out" ;;
+    esac
+else
+    fail "$name" "env: $lda1, run: $lda2"
+fi
+
 name="env-volta-forever-version"
 vfv=$(get_var "$vf" VOLTA_FOREVER)
 case $vfv in

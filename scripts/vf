@@ -304,6 +304,24 @@ setup_env() {
     if [ "$opt_no_audit" = 0 ] && [ -f "$_audit" ]; then
         _with_audit=1
     fi
+    # LD_AUDIT: the layer's audit library, then those that were there, without an audit
+    # library of the layer a second time (vf under vf, after eval "$(vf env)", or under the
+    # launcher of another installation). The loader asks each in its order for every library
+    # it looks for, and gives each the name that the one before chose: one of the user's sees
+    # what the layer substituted and has the last word, as the user's entries of VF_AUDIT_MAP
+    # come before the launcher's.
+    _others_audit=
+    set -f
+    _oifs=$IFS; IFS=:
+    for _a in ${LD_AUDIT:-}; do
+        case $_a in
+            libvf_audit.so|*/libvf_audit.so) ;;
+            *) _others_audit=$_others_audit:$_a ;;
+        esac
+    done
+    IFS=$_oifs
+    set +f
+    _ld_audit=$(path_prepend "$_audit" "$_others_audit")
 
     # The library path: the layer's own libraries, the forwarding libraries, the CUDA 12.9.2
     # libraries, then what was there. The directory of the forwarding libraries is left out
@@ -398,7 +416,7 @@ cmd_env() {
     # Only what the launcher sets: VF_* passes through untouched.
     printf 'export LD_LIBRARY_PATH=%s\n' "$(quoted "$_ldpath")"
     if [ "$_with_audit" = 1 ]; then
-        printf 'export LD_AUDIT=%s\n' "$(quoted "$_audit")"
+        printf 'export LD_AUDIT=%s\n' "$(quoted "$_ld_audit")"
         [ -n "$_full_map" ] && printf 'export VF_AUDIT_MAP=%s\n' "$(quoted "$_full_map")"
     fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
@@ -441,7 +459,7 @@ cmd_run() {
     [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
     export LD_LIBRARY_PATH="$_ldpath"
     if [ "$_with_audit" = 1 ]; then
-        export LD_AUDIT="$_audit"
+        export LD_AUDIT="$_ld_audit"
         [ -n "$_full_map" ] && export VF_AUDIT_MAP="$_full_map"
     fi
     export VOLTA_FOREVER="$_version"
@@ -627,7 +645,10 @@ cmd_doctor() {
     # Environment that run would set.
     echo "ok    LD_LIBRARY_PATH would be: $_ldpath"
     if [ -f "$_audit" ]; then
-        echo "ok    LD_AUDIT would be: $_audit"
+        echo "ok    LD_AUDIT would be: $_ld_audit"
+        if [ "$_ld_audit" != "$_audit" ]; then
+            echo "       (the layer's audit library first, then those that were in LD_AUDIT: they see the names that it chose, and have the last word)"
+        fi
     fi
 
     if [ "$_ok" = 0 ]; then
