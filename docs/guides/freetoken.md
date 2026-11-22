@@ -60,7 +60,7 @@ Download the UD-Q4_K_M text model (21.1 GiB) to a local drive. The following con
 model=Qwen3.5-35B-A3B-UD-Q4_K_M.gguf
 curl -fL -C - -o "$model" "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/resolve/63af8373893a7a73c6dfcb84cb63d815981da5e0/$model" &&
 printf '%s  %s\n' a20c5a9f0cee94d24af3553e7828df1337c7d24213789911c74e1f4936894936 "$model" | sha256sum --check &&
-export PTXAS_OPTIONS='--override-directive-values --maxrregcount=192' &&
+PTXAS_OPTIONS='--override-directive-values --maxrregcount=192' \
 ft serve --model "$model" --served-model-name qwen --text-model-only --enable-timings-report \
   --moe-strategy fused --dtype float16 --attn triton --num-tokens 1024 --graph 1
 ```
