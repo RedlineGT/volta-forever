@@ -101,4 +101,4 @@ The two servers ran in sequence on the same V100. Changing `--cuda-graph-backend
 
 The stock run used VF 0.1.1, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA toolkit 13.5 and driver 580.178.04. The command selects WNA16 at VF’s default capability of 7.5. The experimental LoRA configuration switches select the wheel’s CUDA JIT expert router for 32-token chunks. The run used the checkpoint’s own weights.
 
-An earlier experiment with an SGLang adapter, larger chunks and CUDA graph decode measured 643.91 tokens/s in prefill and 67.30 in decode. [Archived measurements](./benchmarks/sglang-results.json) · [Archived configuration](https://github.com/nbald/volta-forever/blob/7ead7334d0909483b63139d253aead22cf97820a/docs/guides/sglang.md)
+SGLang also answered **Paris** with the checkpoint’s own prediction head and four speculative steps (NEXTN). A VF source build at `a381fc7` measured **171.66 tokens/s in prefill** and **37.60 in decode**. Decode includes draft generation, target verification and draft extension. [NEXTN settings and per-request results](./benchmarks/sglang-stock-mtp.json)

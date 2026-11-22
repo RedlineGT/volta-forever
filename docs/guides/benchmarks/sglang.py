@@ -15,6 +15,9 @@ METRIC = re.compile(
     r"prompt_tokens_total|generation_tokens_total)\{([^}]*)\}\s+(\S+)"
 )
 LABEL = re.compile(r'(\w+)="((?:\\.|[^"\\])*)"')
+ORDINARY_PHASES = {"extend", "decode"}
+NEXTN_DECODE = ("eagle_draft", "target_verify", "eagle_draft_extend")
+NEXTN_PHASES = {"extend", *NEXTN_DECODE}
 CACHE_HITS = ("device_hit", "host_hit", "storage_hit")
 
 
@@ -55,11 +58,15 @@ def phase_seconds(url, model, before, input_tokens, output_tokens):
             raise ValueError("SGLang reused cached prompt tokens.")
         phases = {key[8:]: value for key, value in delta.items()
                   if key.startswith("forward:") and value > 0}
-        if set(phases) - {"extend", "decode"}:
+        names = set(phases)
+        if not (names <= ORDINARY_PHASES or names <= NEXTN_PHASES):
             raise ValueError(f"Unexpected GPU forward phases: {phases!r}")
-        ready = (set(phases) == {"extend", "decode"} and all(key in delta for key in CACHE_HITS)
+        ready = (names in (ORDINARY_PHASES, NEXTN_PHASES) and all(key in delta for key in CACHE_HITS)
                  and all(delta.get(key) == count for key, count in expected.items()))
         if ready and previous == phases:
+            if names == NEXTN_PHASES:
+                return {"prefill": phases["extend"], "decode": sum(phases[k] for k in NEXTN_DECODE),
+                        "speculative_forward_s": {k: phases[k] for k in NEXTN_DECODE}}
             return {"prefill": phases["extend"], "decode": phases["decode"]}
         previous = phases if ready else None
         if time.monotonic() >= deadline:
@@ -113,12 +120,15 @@ def measure(url, model, item):
     if n_in < 1 or n_out < 2:
         raise ValueError(f"Insufficient tokens for {item['id']}: {usage!r}")
     seconds = phase_seconds(url, model, before, n_in, n_out)
-    return {
+    row = {
         "id": item["id"], "input_tokens": n_in, "output_tokens": n_out,
         "prefill_s": seconds["prefill"], "decode_s": seconds["decode"],
         "prefill_tokens_per_s": n_in / seconds["prefill"],
         "decode_tokens_per_s": (n_out - 1) / seconds["decode"], "text": text,
     }
+    if "speculative_forward_s" in seconds:
+        row["speculative_forward_s"] = seconds["speculative_forward_s"]
+    return row
 
 
 def main():

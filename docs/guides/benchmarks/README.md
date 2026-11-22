@@ -37,7 +37,7 @@ curl -fsSLO "$base/sglang.py" && curl -fsSLO "$base/prompts.json"
 python3 sglang.py
 ```
 
-The client sets a fresh cache salt on every chat. It verifies the input and output token counts and the absence of device, host and storage cache hits. Prefill divides the input tokens by the GPU timer for `extend`. Decode uses the output tokens after the first token and the GPU timer for `decode`. [SGLang Ubuntu guide](../sglang.md) · [Historical adapter experiment](sglang-results.json)
+The client sets a fresh cache salt on every chat. It verifies the input and output token counts and the absence of device, host and storage cache hits. Prefill divides the input tokens by the GPU timer for `extend`. Decode uses the output tokens after the first token and the GPU timer for `decode`. With NEXTN speculative decoding, the client sums the timers for `eagle_draft`, `target_verify` and `eagle_draft_extend`. [NEXTN measurements](sglang-stock-mtp.json) [SGLang Ubuntu guide](../sglang.md) · [Historical adapter experiment](sglang-results.json)
 
 ## FreeToken
 
