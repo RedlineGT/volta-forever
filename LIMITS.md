@@ -195,6 +195,12 @@ decode with Qwen3.5-35B-A3B-AWQ. Its prefill ran outside the graph. A replayed l
 exceeds the register budget can return an error after capture, beyond the register retry
 described above. [GPU validation](docs/validation.md#cuda-graph-replay)
 
+## SGLang tensor parallelism and NCCL
+
+SGLang starts one process per GPU for tensor parallelism. A user tested two and four V100s with NCCL's CUDA 12 build mapped through VF. With the CUDA 13 build, the first all-reduce failed. VF reported that NCCL's indirect calls could reach multicast instructions with no Volta translation. Four ranks also needed the uniform-address translation merged in PR #1. [Issue #2 and reproduction](https://github.com/nbald/volta-forever/issues/2) · [Address translation change](https://github.com/nbald/volta-forever/pull/1)
+
+We separately tested this mapping with two Tesla V100-SXM2-32GBs. One process requested NCCL by soname and the other used the CUDA 13 library's absolute path. Both loaded NCCL 2.32.6 for CUDA 12. Each rank received the exact expected integer sums for 1, 257 and 65,536 elements. [Commands for the SGLang environment](docs/guides/sglang.md#6-additional-notes)
+
 ## What was not tried
 
 - More than one GPU in a process; NVLink
