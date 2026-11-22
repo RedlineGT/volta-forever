@@ -312,10 +312,189 @@
         "client_input_tokens_per_ttft_s": 458.7869416347553,
         "client_decode_tokens_per_s": 99.18568286138726
       }
-    ]
+    ],
+    "exact_checkpoint_limit": "The NInfer runtime requires compute capability 12.0. The upstream llama.cpp GGUF reader rejected the original NINFER v3 file header with 'GGUF magic invalid'. The native reference therefore uses a different checkpoint and quantization."
   },
   "vf_proxy_source": "d9f8083afe412da84e016040acb5424e9fde3602 with the executable-comparison change published in a9dd4cece3cfa38d051e23ea6f37ef4f535f745a",
-  "weights_placement": "Fully GPU-resident; model input file pre-staged in host RAM",
+  "weights_placement": "NInfer reported 19.6 GiB of GPU-resident inference weights. The checkpoint file was staged in host RAM.",
   "prompt_file": "prompts.json",
-  "semantic_question": "What is the capital of France? Answer in one word."
+  "semantic_question": "What is the capital of France? Answer in one word.",
+  "prefill_chunk_comparison": {
+    "upstream_option": "--prefill-chunk",
+    "baseline": "The default (1024 bounded by context 512) processes each 227-token prompt in one chunk.",
+    "trial_args": [
+      "--prefill-chunk",
+      "128"
+    ],
+    "trial": "128 + 99 input tokens; all other server arguments, the checkpoint, proxy and GPU are identical to the baseline.",
+    "requests": [
+      {
+        "label": "semantic",
+        "expected": "Paris",
+        "answer": "Paris",
+        "finish_reason": "stop",
+        "usage": {
+          "completion_tokens": 2,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 24,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 26
+        },
+        "timings": {
+          "cache_n": 0,
+          "predicted_ms": 9.006407,
+          "predicted_n": 2,
+          "predicted_per_second": 111.03206861515365,
+          "predicted_per_token_ms": 9.006407,
+          "prompt_ms": 10080.084718,
+          "prompt_n": 24,
+          "prompt_per_second": 2.380932370255105,
+          "prompt_per_token_ms": 420.00352991666665
+        },
+        "wall_seconds": 10.0926
+      },
+      {
+        "label": "warmup",
+        "expected": "Lisbon",
+        "answer": "Lisbon, Portugal, serves as the welcoming hub for our volunteer group, where new members are immediately integrated into a structured yet supportive environment. Upon arrival, you will find our shared room conveniently located by the entrance, providing a central point for daily operations. Each morning begins with a specific routine: one volunteer places a",
+        "finish_reason": "length",
+        "usage": {
+          "completion_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 228,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 292
+        },
+        "timings": {
+          "cache_n": 0,
+          "predicted_ms": 539.694353,
+          "predicted_n": 64,
+          "predicted_per_second": 116.73273891009195,
+          "predicted_per_token_ms": 8.566577031746032,
+          "prompt_ms": 59223.585821999994,
+          "prompt_n": 228,
+          "prompt_per_second": 3.849817548793272,
+          "prompt_per_token_ms": 259.75256939473684
+        },
+        "wall_seconds": 59.7697
+      },
+      {
+        "label": "run1",
+        "expected": "Kyoto",
+        "answer": "Kyoto, Japan, serves as the welcoming hub for our volunteer group, where new members are immediately integrated into a culture of shared responsibility. Our operations begin in the shared room by the entrance, where one volunteer places a red notebook on the long table each morning to serve as the central record-keeping tool. Before the",
+        "finish_reason": "length",
+        "usage": {
+          "completion_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 291
+        },
+        "timings": {
+          "cache_n": 0,
+          "predicted_ms": 538.059591,
+          "predicted_n": 64,
+          "predicted_per_second": 117.0874026851052,
+          "predicted_per_token_ms": 8.540628428571427,
+          "prompt_ms": 736.321008,
+          "prompt_n": 227,
+          "prompt_per_second": 308.28945192882503,
+          "prompt_per_token_ms": 3.2437048810572686
+        },
+        "wall_seconds": 1.2819
+      },
+      {
+        "label": "run2",
+        "expected": "Lyon",
+        "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room by the entrance provides a central hub for daily operations. Each morning begins with one volunteer placing a green binder on the long table, while another carefully checks the signs by the stairs to report any changes before the doors open. We",
+        "finish_reason": "length",
+        "usage": {
+          "completion_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 291
+        },
+        "timings": {
+          "cache_n": 0,
+          "predicted_ms": 538.061038,
+          "predicted_n": 64,
+          "predicted_per_second": 117.08708780359598,
+          "predicted_per_token_ms": 8.540651396825398,
+          "prompt_ms": 736.5915170000001,
+          "prompt_n": 227,
+          "prompt_per_second": 308.1762343999408,
+          "prompt_per_token_ms": 3.244896550660793
+        },
+        "wall_seconds": 1.2779
+      },
+      {
+        "label": "run3",
+        "expected": "Lima",
+        "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where we gather in a shared room located near the entrance. Each morning begins with one volunteer placing a yellow envelope on the long table, while another checks the signs by the stairs to report any changes before the doors open. We conduct all records in",
+        "finish_reason": "length",
+        "usage": {
+          "completion_tokens": 64,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 291
+        },
+        "timings": {
+          "cache_n": 0,
+          "predicted_ms": 538.054256,
+          "predicted_n": 64,
+          "predicted_per_second": 117.0885636484957,
+          "predicted_per_token_ms": 8.540543746031746,
+          "prompt_ms": 738.4628829999999,
+          "prompt_n": 227,
+          "prompt_per_second": 307.39527364979295,
+          "prompt_per_token_ms": 3.2531404537444932
+        },
+        "wall_seconds": 1.2798
+      }
+    ],
+    "median_prefill_tok_s": 308.1762343999408,
+    "median_decode_tok_s": 117.0874026851052,
+    "extra_diagnostic": {
+      "description": "Additional untimed-series request after the five chats. Same prompt as run1, max_tokens 1, no prefix reuse. Prometheus counters are from two snapshots of /metrics taken around this request.",
+      "prompt_tokens": 227,
+      "completion_tokens": 1,
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 0.0,
+        "predicted_n": 1,
+        "predicted_per_second": 0.0,
+        "predicted_per_token_ms": 0.0,
+        "prompt_ms": 736.544091,
+        "prompt_n": 227,
+        "prompt_per_second": 308.19607783670347,
+        "prompt_per_token_ms": 3.244687625550661
+      },
+      "reported_prefill_units": 2,
+      "reported_prefill_stream_ms": 735.205077,
+      "stream_duration_definition": "CUDA stream interval across the two prefill steps. It includes any gaps between kernels on the stream.",
+      "wall_ms": 739.750917
+    }
+  }
 }

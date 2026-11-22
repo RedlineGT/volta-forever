@@ -92,8 +92,11 @@ After the warm-up, the three responses began with Kyoto, Lyon and Lima. Each use
 
 | Engine and checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
 |---|---:|---:|
-| NInfer, Qwen3.6 mixed Q4/Q5/Q6/Q8 | 431.6 | 117.1 |
+| NInfer, Qwen3.6 mixed Q4/Q5/Q6/Q8, default prefill | 431.6 | 117.1 |
+| Same NInfer server and weights, 128-token prefill chunks | 308.2 | 117.1 |
 | Native llama.cpp, Qwen3.5 Q4_K_M | 470.6 | 99.5 |
+
+To reproduce the second row, add `--prefill-chunk 128` to the server command and rerun the same client. Splitting each prompt into 128 and 99 tokens reduced prefill throughput by 28.6%. Native llama.cpp needs GGUF weights, so its row uses a different checkpoint and quantization. [NInfer chunk settings](https://github.com/Neroued/ninfer/blob/master/docs/startup-configuration.md#model-and-execution)
 
 ## 6. Additional notes
 
