@@ -15,8 +15,9 @@
 //! For every kernel that was launched at least once, the output file has a line with these fields
 //! separated by tabs: kernel name, code origin (native / ptx-rewritten / machine-code-translated
 //! / cache-hit), number of launches, total time in milliseconds, mean time in milliseconds, the
-//! grid sizes seen, the block sizes seen, the emulated instruction summary (the same text
-//! the layer prints when it announces a kernel).
+//! grid sizes seen, the block sizes seen (the most frequent of the first 64 distinct sizes, which
+//! are all that is kept), the emulated instruction summary (the same text the layer prints when it
+//! announces a kernel).
 //!
 //! One file per process: the PID is appended to the path (`FILE.PID`). The file is written when
 //! the process ends (the `.fini_array` function).
@@ -552,9 +553,23 @@ pub unsafe fn profile_launch(
 
     entry.launches += 1;
     entry.total_ns += elapsed_ns;
-    *entry.grids.entry((grid[0], grid[1], grid[2])).or_default() += 1;
-    *entry.blocks.entry((block[0], block[1], block[2])).or_default() += 1;
-    *entry.dynamic_smem.entry(shared_memory_bytes).or_default() += 1;
+    count_shape(&mut entry.grids, (grid[0], grid[1], grid[2]));
+    count_shape(&mut entry.blocks, (block[0], block[1], block[2]));
+    count_shape(&mut entry.dynamic_smem, shared_memory_bytes);
+}
+
+/// The most distinct sizes kept in each map of a kernel's launch shapes (grids, blocks, dynamic
+/// shared memory). A program that runs for long, a server, can launch a kernel with a grid of its
+/// own for each input it is given: the profile must not grow with them.
+const SHAPES_KEPT: usize = 64;
+
+/// Count a launch of size `size` in `seen`, unless `seen` is full and `size` is not in it.
+fn count_shape<K: std::hash::Hash + Eq>(seen: &mut HashMap<K, u64>, size: K) {
+    if let Some(launches) = seen.get_mut(&size) {
+        *launches += 1;
+    } else if seen.len() < SHAPES_KEPT {
+        seen.insert(size, 1);
+    }
 }
 
 /// Profile a launch of `cuLaunchKernelEx`.
@@ -607,7 +622,13 @@ fn format_sizes(sizes: &HashMap<(u32, u32, u32), u64>) -> String {
             }
         })
         .collect();
-    if entries.len() > 5 {
+    if entries.len() >= SHAPES_KEPT {
+        format!(
+            "{} +{} more, and maybe others (only {SHAPES_KEPT} sizes are kept)",
+            parts.join(" "),
+            entries.len() - 5
+        )
+    } else if entries.len() > 5 {
         format!("{} +{} more", parts.join(" "), entries.len() - 5)
     } else {
         parts.join(" ")
@@ -756,6 +777,24 @@ mod tests {
         let s = format_sizes(&sizes);
         assert!(s.contains("128(10)"));
         assert!(s.contains("256(5)"));
+    }
+
+    #[test]
+    fn launch_shapes_are_bounded() {
+        let mut grids = HashMap::new();
+        for x in 0..1000 {
+            count_shape(&mut grids, (x, 1, 1));
+        }
+        count_shape(&mut grids, (3, 1, 1));
+        assert_eq!(grids.len(), SHAPES_KEPT);
+        assert_eq!(grids[&(3, 1, 1)], 2);
+        assert!(!grids.contains_key(&(999, 1, 1)));
+        let text = format_sizes(&grids);
+        assert!(text.starts_with("3(2) "), "{text}");
+        assert!(
+            text.ends_with(" +59 more, and maybe others (only 64 sizes are kept)"),
+            "{text}"
+        );
     }
 
     #[test]
