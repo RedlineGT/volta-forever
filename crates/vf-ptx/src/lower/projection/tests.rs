@@ -165,3 +165,32 @@ fn guards_must_dominate_and_remain_immutable_on_both_sides_of_a_branch() {
         assert_eq!(p.immutable_guard(r, origin, p.labels["target"], 0), allowed, "{text}");
     }
 }
+
+#[test]
+fn cooperative_gather_recovers_all_four_quarters_for_each_epilogue_lane() {
+    let mut math = Symbolic::default();
+    for column in 0..32 {
+        // The writer restores the original epilogue's column from this lane.
+        let destination = (column % 8) * 4 + column / 8;
+        for distance in 0..4 {
+            // XOR distances 1 and 2 deliver register "distance" from this producer.
+            let producer = destination ^ distance;
+            let slot = (producer % 4) ^ distance;
+            for k_local in 0..16 {
+                let half = k_local / 8;
+                let word = (slot / 2) * 512 + producer * 16 + (2 * (slot % 2) + half) * 4;
+                let bit = (k_local % 8) / 2 * 4 + (k_local % 2) * 16;
+                for table in 0..2 {
+                    let packed = math.weight(table * 1152 + word).unwrap();
+                    let expected = Term::Raw {
+                        group: 0,
+                        table: table as u8,
+                        column: column as u8,
+                        k: (16 * (producer % 4) + k_local) as u8,
+                    };
+                    assert_eq!(math.term(packed, bit, 4), Some(expected));
+                }
+            }
+        }
+    }
+}

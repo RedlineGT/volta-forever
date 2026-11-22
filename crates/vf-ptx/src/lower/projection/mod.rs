@@ -5,9 +5,11 @@
 //!
 //! For the measured layout, a warp owns a 32-column output tile. Each 64-K
 //! group stores two 1,152-byte tables (packed four-bit weights, then BF16
-//! scale/bias pairs). A one-row invocation can keep one output column in
-//! each lane. This avoids distributing/recovering eight live outputs in
-//! each of four lanes after every MMA. The verifier interprets the original
+//! scale/bias pairs). At one active row, four lanes cooperate on four columns.
+//! Lane `l` reads K quarter `l % 4` for columns `l / 4 + 8 * j`, using two
+//! contiguous 16-byte loads per table. XOR exchanges at distances 1 and 2
+//! reproduce the original pairwise sum. Each column's accumulator returns
+//! to its original lane before the epilogue. The verifier interprets the original
 //! scalar and warp operations for every lane and K group. Memory addresses
 //! remain symbolic in the expert, item, member and row. The generated path
 //! retains the original grid, argument ABI, epilogue and store owners.
