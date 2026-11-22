@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::scan::{self, Kind};
 
 use super::parse::{Tensor, is_branch, is_tensor, parse};
-use super::types::{Declarations, all_ones, first_operand};
+use super::types::{Declarations, all_ones, first_operand, integer};
 use super::{Options, Unsupported, may_change_shared};
 
 /// What one `ldmatrix` loads into a register that nothing else writes.
@@ -44,6 +44,8 @@ pub(super) struct Plan<'a> {
     /// Compilers put the member mask of a warp instruction in such a register, often in an earlier
     /// block than the instruction.
     pub(super) ones: HashSet<&'a str>,
+    /// Unshadowed 16-bit registers with one unconditional constant definition.
+    pub(super) constants16: HashMap<&'a str, u32>,
     /// Registers written by `movmatrix`: their layout is transposed, not suitable for the chain
     /// form's shuffle indices.
     pub(super) transposed: HashSet<&'a str>,
@@ -92,6 +94,8 @@ impl<'a> Plan<'a> {
         let mut nested: Vec<(String, bool)> = Vec::new();
         let mut loads: Vec<(&str, Origin)> = Vec::new();
         let mut set_to_ones: Vec<&str> = Vec::new();
+        let mut constants16 = Vec::new();
+        let mut plan = Plan::default();
         let mut depth = 0usize;
         for (index, item) in items.iter().enumerate() {
             let (guarded, opcode, operands) = match &item.kind {
@@ -127,10 +131,19 @@ impl<'a> Plan<'a> {
             {
                 set_to_ones.push(register);
             }
+            if matches!(opcode, "mov.b16" | "mov.u16" | "mov.s16")
+                && !guarded
+                && let [register, literal] = scan::split_operands(operands)[..]
+                && let Some(name) = scan::register(register)
+                && let Some(value) = integer(literal)
+                && u16::try_from(value).is_ok()
+            {
+                constants16.push((name, value));
+            }
             if guarded || !is_tensor(opcode) {
                 continue;
             }
-            if let Ok(Tensor::Load { transposed, r, .. }) = parse(opcode, operands) {
+            if let Ok(Tensor::Load { transposed, r, .. }) = parse(opcode, operands, &plan.constants16) {
                 for (matrix, name) in r.into_iter().enumerate() {
                     loads.push((
                         name,
@@ -165,7 +178,6 @@ impl<'a> Plan<'a> {
                     None => false,
                 })
         };
-        let mut plan = Plan::default();
         let written_once =
             |name: &str| writes.get(name) == Some(&1) && declarations.width(name).is_some() && !shadowed(name);
         for (name, origin) in loads {
@@ -174,6 +186,10 @@ impl<'a> Plan<'a> {
             }
         }
         plan.ones = set_to_ones.into_iter().filter(|name| written_once(name)).collect();
+        plan.constants16 = constants16
+            .into_iter()
+            .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(16))
+            .collect();
         // Who reads what, and how.
         let mut gathered: HashSet<&str> = HashSet::new();
         let mut products: Vec<(usize, Vec<&str>, Vec<&str>)> = Vec::new();
@@ -182,7 +198,7 @@ impl<'a> Plan<'a> {
                 continue;
             }
             let tensor = if !guarded && is_tensor(opcode) {
-                parse(opcode, operands).ok()
+                parse(opcode, operands, &plan.constants16).ok()
             } else {
                 None
             };
@@ -316,7 +332,7 @@ impl<'a> Plan<'a> {
                     let operands_s = &text[operands.clone()];
                     // The accumulator of the chain this statement goes on with, or begins.
                     let product = if !guarded && is_tensor(opcode_s) {
-                        parse(opcode_s, operands_s).ok()
+                        parse(opcode_s, operands_s, &plan.constants16).ok()
                     } else {
                         None
                     };

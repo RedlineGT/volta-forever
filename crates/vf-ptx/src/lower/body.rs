@@ -313,7 +313,10 @@ impl<'a> Body<'a> {
                 let product = self.plan.chain_products.contains(&self.current_index)
                     || (!guarded
                         && is_tensor(opcode)
-                        && matches!(parse(opcode, operands), Ok(Tensor::Product { half: true, .. })));
+                        && matches!(
+                            parse(opcode, operands, &self.plan.constants16),
+                            Ok(Tensor::Product { half: true, .. })
+                        ));
                 self.chain_end_touching(operands, product);
             }
         }
@@ -329,7 +332,7 @@ impl<'a> Body<'a> {
         let tensor = if opcode == TANH {
             None
         } else {
-            Some(parse(opcode, operands)?)
+            Some(parse(opcode, operands, &self.plan.constants16)?)
         };
         // A copy of all or nothing under a predicate is a load and a store under it (so CUTLASS
         // writes its copies). A warp matrix store may also be uniformly predicated.

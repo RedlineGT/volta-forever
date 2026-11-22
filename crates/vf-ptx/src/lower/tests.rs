@@ -2585,6 +2585,24 @@ fn block_scaled_selectors_out_of_range_are_refused() {
 }
 
 #[test]
+fn block_scaled_selectors_in_constant_u16_registers() {
+    let product = "mma.sync.aligned.m16n8k64.row.col.kind::mxf4.block_scale.f32.e2m1.e2m1.f32.ue8m0
+        {%d0,%d1,%d2,%d3},{%a0,%a1,%a2,%a3},{%b0,%b1},{%c0,%c1,%c2,%c3},
+        %sa,{%s0,%s1},%sb,{%s0,%s2};";
+    let body = |assign: &str, product: &str| format!("{{\n.reg .b16 %s<3>;\n{assign}\n{product}\nret;\n}}");
+    let assign = "mov.b16 %s0, 2; mov.u16 %s1, 1; mov.s16 %s2, 3;";
+    let literal = product.replace("{%s0,%s1}", "{2,1}").replace("{%s0,%s2}", "{2,3}");
+    assert_eq!(lower(&body(assign, product)), lower(&body(assign, &literal)));
+    for extra in ["mov.b16 %s0, 0;", "@%p mov.b16 %s2, 0;", "{ .reg .b16 %s1; }"] {
+        assert!(refusal(&body(&format!("{assign} {extra}"), product)).contains("selector_"));
+    }
+    let guarded = assign.replace("mov.u16", "@%p mov.u16");
+    assert!(refusal(&body(&guarded, product)).contains("selector_a"));
+    let invalid = assign.replace("%s0, 2", "%s0, 1");
+    assert!(refusal(&body(&invalid, product)).contains("a scale selector that the instruction does not have"));
+}
+
+#[test]
 fn ue4m3_outside_a_block_scaled_product_is_refused() {
     let refused = refusal("{\n\t.reg .b32 %r<2>;\n\tabs.ue4m3 %r0, %r1;\n\tret;\n}");
     assert!(refused.ends_with("no Volta sequence for this form"), "{refused}");

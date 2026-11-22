@@ -1,6 +1,8 @@
 //! Parsing of tensor-core instructions and instruction classification: which opcodes this
 //! module rewrites, which it refuses, and how their operands are taken apart.
 
+use std::collections::HashMap;
+
 use crate::scan;
 
 use super::types::{Element, Fp8, ScaledKind, address, integer, place_of, type_width};
@@ -191,6 +193,7 @@ pub(super) fn parse_block_scaled<'a>(
     opcode: &str,
     qualifiers: &[&str],
     parts: &[&'a str],
+    constants: &HashMap<&str, u32>,
 ) -> Result<Tensor<'a>, Unsupported> {
     let unsupported = |what: &str| Unsupported(format!("{opcode}: {what}"));
     // 8 operand groups: d, a, b, c, scale_a, {byte_a, thread_a}, scale_b, {byte_b, thread_b}.
@@ -202,14 +205,15 @@ pub(super) fn parse_block_scaled<'a>(
     let b = scan::vector(parts[2]).ok_or_else(|| unsupported("b not recognised"))?;
     let c = scan::vector(parts[3]).ok_or_else(|| unsupported("c not recognised"))?;
     let scale_a = scan::register(parts[4].trim()).ok_or_else(|| unsupported("scale_a not recognised"))?;
-    // The selectors are {byte_id, thread_id} with integer literal values, not registers.
+    // LLVM may materialize the 16-bit selectors in registers before the product.
+    let selector = |value: &str| integer(value).or_else(|| constants.get(value).copied());
     let parse_selector = |part: &str| -> Option<(u32, u32)> {
         let inner = part.trim().strip_prefix('{')?.strip_suffix('}')?;
         let items: Vec<&str> = inner.split(',').collect();
         if items.len() != 2 {
             return None;
         }
-        Some((integer(items[0].trim())?, integer(items[1].trim())?))
+        Some((selector(items[0].trim())?, selector(items[1].trim())?))
     };
     let (byte_id_a, thread_id_a) = parse_selector(parts[5]).ok_or_else(|| unsupported("selector_a not recognised"))?;
     let scale_b = scan::register(parts[6].trim()).ok_or_else(|| unsupported("scale_b not recognised"))?;
@@ -304,7 +308,11 @@ fn matrix_count(qualifier: &str) -> Option<usize> {
     }
 }
 
-pub(super) fn parse<'a>(opcode: &str, operands: &'a str) -> Result<Tensor<'a>, Unsupported> {
+pub(super) fn parse<'a>(
+    opcode: &str,
+    operands: &'a str,
+    constants: &HashMap<&str, u32>,
+) -> Result<Tensor<'a>, Unsupported> {
     let unsupported = |what: &str| Unsupported(format!("{opcode}: {what}"));
     let parts = scan::split_operands(operands);
     let qualifiers: Vec<&str> = opcode.split('.').skip(3).collect();
@@ -312,7 +320,7 @@ pub(super) fn parse<'a>(opcode: &str, operands: &'a str) -> Result<Tensor<'a>, U
         // Block-scaled MMA: 8 operand groups (d, a, b, c, scale_a, {byte_a, thread_a},
         // scale_b, {byte_b, thread_b}). Detected from the qualifiers before the standard parse.
         if qualifiers.contains(&"block_scale") {
-            return parse_block_scaled(opcode, &qualifiers, &parts);
+            return parse_block_scaled(opcode, &qualifiers, &parts, constants);
         }
         let float_accumulator = matches!(
             qualifiers[..],
