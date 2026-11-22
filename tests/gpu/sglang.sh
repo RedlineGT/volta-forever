@@ -125,13 +125,17 @@ refused() {
     echo "$1" | grep -m1 'cannot run on this GPU' | cut -c1-300
 }
 verdict() {
-    # verdict STAGE OUTPUT WORD: PASS when a line of the output is WORD, else REFUSED or FAIL.
-    # With ALL_MATCH for WORD, a text that leaves the CPU's only where the CPU itself had a near
-    # tie (greedy_compare.py) passes too, and says so.
-    if echo "$2" | grep -q "^$3\$"; then
+    # verdict STAGE OUTPUT WORD: PASS when the program's verdict is WORD, else REFUSED or FAIL. The
+    # verdict is what follows `verdict: ` on the last line of the output that starts so: what
+    # else the program, its libraries and its kernels printed is not looked at for it. With
+    # ALL_MATCH for WORD, a text that leaves the CPU's only where the CPU itself had a near tie
+    # (greedy_compare.py) passes too, and says so.
+    local said
+    said=$(echo "$2" | sed -n 's/^verdict: //p' | tail -1)
+    if [ "$said" = "$3" ]; then
         echo "PASS stage-$1"
-    elif [ "$3" = ALL_MATCH ] && echo "$2" | grep -q "^MATCH_BUT_NEAR_TIES "; then
-        echo "PASS stage-$1 (with $(echo "$2" | sed -n 's/^MATCH_BUT_NEAR_TIES //p') near tie(s): see the lines above)"
+    elif [ "$3" = ALL_MATCH ] && [[ "$said" =~ ^MATCH_BUT_NEAR_TIES\ [0-9]+$ ]]; then
+        echo "PASS stage-$1 (with ${said#MATCH_BUT_NEAR_TIES } near tie(s): see the lines above)"
     elif [ -n "$(refused "$2")" ]; then
         echo "REFUSED stage-$1: $(refused "$2")"; failed=1
     elif echo "$2" | grep -q '^RAN OUT OF TIME$'; then

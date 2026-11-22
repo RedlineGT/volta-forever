@@ -6,7 +6,7 @@ Environment: PORT (the server listens on 127.0.0.1), REF_FILE (made by vllm-ref.
 are asked for as each of its texts has), MODEL_NAME (default `model`).
 The request names no repetition penalty: the server takes the one of the model's configuration,
 which is what the reference must have been made with (PENALTY=model).
-Prints a line for each prompt, then ALL_MATCH, MATCH_BUT_NEAR_TIES n or SOME_DIFFER
+Prints a line for each prompt, then `verdict: ` and ALL_MATCH, MATCH_BUT_NEAR_TIES n or SOME_DIFFER
 (greedy_compare.py says what a near tie is)."""
 import json, os, sys, time, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -26,5 +26,5 @@ for i, r in enumerate(ref):
     kind, detail = greedy_compare.compare(r, text=text)
     kinds.append(kind)
     print('  prompt %d: %s (%d tokens in %.2f s): %s' % (i, {'match': 'MATCH', 'near': 'NEAR TIE', 'differ': 'DIFFER'}[kind], tokens, seconds, detail if kind != 'match' else repr(text[:60])))
-print(greedy_compare.conclude(kinds))
+print('verdict:', greedy_compare.conclude(kinds))
 sys.exit(1 if 'differ' in kinds else 0)

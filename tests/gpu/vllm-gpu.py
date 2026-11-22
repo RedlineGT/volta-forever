@@ -7,7 +7,8 @@ Environment:
   DTYPE       float16 or float32 (default float32)
   MAX_TOKENS  maximum new tokens (default 50)
   REF_FILE    JSON reference from vllm-ref.py (required)
-Prints PASS or FAIL per prompt, and ALL_MATCH or the first divergence.
+Prints a line for each prompt (MATCH, or the first divergence), then `verdict: ALL_MATCH` or
+`verdict: SOME_DIFFER`.
 """
 import os, sys, json, time, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -59,7 +60,7 @@ for i, r in enumerate(ref):
 if total_time > 0:
     print(f'  {total_tokens} tokens in {total_time:.2f}s = {total_tokens/total_time:.1f} tok/s')
 if all_match:
-    print('ALL_MATCH')
+    print('verdict: ALL_MATCH')
 else:
-    print('SOME_DIFFER')
+    print('verdict: SOME_DIFFER')
 sys.exit(0 if all_match else 1)

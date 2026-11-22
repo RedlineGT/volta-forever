@@ -7,7 +7,7 @@ Environment:
                     for as each of its texts has
   ATTENTION_BACKEND flashinfer, triton, torch_native (default: SGLang's own choice)
   DTYPE             float16 (default) or float32
-Prints a line for each prompt, then ALL_MATCH, MATCH_BUT_NEAR_TIES n or SOME_DIFFER
+Prints a line for each prompt, then `verdict: ` and ALL_MATCH, MATCH_BUT_NEAR_TIES n or SOME_DIFFER
 (greedy_compare.py says what a near tie is).
 """
 import json, os, sys, time
@@ -49,7 +49,7 @@ def main():
             pass
     if seconds:
         print('  %d tokens in %.2f s = %.1f tok/s (one prompt at a time)' % (tokens, seconds, tokens / seconds))
-    print(greedy_compare.conclude(kinds))
+    print('verdict:', greedy_compare.conclude(kinds))
     return 1 if 'differ' in kinds else 0
 
 

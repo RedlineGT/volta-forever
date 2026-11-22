@@ -9,12 +9,14 @@ Environment:
   TOP_K       top-k for sampling (default: not set)
   TOP_P       top-p for sampling (default: not set)
   SEED        random seed for sampling (default 42)
-  REF_FILE    JSON reference from vllm-ref.py (optional; compare greedy tokens: prints ALL_MATCH,
-              MATCH_BUT_NEAR_TIES n or SOME_DIFFER, as greedy_compare.py defines them)
+  REF_FILE    JSON reference from vllm-ref.py (optional; compare greedy tokens: prints
+              `verdict: ALL_MATCH`, `verdict: MATCH_BUT_NEAR_TIES n` or `verdict: SOME_DIFFER`, as
+              greedy_compare.py defines them)
 With sampling and TOP_K: every token sampled must be among the TOP_K most likely, and within the
 TOP_P of their probability at TEMPERATURE, by the log-probabilities of the model's own logits that
 the engine gives with each token (`raw_logprobs`): what the kernels of the sampling did is checked,
-not what the model computed (that is the greedy stage's). Prints ALL_WITHIN or SOME_OUTSIDE.
+not what the model computed (that is the greedy stage's). Prints `verdict: ALL_WITHIN` or
+`verdict: SOME_OUTSIDE`.
 Prints PASS or FAIL with the reason.
 """
 import sys, os, json, math, time, traceback
@@ -118,9 +120,9 @@ def main():
             print(f'  {total_tokens} tokens in {t_gen:.2f}s = {total_tokens/t_gen:.1f} tok/s')
 
         if ref:
-            print(greedy_compare.conclude(kinds))
+            print('verdict:', greedy_compare.conclude(kinds))
         if checked:
-            print('SOME_OUTSIDE' if any(wrong) else 'ALL_WITHIN')
+            print('verdict:', 'SOME_OUTSIDE' if any(wrong) else 'ALL_WITHIN')
 
         print('PASS')
     except Exception as e:
