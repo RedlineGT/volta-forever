@@ -87,6 +87,8 @@ Each rate uses the change in vLLM’s own phase timer for one request. Prefill c
 
 On the same card and the same three requests, full CUDA graphs with the compiler disabled reached 1016.51 prefill and 72.24 decode tokens/s. Eager mode at the same assembler optimization level reached 890.74 and 9.43 tokens/s. [Same-GPU comparison](./benchmarks/vllm-graphs.json)
 
+The native 1Cat-vLLM reference on the same card and AWQ checkpoint reached **1443.33 prefill** and **76.09 decode** tokens/s. Official vLLM, using the locally built VF 0.1.2 archive, reached **1006.90** and **72.14** in that comparison. Both used the same three requests with speculative decoding disabled. These native rates are the targets for this workload. [Paired measurements and responses](./benchmarks/vllm-graphs.json)
+
 ## 6. Additional notes
 
 VF 0.1.1 reports the capability 7.5 required by vLLM’s NVML check. The 35B run used all nine checkpoint shards, automatic quantization selection and CUDA 13.5 headers for FlashInfer RMSNorm. VF 0.1.0 reported 7.0 to this check. [VF 0.1.1 release](https://github.com/nbald/volta-forever/releases/tag/v0.1.1)

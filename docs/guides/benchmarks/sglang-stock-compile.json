@@ -1,0 +1,142 @@
+{
+  "engine": "SGLang 0.5.23 (official PyPI package)",
+  "volta_forever": "0.1.1 (120f2d2)",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "driver": "580.178.04",
+  "toolkit": "CUDA 13.5",
+  "pytorch": "2.14.1+cu130",
+  "triton": "3.8.0",
+  "checkpoint": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+  "revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+  "safetensors_shards": 9,
+  "reported_capability": "7.5 (VF default)",
+  "execution": "Batch one, eager 32-token prefill, full decode CUDA graph, official SGLang JIT expert router with the standard top-k layout, official Triton assembler.",
+  "server": {
+    "dtype": "float16",
+    "quantization": "moe_wna16",
+    "attention_backend": "triton",
+    "sampling_backend": "pytorch",
+    "context_length": 512,
+    "chunked_prefill_size": 32,
+    "max_running_requests": 1,
+    "mem_fraction_static": 0.85,
+    "disable_cuda_graph": false,
+    "model_loader_extra_config": "{\"enable_multithread_load\":false}",
+    "skip_server_warmup": true,
+    "watchdog_timeout": 3600.0,
+    "enable_metrics": true,
+    "json_model_override_args": {
+      "quantization_config": {
+        "quant_method": "awq",
+        "bits": 4,
+        "group_size": 128,
+        "version": "gemm",
+        "zero_point": true,
+        "modules_to_not_convert": [
+          "visual",
+          "linear_attn",
+          "self_attn.qkv_proj",
+          "self_attn.o_proj",
+          "shared_expert",
+          "mlp.gate",
+          "model.layers.0.",
+          "mtp"
+        ]
+      }
+    },
+    "cuda_graph_backend_decode": "full",
+    "cuda_graph_backend_prefill": "disabled",
+    "cuda_graph_bs_decode": [
+      1
+    ]
+  },
+  "environment": {
+    "PTXAS_OPTIONS": "--override-directive-values --maxrregcount=192 --opt-level=3",
+    "NVCC_APPEND_FLAGS": "-gencode=arch=compute_75,code=compute_75",
+    "SGLANG_MAMBA_CONV_DTYPE": "float16",
+    "FLASHINFER_USE_CUDA_NORM": "1",
+    "SGLANG_ENABLE_METRICS_DEVICE_TIMER": "1",
+    "OMP_NUM_THREADS": "4",
+    "MAX_JOBS": "4",
+    "SGLANG_EXPERIMENTAL_LORA_OPTI": "1",
+    "SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN": "1",
+    "SGLANG_OPT_LORA_FUSED_TOPK_PACK": "0"
+  },
+  "chat": {
+    "question": "What is the capital of France? Answer with just the city.",
+    "http_status": 200,
+    "answer": "Paris",
+    "prompt_tokens": 25,
+    "completion_tokens": 2
+  },
+  "benchmark": {
+    "client": "sglang.py",
+    "client_sha256": "0086d505566ce5b5e5e615592053614c96df7dd1597debf3ed222a2c1c4ff18a",
+    "prompts_sha256": "c40ce4a6b25ec6821587480eb3e13bf0ba0186106c4a960e4f69d5c8ede3f4a9",
+    "temperature": 0,
+    "thinking": false,
+    "max_tokens": 64,
+    "concurrency": 1,
+    "warmups": 1,
+    "measured_requests": 3,
+    "cached_input_tokens_per_request": 0,
+    "timers": "Deltas of sglang:forward_execution_seconds_total (extend and decode). The client checks token totals and device/host/storage cache hits before accepting each sample."
+  },
+  "results": [
+    {
+      "id": "warmup",
+      "input_tokens": 228,
+      "output_tokens": 64,
+      "prefill_s": 1.2607815704345713,
+      "decode_s": 1.6230225849151605,
+      "prefill_tokens_per_s": 180.8402068578874,
+      "decode_tokens_per_s": 38.81646539335937,
+      "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to ensure smooth operations for our visitors. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member ins"
+    },
+    {
+      "id": "run1",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "prefill_s": 1.2507996215820318,
+      "decode_s": 1.6226631622314418,
+      "prefill_tokens_per_s": 181.4839052420616,
+      "decode_tokens_per_s": 38.825063307263434,
+      "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record activities. Before the doors open, another team member inspects the signs by the"
+    },
+    {
+      "id": "run2",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "prefill_s": 1.2538910751342787,
+      "decode_s": 1.6230635566711413,
+      "prefill_tokens_per_s": 181.0364588293211,
+      "decode_tokens_per_s": 38.815485531084974,
+      "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+    },
+    {
+      "id": "run3",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "prefill_s": 1.2461137924194343,
+      "decode_s": 1.6220241947174063,
+      "prefill_tokens_per_s": 182.16634899711727,
+      "decode_tokens_per_s": 38.840357748779475,
+      "text": "Lima, Peru, is the location where our volunteer group convenes daily to manage our shared operations. Upon arrival, you will find the team gathered in a common room situated directly by the entrance, where a long table serves as the central hub for our activities. Each morning, a designated volunteer places a yellow envelope on"
+    },
+    {
+      "id": "median",
+      "prefill_tokens_per_s": 181.4839052420616,
+      "decode_tokens_per_s": 38.825063307263434
+    }
+  ],
+  "new_driver_xid": false,
+  "torch_compile": "Default PyTorch behavior. SGLang uses its decorated @torch.compile expert reduction.",
+  "expert_reduction_check": {
+    "shape": "[tokens, 8, 2048], FP16; tokens = 1, 8, 32",
+    "routed_scaling_factors": [
+      1.0,
+      0.75
+    ],
+    "result": "All six GPU outputs exactly matched FP32 CPU accumulation followed by FP16 conversion. TorchDynamo recorded three unique graphs."
+  }
+}

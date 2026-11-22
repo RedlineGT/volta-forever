@@ -104,7 +104,7 @@ Start with Ubuntu 24.04 and a Tesla V100. Each guide checks for the NVIDIA R580 
 | Ubuntu guide | Model in the example | V100 result |
 |---|---|---|
 | [vLLM](docs/guides/vllm.md) | Qwen3.5-35B-A3B, 4-bit AWQ | The official server answered “Paris”. With CUDA graphs and Marlin experts, **1014.26 tokens/s** prefill and **72.13 tokens/s** decode. [Benchmark](docs/guides/benchmarks/) |
-| [SGLang](docs/guides/sglang.md) | Qwen3.5-35B-A3B, 4-bit AWQ | The official PyPI server answered “Paris” with VF 0.1.1. With its JIT expert router and batch-one CUDA decode graph, the server reached **180.82 tokens/s** prefill and **38.12 tokens/s** decode. [Benchmark](docs/guides/benchmarks/sglang-stock-jit32.json) |
+| [SGLang](docs/guides/sglang.md) | Qwen3.5-35B-A3B, 4-bit AWQ | The official PyPI server answered “Paris” with VF 0.1.1. With PyTorch compilation, its JIT expert router and batch-one CUDA decode graph, the server reached **181.48 tokens/s** prefill and **38.83 tokens/s** decode. [Benchmark](docs/guides/benchmarks/sglang-stock-compile.json) |
 | [FreeToken](docs/guides/freetoken.md) | Qwen3.5-35B-A3B, GGUF Q4_K_M | The server answered “Paris”. Batch-one CUDA graphs reached **884.56 tokens/s** prefill and **109.26 tokens/s** decode. [Benchmark](docs/guides/benchmarks/freetoken-graphs.json) |
 | [ZML](docs/guides/zml.md) | Qwen3.5-0.8B | The CUDA example answered “Paris”. The 35B AWQ loader stopped on a missing expert tensor. |
 | [Strata](docs/guides/strata.md) | Qwen3.5-35B-A3B-MTP, GGUF UD-Q4_K_XL | The CUDA 13 server answered “Paris”. With VF, **1866.8 tokens/s** prefill and **152.0 tokens/s** decode. [Native CUDA 12 comparison](docs/guides/benchmarks/strata-results.json) |

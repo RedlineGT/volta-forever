@@ -62,7 +62,7 @@ export NVCC_APPEND_FLAGS='-gencode=arch=compute_75,code=compute_75'
 export SGLANG_MAMBA_CONV_DTYPE=float16 FLASHINFER_USE_CUDA_NORM=1
 export SGLANG_EXPERIMENTAL_LORA_OPTI=1 SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN=1
 export SGLANG_OPT_LORA_FUSED_TOPK_PACK=0
-export TORCH_COMPILE_DISABLE=1 SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
+export SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
 export OMP_NUM_THREADS=4 MAX_JOBS=4
 awq='{"quantization_config":{"quant_method":"awq","bits":4,"group_size":128,"version":"gemm","zero_point":true,"modules_to_not_convert":["visual","linear_attn","self_attn.qkv_proj","self_attn.o_proj","shared_expert","mlp.gate","model.layers.0.","mtp"]}}'
 python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
@@ -86,7 +86,7 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
-The 32-token configuration above measured **180.82 tokens/s in prefill** and **38.12 tokens/s in decode**. SGLang uses its own JIT expert router and standard top-k layout. [32-token results](./benchmarks/sglang-stock-jit32.json)
+The 32-token configuration above measured **181.48 tokens/s in prefill** and **38.83 tokens/s in decode**. SGLang uses its own JIT expert router and standard top-k layout. [32-token results](./benchmarks/sglang-stock-compile.json) · [Earlier run with Torch compilation disabled](./benchmarks/sglang-stock-jit32.json)
 
 To isolate CUDA graphs, we also compared the same two launches at a smaller eight-token chunk size.
 

@@ -26,7 +26,7 @@ The official vLLM 0.34.0 server used its compiler, Marlin experts and full and p
 
 ## SGLang
 
-Run the client against the official SGLang server started by the Ubuntu guide. With VF 0.1.1, a 32-token prefill chunk and batch-one CUDA decode graphs, it measured **180.82 prefill** and **38.12 decode** tokens/s. [Native JIT router, responses and phase timers](sglang-stock-jit32.json)
+Run the client against the official SGLang server started by the Ubuntu guide. With VF 0.1.1, a 32-token prefill chunk and batch-one CUDA decode graphs, it measured **181.48 prefill** and **38.83 decode** tokens/s. [Native JIT router, responses and phase timers](sglang-stock-compile.json)
 
 With eight-token chunks, a paired series using the same cache salts measured **62.55/38.25** with graphs and **72.97/12.27** with graphs disabled. The server processed 227 uncached tokens and returned 64 for each of the three requests. [Same-GPU measurements](sglang-stock-graphs.json) · [Eager diagnostic](sglang-stock-results.json)
 

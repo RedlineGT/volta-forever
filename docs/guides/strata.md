@@ -71,6 +71,8 @@ All runs used the same physical V100 with the same checkpoint and MTP speculativ
 
 A second comparison used version 0.1.64 on both paths. Across five rounds of three chats each, native CUDA 12 measured **1,877.6 prefill / 150.9 decode tok/s** and CUDA 13 with VF measured **1,871.4 / 152.2 tok/s**. All 30 replies began with the requested city and reported zero cached tokens. [All 30 measurements](./benchmarks/strata-results.json)
 
+Setting `--set prefill=256` reduced the engine’s prompt chunk from 1,024 to 256 tokens. The same 15-request test measured **1,869.9 prefill / 152.3 decode tok/s**. Automatic sizing had the higher median prefill rate. [Chunk setting and measurements](./benchmarks/strata-results.json)
+
 ## 6. Additional notes
 
 The standard Qwen3.5-35B-A3B Q4_K_M file has 733 tensors. Strata rejected it with `missing qwen35moe.nextn_predict_layers`. The MTP file used above includes 753 tensors. Strata also registers Qwen3.6-35B-A3B under the same profile; omitting `--model-path` selects that separate checkpoint. [Strata model catalog](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md#qwen36-35b-a3b)
