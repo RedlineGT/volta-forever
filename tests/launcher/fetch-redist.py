@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline regressions for the component downloader. Run with python3 tests/launcher/fetch-redist.py."""
 import hashlib
+import http.server
 import io
 import json
 import os
@@ -11,7 +12,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -68,13 +71,13 @@ class FetchTest(unittest.TestCase):
         }}
         (self.root / "manifest.json").write_text(json.dumps(self.manifest))
 
-    def launch(self, *options, interrupt=None):
+    def launch(self, *options, interrupt=None, manifest=None):
         command, env = [sys.executable, str(SCRIPT)], {**os.environ, "PATH": str(self.commands)}
         if interrupt:
             command[1:1] = ["-c", INTERRUPTED]
             env["VF_TEST_SIGNAL"] = interrupt
         return subprocess.Popen(
-            [*command, self.root.as_uri(), str(self.root / "manifest.json"),
+            [*command, self.root.as_uri(), manifest or str(self.root / "manifest.json"),
              str(self.cache), str(self.tree), "--discard", *options],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True,
@@ -180,6 +183,34 @@ class FetchTest(unittest.TestCase):
         self.finish(self.launch("--runtime"))
         self.assertEqual([path for path in leftovers if path.exists()], [])
         self.assertFalse((self.tree / ".vf-stage-old").exists())
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+
+    def test_manifest_over_http(self):
+        # Refused before anything is asked of the server, unless --allow-http.
+        self.component("a")
+        root, asked = str(self.root), []
+
+        class Server(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=root, **kwargs)
+
+            def do_GET(self):
+                asked.append(self.path)
+                super().do_GET()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}/manifest.json"
+        with mock.patch.dict(os.environ, no_proxy="*"):
+            self.assertIn("--allow-http", self.finish(self.launch("--runtime", manifest=url), success=False))
+            self.assertEqual(asked, [])
+            self.finish(self.launch("--runtime", "--allow-http", manifest=url))
+        self.assertEqual(asked, ["/manifest.json"])
         self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
 
     def test_concurrent_installs(self):

@@ -4,6 +4,7 @@ verify their SHA-256 and unpack them into one merged tree.
 
 usage: fetch-redist.py BASE_URL MANIFEST DL_DIR TREE_DIR [--skip REGEX] [--only REGEX]
                        [--platform linux-x86_64] [--variant NAME] [--runtime] [--discard]
+                       [--allow-http]
 
 BASE_URL   e.g. https://developer.download.nvidia.com/compute/cuda/redist
 MANIFEST   a local JSON file or an https:// URL to one
@@ -14,6 +15,10 @@ TREE_DIR   merged tree (bin/, include/, lib/, nvvm/ ...), like /usr/local/cuda
            needs to run, without the headers and the static libraries
 --discard  remove each archive once it is unpacked; what TREE_DIR/COMPONENTS.tsv records
            as unpacked is then not downloaded again
+--allow-http
+           take a MANIFEST given by an http:// URL (refused otherwise: the manifest holds the
+           SHA-256 that the archives are checked against, and over plain HTTP whoever is on
+           the way can change both)
 
 Needs: Python 3, GNU tar. Uses aria2c when available; falls back to Python's own
 urllib (slower, single-threaded). Re-runnable: verified archives are not downloaded again.
@@ -92,8 +97,11 @@ def download(url, dest_dir, dest_name, expected_sha256, lock_fds):
     return dest
 
 
-def load_manifest(path_or_url):
-    """Load a JSON manifest from a local file or an https:// URL."""
+def load_manifest(path_or_url, allow_http=False):
+    """Load a JSON manifest from a local file or an https:// URL (http:// with allow_http)."""
+    if path_or_url.startswith("http://") and not allow_http:
+        sys.exit(f"{path_or_url}: a manifest over plain HTTP is refused, since it holds the SHA-256 "
+                 "that the archives are checked against (--allow-http takes it)")
     if path_or_url.startswith("https://") or path_or_url.startswith("http://"):
         import urllib.request
         with urllib.request.urlopen(path_or_url) as resp:
@@ -122,6 +130,7 @@ def main():
     ap.add_argument("--runtime", action="store_true")
     ap.add_argument("--discard", action="store_true")
     ap.add_argument("--with-nccl", action="store_true", help="include NVIDIA's CUDA 12 NCCL runtime wheel among selectable components")
+    ap.add_argument("--allow-http", action="store_true", help="take a manifest given by an http:// URL")
     a = ap.parse_args()
     if a.with_nccl and not a.runtime:
         ap.error("--with-nccl requires --runtime")
@@ -129,7 +138,7 @@ def main():
     if not _has_aria2c():
         print("note: aria2c not found; using Python's urllib (slower)", file=sys.stderr)
 
-    manifest = load_manifest(a.manifest)
+    manifest = load_manifest(a.manifest, a.allow_http)
     if a.with_nccl:
         manifest["libnccl"] = {"version": NCCL_VERSION, "linux-x86_64": NCCL_WHEEL}
     os.makedirs(a.dl_dir, exist_ok=True)
