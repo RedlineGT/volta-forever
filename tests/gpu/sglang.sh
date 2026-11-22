@@ -10,9 +10,11 @@
 # REFUSED: the layer did not give a kernel to the program, and says which and why.
 #
 # ATTENTION_BACKEND: triton (default here), torch_native, flashinfer (SGLang's own default).
-#   With flashinfer, c and d are refused: its attention kernels have matrix products and name
-#   every register of the machine (`LIMITS.md`). The other two do not use those kernels
-#   (FlashInfer still gives the normalisation, the rotary embedding and the sampling).
+#   With flashinfer, c and d pass with the test's model: five of FlashInfer's eighteen prefill
+#   kernels are refused (`LIMITS.md`), and its prompts ask for none of them; another model or
+#   batch may, and the stage is then REFUSED and names the kernel. The other two do not use
+#   those kernels (FlashInfer still gives the normalisation, the rotary embedding and the
+#   sampling).
 #
 # Requires, either
 #   $VF_SGLANG_VENV   a virtual environment in which SGLang was installed the usual way
