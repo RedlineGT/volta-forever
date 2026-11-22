@@ -280,6 +280,18 @@ path_prepend() {
 
 setup_env() {
     find_cuda12
+    # (LD_LIBRARY_PATH, LD_AUDIT and VF_AUDIT_MAP are lists whose entries a ':' separates: a
+    # directory with one in its path would be split there.)
+    case $home in
+        *:*)
+            echo "vf: the installation is in $home, whose path has a ':', which the launcher cannot pass on in LD_LIBRARY_PATH, LD_AUDIT and VF_AUDIT_MAP; put it in a directory whose path has none" >&2
+            exit 2 ;;
+    esac
+    case $_cuda12 in
+        *:*)
+            echo "vf: the CUDA 12.9.2 directory $_cuda12 ($_cuda12_why) has a ':' in its path, which the launcher cannot pass on in LD_LIBRARY_PATH and VF_AUDIT_MAP; name it by a path without one (a symbolic link to it)" >&2
+            exit 2 ;;
+    esac
     build_map
 
     _audit=$lib_dir/libvf_audit.so
@@ -562,7 +574,8 @@ cmd_doctor() {
     # CUDA 12.9.2 libraries.
     opt_no_audit=0
     opt_map_file=
-    setup_env 2>/dev/null
+    VF_QUIET=1
+    setup_env
     if [ -n "$_cuda12_left" ]; then
         echo "NOTICE in $home/cuda-12.9.2/lib, not counted as libraries:$_cuda12_left"
         echo "       (a .vf-part file is what an interrupted vf fetch left; the next vf fetch removes it)"

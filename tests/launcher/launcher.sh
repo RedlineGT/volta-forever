@@ -532,6 +532,41 @@ else
     fail "$name" "relative CUDA library directory lost when the command changes directory"
 fi
 
+# A ':' in a directory that goes into LD_LIBRARY_PATH and VF_AUDIT_MAP, whose entries colons
+# separate, is refused and said, as one in an entry of a --map file is: the CUDA 12.9.2
+# directory given by VF_CUDA12, by --cuda12, by a relative path from a directory that has one,
+# and the installation's own path. vf version needs neither.
+name="cuda12-colon"
+mkdir -p "$tmp/cuda:12/lib"
+: >"$tmp/cuda:12/lib/libcublas.so.12"
+for how in env option relative doctor; do
+    _st=0
+    case $how in
+        env) err=$(VF_CUDA12="$tmp/cuda:12/lib" "$vf" env 2>&1 >/dev/null) || _st=$? ;;
+        option) err=$("$vf" --cuda12 "$tmp/cuda:12/lib" sh -c 'echo ran' 2>&1) || _st=$? ;;
+        relative) err=$(cd "$tmp/cuda:12" && "$vf" --cuda12 lib env 2>&1 >/dev/null) || _st=$? ;;
+        doctor) err=$(VF_CUDA12="$tmp/cuda:12/lib" "$vf" doctor 2>&1 >/dev/null) || _st=$? ;;
+    esac
+    case "$_st:$err" in
+        *ran*) fail "$name-$how" "the command ran" ;;
+        2:*"$tmp/cuda:12/lib"*"':'"*) pass "$name-$how" ;;
+        *) fail "$name-$how" "exit $_st, said: $err" ;;
+    esac
+done
+name="home-colon"
+mk_archive "$tmp/inst:all" cuda12
+_st=0
+err=$("$tmp/inst:all/bin/vf" env 2>&1 >/dev/null) || _st=$?
+case "$_st:$err" in
+    2:*"$tmp/inst:all"*"':'"*)
+        if [ "$("$tmp/inst:all/bin/vf" version)" = "0.1.0 test" ]; then
+            pass "$name"
+        else
+            fail "$name" "vf version is refused too"
+        fi ;;
+    *) fail "$name" "exit $_st, said: $err" ;;
+esac
+
 # 9. Warning when CUDA 12.9.2 is absent.
 
 name="warn-no-cuda12"
