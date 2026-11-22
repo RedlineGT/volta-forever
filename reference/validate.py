@@ -2409,7 +2409,9 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
     writes, not the home of a uniform register declared there (`homes_here`: {register:
     uniform register}), not a register that holds a predicate there (`held_here`), and not
     the register of another uniform register of the frame at the same instruction. The same of
-    the register that the top of the frame is loaded in.
+    the register that the top of the frame is loaded in, and of the temporary register that a
+    uniform predicate kept in the frame is loaded in or stored from (`mem: load UP<n>`,
+    `mem: store UP<n>`).
 
     V2, the order. A value has a name: what a register held before the sequence, what the
     frame holds of a uniform register, what an instruction of the sequence made. A load gives
@@ -2417,9 +2419,11 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
     so do what puts a register away and brings it back. Then:
     - what the instruction became reads, in the register of a uniform register, that register
       as loaded, or what the instruction made there; in any other register, nothing that a
-      move of the frame put there;
+      move of the frame put there, but for the conversion that reads a uniform predicate
+      back from its temporary register;
     - a store is of a uniform register that the instruction writes, of the value that the
-      instruction made in its register, and the last it makes there; once for each;
+      instruction made in its register, and the last it makes there; once for each; a store
+      of a uniform predicate is of what its conversion wrote down;
     - a register put away ends with what it held;
     - a load or a store of the frame, and what puts a register away or brings it back, takes
       its address from the stack pointer or from a register that holds, at that instruction,
@@ -2429,7 +2433,10 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
     computes its value, or a load into the home of a uniform register that the instruction
     still read, passed. Until 2026-11-21 the values were followed and the addresses were not:
     a store placed before the load of the base it is addressed from passed, and wrote the
-    word of another uniform register.) Returns the registers of V1."""
+    word of another uniform register. Until 2026-11-22 the moves of uniform predicates kept in
+    the frame were not followed: a load of a predicate into a register that the instruction
+    read, or into the register of a uniform register loaded before it, passed.) Returns the
+    registers of V1."""
     seq = sorted(parts)
     d75 = mc.decode(75, int.from_bytes(original_code[old:old + 16], 'little')) if old + 16 <= len(original_code) else None
     if d75 is None:
@@ -2437,11 +2444,16 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
     own = {r for l, r, *_ in d75.reads if l == 'R'} | {r for l, r in d75.writes if l == 'R'}
     written_u = {r for l, r in d75.writes if l == 'U'}
     # What stands where.
-    standin, where, loaded, base, room = {}, {}, set(), None, set()
+    standin, where, loaded, base, room, temporaries = {}, {}, set(), None, set(), []
     for new, w in seq:
         t = tb[new // 16] or ''
         move = re.match(r'mem: (load|store) UR(\d+)$', w)
-        if move:
+        predicate = re.match(r'mem: (load|store) UP(\d+)$', w)
+        if predicate:
+            m = (LDL_RE if predicate.group(1) == 'load' else STL_RE).match(t)
+            if m:               # (`predicate_frame_moves` says so when it is not)
+                temporaries.append((int(m.group(1 if predicate.group(1) == 'load' else 4)[1:]), int(predicate.group(2)), new, w))
+        elif move:
             load, u = move.group(1) == 'load', int(move.group(2))
             m = (LDL_RE if load else STL_RE).match(t)
             if not m:
@@ -2479,6 +2491,17 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
         x, new = base
         if x in by_register or x in own or x in homes_here or x in held_here:
             say(new, old, 'mem: base', 'V: R%d, where the top of the frame is loaded, holds something else that the instruction needs' % x)
+    for x, q, new, w in temporaries:
+        if x in by_register:
+            say(new, old, w, 'V: R%d is the temporary of UP%d here, and stands for UR%d' % (x, q, by_register[x][0]))
+        if x in own:
+            say(new, old, w, 'V: R%d is the temporary of UP%d here, and the instruction itself reads or writes R%d' % (x, q, x))
+        if x in homes_here:
+            say(new, old, w, 'V: R%d is the temporary of UP%d here, and is the home of UR%d there' % (x, q, homes_here[x]))
+        if x in held_here:
+            say(new, old, w, 'V: R%d is the temporary of UP%d here, and holds a predicate there' % (x, q))
+        if base is not None and x == base[0]:
+            say(new, old, w, 'V: R%d is the temporary of UP%d here, and the top of the frame is loaded in it' % (x, q))
     owner = {x: us[0] for x, us in by_register.items() if len(us) == 1}
     base = base[0] if base is not None else None
 
@@ -2487,6 +2510,8 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
             return 'what R%d held before the instruction' % value[1]
         if value[0] == 'ur':
             return 'UR%d as the frame has it' % value[1]
+        if value[0] == 'up':
+            return 'UP%d as the frame has it' % value[1]
         if value[0] == 'base':
             return 'the top of the frame'
         if value[0] == 'none':
@@ -2495,6 +2520,7 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
 
     # The values, in the order of the code.
     reg, mem, stored, made = {}, {}, {}, {}
+    kind = dict(seq)
     held = lambda r: reg.get(r, ('in', r))
 
     def addressed(new, w, register):
@@ -2507,7 +2533,21 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
         t = tb[new // 16] or ''
         away = re.match(r'room: R(\d+) (away|back)$', w)
         move = re.match(r'mem: (load|store) UR(\d+)$', w)
-        if away:
+        predicate = re.match(r'mem: (load|store) UP(\d+)$', w)
+        if predicate:
+            load, q = predicate.group(1) == 'load', int(predicate.group(2))
+            m = (LDL_RE if load else STL_RE).match(t)
+            if not m:
+                continue
+            addressed(new, w, m.group(2))
+            if load:
+                reg[int(m.group(1)[1:])] = ('up', q)
+            else:
+                x = int(m.group(4)[1:])
+                value = held(x)
+                if not (value[0] == 'made' and kind.get(value[1]) == 'held: kept'):
+                    say(new, old, w, 'V: stores for UP%d what R%d holds then: %s, not what its conversion wrote down' % (q, x, said(value)))
+        elif away:
             v = int(away.group(1))
             m = (STL_RE if away.group(2) == 'away' else LDL_RE).match(t)
             if not m:
@@ -2550,13 +2590,15 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
                 if letter != 'R':
                     continue
                 value = held(r)
+                if value[0] == 'up' and w == 'held: back':
+                    continue        # (the conversion: `predicate_frame_moves` pairs it with its load)
                 if r in owner:
                     if not (value == ('ur', owner[r]) or (value[0] == 'made' and value[2])):
                         say(new, old, w, 'V: reads R%d, which stands for UR%d here, when it holds %s' % (r, owner[r], said(value)))
                 elif r == base:
                     if value != ('base',):
                         say(new, old, w, 'V: reads R%d for the top of the frame when it holds %s' % (r, said(value)))
-                elif value[0] in ('ur', 'base', 'none') or (value[0] == 'in' and value[1] != r):
+                elif value[0] in ('ur', 'up', 'base', 'none') or (value[0] == 'in' and value[1] != r):
                     say(new, old, w, 'V: reads R%d, where a move of the frame has put %s' % (r, said(value)))
             for letter, r in d70.writes:
                 if letter == 'R':
@@ -2573,7 +2615,7 @@ def check_frame_values(mc, name, old, parts, tb, result_code, original_code, hom
             say(new, old, w, 'V: stores for UR%d what R%d holds then: %s, not what the instruction made' % (u, x, said(value)))
         elif made.get(x) != value:
             say(new, old, w, 'V: stores UR%d from R%d before the last instruction that writes it there' % (u, x))
-    return set(by_register) | ({base} if base is not None else set())
+    return set(by_register) | ({base} if base is not None else set()) | {x for x, q, new, w in temporaries if w.startswith('mem: load ')}
 
 
 def check_r1_lowered(mc, name, old, parts, tb, ta, result_code, original_code, frame_bytes, highest, listing, problems, say):

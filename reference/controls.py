@@ -192,6 +192,10 @@ level 3):
     standin_shared_l3
                 two uniform registers of the frame that an instruction reads are loaded into
                 one register
+    up_standin_l3
+                a uniform predicate kept in the frame is loaded, after the uniform registers of
+                the frame that the instruction reads, into the register that stands for the
+                first of them, and read back from there
 
 With room made at an instruction (VF_BORROW=5 makes it where a kernel would otherwise need more
 registers than it has):
@@ -898,6 +902,26 @@ def patched(control):
                 items.append(self.late(mc.md70.by_name['stl__sImmOffset'], word, i, 'mem: store UR%d' % other[0]))
         return items
 
+    # ---- level 3 controls: the uniform predicates kept in the frame (`mem: load UP<n>`,
+    # `mem: store UP<n>`), which `translate` moves with `load_word` and `store_word` and reads
+    # back with `read_back` ----
+    load_word, read_back = Function.load_word, Function.read_back
+
+    def load_word_up_standin(self, word, rd, i, items, what):
+        if what.startswith('mem: load UP'):
+            read, written, together = self.in_frame(self.src[i])
+            there = [self._mem_regs[u] for u in sorted(read) if u in self._mem_regs]
+            if there:
+                self._up_read_back = (i, rd, there[0])
+                rd = there[0]
+        return load_word(self, word, rd, i, items, what)
+
+    def read_back_up_standin(self, holder, p, i):
+        moved = getattr(self, '_up_read_back', None)
+        if moved is not None and moved[:2] == (i, holder):
+            holder = moved[2]
+        return read_back(self, holder, p, i)
+
     # ---- level 3 product controls ----
     def product_odd_before_l3(self, i, d, wait):
         """Odd computed before the gathering that still reads half: move the two 'kept: odd'
@@ -969,6 +993,7 @@ def patched(control):
         'standin_home_l3': {'from_memory': from_memory_into_home},
         'standin_operand_l3': {'from_memory': from_memory_into_operand},
         'standin_shared_l3': {'from_memory': from_memory_shared},
+        'up_standin_l3': {'load_word': load_word_up_standin, 'read_back': read_back_up_standin},
         # ---- room controls ----
         'room_reads_orig': {},
         'room_home_alive': {},
@@ -1009,7 +1034,7 @@ CONTROLS += BORROW_CONTROLS
 # (Those of level 3: only when VF_BORROW>=2 and a function uses the frame.)
 FRAME_CONTROLS = ['no_lane_l3', 'odd_pair_l3', 'no_r1_lower', 'wrong_r1_lower', 'wrong_slot_load', 'no_store_l3', 'held_busy_l3', 'unkept_holder_l3', 'shared_holder_l3', 'home_unsaid', 'guarded_store_l3', 'no_old_load_l3', 'no_load_wait', 'store_no_read_sb', 'wrong_base_const', 'missing_pool_line', 'no_attr_raise', 'no_borrow_wait_l3', 'no_c3_wait',
                   'store_before_l3', 'store_other_l3', 'stray_store_l3', 'standin_home_l3', 'standin_operand_l3', 'standin_shared_l3',
-                  'base_after_use_l3']
+                  'base_after_use_l3', 'up_standin_l3']
 CONTROLS += FRAME_CONTROLS
 # (Those of a frame addressed from its top, which a register is loaded with: at VF_BORROW=3,
 # and wherever the program moves its stack pointer in a way that is not followed.)
@@ -1048,7 +1073,7 @@ def run(mc, control, path, out_dir, untouched, validated=True):
     translation as it is is kept there and not validated.)"""
     originals = {name: getattr(Function, name) for name in ('stand_ins', 'liveness', 'late', 'schedule', 'return_addresses', 'matrix_load', 'matrix_product', 'kept', 'kept_gathering', 'given_back', 'all_predicates', 'waits_for', 'masked',
                                                              'kept_for_rows', 'whole_rows', 'half_of_pair', 'converted',
-                                                             'from_memory', 'to_memory', 'frame_top')}
+                                                             'from_memory', 'to_memory', 'frame_top', 'load_word', 'store_word', 'read_back')}
     for name, replacement in patched(control).items():
         setattr(Function, name, replacement)
     stall, relocations_of = translate.with_stall, translate.relocations_of
