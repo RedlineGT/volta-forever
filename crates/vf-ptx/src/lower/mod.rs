@@ -253,6 +253,17 @@ const NEVER: &str = "$vf_never";
 /// How the names of the registers and of the labels that the rewriting adds begin.
 const GENERATED: [&str; 2] = ["%vf_", "$vf_"];
 
+/// Specialization for a pair of BF16 matrix products sharing the same left fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Bf16Row {
+    #[default]
+    Off,
+    /// Match the scalar BF16 lowering's FP32 accumulation order.
+    Ordered,
+    /// Accumulate four partial dots in parallel, then add C. Rounding can differ.
+    Tree,
+}
+
 /// What the rewriting may take for granted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Options {
@@ -265,6 +276,8 @@ pub struct Options {
     /// convert its multiplicands to normal half precision or signed zero. The FP32 accumulator
     /// may round differently from the scalar path.
     pub bf16_tc_groups: bool,
+    /// Optimize products with one active row, after a uniform runtime check.
+    pub bf16_row: Bf16Row,
 }
 
 /// The names of `text` that begin with `%`, without repetition: for the text of a module outside
@@ -350,8 +363,8 @@ pub fn body_in(
         ),
         None => (text, items, Counts::default()),
     };
-    let grouped = if options.bf16_tc_groups {
-        bf16_groups::rewrite(text, &items, outside)
+    let grouped = if options.bf16_tc_groups || options.bf16_row != Bf16Row::Off {
+        bf16_groups::rewrite(text, &items, outside, options)
     } else {
         None
     };

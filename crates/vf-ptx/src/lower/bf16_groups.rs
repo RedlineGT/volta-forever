@@ -1,7 +1,10 @@
 //! Convert consecutive BF16 MMAs to FP16 MMAs when every participating lane has exactly
 //! representable inputs. Keep the original operations behind a warp-uniform branch for all
 //! other inputs. A group shares one vote and converts each distinct multiplicand once.
+mod row;
 mod schedule;
+
+use super::{Bf16Row, Options, types::Declarations};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
@@ -103,28 +106,36 @@ fn write_guard(out: &mut String, reg: &str, id: usize, sources: &BTreeMap<&str, 
     }
 }
 
-pub(super) fn rewrite(text: &str, items: &[Item], outside: &[String]) -> Option<(String, usize)> {
+pub(super) fn rewrite(text: &str, items: &[Item], outside: &[String], options: Options) -> Option<(String, usize)> {
     if !text.contains(MMA) || text.contains("bfgroup_") || outside.iter().any(|s| s.contains("bfgroup_")) {
         return None;
     }
     if let Some((scheduled, starts)) = schedule::prepare(text, items) {
         let scheduled_items = scan::items(scheduled.as_bytes(), 0..scheduled.len())?;
-        return group(&scheduled, &scheduled_items, &starts);
+        return group(&scheduled, &scheduled_items, &starts, options);
     }
-    group(text, items, &HashSet::new())
+    group(text, items, &HashSet::new(), options)
 }
 
-fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>) -> Option<(String, usize)> {
+fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Options) -> Option<(String, usize)> {
     let mut out = String::new();
     let mut copied = 0;
     let mut first = 0;
     let mut groups = 0;
     let mut added_products = 0;
+    let mut declarations = Declarations::default();
     let mut depth = 0;
     while first < items.len() {
-        match items[first].kind {
+        match &items[first].kind {
             Kind::Open => depth += 1,
             Kind::Close => depth -= 1,
+            Kind::Statement {
+                guarded: false,
+                opcode,
+                operands,
+            } if depth == 0 && options.bf16_row != Bf16Row::Off && &text[opcode.clone()] == ".reg" => {
+                declarations.declare(&text[operands.clone()]);
+            }
             _ => {}
         }
         if depth != 0 || product(&items[first], text).is_none() {
@@ -167,6 +178,25 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>) -> Option<(Stri
         }
         if products.len() < 4 && !(products.len() == 2 && scheduled.contains(&items[first].range.start)) {
             first += 1;
+            continue;
+        }
+        if options.bf16_row != Bf16Row::Off
+            && let [(one, left), (two, right)] = &products[..]
+            && *two == *one + 1
+            && scheduled.contains(&items[*one].range.start)
+            && row::eligible(left, right, &declarations)
+        {
+            let begin = items[*one].range.start;
+            let end = items[*two].range.end;
+            out.push_str(&text[copied..begin]);
+            row::write(&mut out, groups, [left, right], options.bf16_row, &text[begin..end]);
+            copied = end;
+            groups += 1;
+            first = last + 1;
+            continue;
+        }
+        if !options.bf16_tc_groups {
+            first = last + 1;
             continue;
         }
         // In the V100 measurements, groups sharing a complete multiplicand amortized
@@ -234,7 +264,16 @@ mod tests {
     fn scoped(source: &str, outside: &[String]) -> Option<String> {
         let text = format!("{{\n{source}\n}}");
         let items = scan::items(text.as_bytes(), 0..text.len()).unwrap();
-        rewrite(&text, &items, outside).map(|(text, _)| text)
+        rewrite(
+            &text,
+            &items,
+            outside,
+            Options {
+                bf16_tc_groups: true,
+                ..Default::default()
+            },
+        )
+        .map(|(text, _)| text)
     }
 
     #[test]

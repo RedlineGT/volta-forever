@@ -1,0 +1,46 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry k(.param .u64 output) {
+.reg .u64 %out,%offset;
+.reg .b32 %lane,%active,%upper,%b,%b2,%zero,%large,%d<8>,%value;
+.reg .pred %row,%first,%invalid;
+ld.param.u64 %out,[output];
+mov.u32 %lane,%laneid;
+mul.wide.u32 %offset,%lane,16;
+add.u64 %out,%out,%offset;
+setp.lt.u32 %row,%lane,4;
+setp.eq.u32 %first,%lane,0;
+selp.b32 %active,0x3f803f80,0,%row;
+selp.b32 %large,0x4b800000,0,%row;
+mov.b32 %zero,0;
+mov.b32 %upper,0;
+mov.b32 %b,0x3f803f80;
+// Sixteen unit products at C=2^24. Sequential ties-to-even retains C.
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%active,%upper,%active,%upper},{%b,%b},{%large,%large,%zero,%zero};
+mov.b32 %b2,%b;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d4,%d5,%d6,%d7},{%active,%upper,%active,%upper},{%b2,%b2},{%large,%large,%zero,%zero};
+shfl.sync.idx.b32 %value,%d0,0,31,0xffffffff;
+st.global.b32 [%out],%value;
+shfl.sync.idx.b32 %value,%d5,0,31,0xffffffff;
+st.global.b32 [%out+4],%value;
+// Nonzero row 8 forces both products down the ordinary path.
+selp.b32 %upper,0x3f803f80,0,%row;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%active,%upper,%active,%upper},{%b,%b},{%large,%large,%zero,%zero};
+mov.b32 %b2,%b;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d4,%d5,%d6,%d7},{%active,%upper,%active,%upper},{%b2,%b2},{%large,%large,%zero,%zero};
+shfl.sync.idx.b32 %value,%d6,0,31,0xffffffff;
+st.global.b32 [%out+8],%value;
+// Infinity in one word of B in the second product makes 0*Inf NaN on row 8.
+mov.b32 %upper,0;
+selp.b32 %value,0x7f803f80,%b,%first;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%active,%upper,%active,%upper},{%b,%b},{%large,%large,%zero,%zero};
+mov.b32 %b2,%value;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d4,%d5,%d6,%d7},{%active,%upper,%active,%upper},{%b2,%b2},{%large,%large,%zero,%zero};
+shfl.sync.idx.b32 %value,%d6,0,31,0xffffffff;
+setp.nan.f32 %invalid,%value,%value;
+selp.u32 %value,1,0,%invalid;
+st.global.b32 [%out+12],%value;
+ret;
+}

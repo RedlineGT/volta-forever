@@ -91,6 +91,8 @@ px bf16-mma-branches "$G/ptx-cases/bf16-cases.ptx" 180 0 0 0
 # An exactly representable BF16 tile and a tile with one out-of-range lane.
 VF_BF16_TC_GROUPS=0 px bf16-mma-group-off "$G/ptx-cases/bf16-group.ptx" 42400000 5aa55aa5 12345678 0
 VF_BF16_TC_GROUPS=1 px bf16-mma-group-on "$G/ptx-cases/bf16-group.ptx" 42400000 5aa55aa5 12345678 0
+VF_BF16_ROW=ordered px bf16-row-ordered "$G/ptx-cases/bf16-row.ptx" 4b800000 4b800000 41800000 1
+VF_BF16_ROW=tree px bf16-row-tree "$G/ptx-cases/bf16-row.ptx" 4b800008 4b800008 41800000 1
 
 # Kernels that exist as PTX text only (tests/kernels/ptx-cases): four products
 # on accumulators that hold 1.0, after a scope that declares their family again and sets its own

@@ -272,6 +272,14 @@ impl Policy {
         if let Ok(value) = std::env::var("VF_BF16_TC_GROUPS") {
             self.lowering.bf16_tc_groups = value == "1";
         }
+        if let Ok(value) = std::env::var("VF_BF16_ROW") {
+            use vf_ptx::lower::Bf16Row;
+            self.lowering.bf16_row = match value.as_str() {
+                "ordered" => Bf16Row::Ordered,
+                "tree" => Bf16Row::Tree,
+                _ => Bf16Row::Off,
+            };
+        }
         if let Some(sm) = std::env::var("VF_CAPABILITY").ok().as_deref().and_then(capability_sm) {
             self.told_sm = Some(sm);
         }
