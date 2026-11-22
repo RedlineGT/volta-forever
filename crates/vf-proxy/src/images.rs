@@ -230,6 +230,7 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
     // Context destruction can retire a CUmodule without an explicit unload.
     // The driver's next load starts a new lifetime at the same address.
     kernels::forget(handle);
+    crate::contexts::forget(handle);
     if config().profile
         && let Some(origin) = replacement.origin
     {
@@ -255,6 +256,7 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
 pub fn release(handle: usize) {
     KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
     kernels::forget(handle);
+    crate::contexts::forget(handle);
 }
 
 fn report(who: &str, what: &str, outcome: &Outcome) {

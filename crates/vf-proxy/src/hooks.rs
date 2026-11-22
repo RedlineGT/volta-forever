@@ -1,5 +1,5 @@
 //! The driver functions this library answers itself instead of forwarding blindly: the lookups of the
-//! CUDA runtime, the device capability, and every function that takes GPU code.
+//! CUDA runtime, the device capability, every function that takes GPU code, and the ends of contexts.
 //!
 //! `build.rs` finds the functions defined here by their `extern "C" fn <name>(` text and generates a
 //! plain jump for all the others.
@@ -9,7 +9,7 @@ use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::atomic::Ordering::Relaxed;
 
 use crate::images::{CUDA_ERROR_INVALID_PTX, Replacement};
-use crate::{COUNTS, REALS, callers, config, fit, idx, images, kernels, lazy, log, own_entry, profile};
+use crate::{COUNTS, REALS, callers, config, contexts, fit, idx, images, kernels, lazy, log, own_entry, profile};
 
 type CUresult = c_int;
 const CUDA_SUCCESS: CUresult = 0;
@@ -353,10 +353,22 @@ unsafe fn load(
     }
 }
 
+/// What a load of a module answered: the module that the program now holds is one of the current
+/// context, and goes with it (`contexts`).
+///
+/// # Safety
+/// `module` must be null or point to the handle the driver stored.
+unsafe fn in_context(result: CUresult, module: *mut *mut c_void) -> CUresult {
+    if result == CUDA_SUCCESS && !module.is_null() {
+        contexts::loaded(unsafe { *module } as usize);
+    }
+    result
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *const c_void) -> CUresult {
     let real = real!(cuModuleLoadData: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
-    unsafe {
+    let result = unsafe {
         load(
             "cuModuleLoadData",
             module,
@@ -364,7 +376,8 @@ pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *cons
             |image| real(module, image),
             |image| load_logged(module, image, 0, std::ptr::null_mut(), std::ptr::null_mut()),
         )
-    }
+    };
+    unsafe { in_context(result, module) }
 }
 
 #[unsafe(no_mangle)]
@@ -376,7 +389,7 @@ pub unsafe extern "C" fn cuModuleLoadDataEx(
     values: *mut *mut c_void,
 ) -> CUresult {
     let real = real!(cuModuleLoadDataEx: ModuleLoadEx);
-    unsafe {
+    let result = unsafe {
         load(
             "cuModuleLoadDataEx",
             module,
@@ -384,13 +397,14 @@ pub unsafe extern "C" fn cuModuleLoadDataEx(
             |image| real(module, image, count, options, values),
             |image| load_logged(module, image, count, options, values),
         )
-    }
+    };
+    unsafe { in_context(result, module) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadFatBinary(module: *mut *mut c_void, image: *const c_void) -> CUresult {
     let real = real!(cuModuleLoadFatBinary: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
-    unsafe {
+    let result = unsafe {
         load(
             "cuModuleLoadFatBinary",
             module,
@@ -398,11 +412,21 @@ pub unsafe extern "C" fn cuModuleLoadFatBinary(module: *mut *mut c_void, image: 
             |image| real(module, image),
             |image| load_logged(module, image, 0, std::ptr::null_mut(), std::ptr::null_mut()),
         )
-    }
+    };
+    unsafe { in_context(result, module) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoad(module: *mut *mut c_void, path: *const c_char) -> CUresult {
+    let result = unsafe { load_file(module, path) };
+    unsafe { in_context(result, module) }
+}
+
+/// `cuModuleLoad`, adapted if needed.
+///
+/// # Safety
+/// The arguments of the program's `cuModuleLoad`.
+unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
     let real = real!(cuModuleLoad: unsafe extern "C" fn(*mut *mut c_void, *const c_char) -> CUresult);
     let replacement = if path.is_null() {
         None
@@ -1174,6 +1198,7 @@ unsafe fn share_kernels(result: CUresult, module: *mut *mut c_void, library: usi
         let module_handle = unsafe { *module } as usize;
         kernels::share(module_handle, library);
         fit::share_module(module_handle, library);
+        contexts::loaded(module_handle);
     }
 }
 
@@ -1292,6 +1317,7 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
     let mut module = std::ptr::null_mut();
     if unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS {
         kernels::share(module as usize, owner);
+        contexts::loaded(module as usize);
     }
     result
 }
@@ -1833,6 +1859,82 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
                 launch_ref.stream,
             )
         };
+    }
+    result
+}
+
+// ---- contexts: the modules of a context go with it ------------------------------------------------------
+
+type ContextDestroy = unsafe extern "C" fn(*mut c_void) -> CUresult;
+type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
+    let real = real!(cuCtxDestroy: ContextDestroy);
+    let result = unsafe { real(context) };
+    if result == CUDA_SUCCESS {
+        contexts::destroyed(context as usize);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
+    let real = real!(cuCtxDestroy_v2: ContextDestroy);
+    let result = unsafe { real(context) };
+    if result == CUDA_SUCCESS {
+        contexts::destroyed(context as usize);
+    }
+    result
+}
+
+/// Only to know which context is the primary context of the device, for its release or reset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: c_int) -> CUresult {
+    let real = real!(cuDevicePrimaryCtxRetain: unsafe extern "C" fn(*mut *mut c_void, c_int) -> CUresult);
+    let result = unsafe { real(context, device) };
+    if result == CUDA_SUCCESS && !context.is_null() {
+        contexts::primary_retained(device, unsafe { *context } as usize);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
+    let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
+    let result = unsafe { real(device) };
+    if result == CUDA_SUCCESS {
+        contexts::primary_released(device);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
+    let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
+    let result = unsafe { real(device) };
+    if result == CUDA_SUCCESS {
+        contexts::primary_released(device);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
+    let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
+    let result = unsafe { real(device) };
+    if result == CUDA_SUCCESS {
+        contexts::primary_reset(device);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
+    let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
+    let result = unsafe { real(device) };
+    if result == CUDA_SUCCESS {
+        contexts::primary_reset(device);
     }
     result
 }

@@ -5,12 +5,22 @@
 //   - fork_exit: a child made by fork() while another thread of the parent waits in a write of
 //     the log, and that ends with exit(), ends. (What the layer would report at the child's end
 //     is its parent's, and the lock of the log stays held in the child for ever.)
+//   - contexts: what the layer keeps of the modules of a context is dropped when the context is
+//     destroyed (cuCtxDestroy and cuCtxDestroy_v2, the last release and a reset of the primary
+//     context, by both names of each): the bytes in use in the heap stay as they were over 500
+//     contexts, with a module each (an image of 8 kB). A release of the primary context
+//     that is not its last, and the destruction of another context, leave the modules as they are
+//     (a kernel that the layer refuses is still refused); a library stays when the context in
+//     which the driver gave a module for it goes. The cubin of tests/kernels/k_fit_test (CUBIN in
+//     the environment), whose original the layer keeps for a second translation at launch, is
+//     dropped with its context too.
 //
 // usage: lifecycle CASE PROXY DIR
 // PROXY is the layer's libcuda.so.1, DIR a directory for the files of the case.
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -141,11 +151,201 @@ static int fork_exit(const char *proxy, const char *dir) {
     return 0;
 }
 
+// ---- contexts ----
+
+#define CUDA_ERROR_INVALID_PTX 218
+#define CYCLES 500
+// A second translation takes a twentieth of a second.
+#define SECOND_CYCLES 40
+// What may come and go in the heap over cycles that keep nothing.
+#define NOISE (256 * 1024)
+
+#define SYM(ret, name, ...) static ret (*name)(__VA_ARGS__)
+SYM(CUresult, cuCtxCreate_v2, void **, unsigned, int);
+SYM(CUresult, cuCtxDestroy, void *);
+SYM(CUresult, cuCtxDestroy_v2, void *);
+SYM(CUresult, cuCtxSetCurrent, void *);
+SYM(CUresult, cuDevicePrimaryCtxRetain, void **, int);
+SYM(CUresult, cuDevicePrimaryCtxRelease, int);
+SYM(CUresult, cuDevicePrimaryCtxRelease_v2, int);
+SYM(CUresult, cuDevicePrimaryCtxReset, int);
+SYM(CUresult, cuDevicePrimaryCtxReset_v2, int);
+SYM(CUresult, cuModuleLoadData, void **, const void *);
+SYM(CUresult, cuModuleGetFunction, void **, void *, const char *);
+SYM(CUresult, cuLaunchKernel, void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void *,
+    void **, void **);
+SYM(CUresult, cuLibraryLoadData, void **, const void *, int *, void **, unsigned, int *, void **, unsigned);
+SYM(CUresult, cuLibraryGetKernel, void **, void *, const char *);
+SYM(CUresult, cuLibraryGetModule, void **, void *);
+SYM(CUresult, cuKernelGetFunction, void **, void *);
+SYM(CUresult, cuLibraryUnload, void *);
+#define LOAD(name) *(void **)&name = sym(#name)
+
+// The bytes in use in the heap, which the layer's allocations are in, with the blocks that malloc
+// maps on their own (a large table).
+static long heap(void) {
+    struct mallinfo2 info = mallinfo2();
+    return (long)(info.uordblks + info.hblkhd);
+}
+
+static void check_growth(const char *name, long before, int cycles) {
+    long growth = heap() - before;
+    char what[96];
+    snprintf(what, sizeof what, "heap %+ld bytes over %d contexts (want less than %d)", growth, cycles, NOISE);
+    check(name, growth < NOISE, what);
+}
+
+// The image of `ptx`, with a comment that makes it as large as an image of a program.
+#define COMMENT 8192
+static char *large_image(void) {
+    char *image = malloc(sizeof ptx + 3 + COMMENT + 1);
+    strcpy(image, ptx);
+    strcat(image, "// ");
+    memset(image + strlen(image), 'x', COMMENT);
+    strcpy(image + sizeof ptx - 1 + 3 + COMMENT, "\n");
+    return image;
+}
+
+static void *read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(2); }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    void *data = malloc(size);
+    if (fread(data, 1, size, f) != (size_t)size) { fprintf(stderr, "cannot read %s\n", path); exit(2); }
+    fclose(f);
+    return data;
+}
+
+static int contexts(const char *proxy, const char *dir) {
+    // Translations kept: a translation is taken from there after the first.
+    char cache[4096];
+    snprintf(cache, sizeof cache, "%s/cache", dir);
+    if (mkdir(cache, 0700)) { perror("mkdir"); return 2; }
+    setenv("VF_PROXY_CACHE", cache, 1);
+    open_proxy(proxy);
+    LOAD(cuCtxCreate_v2); LOAD(cuCtxDestroy); LOAD(cuCtxDestroy_v2); LOAD(cuCtxSetCurrent);
+    LOAD(cuDevicePrimaryCtxRetain); LOAD(cuDevicePrimaryCtxRelease); LOAD(cuDevicePrimaryCtxRelease_v2);
+    LOAD(cuDevicePrimaryCtxReset); LOAD(cuDevicePrimaryCtxReset_v2);
+    LOAD(cuModuleLoadData); LOAD(cuModuleGetFunction); LOAD(cuLaunchKernel);
+    LOAD(cuLibraryLoadData); LOAD(cuLibraryGetKernel); LOAD(cuLibraryGetModule); LOAD(cuLibraryUnload);
+    LOAD(cuKernelGetFunction);
+    char *image = large_image();
+    void *context, *other, *module, *function, *library, *kernel;
+    long before = 0;
+    char what[96];
+
+    // A context made and destroyed, with a module: by either name of the call.
+    for (int i = 0; i < CYCLES + 50; i++) {
+        if (i == 50) before = heap();
+        cuCtxCreate_v2(&context, 0, 0);
+        cuModuleLoadData(&module, image);
+        cuModuleGetFunction(&function, module, "good");
+        (i & 1 ? cuCtxDestroy : cuCtxDestroy_v2)(context);
+    }
+    check_growth("context_destroyed", before, CYCLES);
+
+    // The primary context retained twice: the first release leaves the module as it is (its
+    // refused kernel is still refused), the second destroys the context.
+    int still_refused = 0;
+    for (int i = 0; i < CYCLES + 50; i++) {
+        if (i == 50) before = heap();
+        cuDevicePrimaryCtxRetain(&context, 0);
+        cuDevicePrimaryCtxRetain(&context, 0);
+        cuCtxSetCurrent(context);
+        cuModuleLoadData(&module, image);
+        (i & 1 ? cuDevicePrimaryCtxRelease : cuDevicePrimaryCtxRelease_v2)(0);
+        still_refused += cuModuleGetFunction(&function, module, "bad") == CUDA_ERROR_INVALID_PTX;
+        (i & 1 ? cuDevicePrimaryCtxRelease_v2 : cuDevicePrimaryCtxRelease)(0);
+    }
+    snprintf(what, sizeof what, "refused after the first release %d times of %d", still_refused, CYCLES + 50);
+    check("primary_not_last_release", still_refused == CYCLES + 50, what);
+    check_growth("primary_last_release", before, CYCLES);
+
+    // The primary context reset while it is retained: its modules go.
+    cuDevicePrimaryCtxRetain(&context, 0);
+    cuCtxSetCurrent(context);
+    for (int i = 0; i < CYCLES + 50; i++) {
+        if (i == 50) before = heap();
+        cuModuleLoadData(&module, image);
+        cuModuleGetFunction(&function, module, "good");
+        (i & 1 ? cuDevicePrimaryCtxReset : cuDevicePrimaryCtxReset_v2)(0);
+    }
+    check_growth("primary_reset", before, CYCLES);
+    cuDevicePrimaryCtxRelease_v2(0);
+
+    // Another context destroyed: the module of this one stays as it is.
+    cuCtxCreate_v2(&context, 0, 0);
+    cuModuleLoadData(&module, image);
+    cuCtxCreate_v2(&other, 0, 0);
+    cuCtxDestroy_v2(other);
+    cuCtxSetCurrent(context);
+    check("other_context_destroyed", cuModuleGetFunction(&function, module, "bad") == CUDA_ERROR_INVALID_PTX,
+          "the refused kernel of this context's module is refused");
+    cuCtxDestroy_v2(context);
+
+    // A library, and the module that the driver gives for it in a context that goes: the library
+    // stays as it is.
+    cuCtxCreate_v2(&context, 0, 0);
+    cuLibraryLoadData(&library, image, NULL, NULL, 0, NULL, NULL, 0);
+    cuLibraryGetModule(&module, library);
+    cuCtxDestroy_v2(context);
+    cuCtxCreate_v2(&context, 0, 0);
+    check("library_stays",
+          cuLibraryGetKernel(&kernel, library, "bad") == CUDA_ERROR_INVALID_PTX
+              && cuLibraryGetKernel(&kernel, library, "good") == 0,
+          "its refused kernel is refused, the other given");
+    cuCtxDestroy_v2(context);
+    // The module that the driver gives for the library in each context, and a function of it; the
+    // function of the library's kernel there, which leads to that module too.
+    cuLibraryGetKernel(&kernel, library, "good");
+    for (int i = 0; i < 10 * CYCLES + 50; i++) {
+        if (i == 50) before = heap();
+        cuCtxCreate_v2(&context, 0, 0);
+        cuLibraryGetModule(&module, library);
+        cuModuleGetFunction(&function, module, "good");
+        cuKernelGetFunction(&function, kernel);
+        cuCtxDestroy_v2(context);
+    }
+    check_growth("context_destroyed_library_module", before, 10 * CYCLES);
+    cuLibraryUnload(library);
+
+    // A translated cubin whose original the layer keeps for a second translation at launch.
+    const char *cubin_path = getenv("CUBIN");
+    if (!cubin_path) { fprintf(stderr, "contexts: CUBIN is not set\n"); return 2; }
+    void *cubin = read_file(cubin_path);
+    for (int i = 0; i < CYCLES + 50; i++) {
+        if (i == 50) before = heap();
+        cuCtxCreate_v2(&context, 0, 0);
+        cuModuleLoadData(&module, cubin);
+        cuModuleGetFunction(&function, module, "k_fit_regs");
+        cuCtxDestroy_v2(context);
+    }
+    check_growth("context_destroyed_translated", before, CYCLES);
+    // And launched from a second translation, a module of the same context: the stand-in refuses
+    // the launches of the first module of a context.
+    int launched = 0;
+    for (int i = 0; i < SECOND_CYCLES + 10; i++) {
+        if (i == 10) before = heap();
+        cuCtxCreate_v2(&context, 0, 0);
+        cuModuleLoadData(&module, cubin);
+        cuModuleGetFunction(&function, module, "k_fit_regs");
+        launched += cuLaunchKernel(function, 1, 1, 1, 1024, 1, 1, 0, NULL, NULL, NULL) == 0;
+        cuCtxDestroy_v2(context);
+    }
+    snprintf(what, sizeof what, "%d launches of %d", launched, SECOND_CYCLES + 10);
+    check("second_translation_launched", launched == SECOND_CYCLES + 10, what);
+    check_growth("context_destroyed_second_translation", before, SECOND_CYCLES);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) { fprintf(stderr, "usage: lifecycle CASE PROXY DIR\n"); return 2; }
     const char *name = argv[1], *proxy = argv[2], *dir = argv[3];
     int status;
     if (!strcmp(name, "fork_exit")) status = fork_exit(proxy, dir);
+    else if (!strcmp(name, "contexts")) status = contexts(proxy, dir);
     else { fprintf(stderr, "unknown case: %s\n", name); return 2; }
     if (status) return status;
     printf("%s: %d checks, %d wrong\n", name, checks, wrong);

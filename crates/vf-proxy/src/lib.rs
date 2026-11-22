@@ -51,6 +51,7 @@ mod generated {
 }
 mod cache;
 mod callers;
+mod contexts;
 pub mod fit;
 mod hooks;
 mod images;

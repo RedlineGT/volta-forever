@@ -863,6 +863,9 @@ fn load(image: Vec<u8>, library: bool) -> Option<usize> {
     // (The handle is new: nothing of the layer's own may be left under it.)
     forget(handle as usize);
     crate::images::keep(handle as usize, crate::images::Replacement::from_vec(image));
+    if !library {
+        crate::contexts::loaded(handle as usize);
+    }
     Some(handle as usize)
 }
 

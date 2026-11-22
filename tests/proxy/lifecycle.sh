@@ -3,7 +3,8 @@
 #   tests/proxy/lifecycle.sh [PROXY_DIR]
 # PROXY_DIR is the directory of the libcuda.so.1 to test (default: dist/lib of this tree). A
 # stand-in for the driver (lifecycle_mock_driver.c) gives every module a handle of its own;
-# lifecycle.c says what each case checks. Each case runs in a process of its own. Needs gcc.
+# lifecycle.c says what each case checks. Each case runs in a process of its own. Needs gcc and
+# tests/kernels/k_fit_test.135.sm75.cubin.
 # Prints one line a check, then PASS or FAIL; exit status 1 on FAIL.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -21,7 +22,9 @@ export VF_PROXY_CACHE=0
 export VF_LOG_LEVEL=0
 export VF_EMULATION_WARNINGS=0
 status=0
-for case in fork_exit; do
+export CUBIN=$W/tests/kernels/k_fit_test.135.sm75.cubin
+[ -f "$CUBIN" ] || { echo "missing: $CUBIN"; exit 2; }
+for case in fork_exit contexts; do
     mkdir -p "$out/$case"
     "$out/lifecycle" "$case" "$proxy/libcuda.so.1" "$out/$case" || status=1
 done
