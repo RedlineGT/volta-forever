@@ -54,7 +54,7 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 ## ZML
 
-The official LLMD server generated with AMD MXFP4 and the VF development compiler on one V100. With MTP disabled, each measured request read 227 uncached tokens and generated 64. Median decode was **38.12 tokens/s** by LLMD’s step timer and **38.08 tokens/s** between streamed tokens. Median input throughput was **309.69 tokens/s** using the server’s time to first token. The earlier **536.38 prefill / 66.85 decode** measurement used a locally modified ZML example and QuantTrio AWQ. [LLMD counters and replies](zml-llmd-mxfp4.json) · [Experimental AWQ results](zml-awq-experimental.json) · [Ubuntu guide](../zml.md)
+The official LLMD server generated with AMD MXFP4 and the VF development compiler on one V100. With MTP disabled, each measured request read 227 uncached tokens and generated 64. With a 256-token batch and 256-token prefill chunks, the VF launcher measured **38.35 decode tokens/s** on LLMD’s step timer and **482.98 input tokens/s** through the first token. At batch and chunk size 64, the corresponding development compiler measured **38.15** and **309.69**. The earlier **536.38 prefill / 66.85 decode** measurement used a locally modified ZML example and QuantTrio AWQ. [LLMD counters and replies](zml-llmd-mxfp4.json) · [Experimental AWQ results](zml-awq-experimental.json) · [Ubuntu guide](../zml.md)
 
 ## Strata
 
