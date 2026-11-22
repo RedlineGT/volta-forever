@@ -46,7 +46,7 @@ It installs no package of the system, asks for no password and writes nowhere el
 | `VF_VERSION` | the version to install (default: the one the script was published with) |
 | `VF_PREFIX`, `VF_BIN` | where versions are unpacked, and where the commands are linked |
 | `VF_INSTALL_FETCH=0` | do not run `vf fetch` |
-| `VF_INSTALL_BASE` | where the archive and `SHA256SUMS` are taken from (a mirror, a directory served locally) |
+| `VF_INSTALL_BASE` | where the archive and `SHA256SUMS` are taken from (a mirror, a directory served locally): an `https://` URL, or a `file://` one; `VF_INSTALL_ALLOW_HTTP=1` takes an `http://` one too |
 
 Reinstalling or switching releases keeps existing `vf venv` environments pinned to their installed launcher. Releases share one `cuda-12.9.2` directory under `VF_PREFIX`. When upgrading an older installation, this path points to its existing CUDA directory so manual `vf fetch` commands share the same downloads. Keep that directory when removing individual old versions.
 
@@ -172,7 +172,8 @@ eval "$(vf env)"
 
 - `LD_LIBRARY_PATH`: the layer's `lib` (the proxy `libcuda.so.1`, the nvJitLink adapter), its
   `forward` (the libraries with CUDA 13's names), the CUDA 12.9.2 directory, then what was there.
-- `LD_AUDIT` = the audit library, and `VF_AUDIT_MAP` = its table of substitutions: for each
+- `LD_AUDIT` = the audit library (then those that were in `LD_AUDIT`, which see the names it
+  chose), and `VF_AUDIT_MAP` = its table of substitutions: for each
   forwarding library whose CUDA 12.9.2 library is there, its name to the forwarding library,
   and the name of the CUDA 12.9.2 library that it calls to that library. So a program that
   carries CUDA 13 libraries of its own and finds them by a recorded path (a PyTorch wheel) or

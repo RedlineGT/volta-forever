@@ -4,6 +4,7 @@ verify their SHA-256 and unpack them into one merged tree.
 
 usage: fetch-redist.py BASE_URL MANIFEST DL_DIR TREE_DIR [--skip REGEX] [--only REGEX]
                        [--platform linux-x86_64] [--variant NAME] [--runtime] [--discard]
+                       [--allow-http]
 
 BASE_URL   e.g. https://developer.download.nvidia.com/compute/cuda/redist
 MANIFEST   a local JSON file or an https:// URL to one
@@ -14,6 +15,10 @@ TREE_DIR   merged tree (bin/, include/, lib/, nvvm/ ...), like /usr/local/cuda
            needs to run, without the headers and the static libraries
 --discard  remove each archive once it is unpacked; what TREE_DIR/COMPONENTS.tsv records
            as unpacked is then not downloaded again
+--allow-http
+           take a MANIFEST given by an http:// URL (refused otherwise: the manifest holds the
+           SHA-256 that the archives are checked against, and over plain HTTP whoever is on
+           the way can change both)
 
 Needs: Python 3, GNU tar. Uses aria2c when available; falls back to Python's own
 urllib (slower, single-threaded). Re-runnable: verified archives are not downloaded again.
@@ -27,6 +32,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,6 +47,11 @@ NCCL_WHEEL = {
     "sha256": "2a6e6d5ddfc08970eca872be3dfa2650b24fa10a2043974465a9cae9c64ed6d8",
     "size": 336541086,
 }
+
+# What is being unpacked is written in a directory of TREE_DIR whose name starts with this,
+# then moved into place: no program loads from there, and no name pattern of the launcher
+# matches it. (Earlier releases wrote the NCCL runtime as lib/libnccl.so.2.vf-part.)
+STAGE_PREFIX = ".vf-stage-"
 
 
 def sha256(path):
@@ -86,8 +97,11 @@ def download(url, dest_dir, dest_name, expected_sha256, lock_fds):
     return dest
 
 
-def load_manifest(path_or_url):
-    """Load a JSON manifest from a local file or an https:// URL."""
+def load_manifest(path_or_url, allow_http=False):
+    """Load a JSON manifest from a local file or an https:// URL (http:// with allow_http)."""
+    if path_or_url.startswith("http://") and not allow_http:
+        sys.exit(f"{path_or_url}: a manifest over plain HTTP is refused, since it holds the SHA-256 "
+                 "that the archives are checked against (--allow-http takes it)")
     if path_or_url.startswith("https://") or path_or_url.startswith("http://"):
         import urllib.request
         with urllib.request.urlopen(path_or_url) as resp:
@@ -95,7 +109,15 @@ def load_manifest(path_or_url):
     return json.load(open(path_or_url))
 
 
+def stop(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main():
+    # SIGTERM and SIGHUP end a fetch as Ctrl-C does, by an exception: what it staged is removed.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        if signal.getsignal(signum) == signal.SIG_DFL:
+            signal.signal(signum, stop)
     ap = argparse.ArgumentParser()
     ap.add_argument("base_url")
     ap.add_argument("manifest", help="local JSON file or https:// URL")
@@ -108,6 +130,7 @@ def main():
     ap.add_argument("--runtime", action="store_true")
     ap.add_argument("--discard", action="store_true")
     ap.add_argument("--with-nccl", action="store_true", help="include NVIDIA's CUDA 12 NCCL runtime wheel among selectable components")
+    ap.add_argument("--allow-http", action="store_true", help="take a manifest given by an http:// URL")
     a = ap.parse_args()
     if a.with_nccl and not a.runtime:
         ap.error("--with-nccl requires --runtime")
@@ -115,7 +138,7 @@ def main():
     if not _has_aria2c():
         print("note: aria2c not found; using Python's urllib (slower)", file=sys.stderr)
 
-    manifest = load_manifest(a.manifest)
+    manifest = load_manifest(a.manifest, a.allow_http)
     if a.with_nccl:
         manifest["libnccl"] = {"version": NCCL_VERSION, "linux-x86_64": NCCL_WHEEL}
     os.makedirs(a.dl_dir, exist_ok=True)
@@ -178,34 +201,56 @@ def write_receipts(path, receipts):
     os.replace(tmp, path)
 
 
-def install_nccl_runtime(wheel, tree, version):
-    tree = Path(tree)
-    (tree / "lib").mkdir(exist_ok=True)
+def remove_leftovers(tree, dl_dir):
+    """What an interrupted fetch left. The caller holds the locks: nothing else writes there."""
+    for stage in Path(tree).glob(STAGE_PREFIX + "*"):
+        shutil.rmtree(stage, ignore_errors=True)
+    for part in [*Path(tree).glob("*.vf-part"), *Path(tree, "lib").glob("*.vf-part")]:
+        part.unlink(missing_ok=True)
+    for part in Path(dl_dir).glob(".dl-*"):
+        part.unlink(missing_ok=True)
+
+
+def move_into_place(stage, tree):
+    """Move each file staged under stage to the same place under tree, by a rename: the regular
+    files first, then the symbolic links, so that a link does not name a file that is not
+    there yet."""
+    links = []
+    for directory, subdirectories, names in os.walk(stage):
+        target = os.path.join(tree, os.path.relpath(directory, stage))
+        os.makedirs(target, exist_ok=True)
+        for name in [n for n in subdirectories if os.path.islink(os.path.join(directory, n))]:
+            subdirectories.remove(name)
+            names.append(name)
+        for name in names:
+            source = os.path.join(directory, name)
+            if os.path.islink(source):
+                links.append((source, os.path.join(target, name)))
+            else:
+                os.replace(source, os.path.join(target, name))
+    for source, dest in links:
+        os.replace(source, dest)
+
+
+def stage_nccl_runtime(wheel, stage, version):
     files = [
-        (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", tree / "NCCL-LICENSE.txt"),
-        ("nvidia/nccl/lib/libnccl.so.2", tree / "lib/libnccl.so.2"),
+        (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", "NCCL-LICENSE.txt"),
+        ("nvidia/nccl/lib/libnccl.so.2", "lib/libnccl.so.2"),
     ]
-    # Writers hold the tree lock. A retry reclaims the partial 421 MB runtime
-    # even if the previous installer was killed before it could clean up.
-    staged = [(member, dest, dest.with_name(dest.name + ".vf-part")) for member, dest in files]
-    try:
-        with zipfile.ZipFile(wheel) as archive:
-            for member, dest, part in staged:
-                part.unlink(missing_ok=True)
-                with archive.open(member) as src, part.open("xb") as dst:
-                    shutil.copyfileobj(src, dst, length=1 << 20)
-        for member, dest, part in staged:
-            os.replace(part, dest)
-    finally:
-        for member, dest, part in staged:
-            part.unlink(missing_ok=True)
+    stage = Path(stage)
+    (stage / "lib").mkdir()
+    with zipfile.ZipFile(wheel) as archive:
+        for member, dest in files:
+            with archive.open(member) as src, (stage / dest).open("xb") as dst:
+                shutil.copyfileobj(src, dst, length=1 << 20)
 
 
 def install_components(a, rows, lock_fds):
+    remove_leftovers(a.tree_dir, a.dl_dir)
     record = os.path.join(a.tree_dir, "COMPONENTS.tsv")
     receipts = read_receipts(record)
     requested = "runtime" if a.runtime else "full"
-    extract = ["--strip-components=1", "-C", a.tree_dir]
+    extract = ["--strip-components=1"]
     if a.runtime:
         extract += ["--wildcards", "--exclude=*/lib/stubs/*", "*/lib/*.so*", "*/LICENSE"]
 
@@ -228,15 +273,22 @@ def install_components(a, rows, lock_fds):
             download(url, a.dl_dir, os.path.basename(dest), expected, lock_fds)
         else:
             print(f"have {name} {version}", flush=True)
-        # A failed extraction may already have overwritten files of the previous
-        # version. Invalidate its receipt before tar starts modifying the tree.
-        if prior:
-            del receipts[name]
-            write_receipts(record, receipts)
-        if name == "libnccl" and dest.endswith(".whl"):
-            install_nccl_runtime(dest, a.tree_dir, version)
-        elif subprocess.run(["tar", "-xf", dest] + extract, pass_fds=lock_fds).returncode != 0:
-            sys.exit(f"cannot unpack {dest} into {a.tree_dir}")
+        # Unpacked in a directory of the tree, then moved into place: a failure on the way (a
+        # full disk, a damaged archive) leaves the tree as it was. Writers hold the tree lock;
+        # what a killed fetch staged (the 421 MB NCCL runtime, say), the next one removes.
+        stage = tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=a.tree_dir)
+        try:
+            if name == "libnccl" and dest.endswith(".whl"):
+                stage_nccl_runtime(dest, stage, version)
+            elif subprocess.run(["tar", "-xf", dest, "-C", stage] + extract, pass_fds=lock_fds).returncode != 0:
+                sys.exit(f"cannot unpack {dest} into {a.tree_dir}")
+            # The files of the previous version are replaced from here: its receipt goes first.
+            if prior:
+                del receipts[name]
+                write_receipts(record, receipts)
+            move_into_place(stage, a.tree_dir)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
         installed = "full" if same_archive and prior[4] == "full" else requested
         receipts[name] = [name, version, os.path.basename(dest), expected, installed]
         write_receipts(record, receipts)

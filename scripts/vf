@@ -99,43 +99,100 @@ get_version() {
     fi
 }
 
+# --- the release that an environment made by vf venv runs ------------------------
+# Such an environment keeps the launcher that made it: an upgrade does not change the release
+# that its Pythons run. For the one activated in this shell ($VIRTUAL_ENV), sets $_venv_note
+# when that launcher is not this one (empty otherwise).
+
+venv_release() {
+    _venv_note=
+    [ -n "${VIRTUAL_ENV:-}" ] || return 0
+    for _path in "$VIRTUAL_ENV"/lib/python*/site-packages/volta_forever_venv.path; do
+        [ -f "$_path" ] || continue
+        _venv_launcher=
+        IFS= read -r _venv_launcher <"$_path" || [ -n "$_venv_launcher" ] || continue
+        if [ ! -x "$_venv_launcher" ]; then
+            _venv_note="the environment $VIRTUAL_ENV was made by $_venv_launcher, which is no longer there: its Pythons start without the layer (vf venv $VIRTUAL_ENV makes them run through this release)"
+        elif [ "$(cd "$(dirname "$_venv_launcher")" && pwd -P)/${_venv_launcher##*/}" != "$(cd "$self_dir" && pwd -P)/vf" ]; then
+            # (Its own launcher, told of no environment, says its version.)
+            _venv_version=$(VIRTUAL_ENV= "$_venv_launcher" version 2>/dev/null) || _venv_version=unknown
+            _venv_note="the environment $VIRTUAL_ENV runs through the release $_venv_version ($_venv_launcher), not this one (vf venv $VIRTUAL_ENV makes it run through this one)"
+        fi
+        return 0
+    done
+}
+
 # --- find the CUDA 12.9.2 libraries, in order ----------------------------------
 
+# Whether a file name is that of a shared library: NAME.so, or NAME.so.VERSION with a VERSION
+# of digits and dots (not libnccl.so.2.vf-part, what an interrupted download of an earlier
+# release left).
+is_library() {
+    case $1 in
+        *.so) return 0 ;;
+        *.so.*) ;;
+        *) return 1 ;;
+    esac
+    case ${1##*.so.} in
+        ''|*[!0-9.]*) return 1 ;;
+    esac
+}
+
+# Sets $_cuda12 (the directory, or empty when none is found), $_cuda12_why (how it was chosen,
+# which vf doctor says) and $_cuda12_left (files of the installation's directory that look
+# like libraries and are not, left out).
 find_cuda12() {
-    _cuda12_dir=${opt_cuda12:-${VF_CUDA12:-}}
-    if [ -n "$_cuda12_dir" ]; then
-        case $_cuda12_dir in
+    _cuda12=${opt_cuda12:-${VF_CUDA12:-}}
+    _cuda12_left=
+    if [ -n "$_cuda12" ]; then
+        if [ -n "$opt_cuda12" ]; then _cuda12_why="given by --cuda12"; else _cuda12_why="given by VF_CUDA12"; fi
+        case $_cuda12 in
             /*) ;;
-            *) _cuda12_dir=$(pwd -P)/$_cuda12_dir ;;
+            *) _cuda12=$(pwd -P)/$_cuda12 ;;
         esac
-        printf '%s\n' "$_cuda12_dir"
-        return
+        return 0
     fi
     # An NCCL-only fetch supplements an existing toolkit. It must not
     # replace the source/system toolkit that supplies cuBLAS and nvJitLink.
+    # (Only libraries count.)
     _installed=$home/cuda-12.9.2/lib
+    _nccl_alone=
+    _libs=0
     if [ -d "$_installed" ]; then
-        set -- "$_installed"/*.so*
-        if [ "$#" -ne 1 ] || [ "$1" != "$_installed/libnccl.so.2" ]; then
-            echo "$_installed"
-            return
-        fi
+        for _f in "$_installed"/*.so*; do
+            [ -f "$_f" ] || continue
+            if ! is_library "${_f##*/}"; then
+                _cuda12_left="$_cuda12_left ${_f##*/}"
+            elif [ "${_f##*/}" = libnccl.so.2 ]; then
+                _nccl_alone="; the installation's own holds the CUDA 12 NCCL alone"
+            else
+                _libs=$((_libs + 1))
+            fi
+        done
+    fi
+    if [ "$_libs" -gt 0 ]; then
+        _cuda12=$_installed
+        _cuda12_why="the installation's own, where vf fetch puts them"
+        return 0
     fi
     # In a source tree: where scripts/fetch-all.sh puts NVIDIA's toolkits.
     if [ -f "$home/toolkits/cuda-12.9.2/lib/libcublas.so.12" ]; then
-        echo "$home/toolkits/cuda-12.9.2/lib"
-        return
+        _cuda12=$home/toolkits/cuda-12.9.2/lib
+        _cuda12_why="the toolkit of the source tree, where scripts/fetch-all.sh puts it$_nccl_alone"
+        return 0
     fi
     # System-installed CUDA 12.9.
     if [ -f "/usr/local/cuda-12.9/lib64/libcublas.so.12" ]; then
-        echo "/usr/local/cuda-12.9/lib64"
-        return
+        _cuda12=/usr/local/cuda-12.9/lib64
+        _cuda12_why="the system's CUDA 12.9$_nccl_alone"
+        return 0
     fi
-    if [ -f "$_installed/libnccl.so.2" ]; then
-        echo "$_installed"
-        return
+    if [ -n "$_nccl_alone" ]; then
+        _cuda12=$_installed
+        _cuda12_why="the installation's own, which holds the CUDA 12 NCCL alone: no other CUDA 12.9.2 library was found"
+        return 0
     fi
-    return 1
+    _cuda12_why=
 }
 
 # --- build the audit map -------------------------------------------------------
@@ -217,12 +274,16 @@ build_map() {
 path_prepend() {
     # $1 = new components (colon-separated), $2 = old value.
     _new_parts=$1 _old=$2 _result=
-    # Build the result from new parts, then add old parts not already present.
+    # Build the result from new parts, then add old parts not already present. An empty
+    # component, of either, is left out (the loader takes it for the current directory), and
+    # a component is taken as it is (no pattern expanded, no backslash read).
+    set -f
     _oifs=$IFS; IFS=:
     # shellcheck disable=SC2086
     set -- $_new_parts
     IFS=$_oifs
     for _p do
+        [ -z "$_p" ] && continue
         case ":${_result}:" in
             *":$_p:"*) ;;
             *) if [ -n "$_result" ]; then _result=$_result:$_p; else _result=$_p; fi ;;
@@ -236,16 +297,29 @@ path_prepend() {
         [ -z "$_p" ] && continue
         case ":${_result}:" in
             *":$_p:"*) ;;
-            *) _result=$_result:$_p ;;
+            *) if [ -n "$_result" ]; then _result=$_result:$_p; else _result=$_p; fi ;;
         esac
     done
-    echo "$_result"
+    set +f
+    printf '%s\n' "$_result"
 }
 
 # --- build environment for run/env, as variable assignments ---------------------
 
 setup_env() {
-    _cuda12=$(find_cuda12 2>/dev/null) || _cuda12=
+    find_cuda12
+    # (LD_LIBRARY_PATH, LD_AUDIT and VF_AUDIT_MAP are lists whose entries a ':' separates: a
+    # directory with one in its path would be split there.)
+    case $home in
+        *:*)
+            echo "vf: the installation is in $home, whose path has a ':', which the launcher cannot pass on in LD_LIBRARY_PATH, LD_AUDIT and VF_AUDIT_MAP; put it in a directory whose path has none" >&2
+            exit 2 ;;
+    esac
+    case $_cuda12 in
+        *:*)
+            echo "vf: the CUDA 12.9.2 directory $_cuda12 ($_cuda12_why) has a ':' in its path, which the launcher cannot pass on in LD_LIBRARY_PATH and VF_AUDIT_MAP; name it by a path without one (a symbolic link to it)" >&2
+            exit 2 ;;
+    esac
     build_map
 
     _audit=$lib_dir/libvf_audit.so
@@ -253,6 +327,24 @@ setup_env() {
     if [ "$opt_no_audit" = 0 ] && [ -f "$_audit" ]; then
         _with_audit=1
     fi
+    # LD_AUDIT: the layer's audit library, then those that were there, without an audit
+    # library of the layer a second time (vf under vf, after eval "$(vf env)", or under the
+    # launcher of another installation). The loader asks each in its order for every library
+    # it looks for, and gives each the name that the one before chose: one of the user's sees
+    # what the layer substituted and has the last word, as the user's entries of VF_AUDIT_MAP
+    # come before the launcher's.
+    _others_audit=
+    set -f
+    _oifs=$IFS; IFS=:
+    for _a in ${LD_AUDIT:-}; do
+        case $_a in
+            libvf_audit.so|*/libvf_audit.so) ;;
+            *) _others_audit=$_others_audit:$_a ;;
+        esac
+    done
+    IFS=$_oifs
+    set +f
+    _ld_audit=$(path_prepend "$_audit" "$_others_audit")
 
     # The library path: the layer's own libraries, the forwarding libraries, the CUDA 12.9.2
     # libraries, then what was there. The directory of the forwarding libraries is left out
@@ -313,17 +405,10 @@ setup_env() {
             if [ -n "$_user_map" ]; then _user_map="$_user_map:$_mline"; else _user_map=$_mline; fi
         done < "$opt_map_file"
     fi
-    # Priority: user's VF_AUDIT_MAP (already in the env), then --map file, then launcher's.
-    _full_map=
-    if [ -n "${VF_AUDIT_MAP:-}" ]; then
-        _full_map=${VF_AUDIT_MAP}
-    fi
-    if [ -n "$_user_map" ]; then
-        if [ -n "$_full_map" ]; then _full_map="$_full_map:$_user_map"; else _full_map=$_user_map; fi
-    fi
-    if [ -n "$_launcher_map" ]; then
-        if [ -n "$_full_map" ]; then _full_map="$_full_map:$_launcher_map"; else _full_map=$_launcher_map; fi
-    fi
+    # Priority: user's VF_AUDIT_MAP (already in the env), then --map file, then launcher's. An
+    # entry that is there already is not added again: under itself (vf vf, or after
+    # eval "$(vf env)") the launcher finds its own entries in VF_AUDIT_MAP.
+    _full_map=$(path_prepend "${VF_AUDIT_MAP:-}" "$_user_map:$_launcher_map")
 
     if [ "${VF_QUIET:-0}" != 1 ]; then
         if [ -z "$_cuda12" ]; then
@@ -347,7 +432,7 @@ cmd_env() {
     # Only what the launcher sets: VF_* passes through untouched.
     printf 'export LD_LIBRARY_PATH=%s\n' "$(quoted "$_ldpath")"
     if [ "$_with_audit" = 1 ]; then
-        printf 'export LD_AUDIT=%s\n' "$(quoted "$_audit")"
+        printf 'export LD_AUDIT=%s\n' "$(quoted "$_ld_audit")"
         [ -n "$_full_map" ] && printf 'export VF_AUDIT_MAP=%s\n' "$(quoted "$_full_map")"
     fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
@@ -390,7 +475,7 @@ cmd_run() {
     [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
     export LD_LIBRARY_PATH="$_ldpath"
     if [ "$_with_audit" = 1 ]; then
-        export LD_AUDIT="$_audit"
+        export LD_AUDIT="$_ld_audit"
         [ -n "$_full_map" ] && export VF_AUDIT_MAP="$_full_map"
     fi
     export VOLTA_FOREVER="$_version"
@@ -528,9 +613,14 @@ cmd_doctor() {
     # CUDA 12.9.2 libraries.
     opt_no_audit=0
     opt_map_file=
-    setup_env 2>/dev/null
+    VF_QUIET=1
+    setup_env
+    if [ -n "$_cuda12_left" ]; then
+        echo "NOTICE in $home/cuda-12.9.2/lib, not counted as libraries:$_cuda12_left"
+        echo "       (a .vf-part file is what an interrupted vf fetch left; the next vf fetch removes it)"
+    fi
     if [ -n "$_cuda12" ]; then
-        echo "ok    CUDA 12.9.2 libraries in $_cuda12"
+        echo "ok    CUDA 12.9.2 libraries in $_cuda12 ($_cuda12_why)"
         # The forwarding libraries that have their CUDA 12.9.2 library there.
         _oifs=$IFS; IFS=:
         # shellcheck disable=SC2086
@@ -571,8 +661,13 @@ cmd_doctor() {
     # Environment that run would set.
     echo "ok    LD_LIBRARY_PATH would be: $_ldpath"
     if [ -f "$_audit" ]; then
-        echo "ok    LD_AUDIT would be: $_audit"
+        echo "ok    LD_AUDIT would be: $_ld_audit"
+        if [ "$_ld_audit" != "$_audit" ]; then
+            echo "       (the layer's audit library first, then those that were in LD_AUDIT: they see the names that it chose, and have the last word)"
+        fi
     fi
+    venv_release
+    [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
 
     if [ "$_ok" = 0 ]; then
         exit 1
@@ -766,7 +861,7 @@ while [ $# -gt 0 ]; do
             subcmd=venv; shift; break ;;
         ptxas)
             shift
-            _cuda12=$(find_cuda12) || _cuda12=
+            find_cuda12
             [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
             exec "${tool%/*}/vf-ptxas" "$@" ;;
         inspect|extract|adapt|translate)
@@ -883,6 +978,8 @@ case $subcmd in
         ;;
     version)
         get_version
+        venv_release
+        [ -z "$_venv_note" ] || echo "vf: $_venv_note" >&2
         ;;
     *)
         echo "vf: unknown subcommand: $subcmd" >&2

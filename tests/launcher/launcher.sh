@@ -176,6 +176,47 @@ case "$map" in
 esac
 rm "$nccl"
 
+# What an interrupted NCCL download leaves (libnccl.so.2.vf-part), alone or beside the library,
+# and an empty directory, are no CUDA 12.9.2 libraries: the toolkit found next is taken, and
+# doctor says which directory it took, why, and what it did not count.
+name="nccl-leftover-does-not-mask-cuda"
+for left in part nccl-and-part empty; do
+    lo=$tmp/nccl-leftover-$left
+    mk_archive "$lo"
+    mkdir -p "$lo/cuda-12.9.2/lib" "$lo/toolkits/cuda-12.9.2/lib"
+    : >"$lo/toolkits/cuda-12.9.2/lib/libcublas.so.12"
+    case $left in
+        part) : >"$lo/cuda-12.9.2/lib/libnccl.so.2.vf-part" ;;
+        nccl-and-part) : >"$lo/cuda-12.9.2/lib/libnccl.so.2"; : >"$lo/cuda-12.9.2/lib/libnccl.so.2.vf-part" ;;
+    esac
+    map=$(run_var "$lo/bin/vf" VF_AUDIT_MAP)
+    case ":$map:" in
+        *":libcublas.so.12=$lo/toolkits/cuda-12.9.2/lib/libcublas.so.12:"*) pass "$name-$left" ;;
+        *) fail "$name-$left" "got: $map" ;;
+    esac
+done
+case ":$map:" in
+    *":libnccl.so.2="*) fail "$name-empty" "NCCL mapped: $map" ;;
+esac
+lo=$tmp/nccl-leftover-nccl-and-part
+out=$("$lo/bin/vf" doctor 2>&1) || true
+case $out in
+    *"not counted as libraries: libnccl.so.2.vf-part"*"ok    CUDA 12.9.2 libraries in $lo/toolkits/cuda-12.9.2/lib (the toolkit of the source tree, where scripts/fetch-all.sh puts it; the installation's own holds the CUDA 12 NCCL alone)"*"ok    CUDA 12 NCCL from $lo/cuda-12.9.2/lib/libnccl.so.2"*)
+        pass "$name-doctor" ;;
+    *) fail "$name-doctor" "got: $out" ;;
+esac
+name="doctor-says-why"
+out1=$("$vf" doctor 2>&1) || true
+out2=$(VF_CUDA12="$arch/cuda-12.9.2/lib" "$vf" doctor 2>&1) || true
+case $out1 in
+    *"ok    CUDA 12.9.2 libraries in $arch/cuda-12.9.2/lib (the installation's own, where vf fetch puts them)"*)
+        case $out2 in
+            *"ok    CUDA 12.9.2 libraries in $arch/cuda-12.9.2/lib (given by VF_CUDA12)"*) pass "$name" ;;
+            *) fail "$name" "with VF_CUDA12: $out2" ;;
+        esac ;;
+    *) fail "$name" "got: $out1" ;;
+esac
+
 name="env-ld-audit"
 lda=$(get_var "$vf" LD_AUDIT)
 case $lda in
@@ -184,6 +225,24 @@ case $lda in
     *)
         fail "$name" "got: $lda" ;;
 esac
+
+# An LD_AUDIT that was there is kept, after the layer's audit library (the loader asks them in
+# their order, and the user's sees what the layer substituted), without an audit library of the
+# layer a second time (this installation's, or another's) and without empty entries; doctor
+# says so.
+name="ld-audit-kept"
+want="$arch/lib/libvf_audit.so:/my/audit.so"
+lda1=$(LD_AUDIT=/my/audit.so get_var "$vf" LD_AUDIT)
+lda2=$(LD_AUDIT=":$arch/lib/libvf_audit.so::/other/lib/libvf_audit.so:/my/audit.so:" run_var "$vf" LD_AUDIT)
+out=$(LD_AUDIT=/my/audit.so "$vf" doctor 2>&1) || true
+if [ "$lda1" = "$want" ] && [ "$lda2" = "$want" ]; then
+    case $out in
+        *"LD_AUDIT would be: $want"*"then those that were in LD_AUDIT"*) pass "$name" ;;
+        *) fail "$name" "doctor said: $out" ;;
+    esac
+else
+    fail "$name" "env: $lda1, run: $lda2"
+fi
 
 name="env-volta-forever-version"
 vfv=$(get_var "$vf" VOLTA_FOREVER)
@@ -360,6 +419,19 @@ case $map in
         fail "$name" "user entry not first: $map" ;;
 esac
 
+# 4b. Under itself (vf vf, or vf after eval "$(vf env)") the launcher does not add its entries
+# to the map again; the user's stay first.
+name="map-under-itself"
+m1=$(run_var "$vf" VF_AUDIT_MAP)
+m2=$("$vf" "$vf" sh -c 'printf "%s" "$VF_AUDIT_MAP"')
+m3=$(eval "$("$vf" env)"; unset LD_AUDIT; "$vf" sh -c 'printf "%s" "$VF_AUDIT_MAP"')
+m4=$(VF_AUDIT_MAP="mylib.so=/my/path" "$vf" "$vf" "$vf" sh -c 'printf "%s" "$VF_AUDIT_MAP"')
+if [ -n "$m1" ] && [ "$m2" = "$m1" ] && [ "$m3" = "$m1" ] && [ "$m4" = "mylib.so=/my/path:$m1" ]; then
+    pass "$name"
+else
+    fail "$name" "once: $m1; vf vf: $m2; after env: $m3; vf vf vf with an entry of the user's: $m4"
+fi
+
 # 5. --map FILE adds entries with priority (before launcher's, after user's VF_AUDIT_MAP).
 
 name="map-file-priority"
@@ -491,6 +563,41 @@ else
     fail "$name" "relative CUDA library directory lost when the command changes directory"
 fi
 
+# A ':' in a directory that goes into LD_LIBRARY_PATH and VF_AUDIT_MAP, whose entries colons
+# separate, is refused and said, as one in an entry of a --map file is: the CUDA 12.9.2
+# directory given by VF_CUDA12, by --cuda12, by a relative path from a directory that has one,
+# and the installation's own path. vf version needs neither.
+name="cuda12-colon"
+mkdir -p "$tmp/cuda:12/lib"
+: >"$tmp/cuda:12/lib/libcublas.so.12"
+for how in env option relative doctor; do
+    _st=0
+    case $how in
+        env) err=$(VF_CUDA12="$tmp/cuda:12/lib" "$vf" env 2>&1 >/dev/null) || _st=$? ;;
+        option) err=$("$vf" --cuda12 "$tmp/cuda:12/lib" sh -c 'echo ran' 2>&1) || _st=$? ;;
+        relative) err=$(cd "$tmp/cuda:12" && "$vf" --cuda12 lib env 2>&1 >/dev/null) || _st=$? ;;
+        doctor) err=$(VF_CUDA12="$tmp/cuda:12/lib" "$vf" doctor 2>&1 >/dev/null) || _st=$? ;;
+    esac
+    case "$_st:$err" in
+        *ran*) fail "$name-$how" "the command ran" ;;
+        2:*"$tmp/cuda:12/lib"*"':'"*) pass "$name-$how" ;;
+        *) fail "$name-$how" "exit $_st, said: $err" ;;
+    esac
+done
+name="home-colon"
+mk_archive "$tmp/inst:all" cuda12
+_st=0
+err=$("$tmp/inst:all/bin/vf" env 2>&1 >/dev/null) || _st=$?
+case "$_st:$err" in
+    2:*"$tmp/inst:all"*"':'"*)
+        if [ "$("$tmp/inst:all/bin/vf" version)" = "0.1.0 test" ]; then
+            pass "$name"
+        else
+            fail "$name" "vf version is refused too"
+        fi ;;
+    *) fail "$name" "exit $_st, said: $err" ;;
+esac
+
 # 9. Warning when CUDA 12.9.2 is absent.
 
 name="warn-no-cuda12"
@@ -551,6 +658,21 @@ if [ -n "$ldp1" ] && [ "$ldp1" = "$ldp2" ]; then
     pass "$name"
 else
     fail "$name" "paths differ after second eval: $ldp1 / $ldp2"
+fi
+
+# The function that joins these lists gives each component once and no empty one (which the
+# loader takes for the current directory), of the new value as of the old, and every component
+# as it is: no pattern expanded, no backslash read.
+name="path-prepend"
+sed -n '/^path_prepend() {/,/^}/p' "$launcher" >"$tmp/path_prepend.sh"
+: >"$tmp/a-file"
+got=$(. "$tmp/path_prepend.sh"; path_prepend '/a::/c:' ':/c:/d::/a:')
+got2=$(cd "$tmp" && . "$tmp/path_prepend.sh"; path_prepend '*:/b\tc' '/b\tc:/d\n')
+got3=$(. "$tmp/path_prepend.sh"; path_prepend '' ':/d:')
+if [ "$got" = "/a:/c:/d" ] && [ "$got2" = '*:/b\tc:/d\n' ] && [ "$got3" = /d ]; then
+    pass "$name"
+else
+    fail "$name" "got: $got | $got2 | $got3"
 fi
 
 # 13b. What env prints is read back by eval as it is, whatever the path holds: a space, a
@@ -863,6 +985,29 @@ if python3 -c 'import sys, venv; sys.exit(0 if hasattr(sys, "orig_argv") else 1)
         fail "$name" "a second vf venv on the same directory"
     fi
 
+    # Activated in a shell, an environment that runs another installation's launcher is named
+    # by vf version (on standard error) and vf doctor of this one, with the release it runs.
+    name="venv-release-named"
+    mk_archive "$tmp/arch-newer" cuda12
+    echo "0.2.0 test" >"$tmp/arch-newer/VERSION"
+    _st=0
+    err=$(VIRTUAL_ENV="$ve" "$tmp/arch-newer/bin/vf" version 2>&1 >"$tmp/version.out") || _st=$?
+    doc=$(VIRTUAL_ENV="$ve" "$tmp/arch-newer/bin/vf" doctor 2>&1) || true
+    own=$(VIRTUAL_ENV="$ve" "$vfv" version 2>&1)
+    said="the environment $ve runs through the release 0.1.0 test ($vfv), not this one"
+    if [ "$_st" = 0 ] && [ "$(cat "$tmp/version.out")" = "0.2.0 test" ] && [ "$own" = "0.1.0 test" ]; then
+        case "$err" in
+            "vf: $said"*)
+                case $doc in
+                    *"NOTICE $said"*) pass "$name" ;;
+                    *) fail "$name" "doctor said: $doc" ;;
+                esac ;;
+            *) fail "$name" "vf version said: $err" ;;
+        esac
+    else
+        fail "$name" "status $_st, version $(cat "$tmp/version.out"), its own launcher said: $own"
+    fi
+
     # Not a virtual environment: a Python with no pyvenv.cfg; a directory that holds something.
     name="venv-refuses-another-python"
     mkdir -p "$tmp/not-venv/bin" "$tmp/not-venv/lib"
@@ -901,6 +1046,12 @@ if python3 -c 'import sys, venv; sys.exit(0 if hasattr(sys, "orig_argv") else 1)
     mv "$tmp/arch-venv" "$tmp/arch-gone"
     got=$("$ve/bin/python" -c 'import os; print(os.environ.get("VOLTA_FOREVER"))')
     if [ "$got" = None ]; then pass "$name"; else fail "$name" "with the launcher gone: $got"; fi
+    name="venv-release-gone"
+    err=$(VIRTUAL_ENV="$ve" "$tmp/arch-newer/bin/vf" version 2>&1 >/dev/null)
+    case $err in
+        *"$ve was made by $vfv, which is no longer there"*) pass "$name" ;;
+        *) fail "$name" "vf version said: $err" ;;
+    esac
 else
     echo "SKIP  venv (no python3 of 3.10 or later with the venv module)"
 fi

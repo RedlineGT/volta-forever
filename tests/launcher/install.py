@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Exercise install.sh with local releases, a real vf venv and stand-ins for CUDA files."""
 import hashlib
+import http.server
 import os
 from pathlib import Path
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 
@@ -80,11 +83,12 @@ sys.exit(rc)
 """)
             path.chmod(0o755)
 
-    def install(self, version, mode=None):
+    def install(self, version, mode=None, **settings):
         env = dict(self.env, VF_VERSION=version)
         if mode:
             env.update(PATH=str(self.shims) + ":" + env["PATH"], SYNC_MODE=mode,
                        SYNC_DIR=str(self.root), LEGACY_DIR=str(self.prefix / self.releases[version].name))
+        env.update(settings)
         shell = [SHELL, "--posix"] if SHELL == "bash" else [SHELL]
         return subprocess.Popen([*shell, str(INSTALLER)], env=env, start_new_session=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -112,6 +116,36 @@ sys.exit(rc)
                 "print(os.environ['VOLTA_FOREVER'])"
         actual = subprocess.check_output([venv / "bin/python", "-c", check], env=self.env, text=True)
         self.assertEqual(actual.strip(), version)
+
+    def serve(self, asked, redirect=None, tls=None):
+        """A server of the releases on 127.0.0.1, or of redirections to redirect + the path."""
+        base = str(self.base)
+
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=base, **kwargs)
+
+            def do_GET(self):
+                asked.append(self.path)
+                if redirect:
+                    self.send_response(302)
+                    self.send_header("Location", redirect + self.path)
+                    self.end_headers()
+                else:
+                    super().do_GET()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if tls:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(*tls)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_port
 
     def wait_for(self, condition, *procs):
         until = time.monotonic() + 15
@@ -143,6 +177,13 @@ sys.exit(rc)
         self.assertTrue(os.path.samefile(legacy / "cuda-12.9.2", new / "cuda-12.9.2"),
                         "manual fetches must share one directory and the same download lock")
         self.check_venv(venv_old, "1.0.0")
+        # Activated, the old environment is named by vf version and vf doctor of the new release.
+        activated = dict(self.env, VIRTUAL_ENV=str(venv_old))
+        shown = subprocess.run([self.bin / "vf", "version"], env=activated, capture_output=True, text=True)
+        self.assertIn("1.1.0", shown.stdout)
+        self.assertIn(f"{venv_old} runs through the release 1.0.0", shown.stderr)
+        doctor = subprocess.run([self.bin / "vf", "doctor"], env=activated, capture_output=True, text=True)
+        self.assertIn(f"NOTICE the environment {venv_old} runs through the release 1.0.0", doctor.stdout)
         subprocess.run([self.bin / "vf", "venv", venv_new, "--", "--without-pip"], env=self.env,
                        check=True, stdout=subprocess.DEVNULL)
         self.success(self.install("1.1.0"))
@@ -195,6 +236,79 @@ sys.exit(rc)
 
     def test_concurrent_versions(self):
         self.concurrent_publishers("1.0.0")
+
+    def test_leftovers_of_killed_installers_are_removed(self):
+        # Those not changed for a day; a younger one may be another installer's.
+        self.prefix.mkdir()
+        self.bin.mkdir()
+        old = [self.prefix / ".vf-install.Old12345", self.bin / ".vf-links.Old12345"]
+        young = [self.prefix / ".vf-install.New12345", self.bin / ".vf-links.New12345"]
+        for path in old + young:
+            (path / "volta-forever-0.0.1-linux-x86_64").mkdir(parents=True)
+        for path in old:
+            os.utime(path, (time.time() - 2 * 86400,) * 2)
+        self.success(self.install("1.0.0"))
+        self.assertEqual([path for path in old if os.path.lexists(path)], [])
+        self.assertEqual([path for path in young if not path.is_dir()], [])
+        self.assertTrue((self.prefix / ".vf-install.lock").is_file())
+
+    def test_plain_http_refused_unless_allowed(self):
+        asked = []
+        base = f"http://127.0.0.1:{self.serve(asked)}"
+        proc = self.install("1.0.0", VF_INSTALL_BASE=base, no_proxy="*")
+        output, _ = proc.communicate(timeout=30)
+        self.assertNotEqual(proc.returncode, 0, output)
+        self.assertIn("VF_INSTALL_ALLOW_HTTP", output)
+        self.assertEqual(asked, [])
+        self.assertFalse((self.bin / "vf").exists())
+        self.success(self.install("1.0.0", VF_INSTALL_BASE=base, VF_INSTALL_ALLOW_HTTP="1", no_proxy="*"))
+        self.assertIn("1.0.0", subprocess.check_output([self.bin / "vf", "version"], text=True))
+
+    def test_https_redirections(self):
+        # Over HTTPS, a redirection to plain HTTP is refused, by curl and by wget; one to
+        # HTTPS is followed.
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            self.skipTest("no openssl to make the server's certificate")
+        key, cert = self.root / "key.pem", self.root / "cert.pem"
+        subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
+                        "-days", "1", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
+                       check=True, capture_output=True)
+        (self.root / "wgetrc").write_text(f"ca_certificate = {cert}\n")
+        trust = dict(CURL_CA_BUNDLE=str(cert), WGETRC=str(self.root / "wgetrc"), no_proxy="*")
+        asked = []
+        secure = self.serve(asked, tls=(cert, key))
+        to_plain = self.serve(asked, redirect=f"http://127.0.0.1:{self.serve(asked)}", tls=(cert, key))
+        to_secure = self.serve(asked, redirect=f"https://127.0.0.1:{secure}", tls=(cert, key))
+        # The commands of PATH without curl, for wget.
+        without_curl = self.root / "without-curl"
+        without_curl.mkdir()
+        for directory in self.env["PATH"].split(os.pathsep):
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
+                link = without_curl / entry.name
+                if entry.name != "curl" and not os.path.lexists(link):
+                    link.symlink_to(entry.path)
+        tried = 0
+        for tool, path, refusal in (("curl", self.env["PATH"], '"http" not supported'),
+                                    ("wget", str(without_curl), "redirected to another scheme than https://")):
+            if shutil.which(tool, path=path) is None:
+                continue
+            tried += 1
+            for port, works in ((to_plain, False), (secure, True), (to_secure, True)):
+                place = self.root / f"{tool}-{port}"
+                proc = self.install("1.0.0", PATH=path, VF_INSTALL_BASE=f"https://127.0.0.1:{port}",
+                                    VF_PREFIX=str(place), VF_BIN=str(place / "bin"), **trust)
+                output, _ = proc.communicate(timeout=30)
+                self.assertEqual(proc.returncode == 0, works, (tool, port, output))
+                self.assertEqual((place / "bin/vf").exists(), works, (tool, port, output))
+                if not works:
+                    self.assertIn(refusal, output)
+        if not tried:
+            self.skipTest("neither curl nor wget")
 
     def test_versions_share_later_fetches(self):
         self.success(self.install("1.0.0"))

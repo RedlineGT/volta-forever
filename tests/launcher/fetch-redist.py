@@ -1,20 +1,35 @@
 #!/usr/bin/env python3
 """Offline regressions for the component downloader. Run with python3 tests/launcher/fetch-redist.py."""
 import hashlib
+import http.server
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
+from unittest import mock
 import zipfile
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/fetch-redist.py"
+# The script, given the signal VF_TEST_SIGNAL when it starts to write the NCCL runtime.
+INTERRUPTED = """
+import os, runpy, shutil, signal, sys
+real = shutil.copyfileobj
+def interrupted(*args, **kwargs):
+    os.kill(os.getpid(), getattr(signal, os.environ["VF_TEST_SIGNAL"]))
+    return real(*args, **kwargs)
+shutil.copyfileobj = interrupted
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
 
 
 class FetchTest(unittest.TestCase):
@@ -45,11 +60,26 @@ class FetchTest(unittest.TestCase):
         (self.root / "manifest.json").write_text(json.dumps(self.manifest))
         return path
 
-    def launch(self, *options):
+    def nccl_wheel(self):
+        archive = self.root / "nvidia_nccl_cu12-test.whl"
+        with zipfile.ZipFile(archive, "w") as wheel:
+            wheel.writestr("nvidia_nccl_cu12-2.32.6.dist-info/licenses/License.txt", "NCCL license")
+            wheel.writestr("nvidia/nccl/lib/libnccl.so.2", b"NCCL runtime")
+        self.manifest["libnccl"] = {"version": "2.32.6", "linux-x86_64": {
+            "relative_path": archive.name, "size": archive.stat().st_size,
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        }}
+        (self.root / "manifest.json").write_text(json.dumps(self.manifest))
+
+    def launch(self, *options, interrupt=None, manifest=None):
+        command, env = [sys.executable, str(SCRIPT)], {**os.environ, "PATH": str(self.commands)}
+        if interrupt:
+            command[1:1] = ["-c", INTERRUPTED]
+            env["VF_TEST_SIGNAL"] = interrupt
         return subprocess.Popen(
-            [sys.executable, str(SCRIPT), self.root.as_uri(), str(self.root / "manifest.json"),
+            [*command, self.root.as_uri(), manifest or str(self.root / "manifest.json"),
              str(self.cache), str(self.tree), "--discard", *options],
-            env={**os.environ, "PATH": str(self.commands)}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True,
         )
 
@@ -63,6 +93,7 @@ class FetchTest(unittest.TestCase):
         self.component("b", license=False)
         self.finish(self.launch("--runtime"), success=False)
         self.assertTrue((self.tree / "lib/a.so").exists())
+        self.assertFalse((self.tree / "lib/b.so").exists(), "a failed unpacking changed the tree")
         self.assertFalse((self.cache / "a.tar").exists())
         first.unlink()  # The retry must use the receipt, even if the first download is now offline.
         self.component("b")
@@ -88,15 +119,44 @@ class FetchTest(unittest.TestCase):
         self.finish(self.launch())
         self.assertTrue((self.tree / "include/a.h").exists())
 
-    def test_failed_replacement_invalidates_previous_receipt(self):
+    def test_failed_replacement_keeps_previous_version(self):
+        # The new archive fails half-way (its library unpacked, its licence missing): the tree
+        # keeps the previous version, and its receipt, rather than a mix of the two.
         self.component("a")
         self.finish(self.launch("--runtime"))
         self.component("a", license=False, data=b"changed")
         self.finish(self.launch("--runtime"), success=False)
-        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"changed")
-        self.component("a")
-        self.finish(self.launch("--runtime"))
         self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+        self.assertEqual(list(self.tree.glob(".vf-stage-*")), [])
+        self.component("a")
+        self.assertIn("unpacked before", self.finish(self.launch("--runtime")))
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+        self.component("a", data=b"changed")
+        self.finish(self.launch("--runtime"))
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"changed")
+
+    def test_links_replace_links(self):
+        # A library's links are moved as links, after the files that they name.
+        for version in ("1.2", "1.3"):
+            path = self.root / "x.tar"
+            with tarfile.open(path, "w") as archive:
+                for member in (f"lib/x.so.{version}", "LICENSE"):
+                    item = tarfile.TarInfo("pkg/" + member)
+                    item.size = len(version)
+                    archive.addfile(item, io.BytesIO(version.encode()))
+                for name, target in (("lib/x.so.1", f"x.so.{version}"), ("lib/x.so", "x.so.1")):
+                    item = tarfile.TarInfo("pkg/" + name)
+                    item.type, item.linkname = tarfile.SYMTYPE, target
+                    archive.addfile(item)
+            self.manifest["x"] = {"version": version, "linux-x86_64": {
+                "relative_path": path.name, "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }}
+            (self.root / "manifest.json").write_text(json.dumps(self.manifest))
+            self.finish(self.launch("--runtime"))
+            self.assertEqual(os.readlink(self.tree / "lib/x.so.1"), f"x.so.{version}")
+            self.assertEqual(os.readlink(self.tree / "lib/x.so"), "x.so.1")
+            self.assertEqual((self.tree / "lib/x.so").read_text(), version)
 
     def test_nccl_wheel_runtime_and_retry(self):
         archive = self.root / "nvidia_nccl_cu12-test.whl"
@@ -125,6 +185,63 @@ class FetchTest(unittest.TestCase):
         self.assertFalse((lib / "libnccl.so.2.vf-part").exists())
         archive.unlink()
         self.assertIn("unpacked before", self.finish(self.launch("--runtime", "--only", "libnccl")))
+
+    def test_interrupted_nccl_leaves_no_library_name(self):
+        # Killed while it writes the NCCL runtime: nothing is left in lib/ that the launcher
+        # could count as a library. SIGTERM ends it as Ctrl-C does, and it removes what it
+        # staged; after SIGKILL, the next fetch does.
+        self.nccl_wheel()
+        for name, status in (("SIGTERM", 128 + signal.SIGTERM), ("SIGKILL", -signal.SIGKILL)):
+            proc = self.launch("--runtime", "--only", "libnccl", interrupt=name)
+            output = proc.communicate(timeout=15)[0]
+            self.assertEqual(proc.returncode, status, output)
+            lib = self.tree / "lib"
+            self.assertEqual(sorted(lib.iterdir()) if lib.exists() else [], [], name)
+            if name == "SIGTERM":
+                self.assertEqual(list(self.tree.glob(".*")), [self.tree / ".vf-fetch.lock"])
+        self.finish(self.launch("--runtime", "--only", "libnccl"))
+        self.assertEqual((self.tree / "lib/libnccl.so.2").read_bytes(), b"NCCL runtime")
+        self.assertEqual(list(self.tree.glob(".vf-stage-*")), [])
+
+    def test_leftovers_are_removed(self):
+        self.component("a")
+        leftovers = [self.tree / "lib/libnccl.so.2.vf-part", self.tree / "NCCL-LICENSE.txt.vf-part",
+                     self.tree / ".vf-stage-old/lib/a.so", self.cache / ".dl-old"]
+        for path in leftovers:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"left by an interrupted fetch")
+        self.finish(self.launch("--runtime"))
+        self.assertEqual([path for path in leftovers if path.exists()], [])
+        self.assertFalse((self.tree / ".vf-stage-old").exists())
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+
+    def test_manifest_over_http(self):
+        # Refused before anything is asked of the server, unless --allow-http.
+        self.component("a")
+        root, asked = str(self.root), []
+
+        class Server(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=root, **kwargs)
+
+            def do_GET(self):
+                asked.append(self.path)
+                super().do_GET()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}/manifest.json"
+        with mock.patch.dict(os.environ, no_proxy="*"):
+            self.assertIn("--allow-http", self.finish(self.launch("--runtime", manifest=url), success=False))
+            self.assertEqual(asked, [])
+            self.finish(self.launch("--runtime", "--allow-http", manifest=url))
+        self.assertEqual(asked, ["/manifest.json"])
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
 
     def test_concurrent_installs(self):
         self.component("a")
