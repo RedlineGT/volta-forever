@@ -21,6 +21,8 @@
 //   - cache_temporaries: a write to the layer's cache that fails (a limit on the size of files)
 //     leaves no temporary file; the first use of the cache removes a temporary file that a write
 //     left an hour before, not one of now.
+//   - file_path: a file whose name is not UTF-8, loaded with cuModuleLoad and
+//     cuLibraryLoadFromFile, is adapted as any other (its refused kernel is refused).
 //
 // usage: lifecycle CASE PROXY DIR
 // PROXY is the layer's libcuda.so.1, DIR a directory for the files of the case.
@@ -182,6 +184,8 @@ SYM(CUresult, cuDevicePrimaryCtxRelease_v2, int);
 SYM(CUresult, cuDevicePrimaryCtxReset, int);
 SYM(CUresult, cuDevicePrimaryCtxReset_v2, int);
 SYM(CUresult, cuModuleLoadData, void **, const void *);
+SYM(CUresult, cuModuleLoad, void **, const char *);
+SYM(CUresult, cuLibraryLoadFromFile, void **, const char *, int *, void **, unsigned, int *, void **, unsigned);
 SYM(CUresult, cuModuleGetFunction, void **, void *, const char *);
 SYM(CUresult, cuLaunchKernel, void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void *,
     void **, void **);
@@ -492,6 +496,34 @@ static int cache_temporaries(const char *proxy, const char *dir) {
     return 0;
 }
 
+// ---- file_path ----
+
+static int file_path(const char *proxy, const char *dir) {
+    // The name has a byte that UTF-8 has no character for.
+    char path[4096];
+    snprintf(path, sizeof path, "%s/k\xff.ptx", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) { perror("fopen"); return 2; }
+    fputs(ptx, f);
+    fclose(f);
+    open_proxy(proxy);
+    LOAD(cuModuleLoad); LOAD(cuModuleGetFunction); LOAD(cuLibraryLoadFromFile); LOAD(cuLibraryGetKernel);
+    void *module, *function, *library, *kernel;
+    char what[64];
+    if (cuModuleLoad(&module, path)) { fprintf(stderr, "file_path: cuModuleLoad failed\n"); return 2; }
+    CUresult r = cuModuleGetFunction(&function, module, "bad");
+    snprintf(what, sizeof what, "the refused kernel: error %d (want %d)", r, CUDA_ERROR_INVALID_PTX);
+    check("file_path_module", r == CUDA_ERROR_INVALID_PTX, what);
+    if (cuLibraryLoadFromFile(&library, path, NULL, NULL, 0, NULL, NULL, 0)) {
+        fprintf(stderr, "file_path: cuLibraryLoadFromFile failed\n");
+        return 2;
+    }
+    r = cuLibraryGetKernel(&kernel, library, "bad");
+    snprintf(what, sizeof what, "the refused kernel: error %d (want %d)", r, CUDA_ERROR_INVALID_PTX);
+    check("file_path_library", r == CUDA_ERROR_INVALID_PTX, what);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) { fprintf(stderr, "usage: lifecycle CASE PROXY DIR\n"); return 2; }
     const char *name = argv[1], *proxy = argv[2], *dir = argv[3];
@@ -500,6 +532,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(name, "contexts")) status = contexts(proxy, dir);
     else if (!strcmp(name, "lazy_lock")) status = lazy_lock(proxy, dir);
     else if (!strcmp(name, "cache_temporaries")) status = cache_temporaries(proxy, dir);
+    else if (!strcmp(name, "file_path")) status = file_path(proxy, dir);
     else { fprintf(stderr, "unknown case: %s\n", name); return 2; }
     if (status) return status;
     printf("%s: %d checks, %d wrong\n", name, checks, wrong);

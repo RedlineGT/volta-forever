@@ -65,6 +65,11 @@ int cuModuleLoadData(void **module, const void *image) {
     first_in_context[(uintptr_t)*module % 4096] = loads_in_context++ == 0;
     return 0;
 }
+int cuModuleLoad(void **module, const char *path) {
+    (void)path;
+    *module = (void *)new_handle();
+    return 0;
+}
 int cuModuleUnload(void *module) { (void)module; return 0; }
 int cuModuleGetFunction(void **function, void *module, const char *name) {
     (void)name;
@@ -82,6 +87,12 @@ int cuLaunchKernel(void *function, unsigned gx, unsigned gy, unsigned gz, unsign
 int cuLibraryLoadData(void **library, const void *image, int *jit_options, void **jit_values, unsigned jit_count,
                       int *options, void **values, unsigned count) {
     (void)image; (void)jit_options; (void)jit_values; (void)jit_count; (void)options; (void)values; (void)count;
+    *library = (void *)new_handle();
+    return 0;
+}
+int cuLibraryLoadFromFile(void **library, const char *path, int *jit_options, void **jit_values, unsigned jit_count,
+                          int *options, void **values, unsigned count) {
+    (void)path; (void)jit_options; (void)jit_values; (void)jit_count; (void)options; (void)values; (void)count;
     *library = (void *)new_handle();
     return 0;
 }

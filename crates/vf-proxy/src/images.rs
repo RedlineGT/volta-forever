@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_int, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
@@ -741,7 +742,8 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     if !config().adapt {
         return None;
     }
-    let mut contents = std::fs::read(path.to_str().ok()?).ok()?;
+    // A path is bytes, in whatever encoding: it is read as the driver would read it.
+    let mut contents = std::fs::read(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
     if contents.len() < 4 {
         return None;
     }
