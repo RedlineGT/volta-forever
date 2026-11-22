@@ -284,7 +284,11 @@ sys.exit(rc)
         without_curl = self.root / "without-curl"
         without_curl.mkdir()
         for directory in self.env["PATH"].split(os.pathsep):
-            for entry in os.scandir(directory) if os.path.isdir(directory) else ():
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
                 link = without_curl / entry.name
                 if entry.name != "curl" and not os.path.lexists(link):
                     link.symlink_to(entry.path)

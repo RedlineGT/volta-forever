@@ -1,4 +1,7 @@
-"""Check CUDA device and kernel capability queries through callers with different GPU images."""
+"""Check CUDA device and kernel capability queries through callers with different GPU images.
+
+Run with python3 tests/proxy/driver_capability.py path/to/libcuda.so.1.
+"""
 import _ctypes
 import ctypes as c
 import os
@@ -95,6 +98,8 @@ def run(proxy, directory):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit("usage: python3 tests/proxy/driver_capability.py LIBCUDA (the layer's, as dist/lib/libcuda.so.1)")
     proxy = Path(sys.argv[1]).resolve(strict=True)
     if len(sys.argv) == 3:
         run(proxy, Path(sys.argv[2]))

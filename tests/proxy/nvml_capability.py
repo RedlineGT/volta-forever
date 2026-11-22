@@ -1,4 +1,7 @@
-"""Exercise NVML lookup through ctypes, the path used by pynvml, without a GPU."""
+"""Exercise NVML lookup through ctypes, the path used by pynvml, without a GPU.
+
+Run with python3 tests/proxy/nvml_capability.py path/to/libvf_audit.so.
+"""
 import _ctypes
 import ctypes
 import os
@@ -37,6 +40,8 @@ def check(library, expected):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit("usage: python3 tests/proxy/nvml_capability.py AUDIT_LIBRARY (the layer's, as dist/lib/libvf_audit.so)")
     if sys.argv[1] == "--probe":
         directory = Path(sys.argv[2])
         expected = tuple(map(int, sys.argv[3].split(".")))

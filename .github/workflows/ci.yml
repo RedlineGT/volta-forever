@@ -29,6 +29,13 @@ jobs:
         run: |
           tests/proxy/fit_api.sh
           tests/proxy/marker.sh
+          tests/proxy/graph_fit.sh
+          python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
+          python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1
+      - name: The audit library's answer to NVML, against a stand-in
+        run: python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
+      - name: The stack handling of the forwarding libraries, against a mock library
+        run: tests/forward/stack.sh
       - name: The launcher, under dash and under bash
         run: |
           dash tests/launcher/launcher.sh
@@ -37,6 +44,11 @@ jobs:
         run: |
           dash -n install.sh
           bash --posix -n install.sh
+      - name: The installer and the downloader, on local releases and archives
+        run: |
+          python3 tests/launcher/install.py
+          VF_TEST_SHELL=bash python3 tests/launcher/install.py
+          python3 tests/launcher/fetch-redist.py
       - name: The Rust translator against the Python reference, on the test kernels
         run: |
           scripts/fetch-all.sh denvdis

@@ -106,10 +106,11 @@ exit status, standard input, a child process), what it refuses, how it is turned
 
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
-| `launcher.sh` | 66 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
+| `launcher.sh` | 87 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
+| `install.py` | `install.sh` on local releases: an upgrade that keeps the CUDA 12.9.2 libraries and the `vf venv` environments of the release before, installs stopped half-way, two at once, what killed ones left, plain HTTP refused, redirections from HTTPS (through curl and through wget); under `dash`, or `bash --posix` with `VF_TEST_SHELL=bash` | seconds | dash, flock, python3 3.10 or later with `venv`; openssl for the redirections (skipped without it) |
+| `fetch-redist.py` | `scripts/fetch-redist.py` on local archives: retries after an interruption, concurrent fetches, runtime-only installs, the NCCL wheel, a failure or a signal half-way, what an interrupted fetch left, a manifest over plain HTTP | seconds | python3, tar |
 
-The downloader tests use local archives. Run `python3 tests/launcher/fetch-redist.py`
-to check retries after an interruption, concurrent fetches and runtime-only installs.
+Run the last two with `python3 tests/launcher/install.py` and `python3 tests/launcher/fetch-redist.py`.
 
 ### Tests of the machine-code translator (`tests/sass/`)
 
@@ -138,16 +139,24 @@ through the stand-in.
 | `tests/proxy/graph_fit.sh [PROXY_LIBRARY]` | CUDA graph register pressure with a stand-in driver reading the actual translated ELF. Eight recording, update and capture paths under the usual, bounded and block-size-aware policies | seconds | the proxy, the same cubin and a C compiler |
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 
-Two more host regressions exercise the built libraries directly:
+Four more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
+python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1
+python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
-deferred loads and the lifetime of replacement images. The second links a native sm_70
-device function from both a host object and a static library with the CUDA 12.9 toolkit.
+deferred loads and the lifetime of replacement images. The second checks the compute
+capability that the proxy gives (device attributes, `cuDeviceComputeCapability`, the
+attributes of a function and of a kernel) to callers whose code is for different GPUs, on a
+stand-in driver with a V100 and three later cards, with and without the launcher's marker and
+`VF_CAPABILITY`; it needs gcc and objcopy. The third checks the capability that NVML gives
+through the audit library, by `ctypes` (as `pynvml` asks) and to a library linked against
+it; it needs gcc. The fourth links a native sm_70 device function from both a host object
+and a static library with the CUDA 12.9 toolkit.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -158,6 +167,18 @@ libraries against a mock library.
 |---|---|---|---|
 | `stack.sh` | stack-word copying correctness | seconds | Cargo (`vf-fwdgen` crate) |
 | `package-refusals.sh` | what `scripts/package.sh` refuses to pack: a built tree with a forwarding library missing, with one older than the sources, with the report of a run for one library only | seconds | a built `dist/` (`scripts/build.sh`, `scripts/build-forwarders.sh`) |
+
+### What the CI runs
+
+On every push and pull request, `.github/workflows/ci.yml` runs the unit tests
+(`cargo test`), the tests of `tests/proxy/` but `jitlink_objects.py`,
+`tests/forward/stack.sh`, the tests of `tests/launcher/` (`launcher.sh` and `install.py`
+under `dash` and under `bash --posix`) and `tests/sass/compare.sh` on the test kernels; then
+`install.sh` on five distributions. It runs neither `tests/proxy/jitlink_objects.py`, which
+needs the CUDA 12.9.2 toolkit, nor `tests/forward/package-refusals.sh`, which needs the
+forwarding libraries built from NVIDIA's toolkits (`scripts/fetch-all.sh redist`,
+`scripts/build-forwarders.sh`): it fetches neither. The tests on a GPU and the SASS tests over
+whole corpora are run by hand.
 
 ## Preparing the dependencies
 
