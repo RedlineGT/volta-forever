@@ -43,13 +43,13 @@ All eight engines ran **Qwen3.5-35B-A3B** on a Tesla V100-SXM2-32GB with **MTP a
 | Engine (Ubuntu guide) | Tested model / quantization | CUDA 12 prefill | CUDA 12 decode | CUDA 13 + VF prefill | CUDA 13 + VF decode |
 |---|---|---:|---:|---:|---:|
 | [vLLM](docs/guides/vllm.md) | QuantTrio AWQ W4A16 | 1,443.33¹ | 76.09¹ | 1,449.98 | 80.23 |
-| [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | Not compatible | Not compatible | 2,016.06 | 77.33 |
+| [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | Can't run | Can't run | 2,016.06 | 77.33 |
 | [llama.cpp](docs/guides/llamacpp.md) | Unsloth GGUF Q4_K_M | 497.33 | 100.43 | 1,076.51 | 99.12 |
-| [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF Q4_K_M | Requires CUDA 13 | Requires CUDA 13 | 884.56 | 109.26 |
+| [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF Q4_K_M | Can't run | Can't run | 884.56 | 109.26 |
 | [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_XL | 1,948.50 | 99.07 | 1,982.50 | 104.25 |
-| [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | No CUDA 12 build | No CUDA 12 build | 681.68² | 46.19 |
-| [NInfer](docs/guides/ninfer.md) | Mixed Q4/Q5/Q6/Q8 `.ninfer` | Not compatible | Not compatible | 556.51 | 117.08 |
-| [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | Not compatible | Not compatible | 464.25 | 57.67 |
+| [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | Can't run | Can't run | 681.68² | 46.19 |
+| [NInfer](docs/guides/ninfer.md) | Mixed Q4/Q5/Q6/Q8 `.ninfer` | Can't run | Can't run | 556.51 | 117.08 |
+| [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | Can't run | Can't run | 464.25 | 57.67 |
 
 ¹ The CUDA 12 figures for vLLM are from **1Cat-vLLM** running CUDA 12.8. The native Strata and llama.cpp builds used CUDA 12.9 and 12.9.2 respectively. [1Cat-vLLM measurements](docs/guides/benchmarks/vllm-graphs.json)
 
