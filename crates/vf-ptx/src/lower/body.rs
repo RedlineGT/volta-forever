@@ -504,7 +504,8 @@ impl<'a> Body<'a> {
             }
         } else {
             // (Before the destination is forgotten: it may be its own source.)
-            let zero = match (opcode, guarded, &scan::split_operands(operands)[..]) {
+            let parts = scan::split_operands(operands);
+            let zero = match (opcode, guarded, parts.as_slice()) {
                 ("mov.b32" | "mov.u32" | "mov.s32" | "mov.f32", false, [register, value]) => {
                     scan::register(register).is_some() && (is_zero(value) || self.zeros.contains(*value))
                 }
@@ -514,12 +515,17 @@ impl<'a> Body<'a> {
                 self.written(name);
             }
             // A member mask of all lanes is usually put in a register first.
-            if let ("mov.b32" | "mov.u32" | "mov.s32", false, [register, value]) =
-                (opcode, guarded, &scan::split_operands(operands)[..])
+            if let ("mov.b32" | "mov.u32" | "mov.s32", false, [register, value]) = (opcode, guarded, parts.as_slice())
                 && all_ones(value)
                 && scan::register(register).is_some()
             {
                 self.all_ones.insert(register.to_string());
+            }
+            if let ("mov.b16" | "mov.u16" | "mov.s16", false, [register, value]) = (opcode, guarded, parts.as_slice())
+                && super::types::integer(value) == Some(0x8000)
+                && scan::register(register).is_some()
+            {
+                self.remember(Form::Bf16NegativeZero, &[register], &[]);
             }
             if zero {
                 self.zeros.insert(first_operand(operands).trim().to_string());

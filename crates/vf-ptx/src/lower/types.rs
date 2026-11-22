@@ -40,6 +40,8 @@ pub(super) enum Form {
     E5m2,
     /// The two bf16 elements of a register as f32 (2 registers).
     Bf16,
+    /// A scalar BF16 register holding the exact negative zero bit pattern.
+    Bf16NegativeZero,
     /// A tf32 operand as a product takes it: without the 13 low bits of its mantissa (1 register).
     Tf32,
 }

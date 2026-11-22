@@ -1,0 +1,52 @@
+.version 8.0
+.target sm_90
+.address_size 64
+
+.visible .entry k(.param .u64 output) .reqntid 32,1,1
+{
+    .reg .b16 %a, %b, %c, %lo, %hi;
+    .reg .b32 %r<4>, %lane, %bit;
+    .reg .b64 %out;
+    .reg .pred %odd;
+    mov.u32 %lane, %laneid;
+    and.b32 %bit, %lane, 1;
+    setp.ne.u32 %odd, %bit, 0;
+
+    // The addend's zero sign controls the sign of a negative zero product.
+    mov.b16 %a, 0x8000;
+    mov.b16 %b, 0x4000;
+    mov.b16 %c, 0x8000;
+    fma.rn.bf16 %lo, %a, %b, %c;
+    mov.b16 %c, 0;
+    fma.rn.bf16 %hi, %a, %b, %c;
+    mov.b32 %r0, {%lo, %hi};
+
+    // Half a subnormal rounds to zero and one and a half rounds to two.
+    mov.b16 %a, 1;
+    mov.b16 %c, 0x8000;
+    mov.b16 %b, 0x3f00;
+    fma.rn.bf16 %lo, %a, %b, %c;
+    mov.b16 %b, 0x3fc0;
+    fma.rn.bf16 %hi, %a, %b, %c;
+    mov.b32 %r1, {%lo, %hi};
+
+    mov.b16 %a, 0x7f80;
+    mov.b16 %b, 0;
+    fma.rn.bf16 %lo, %a, %b, %c;
+    mov.b16 %a, 0x7f7f;
+    mov.b16 %b, 0x4000;
+    fma.rn.bf16 %hi, %a, %b, %c;
+    mov.b32 %r2, {%lo, %hi};
+
+    mov.b16 %a, 0x8000;
+    @%odd mov.b16 %c, 0;
+    fma.rn.bf16 %lo, %a, %b, %c;
+    cvt.u32.u16 %r3, %lo;
+    selp.u32 %bit, 0, 32768, %odd;
+    xor.b32 %r3, %r3, %bit;
+
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.b32 [%out], {%r0, %r1, %r2, %r3};
+    ret;
+}

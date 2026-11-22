@@ -31,6 +31,16 @@ impl<'a> Body<'a> {
         self.out.push_str(&self.text[self.copied..range.start]);
         self.copied = range.end;
         self.first_line = true;
+        // Adding -0 to a product preserves even a negative zero product. Two
+        // BF16 significands give at most 16 product bits. Use the ordinary BF16
+        // multiplication, including its subnormal and canonical NaN handling.
+        if opcode == "fma.rn.bf16"
+            && let [_, _, _, addend] = parts[..]
+            && self.recall(super::types::Form::Bf16NegativeZero, &[addend]).is_some()
+        {
+            words[0] = "mul";
+            parts.pop();
+        }
         let memory = matches!(words[0], "ld" | "st");
         // What a load or a store says to the second-level cache changes nothing a program can see,
         // and this target's compiler refuses it: the size of a prefetch, the eviction priority, and

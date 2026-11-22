@@ -1664,6 +1664,27 @@ fn floats_become_ue8m0_bytes() {
 }
 
 #[test]
+fn bf16_fma_with_a_known_negative_zero_addend_is_a_product() {
+    let run = |setup: &str, guard: &str| {
+        lower(&format!(
+            "{{\n.reg .b16 %h<6>;\n.reg .pred %p;\n{setup}\n{guard}fma.rn.bf16 %h0,%h1,%h2,%h3;\nret;\n}}"
+        ))
+    };
+    let known = run("mov.b16 %h3,0x8000;", "@%p ");
+    assert_eq!(count(&known, "mul.rn.f32 "), 1);
+    assert!(known.contains("@%p cvt.u16.u32 %h0,"));
+    for setup in [
+        "mov.b16 %h3,0;",
+        "@%p mov.b16 %h3,0x8000;",
+        "mov.b16 %h3,0x8000;\n@%p mov.b16 %h3,%h4;",
+        "@%p bra skip;\nmov.b16 %h3,0x8000;\nskip:",
+        "{\n.reg .b16 %h<6>;\nmov.b16 %h3,0x8000;\n}",
+    ] {
+        assert_eq!(count(&run(setup, ""), "fma.rm.f32 "), 1, "{setup}");
+    }
+}
+
+#[test]
 fn ue8m0_values_become_bf16() {
     let lowered = lower("{\n\t.reg .b16 %rs1;\n\t.reg .b32 %r1;\n\tcvt.rn.bf16x2.ue8m0x2 %r1, %rs1;\n\tret;\n}");
     assert_eq!(count(&lowered, "ue8m0"), 0);
