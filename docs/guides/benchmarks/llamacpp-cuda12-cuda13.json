@@ -46,7 +46,7 @@
   },
   "client": "python3 freetoken.py --url http://127.0.0.1:8080 --disable-prompt-cache",
   "prompts": "prompts.json",
-  "timings": "llama.cpp per-request prompt_per_second and predicted_per_second. Warm-up excluded from medians.",
+  "timings": "Prefill uses prompt_n / (prompt_ms / 1000). Decode uses (predicted_n - 1) / (predicted_ms / 1000), counting tokens after the first. Both durations come from llama.cpp. Warm-up is excluded from medians.",
   "host_repeat": {
     "native_cuda_12_9": {
       "build": "Unmodified upstream source compiled with CUDA 12.9.2 for sm_70",
