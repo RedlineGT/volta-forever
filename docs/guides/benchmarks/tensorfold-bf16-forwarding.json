@@ -59,7 +59,7 @@
     "forwarding_source": "https://github.com/nbald/volta-forever/commit/f4885eb8781be2385395e824077bf188811c3ad4"
   },
   "reproduce": "../tensorfold.md#5-benchmarks",
-  "build_provenance": "The control binary was built from the four-product sources subsequently published in f34ecec. The candidate used that commit plus forwarding of the two exact FP32 lanes produced by packed BF16 cancellation. Both measured binaries predate the subsequent source integration.",
+  "build_provenance": "The timed control used base ce580bf7ee2eeb58a0d9eaae25cf48fab21d83bb and the private four-product patch. Its stable Git patch ID f06a2232b551de77a535230761aba8665b116fe3 matches the public commit f34ecec7c7f0bb38098b90fe3d8d6e21b9d6426e. The candidate was built from that public commit plus the measured forwarding diff identified below.",
   "candidate_base_commit": "f34ecec7c7f0bb38098b90fe3d8d6e21b9d6426e",
   "candidate_measured_production_diff_sha256": "969514af24dde10fefcd3b3e51c461ef740f4ba5f5ccd64070bf2a95e34a31cf",
   "phase_counts": {
