@@ -97,7 +97,7 @@ with which:
 | PyTorch (stock wheel, sm_75 machine code only) | cuBLAS alone: the 925 operations and the 32 models of `LIMITS.md` (the transforms through the wheel's own cuFFT), and factorisations of `torch.linalg` and a sparse product through the wheel's own cuSOLVER and cuSPARSE. All of them: the 925 operations and the 32 models again |
 | llama.cpp (official CUDA 13 build) | cuBLAS |
 | vLLM, SGLang (pip) | cuBLAS alone (environment set by hand); all of them (through the launcher) |
-| ZML (upstream build, its own CUDA libraries opened by absolute path) | cuBLAS, cuFFT, cuSOLVER, NVRTC |
+| ZML source example (bundled CUDA libraries opened by absolute path) | cuBLAS, cuFFT, cuSOLVER, NVRTC |
 
 If you already have the CUDA 12.9 toolkit installed, the launcher finds it in
 `/usr/local/cuda-12.9/lib64`; elsewhere, name its library directory with `--cuda12` or
@@ -282,9 +282,9 @@ LD_LIBRARY_PATH=$S/lib:$T:$LD_LIBRARY_PATH \
     python3 -c "import torch; print(torch.cuda.get_device_name())"
 ```
 
-**Example: ZML (a program that opens libraries by absolute path)**
+**Example from the historical ZML source test**
 
-The map names every library the program opens, as `tests/gpu/zml.sh` writes it:
+The default `tests/gpu/zml.sh` run keeps the build’s bundled cuDNN 9.24.0 and maps the following CUDA libraries.
 
 ```
 libcuda.so.1=/path/to/volta-forever/lib/libcuda.so.1
@@ -295,12 +295,9 @@ libcublasLt.so.13=/path/to/volta-forever/forward/libcublasLt.so.13
 libcufft.so.12=/path/to/volta-forever/forward/libcufft.so.12
 libcusolver.so.12=/path/to/volta-forever/forward/libcusolver.so.12
 libnvrtc.so.13=/path/to/volta-forever/forward/libnvrtc.so.13
-@cudnn-version=9.24.0
 ```
 
-The `@cudnn-version` setting answers cuDNN's version queries with that version, so that a
-program whose minimum-version check would refuse the older cuDNN that has code for Volta
-accepts it (ZML needs this).
+A separate historical comparison set `VF_ZML_CUDNN=9.10.2` and made that older library report 9.24.0 with `@cudnn-version`. Use the cuDNN build the application expects. The verified 35B LLMD server runs through `vf ./llmd` with its matching runfiles and no manual audit map. [LLMD launch command](docs/guides/zml.md#5-benchmarks)
 
 ### C. Forwarding libraries on the library path
 
@@ -320,7 +317,7 @@ On one Tesla V100, with no switch set (`LIMITS.md` has the counts and what does 
 |---|---|---|
 | PyTorch 2.14 (wheel for CUDA 13) | B, with the map for its cuBLAS | 924 of 925 operations tested give the CPU's results (the other one the CPU does not do), 32 of 32 small whole models |
 | llama.cpp (official CUDA 13 build) | A or C | flash attention on or off; quantized and NVFP4 weights |
-| ZML | B, with a map of every library it opens | it opens its CUDA libraries by absolute path |
+| Historical ZML source test | B, with the map above | the test opens bundled CUDA libraries by absolute path |
 | vLLM 0.34 (installed with pip) | B, as PyTorch | the engine and its HTTP server |
 | SGLang 0.5 (installed with pip) | B, as PyTorch | the engine and its HTTP server, with its default attention (FlashInfer) or with `--attention-backend triton`. Five of FlashInfer's eighteen prefill kernels are still refused: if a model or a batch asks for one of them, the error names it, and `--attention-backend triton` goes without them |
 
