@@ -198,6 +198,8 @@ SGLang starts one process per GPU for tensor parallelism. A user tested two and 
 
 We separately tested this mapping with two Tesla V100-SXM2-32GBs. One process requested NCCL by soname and the other used the CUDA 13 library's absolute path. In a control with NCCL 2.30.7 for CUDA 13, VF refused `AllReduce_Sum_f16_RING_LL` on both ranks and the run timed out during initialization. With the map, both ranks loaded NCCL 2.32.6 for CUDA 12. Each rank received the exact expected integer sums for 1, 257 and 65,536 elements. [Commands for the SGLang environment](docs/guides/sglang.md#6-additional-notes)
 
+Four PyTorch ranks with the CUDA 12.9 build of NCCL also passed SUM and MAX reductions on four V100s. All 1,052,704 output values matched a CPU oracle, and NCCL reported peer access in all twelve directions. The full SGLang 35B run completed on two GPUs. The four-GPU model startup stopped before generation. [Collective and model checks](docs/guides/benchmarks/sglang-tensor-parallel.json)
+
 ## Peer copies over NVLink
 
 One process enabled direct peer access between two V100-SXM2-32GBs connected by two NVLinks (`NV2`). It copied a 64 MiB buffer and verified every byte in each direction. Each rate below is the median of three sets of 32 copies after warm-up, measured one direction at a time on driver 580.178.04.

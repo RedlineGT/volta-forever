@@ -263,5 +263,39 @@
     "result": "CUDA 13.5 nvcc stopped compiling sgl_kernel_jit_communicator. The pre-Hopper branches in sgl_kernel/distributed/ptx.cuh use assert without its declaration. No reduction kernel ran.",
     "new_xid_count": 0,
     "model_performance_measured": false
+  },
+  "pytorch_nccl_four_rank": {
+    "test": "Four Python processes in one Ubuntu 24.04.5 container, each selecting one distinct Tesla V100-SXM2-32GB on a single host.",
+    "scope": "Small tensors only. SGLang custom collectives and four-rank 35B inference are separate tests.",
+    "torch": "2.14.1+cu130",
+    "vf_commit": "95b48db2ab6be843b7d9523bb1291a5906b5b67b",
+    "vf_proxy_sha256": "9ce3161b9ce86eb15da8aa432a74ba054d94c203e37d6148d3052855b38b4e88",
+    "vf_capability": "8.0",
+    "nccl": "2.32.6+cuda12.9",
+    "nccl_sha256": "f90198d76c8dfba9b4764c29f32fae83be6a396a357c1e2ccb10a7f68ff6df0d",
+    "mapped_nccl_on_every_rank": "/opt/cuda12/libnccl.so.2",
+    "rank_gpu_uuids": [
+      "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+      "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+      "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd"
+    ],
+    "elements_per_tensor": [
+      1,
+      257,
+      65536
+    ],
+    "collectives": [
+      "torch.distributed.all_reduce SUM, INT32, asynchronous work waited on a clone",
+      "PyTorch functional all_reduce MAX, FP32, separate returned tensor",
+      "ncclAllReduce SUM and MAX, INT32, separate send and receive pointers with four canary words on either side of each output"
+    ],
+    "validation": "Each rank checked every result against a CPU oracle and verified its source tensor stayed unchanged. All four ranks produced the same 12 result hashes.",
+    "result_words_per_rank": 263176,
+    "physical_links": "All six pairs reported NV2 in nvidia-smi topo -m.",
+    "nccl_connections": "All 12 directed links reported P2P/CUMEM/read. No link throughput counters were collected.",
+    "driver": "580.178.04",
+    "host_memory_peak_bytes": 2566422528,
+    "new_xid_count": 0
   }
 }
