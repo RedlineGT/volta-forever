@@ -116,13 +116,37 @@ fn write_guard(out: &mut String, r: &str, id: usize, batch: &[IndexedProduct<'_>
     .unwrap();
 }
 
+pub(super) enum Accumulator<'a> {
+    Guarded(&'a str),
+    Fragment,
+    Distributed { prefix: &'a str, last: bool },
+}
+
+/// Replicate the input C of each output column into its four neighboring lanes.
+/// Each lane can then keep the column's sum in place throughout the region.
+pub(super) fn distribute_accumulators(out: &mut String, r: &str, batch: &[IndexedProduct<'_>]) {
+    writeln!(
+        out,
+        ".reg .b32 {r}c<4>,{r}col,{r}src,{r}even,{r}odd; .reg .pred {r}oddcol;"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "shr.u32 {r}col,{r}lane,2; shr.u32 {r}src,{r}col,1; and.b32 {r}x,{r}col,1; setp.ne.u32 {r}oddcol,{r}x,0;"
+    )
+    .unwrap();
+    for (k, (_, p)) in batch.iter().enumerate() {
+        writeln!(out, "shfl.sync.idx.b32 {r}even,{}, {r}src,31,0xffffffff; shfl.sync.idx.b32 {r}odd,{}, {r}src,31,0xffffffff; selp.b32 {r}c{k},{r}odd,{r}even,{r}oddcol;", p.c[0],p.c[1]).unwrap();
+    }
+}
+
 pub(super) fn write(
     out: &mut String,
     id: usize,
     batch: &[IndexedProduct<'_>],
     mode: Bf16Row,
     small: bool,
-    original: Option<&str>,
+    accumulation: Accumulator<'_>,
 ) {
     let r = format!("%bfgroup_{id}_r");
     let a = &batch[0].1.a;
@@ -135,7 +159,7 @@ pub(super) fn write(
          shr.u32 {r}col,{r}lane,2; setp.eq.u32 {r}row,{r}g,0;"
     )
     .unwrap();
-    if original.is_some() {
+    if matches!(accumulation, Accumulator::Guarded(_)) {
         write_guard(out, &r, id, batch, mode, small);
     }
     writeln!(out, "shl.b32 {r}evenlane,{r}t,3; or.b32 {r}oddlane,{r}evenlane,4;").unwrap();
@@ -162,7 +186,7 @@ pub(super) fn write(
     if small {
         writeln!(out, ".reg .b32 {r}zero<4>;").unwrap();
     }
-    for (_, p) in batch {
+    for (index, (_, p)) in batch.iter().enumerate() {
         if mode == Bf16Row::Ordered {
             writeln!(
                 out,
@@ -207,13 +231,20 @@ pub(super) fn write(
                 .unwrap();
             }
         }
-        writeln!(
-            out,
-            "shfl.sync.idx.b32 {r}even,{r}acc,{r}evenlane,31,0xffffffff;\n\
-             shfl.sync.idx.b32 {r}odd,{r}acc,{r}oddlane,31,0xffffffff;"
-        )
-        .unwrap();
-        if mode == Bf16Row::Tree {
+        // Once +0 is added to an inactive value, subsequent additions of +0
+        // leave its bits unchanged, including signed zeros and quieted NaNs.
+        let sum = if let Accumulator::Distributed { prefix, last } = accumulation {
+            let carry = format!("{prefix}c{index}");
+            writeln!(out, "add.rn.f32 {carry},{r}acc,{carry};").unwrap();
+            if !last {
+                continue;
+            }
+            carry
+        } else {
+            format!("{r}acc")
+        };
+        writeln!(out, "shfl.sync.idx.b32 {r}even,{sum},{r}evenlane,31,0xffffffff;\nshfl.sync.idx.b32 {r}odd,{sum},{r}oddlane,31,0xffffffff;").unwrap();
+        if mode == Bf16Row::Tree && !matches!(accumulation, Accumulator::Distributed { .. }) {
             writeln!(
                 out,
                 "add.rn.f32 {r}even,{r}even,{}; add.rn.f32 {r}odd,{r}odd,{};",
@@ -240,7 +271,7 @@ pub(super) fn write(
             .unwrap();
         }
     }
-    if let Some(original) = original {
+    if let Accumulator::Guarded(original) = accumulation {
         writeln!(
             out,
             "bra.uni $bfgroup_row_done_{id};\n$bfgroup_row_slow_{id}:\n{original}\n$bfgroup_row_done_{id}:"

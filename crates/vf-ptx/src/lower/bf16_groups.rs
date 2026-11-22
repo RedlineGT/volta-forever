@@ -213,7 +213,7 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
                 batch,
                 options.bf16_row,
                 small,
-                Some(&text[begin..end]),
+                row::Accumulator::Guarded(&text[begin..end]),
             );
             copied = end;
             groups += 1;

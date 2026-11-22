@@ -9,6 +9,7 @@ type Round<'a> = Vec<(usize, Product<'a>)>;
 
 pub(super) struct Region<'a> {
     pub(super) rounds: Vec<Round<'a>>,
+    private_sums: bool,
 }
 
 // A padded suffix must not let a second spelling of a register evade the write set.
@@ -50,6 +51,7 @@ fn bridge<'a>(
     start: usize,
     outer: &Declarations,
     written: &mut HashSet<&'a str>,
+    read: &mut HashSet<&'a str>,
 ) -> Option<usize> {
     let mut local = None;
     for (index, item) in items.iter().enumerate().skip(start).take(256) {
@@ -98,6 +100,7 @@ fn bridge<'a>(
                     return None;
                 }
                 written.insert(*dest);
+                read.extend(src.iter().copied());
             }
             _ => return None,
         }
@@ -119,10 +122,14 @@ impl<'a> Region<'a> {
         if !activations.is_disjoint(&sums) {
             return None;
         }
-        let mut region = Self { rounds: vec![first] };
+        let mut region = Self {
+            rounds: vec![first],
+            private_sums: true,
+        };
         let mut written = HashSet::new();
         while region.rounds.len() < 4 {
-            let Some(idx) = bridge(text, items, region.end() + 1, decl, &mut written) else {
+            let mut read = HashSet::new();
+            let Some(idx) = bridge(text, items, region.end() + 1, decl, &mut written, &mut read) else {
                 break;
             };
             let Some(next) = round(text, items, idx, decl, small) else {
@@ -135,6 +142,7 @@ impl<'a> Region<'a> {
             if !activations.is_disjoint(&written) || !activations.is_disjoint(&sums) || !sums.is_disjoint(&written) {
                 break;
             }
+            region.private_sums &= sums.is_disjoint(&read);
             region.rounds.push(next);
         }
         (region.rounds.len() >= 2).then_some(region)
@@ -189,6 +197,9 @@ impl<'a> Region<'a> {
             row::multiplicand_bounds(out, &r, w, Bf16Row::Tree);
         }
         writeln!(out,"and.b32 {r}bounds,{r}bounds,0x80008000; or.b32 {r}flags,{r}flags,{r}bounds; setp.ne.u32 {r}bad,{r}flags,0; vote.sync.any.pred {r}warp,{r}bad,0xffffffff; @{r}warp bra.uni $bfgroup_region_slow_{id};").unwrap();
+        if self.private_sums {
+            row::distribute_accumulators(out, &r, &self.rounds[0]);
+        }
         for cold in [false, true] {
             let mut copied = items[self.rounds[0][0].0].range.start;
             for (n, batch) in self.rounds.iter().enumerate() {
@@ -202,7 +213,16 @@ impl<'a> Region<'a> {
                     batch,
                     Bf16Row::Tree,
                     true,
-                    cold.then_some(&text[start..end]),
+                    if cold {
+                        row::Accumulator::Guarded(&text[start..end])
+                    } else if self.private_sums {
+                        row::Accumulator::Distributed {
+                            prefix: &r,
+                            last: n + 1 == self.rounds.len(),
+                        }
+                    } else {
+                        row::Accumulator::Fragment
+                    },
                 );
                 copied = end;
             }
@@ -291,6 +311,24 @@ mod tests {
         );
         for mode in [Bf16Row::Ordered, Bf16Row::Off] {
             assert!(!lower(&source(2, ""), mode).contains(label));
+        }
+    }
+
+    #[test]
+    fn keeps_live_intermediate_fragments_visible_to_bridge_instructions() {
+        for n in 2..=4 {
+            let output = lower(&source(n, "mov.b32 %q,%b0;"), Bf16Row::Tree);
+            let (hot, cold) = output.split_once("$bfgroup_region_slow_0:").unwrap();
+            assert_eq!(hot.matches("add.rn.f32 %bfgroup_region_0_c0,").count(), n);
+            assert_eq!(hot.matches("selp.b32 %c0,").count(), 1);
+            assert!(!cold.contains("add.rn.f32 %bfgroup_region_0_c0,"));
+
+            for gap in ["mov.b32 %q,%c0;", "{.reg .b32 local; mov.b32 local,%c15;}"] {
+                let visible = lower(&source(n, gap), Bf16Row::Tree);
+                let (hot, _) = visible.split_once("$bfgroup_region_slow_0:").unwrap();
+                assert!(!hot.contains("add.rn.f32 %bfgroup_region_0_c0,"));
+                assert_eq!(hot.matches("selp.b32 %c0,").count(), n);
+            }
         }
     }
 
