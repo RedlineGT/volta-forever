@@ -18,10 +18,20 @@
 //! - Older CUDA runtimes retain the physical capability by default.
 //!
 //! `VF_CAPABILITY` overrides the device answer for a direct client or code targeting later GPUs.
-//! The code taken from the program follows that setting (`vf_adapt::Policy::told_sm`).
+//! The PTX taken from the program follows that setting (`vf_adapt::Policy::told_sm`), and so does
+//! what the caller is told, except where the program is given machine code of an earlier
+//! generation: the translation of its sm_75 code, which is what runs of a library such as
+//! PyTorch's, which has no PTX. Told 8.0, such a program launches its kernels for sm_80, which
+//! that code has not. A caller is told no later generation than the machine code that is given
+//! for its own embedded code, or for that of the libraries loaded with it as a dependency (a CUDA
+//! runtime answers for the programs that use it; cuDNN's graph library for the library of its
+//! precompiled engines): 7.5 in this case (`vf_adapt::Policy::told_limit`), with a line at the
+//! default log level that says so. `VF_CAPABILITY_ALL=1` tells such a caller what `VF_CAPABILITY`
+//! asks all the same, for a program that does not launch the kernels it would choose for it
+//! (SGLang with the settings of its guide selects its quantized experts from PyTorch's capability).
 
 use std::collections::HashMap;
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, CString, c_void};
 use std::sync::{LazyLock, Mutex};
 
 use vf_adapt::Embedded;
@@ -46,10 +56,21 @@ const FIRST_SM_OF_THAT_RUNTIME: u32 = vf_adapt::TRANSLATED_FROM;
 
 static UNDER_LAUNCHER: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VOLTA_FOREVER").is_some());
 
+/// What a caller is told.
+#[derive(Debug, Clone, Copy)]
+struct Decision {
+    caller: Caller,
+    /// The architecture that the code given for the caller limits what it is told to, below what
+    /// `VF_CAPABILITY` asks (`vf_adapt::Policy::told_limit`).
+    limit: Option<u32>,
+}
+
 #[derive(Default)]
 struct Cache {
     unloads: u64,
-    by_base: HashMap<usize, Caller>,
+    by_base: HashMap<usize, Decision>,
+    /// `vf_adapt::Policy::told_limit_in` of the files read, by path.
+    limits: HashMap<CString, Option<u32>>,
 }
 
 static CALLERS: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
@@ -64,6 +85,113 @@ fn unload_count() -> u64 {
     let mut n = 0u64;
     unsafe { libc::dl_iterate_phdr(Some(first), (&raw mut n).cast()) };
     n
+}
+
+/// An object of the process (the main program or a shared library), as the dynamic loader lists it.
+struct Object {
+    /// The file its code can be read from: `/proc/self/exe` for the main program; `None` for
+    /// an object without a name (the kernel's vDSO has no file either, and reads as nothing).
+    path: Option<CString>,
+    /// Whether the address asked about is in one of its segments.
+    holds: bool,
+    /// Its `DT_SONAME`, and the `DT_NEEDED` names of the libraries it was loaded with.
+    soname: Option<Vec<u8>>,
+    needed: Vec<Vec<u8>>,
+}
+
+/// The objects of the process, the one that holds `address` marked.
+fn objects(address: usize) -> Vec<Object> {
+    unsafe extern "C" fn each(info: *mut libc::dl_phdr_info, _: usize, data: *mut c_void) -> i32 {
+        // SAFETY: `data` is the pair below; `info` is the loader's description of a loaded object,
+        // whose program headers and segments are mapped while it is listed.
+        let (address, list) = unsafe { &mut *data.cast::<(usize, Vec<Object>)>() };
+        let first = list.is_empty();
+        list.push(unsafe { object(&*info, *address, first) });
+        0
+    }
+    let mut data = (address, Vec::<Object>::new());
+    unsafe { libc::dl_iterate_phdr(Some(each), (&raw mut data).cast()) };
+    data.1
+}
+
+/// # Safety
+/// `info` must be what `dl_iterate_phdr` gives to its callback, used during the callback.
+unsafe fn object(info: &libc::dl_phdr_info, address: usize, first: bool) -> Object {
+    const PT_LOAD: u32 = 1;
+    const PT_DYNAMIC: u32 = 2;
+    let (base, count) = (info.dlpi_addr as usize, info.dlpi_phnum as usize);
+    let headers = if info.dlpi_phdr.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(info.dlpi_phdr, count) }
+    };
+    let segments: Vec<(usize, usize)> = headers
+        .iter()
+        .filter(|h| h.p_type == PT_LOAD)
+        .map(|h| {
+            let start = base.wrapping_add(h.p_vaddr as usize);
+            (start, start.saturating_add(h.p_memsz as usize))
+        })
+        .collect();
+    let mapped = |at: usize, length: usize| {
+        segments
+            .iter()
+            .any(|&(start, end)| at >= start && at.checked_add(length).is_some_and(|stop| stop <= end))
+    };
+    let name = if info.dlpi_name.is_null() {
+        &[][..]
+    } else {
+        unsafe { CStr::from_ptr(info.dlpi_name) }.to_bytes()
+    };
+    // The loader lists the main program first, without a name.
+    let path = match name {
+        [] if first => Some(c"/proc/self/exe".to_owned()),
+        [] => None,
+        name => CString::new(name).ok(),
+    };
+    let mut found = Object {
+        path,
+        holds: mapped(address, 1),
+        soname: None,
+        needed: Vec::new(),
+    };
+    // The dynamic section: tags and values, up to DT_NULL.
+    let Some(dynamic) = headers.iter().find(|h| h.p_type == PT_DYNAMIC) else {
+        return found;
+    };
+    let dynamic = base.wrapping_add(dynamic.p_vaddr as usize);
+    let (mut strings, mut size, mut names, mut soname) = (0usize, 0usize, Vec::new(), None);
+    let mut at = dynamic;
+    while mapped(at, 16) {
+        // SAFETY: 16 bytes inside a segment of the object.
+        let (tag, value) = unsafe { (*(at as *const i64), *((at + 8) as *const u64) as usize) };
+        match tag {
+            0 => break,
+            1 => names.push(value),
+            5 => strings = value,
+            10 => size = value,
+            14 => soname = Some(value),
+            _ => {}
+        }
+        at += 16;
+    }
+    // The loader relocates the address of the string table in place, except in a read-only
+    // dynamic section (the vDSO's).
+    if !mapped(strings, size) {
+        strings = strings.wrapping_add(base);
+    }
+    if size == 0 || !mapped(strings, size) {
+        return found;
+    }
+    // SAFETY: the string table is inside a segment of the object.
+    let table = unsafe { std::slice::from_raw_parts(strings as *const u8, size) };
+    let string = |offset: usize| {
+        let rest = table.get(offset..)?;
+        Some(rest[..rest.iter().position(|&b| b == 0)?].to_vec())
+    };
+    found.soname = soname.and_then(string);
+    found.needed = names.into_iter().filter_map(string).collect();
+    found
 }
 
 /// A file mapped read-only.
@@ -133,31 +261,171 @@ fn classify(path: &CStr) -> Caller {
     }
 }
 
-fn caller(return_address: usize) -> Caller {
+/// The limit that the code embedded in the file at `path` sets to what a caller that runs it is
+/// told (`vf_adapt::Policy::told_limit_in`), with the file.
+fn file_limit(path: &CStr, limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
+    let limit = *limits
+        .entry(path.to_owned())
+        .or_insert_with(|| Mapped::open(path).and_then(|file| config().policy.told_limit_in(file.bytes())));
+    limit.map(|sm| (sm, path.to_owned()))
+}
+
+/// The lower of two limits.
+fn lower(limit: Option<(u32, CString)>, other: Option<(u32, CString)>) -> Option<(u32, CString)> {
+    match (limit, other) {
+        (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The files read for what limits the caller of class `caller` whose file is `path`, besides the
+/// libraries loaded with it as a dependency: its own, when it embeds code; for cuDNN's graph
+/// library, which chooses the engines and loads the library of its precompiled ones only when it
+/// needs them (after it asked), that library, beside it.
+fn own_files(path: &CStr, caller: Caller) -> Vec<CString> {
+    let bytes = path.to_bytes();
+    let (directory, name) = match bytes.iter().rposition(|&b| b == b'/') {
+        Some(at) => bytes.split_at(at + 1),
+        None => (&b""[..], bytes),
+    };
+    let mut files = Vec::new();
+    if matches!(caller, Caller::From(_)) && runtime_version(&String::from_utf8_lossy(name)).is_none() {
+        files.push(path.to_owned());
+    }
+    if let Some(version) = name.strip_prefix(b"libcudnn_graph.so")
+        && let Ok(engines) = CString::new([directory, b"libcudnn_engines_precompiled.so", version].concat())
+    {
+        files.push(engines);
+    }
+    files
+}
+
+/// The limit that the code of the libraries loaded with the caller as a dependency (named in
+/// their `DT_NEEDED`) sets to what it is told, and the library that sets it: a CUDA runtime
+/// answers for the programs that use it. Their files are read once each. A library loaded after
+/// the caller first asks is not seen.
+fn dependents_limit(objects: &[Object], limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
+    let caller = objects.iter().find(|object| object.holds)?;
+    let file_name = caller.path.as_ref().map(|path| {
+        path.to_bytes()
+            .rsplit(|&b| b == b'/')
+            .next()
+            .unwrap_or_default()
+            .to_vec()
+    });
+    let names: Vec<&[u8]> = caller
+        .soname
+        .iter()
+        .chain(file_name.iter())
+        .map(Vec::as_slice)
+        .collect();
+    let mut lowest: Option<(u32, CString)> = None;
+    for object in objects.iter().filter(|object| !object.holds) {
+        let Some(path) = &object.path else {
+            continue;
+        };
+        if object.needed.iter().any(|needed| names.contains(&needed.as_slice())) {
+            lowest = lower(lowest, file_limit(path, limits));
+        }
+    }
+    lowest
+}
+
+fn caller(return_address: usize) -> Decision {
     let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
     // SAFETY: the call site is live for the duration of this driver call.
     if unsafe { libc::dladdr(return_address as *const c_void, &mut info) } == 0 || info.dli_fname.is_null() {
-        return Caller::Other;
+        return Decision {
+            caller: Caller::Other,
+            limit: None,
+        };
     }
     let unloads = unload_count();
     let mut cache = CALLERS.lock().unwrap_or_else(|e| e.into_inner());
     if cache.unloads != unloads {
         cache.by_base.clear();
+        cache.limits.clear();
         cache.unloads = unloads;
     }
-    *cache.by_base.entry(info.dli_fbase as usize).or_insert_with(|| {
-        let path = unsafe { CStr::from_ptr(info.dli_fname) };
-        let caller = classify(path);
-        let answer = match (caller, config().capability) {
-            (Caller::Native, _) => "the real compute capability: it has code for this GPU".to_string(),
-            (_, Some((major, minor))) => format!("compute capability {major}.{minor}, as VF_CAPABILITY asks"),
-            (Caller::From(sm), None) => format!("compute capability {}.{}: its code starts there", sm / 10, sm % 10),
-            (Caller::Direct, None) => "compute capability 7.5: it has no embedded GPU code".to_string(),
-            (Caller::Other, None) => "the real compute capability".to_string(),
-        };
-        log::info(format_args!("{} is told {answer}", path.to_string_lossy()));
-        caller
-    })
+    let base = info.dli_fbase as usize;
+    if let Some(decision) = cache.by_base.get(&base) {
+        return *decision;
+    }
+    let objects = objects(return_address);
+    // For the main program the loader's name is `argv[0]`, which names no file when the program
+    // was started by name through PATH, or once it has changed directory: its file is read
+    // through `/proc/self/exe`.
+    let main = objects
+        .first()
+        .filter(|object| object.holds)
+        .and_then(|object| object.path.as_deref());
+    let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
+    // What limits the answer matters only when the user asks for a later generation than Turing's.
+    let limits = config()
+        .policy
+        .told_sm
+        .is_some_and(|sm| sm / 10 > FIRST_SM_OF_THAT_RUNTIME / 10);
+    let caller = classify(path);
+    let mut limit = None;
+    if limits && caller != Caller::Native {
+        for file in own_files(path, caller) {
+            limit = lower(limit, file_limit(&file, &mut cache.limits));
+        }
+        limit = lower(limit, dependents_limit(&objects, &mut cache.limits));
+    }
+    let decision = Decision {
+        caller,
+        limit: limit.as_ref().map(|(sm, _)| *sm),
+    };
+    let name = match main {
+        Some(path) if path == c"/proc/self/exe" => std::fs::read_link("/proc/self/exe").map_or_else(
+            |_| path.to_string_lossy().into_owned(),
+            |file| file.display().to_string(),
+        ),
+        _ => path.to_string_lossy().into_owned(),
+    };
+    match (caller, config().capability, &limit) {
+        (Caller::Native, _, _) => log::info(format_args!(
+            "{name} is told the real compute capability: it has code for this GPU"
+        )),
+        (_, Some((major, minor)), Some((sm, file))) => {
+            let whose = if file.as_c_str() == path {
+                "its code".to_string()
+            } else {
+                format!("the code of {}", file.to_string_lossy())
+            };
+            if config().capability_all {
+                log::warn(format_args!(
+                    "{name} is told compute capability {major}.{minor}, as VF_CAPABILITY and VF_CAPABILITY_ALL ask, \
+                     although {whose} runs here as the translation of its machine code for sm_{sm}, in which the \
+                     kernels that a program told {major}.{minor} chooses are not the real ones"
+                ))
+            } else {
+                log::warn(format_args!(
+                    "{name} is told compute capability {}.{}, not the {major}.{minor} that VF_CAPABILITY asks: {whose} \
+                     runs here as the translation of its machine code for sm_{sm}, in which the kernels that a \
+                     program told {major}.{minor} chooses are not the real ones (VF_CAPABILITY_ALL=1 tells it \
+                     {major}.{minor} all the same)",
+                    sm / 10,
+                    sm % 10
+                ))
+            }
+        }
+        (_, Some((major, minor)), None) => log::info(format_args!(
+            "{name} is told compute capability {major}.{minor}, as VF_CAPABILITY asks"
+        )),
+        (Caller::From(sm), None, _) => log::info(format_args!(
+            "{name} is told compute capability {}.{}: its code starts there",
+            sm / 10,
+            sm % 10
+        )),
+        (Caller::Direct, None, _) => log::info(format_args!(
+            "{name} is told compute capability 7.5: it has no embedded GPU code"
+        )),
+        (Caller::Other, None, _) => log::info(format_args!("{name} is told the real compute capability")),
+    }
+    cache.by_base.insert(base, decision);
+    decision
 }
 
 /// The capability reported for a physical sm_70 device.
@@ -168,17 +436,22 @@ pub fn device_capability(return_address: usize) -> Option<(i32, i32)> {
 /// A client without embedded GPU code can identify the native architecture of an external kernel.
 pub fn binary_capability(return_address: usize) -> Option<(i32, i32)> {
     match caller(return_address) {
-        Caller::Direct => None,
+        Decision {
+            caller: Caller::Direct, ..
+        } => None,
         other => capability(other),
     }
 }
 
-fn capability(caller: Caller) -> Option<(i32, i32)> {
-    let sm = match caller {
+fn capability(decision: Decision) -> Option<(i32, i32)> {
+    let as_pair = |sm: u32| ((sm / 10) as i32, (sm % 10) as i32);
+    let limit = decision.limit.filter(|_| !config().capability_all);
+    let told = config().capability.map(|asked| limit.map_or(asked, as_pair));
+    let sm = match decision.caller {
         Caller::Native => return None,
         Caller::Direct => FIRST_SM_OF_THAT_RUNTIME,
         Caller::From(sm) => sm,
-        Caller::Other => return config().capability,
+        Caller::Other => return told,
     };
-    config().capability.or(Some(((sm / 10) as i32, (sm % 10) as i32)))
+    told.or(Some(as_pair(sm)))
 }

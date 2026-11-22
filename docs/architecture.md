@@ -124,9 +124,11 @@ leads to:
 
 For a program told 8.0 (`VF_CAPABILITY=8.0`), the default policy prefers compatible Ampere
 PTX, including complete PTX retained in that target's cubins. If a fat binary only supplies
-stripped sm_75 and sm_80 executables, VF prefers the broader sm_75 instruction coverage.
-When only the stripped sm_80 image is available, VF translates its supported functions.
-`VF_TRANSLATE=first` gives machine code for the requested capability precedence.
+stripped sm_75 and sm_80 executables, VF prefers the broader sm_75 instruction coverage, and
+the program is then told 7.5, not 8.0 (section 4): told 8.0, it would launch its kernels for
+sm_80, which the sm_75 code does not have. When only the stripped sm_80 image is available,
+VF translates its supported functions. `VF_TRANSLATE=first` gives machine code for the
+requested capability precedence.
 
 ### PTX retargeted and lowered
 
@@ -266,7 +268,20 @@ which loaded file is asking (through `dladdr`), and classifies it:
 
 On a V100, `VF_CAPABILITY=7.0`, `8.0` or `12.0` explicitly sets the answer for
 direct clients, older CUDA runtimes and programs built for later GPUs. A caller
-with embedded Volta code retains 7.0 even with an explicit override. The proxy checks the queried
+with embedded Volta code retains 7.0 even with an explicit override. A caller is
+not told a later generation than the machine code it is given: when the code embedded
+in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
+that use a CUDA runtime), or, for cuDNN's graph library, in the library of cuDNN's
+precompiled engines beside it, runs from the translation of its sm_75 machine code,
+the caller is told 7.5 (8.0 for sm_80 code, when 9.0 or later is asked), and a line at
+the default log level says so. PyTorch is such a program: in its sm_75 code, the
+kernels it chooses for 8.0 print an error and write nothing, and some of those it
+chooses for 9.0 stop the GPU. A program whose code is PTX is told what was asked and
+given its PTX for that capability. The decision is taken when a caller first asks; a
+library loaded after that is not looked at. `VF_CAPABILITY_ALL=1` tells such callers
+what was asked all the same, for a program that does not launch the kernels it would
+choose for it (the SGLang guide: SGLang selects its quantized experts from PyTorch's
+capability). The proxy checks the queried
 device's physical major and minor before changing an answer. Other GPUs keep their
 physical values, including in a mixed-device process. A code-free client using the
 proxy without the launcher gets the physical capability by default.
@@ -520,7 +535,8 @@ placement restores the full size, the driver receives the default translation.
 |---|---|
 | `VF_ADAPT` | `0`: forward images unchanged. |
 | `VF_LAZY` | `0`: compile whole modules when loaded, not each kernel when asked for. |
-| `VF_CAPABILITY` | Compute capability reported to callers without Volta code (e.g. `8.0`). The code taken from a program is then the code for that capability. |
+| `VF_CAPABILITY` | Compute capability reported to callers without Volta code (e.g. `8.0`). The PTX taken from a program is then the PTX for that capability; a caller whose code runs from sm_75 machine code is still told 7.5 (section 4). |
+| `VF_CAPABILITY_ALL` | `1`: `VF_CAPABILITY` is told also to the callers whose code runs from machine code of an earlier generation (section 4). |
 | `VF_FIT` | `0`: a launch that the driver refuses for registers is refused to the program. |
 | `VF_FIT_SHARED` | `1`: if a V100 rejects an oversized dynamic shared-memory opt-in, retry the setter at the device limit minus the kernel’s static shared memory. Kernel launches still have to fit. |
 

@@ -321,6 +321,21 @@ unsafe fn load_adapted(
     Err(result)
 }
 
+/// Whether code loaded into the current context is for the GPU this library adapts code for: the
+/// context's device is of that architecture, or the driver does not say which device it is on
+/// (without a context, a load fails anyway). In a machine that also has a later card, a context on
+/// that card is given the program's code as it is. (A library, `cuLibraryLoadData`, is loaded for
+/// every context of the process, the V100's included: its code is adapted, and a fat binary keeps
+/// the entries of the other cards.)
+fn context_needs_adapting() -> bool {
+    let device = real!(cuCtxGetDevice: unsafe extern "C" fn(*mut c_int) -> CUresult);
+    let capability = real!(cuDeviceComputeCapability: unsafe extern "C" fn(*mut c_int, *mut c_int, c_int) -> CUresult);
+    let (mut ordinal, mut major, mut minor) = (-1, -1, -1);
+    let known =
+        unsafe { device(&mut ordinal) == CUDA_SUCCESS && capability(&mut major, &mut minor, ordinal) == CUDA_SUCCESS };
+    !known || (major * 10 + minor) as u32 == config().policy.device_sm
+}
+
 /// Load `image` with `call`, adapted if needed (see `load_adapted`). When the driver refuses the
 /// adapted image whatever is done, the original is loaded, so that the program gets the result it
 /// would get without this library.
@@ -335,7 +350,8 @@ unsafe fn load(
     call: impl Fn(*const c_void) -> CUresult,
     logged: impl Fn(*const c_void) -> (CUresult, String),
 ) -> CUresult {
-    let Some(replacement) = (unsafe { images::adapt(who, image, None) }) else {
+    let adapted = context_needs_adapting().then(|| unsafe { images::adapt(who, image, None) });
+    let Some(replacement) = adapted.flatten() else {
         let result = call(image);
         unsafe { images::loaded_as_is(result, handle) };
         return result;
@@ -428,7 +444,7 @@ pub unsafe extern "C" fn cuModuleLoad(module: *mut *mut c_void, path: *const c_c
 /// The arguments of the program's `cuModuleLoad`.
 unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
     let real = real!(cuModuleLoad: unsafe extern "C" fn(*mut *mut c_void, *const c_char) -> CUresult);
-    let replacement = if path.is_null() {
+    let replacement = if path.is_null() || !context_needs_adapting() {
         None
     } else {
         images::adapt_file("cuModuleLoad", unsafe { CStr::from_ptr(path) })
@@ -1368,6 +1384,7 @@ unsafe fn link_add_data(
     call: impl Fn(c_int, *mut c_void, usize) -> CUresult,
 ) -> CUresult {
     let replacement = match input {
+        _ if !context_needs_adapting() => None,
         INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
         INPUT_FATBINARY => unsafe { images::adapt(who, data, None) },
         _ => None,

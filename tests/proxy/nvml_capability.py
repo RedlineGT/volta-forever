@@ -74,6 +74,8 @@ if __name__ == "__main__":
                 ({"VOLTA_FOREVER": "test", "VF_CAPABILITY": "8.0"}, "8.0"),
                 ({"VOLTA_FOREVER": "test", "VF_CAPABILITY": "12.0"}, "12.0"),
                 ({"VOLTA_FOREVER": "test", "VF_CAPABILITY": "4294967295.0"}, "7.5"),
+                # Below the GPU's 7.0: not used.
+                ({"VOLTA_FOREVER": "test", "VF_CAPABILITY": "6.1"}, "7.5"),
             ]:
                 subprocess.run([sys.executable, __file__, "--probe", tmp, expected],
                                env={**env, **settings}, check=True)
