@@ -34,24 +34,22 @@ CUDA 13 programs see capability 7.5 by default. Applications with native Volta k
 
 ## Inference engines
 
-These benchmarks use **Qwen3.5-35B-A3B on one Tesla V100-SXM2-32GB**, with **MTP and all other speculative decoding disabled**. Each server handled one request at a time. After a warm-up, it processed three distinct 227-token prompts and generated 64 tokens per prompt. The table reports median **prefill / decode** in tokens/s.
+All eight engines ran **Qwen3.5-35B-A3B** on a Tesla V100-SXM2-32GB with **MTP and all other speculative decoding disabled**. Each engine processed one warm-up followed by three distinct 227-token prompts at concurrency 1 and generated 64 tokens per prompt. Rates are medians in tokens/s. Each native/VF pair used the same card and checkpoint.
 
-The native references are 1Cat-vLLM with CUDA 12.8, upstream Strata with CUDA 12.9 and llama.cpp with CUDA 12.9.2. Each native/VF pair used the same physical card and the same checkpoint. The Ubuntu 24.04 guides include installation, a model test and benchmark commands.
+| Engine (Ubuntu guide) | Tested model / quantization | CUDA 12 prefill | CUDA 12 decode | CUDA 13 + VF prefill | CUDA 13 + VF decode |
+|---|---|---:|---:|---:|---:|
+| [vLLM](docs/guides/vllm.md) | QuantTrio AWQ W4A16 | 1,443.33 | 76.09 | 1,449.98 | 80.23 |
+| [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | | | 2,016.06 | 77.33 |
+| [llama.cpp](docs/guides/llamacpp.md) | Unsloth GGUF Q4_K_M | 497.33 | 100.43 | 1,076.51 | 99.12 |
+| [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF Q4_K_M | | | 884.56 | 109.26 |
+| [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_XL with MTP weights | 1,948.50 | 99.07 | 1,982.50 | 104.25 |
+| [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | | | 681.68¹ | 46.19 |
+| [NInfer](docs/guides/ninfer.md) | Mixed Q4/Q5/Q6/Q8 `.ninfer` | | | 556.51 | 117.08 |
+| [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | | | 464.25 | 57.67 |
 
-| Ubuntu guide | 35B checkpoint format | With VF, prefill / decode | Native, prefill / decode |
-|---|---|---:|---:|
-| [vLLM](docs/guides/vllm.md) | QuantTrio AWQ W4A16 | 1,449.98 / 80.23 | 1,443.33 / 76.09 |
-| [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | 2,016.06 / 77.33 | — |
-| [llama.cpp](docs/guides/llamacpp.md) | Unsloth GGUF Q4_K_M | 1,076.51 / 99.12 | 497.33 / 100.43 |
-| [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF Q4_K_M | 884.56 / 109.26 | — |
-| [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_XL with MTP weights | 1,982.50 / 104.25 | 1,948.50 / 99.07 |
-| [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | 681.68¹ / 46.19 | — |
-| [NInfer](docs/guides/ninfer.md) | Mixed Q4/Q5/Q6/Q8 `.ninfer` | 556.51 / 117.08 | — |
-| [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | 464.25 / 57.67 | — |
+The CUDA 12 builds used 1Cat-vLLM with CUDA 12.8, upstream Strata with CUDA 12.9 and llama.cpp with CUDA 12.9.2. llama.cpp and FreeToken share the same Q4_K_M file. Strata requires MTP metadata at load time even with drafting off. [Native 1Cat-vLLM results](docs/guides/benchmarks/vllm-graphs.json) · [Checkpoints and per-request timings](docs/guides/benchmarks/README.md)
 
-¹ LLMD’s prefill figure uses GPU timestamps for the complete prefill graph. Measured through the server’s first token, the rate was 671.60 input tokens/s. Decode uses LLMD’s own step timer. [Phase timings](docs/guides/benchmarks/zml-llmd-autotune.json)
-
-llama.cpp and FreeToken share the same Q4_K_M file. Strata requires MTP metadata at load time even with drafting off. Its guide identifies the exact file used. [Checkpoint revisions, per-request timings and replies](docs/guides/benchmarks/README.md)
+¹ LLMD prefill uses the GPU span of its complete prefill graph. The same workload measured 671.60 input tokens/s through the first token. Decode uses the server’s own step timer. [Phase timings](docs/guides/benchmarks/zml-llmd-autotune.json)
 
 ## Validation
 
