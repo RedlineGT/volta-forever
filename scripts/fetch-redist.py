@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,11 @@ NCCL_WHEEL = {
     "sha256": "2a6e6d5ddfc08970eca872be3dfa2650b24fa10a2043974465a9cae9c64ed6d8",
     "size": 336541086,
 }
+
+# What is being unpacked is written in a directory of TREE_DIR whose name starts with this,
+# then moved into place: no program loads from there, and no name pattern of the launcher
+# matches it. (Earlier releases wrote the NCCL runtime as lib/libnccl.so.2.vf-part.)
+STAGE_PREFIX = ".vf-stage-"
 
 
 def sha256(path):
@@ -95,7 +101,15 @@ def load_manifest(path_or_url):
     return json.load(open(path_or_url))
 
 
+def stop(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main():
+    # SIGTERM and SIGHUP end a fetch as Ctrl-C does, by an exception: what it staged is removed.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        if signal.getsignal(signum) == signal.SIG_DFL:
+            signal.signal(signum, stop)
     ap = argparse.ArgumentParser()
     ap.add_argument("base_url")
     ap.add_argument("manifest", help="local JSON file or https:// URL")
@@ -178,30 +192,58 @@ def write_receipts(path, receipts):
     os.replace(tmp, path)
 
 
+def remove_leftovers(tree, dl_dir):
+    """What an interrupted fetch left. The caller holds the locks: nothing else writes there."""
+    for stage in Path(tree).glob(STAGE_PREFIX + "*"):
+        shutil.rmtree(stage, ignore_errors=True)
+    for part in [*Path(tree).glob("*.vf-part"), *Path(tree, "lib").glob("*.vf-part")]:
+        part.unlink(missing_ok=True)
+    for part in Path(dl_dir).glob(".dl-*"):
+        part.unlink(missing_ok=True)
+
+
+def move_into_place(stage, tree):
+    """Move each file staged under stage to the same place under tree, by a rename: the regular
+    files first, then the symbolic links, so that a link does not name a file that is not
+    there yet."""
+    links = []
+    for directory, subdirectories, names in os.walk(stage):
+        target = os.path.join(tree, os.path.relpath(directory, stage))
+        os.makedirs(target, exist_ok=True)
+        for name in [n for n in subdirectories if os.path.islink(os.path.join(directory, n))]:
+            subdirectories.remove(name)
+            names.append(name)
+        for name in names:
+            source = os.path.join(directory, name)
+            if os.path.islink(source):
+                links.append((source, os.path.join(target, name)))
+            else:
+                os.replace(source, os.path.join(target, name))
+    for source, dest in links:
+        os.replace(source, dest)
+
+
 def install_nccl_runtime(wheel, tree, version):
-    tree = Path(tree)
-    (tree / "lib").mkdir(exist_ok=True)
     files = [
-        (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", tree / "NCCL-LICENSE.txt"),
-        ("nvidia/nccl/lib/libnccl.so.2", tree / "lib/libnccl.so.2"),
+        (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", "NCCL-LICENSE.txt"),
+        ("nvidia/nccl/lib/libnccl.so.2", "lib/libnccl.so.2"),
     ]
-    # Writers hold the tree lock. A retry reclaims the partial 421 MB runtime
-    # even if the previous installer was killed before it could clean up.
-    staged = [(member, dest, dest.with_name(dest.name + ".vf-part")) for member, dest in files]
+    # Writers hold the tree lock. The 421 MB runtime is staged, and what a killed
+    # installer left there is removed by the next fetch.
+    stage = Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=tree))
     try:
+        (stage / "lib").mkdir()
         with zipfile.ZipFile(wheel) as archive:
-            for member, dest, part in staged:
-                part.unlink(missing_ok=True)
-                with archive.open(member) as src, part.open("xb") as dst:
+            for member, dest in files:
+                with archive.open(member) as src, (stage / dest).open("xb") as dst:
                     shutil.copyfileobj(src, dst, length=1 << 20)
-        for member, dest, part in staged:
-            os.replace(part, dest)
+        move_into_place(stage, tree)
     finally:
-        for member, dest, part in staged:
-            part.unlink(missing_ok=True)
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def install_components(a, rows, lock_fds):
+    remove_leftovers(a.tree_dir, a.dl_dir)
     record = os.path.join(a.tree_dir, "COMPONENTS.tsv")
     receipts = read_receipts(record)
     requested = "runtime" if a.runtime else "full"

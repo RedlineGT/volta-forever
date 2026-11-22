@@ -176,6 +176,47 @@ case "$map" in
 esac
 rm "$nccl"
 
+# What an interrupted NCCL download leaves (libnccl.so.2.vf-part), alone or beside the library,
+# and an empty directory, are no CUDA 12.9.2 libraries: the toolkit found next is taken, and
+# doctor says which directory it took, why, and what it did not count.
+name="nccl-leftover-does-not-mask-cuda"
+for left in part nccl-and-part empty; do
+    lo=$tmp/nccl-leftover-$left
+    mk_archive "$lo"
+    mkdir -p "$lo/cuda-12.9.2/lib" "$lo/toolkits/cuda-12.9.2/lib"
+    : >"$lo/toolkits/cuda-12.9.2/lib/libcublas.so.12"
+    case $left in
+        part) : >"$lo/cuda-12.9.2/lib/libnccl.so.2.vf-part" ;;
+        nccl-and-part) : >"$lo/cuda-12.9.2/lib/libnccl.so.2"; : >"$lo/cuda-12.9.2/lib/libnccl.so.2.vf-part" ;;
+    esac
+    map=$(run_var "$lo/bin/vf" VF_AUDIT_MAP)
+    case ":$map:" in
+        *":libcublas.so.12=$lo/toolkits/cuda-12.9.2/lib/libcublas.so.12:"*) pass "$name-$left" ;;
+        *) fail "$name-$left" "got: $map" ;;
+    esac
+done
+case ":$map:" in
+    *":libnccl.so.2="*) fail "$name-empty" "NCCL mapped: $map" ;;
+esac
+lo=$tmp/nccl-leftover-nccl-and-part
+out=$("$lo/bin/vf" doctor 2>&1) || true
+case $out in
+    *"not counted as libraries: libnccl.so.2.vf-part"*"ok    CUDA 12.9.2 libraries in $lo/toolkits/cuda-12.9.2/lib (the toolkit of the source tree, where scripts/fetch-all.sh puts it; the installation's own holds the CUDA 12 NCCL alone)"*"ok    CUDA 12 NCCL from $lo/cuda-12.9.2/lib/libnccl.so.2"*)
+        pass "$name-doctor" ;;
+    *) fail "$name-doctor" "got: $out" ;;
+esac
+name="doctor-says-why"
+out1=$("$vf" doctor 2>&1) || true
+out2=$(VF_CUDA12="$arch/cuda-12.9.2/lib" "$vf" doctor 2>&1) || true
+case $out1 in
+    *"ok    CUDA 12.9.2 libraries in $arch/cuda-12.9.2/lib (the installation's own, where vf fetch puts them)"*)
+        case $out2 in
+            *"ok    CUDA 12.9.2 libraries in $arch/cuda-12.9.2/lib (given by VF_CUDA12)"*) pass "$name" ;;
+            *) fail "$name" "with VF_CUDA12: $out2" ;;
+        esac ;;
+    *) fail "$name" "got: $out1" ;;
+esac
+
 name="env-ld-audit"
 lda=$(get_var "$vf" LD_AUDIT)
 case $lda in
