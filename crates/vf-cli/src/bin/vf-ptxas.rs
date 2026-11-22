@@ -16,6 +16,9 @@ unsafe extern "C" {
     fn memfd_create(name: *const std::ffi::c_char, flags: std::ffi::c_uint) -> std::ffi::c_int;
 }
 
+/// What ptxas ends with on every error it finds, and so this program on those it finds itself.
+const FATAL: u8 = 255;
+
 fn backend() -> Result<PathBuf, String> {
     let path = match std::env::var_os("VF_PTXAS_REAL") {
         Some(path) => PathBuf::from(path),
@@ -204,7 +207,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("vf-ptxas: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(FATAL)
         }
     }
 }
