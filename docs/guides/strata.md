@@ -69,6 +69,8 @@ python3 strata-ninfer.py strata
 
 All runs used the same physical V100 with the same checkpoint and MTP speculative decoding. Each measured reply started with its requested city. All three configurations reported zero cached prompt tokens. The engine reported its own prompt and generation times. [Per-request measurements and responses](./benchmarks/strata-results.json)
 
+A second comparison used version 0.1.64 on both paths. Across five rounds of three chats each, native CUDA 12 measured **1,877.6 prefill / 150.9 decode tok/s** and CUDA 13 with VF measured **1,871.4 / 152.2 tok/s**. All 30 replies began with the requested city and reported zero cached tokens. [All 30 measurements](./benchmarks/strata-results.json)
+
 ## 6. Additional notes
 
 The standard Qwen3.5-35B-A3B Q4_K_M file has 733 tensors. Strata rejected it with `missing qwen35moe.nextn_predict_layers`. The MTP file used above includes 753 tensors. Strata also registers Qwen3.6-35B-A3B under the same profile; omitting `--model-path` selects that separate checkpoint. [Strata model catalog](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md#qwen36-35b-a3b)

@@ -26,7 +26,9 @@ The official vLLM 0.34.0 server used its compiler, Marlin experts and full and p
 
 ## SGLang
 
-Run the client against the official SGLang server started by the Ubuntu guide. With VF 0.1.1 and batch-one CUDA decode graphs, it measured **71.52 prefill** and **38.26 decode** tokens/s. The paired series using the same cache salts measured **62.55/38.25** with graphs and **72.97/12.27** with graphs disabled. The server processed 227 uncached tokens and returned 64 for each of the three requests. [Same-GPU measurements](sglang-stock-graphs.json) · [Eager diagnostic](sglang-stock-results.json)
+Run the client against the official SGLang server started by the Ubuntu guide. With VF 0.1.1, a 32-token prefill chunk and batch-one CUDA decode graphs, it measured **180.82 prefill** and **38.12 decode** tokens/s. [Native JIT router, responses and phase timers](sglang-stock-jit32.json)
+
+With eight-token chunks, a paired series using the same cache salts measured **62.55/38.25** with graphs and **72.97/12.27** with graphs disabled. The server processed 227 uncached tokens and returned 64 for each of the three requests. [Same-GPU measurements](sglang-stock-graphs.json) · [Eager diagnostic](sglang-stock-results.json)
 
 ```sh
 mkdir -p ~/sglang-v100/benchmark && cd ~/sglang-v100/benchmark
@@ -44,8 +46,8 @@ With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 d
 
 ## Strata
 
-The CUDA 13 engine with VF and the native CUDA 12.9 engine served the same Qwen3.5-35B-A3B-MTP checkpoint on the same V100. The guide includes the server command and the client for the three uncached requests. [Ubuntu guide](../strata.md#5-benchmarks) · [Results and native comparison](strata-results.json)
+The CUDA 13 engine with VF and the native CUDA 12.9 engine served the same Qwen3.5-35B-A3B-MTP checkpoint on the same V100. Over 15 uncached requests per configuration, Strata 0.1.64 with VF reached 1871.4 prefill and 152.2 decode tokens/s. The native 0.1.64 engine reached 1877.6 and 150.9 on the same card. [Ubuntu guide](../strata.md#5-benchmarks) · [Results and native comparison](strata-results.json)
 
 ## TensorFold
 
-The client reads TensorFold’s native prompt and generation timers and checks the token counts on each request. The 35B run used the MLX checkpoint with 4-bit expert weights and 8-bit routers. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [Results and checkpoint revision](tensorfold-results.json)
+The client reads TensorFold’s native prompt and generation timers and checks the token counts on each request. On the same V100, TensorFold with INT8 prompt activations reached 326.80 prefill and 17.01 decode tokens/s. The native llama.cpp reference reached 460.45 and 99.12. Both ran Qwen3.5-35B-A3B. TensorFold used MLX affine weights with 4-bit experts and 8-bit routers, and llama.cpp used GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [Results and checkpoint revision](tensorfold-results.json)

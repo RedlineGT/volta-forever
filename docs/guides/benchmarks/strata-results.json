@@ -463,5 +463,948 @@
     "median_prefill_tok_s": 1866.8,
     "median_decode_tok_s": 152.0
   },
-  "revision": "63af8373893a7a73c6dfcb84cb63d815981da5e0"
+  "revision": "63af8373893a7a73c6dfcb84cb63d815981da5e0",
+  "repeated_same_build": {
+    "engine_version": "0.1.64",
+    "process_order": [
+      "cuda12",
+      "cuda13"
+    ],
+    "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "gpu_numa_node": 0,
+    "cpu_affinity": "0-79",
+    "speculative_mtp": 2,
+    "prompt_cache_tokens_expected": 0,
+    "max_context": 8192,
+    "request_tokens": "227 input, 64 output",
+    "method": "One warm server per build. Five rounds, each with the same semantic check, warm-up and three different measured prompts. Rates below are the medians of all 15 measured requests per build.",
+    "cuda12": {
+      "vf": false,
+      "runs": [
+        {
+          "round": 1,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5428,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 414.5,
+            "predicted_per_token_ms": 6.477,
+            "predicted_per_second": 154.4,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 1,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5841,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.8,
+            "prompt_per_token_ms": 0.532,
+            "prompt_per_second": 1879.1,
+            "predicted_n": 64,
+            "predicted_ms": 456.3,
+            "predicted_per_token_ms": 7.13,
+            "predicted_per_second": 140.3,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 1,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5523,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 424.2,
+            "predicted_per_token_ms": 6.628,
+            "predicted_per_second": 150.9,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 2,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.534,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.7,
+            "prompt_per_token_ms": 0.532,
+            "prompt_per_second": 1880.7,
+            "predicted_n": 64,
+            "predicted_ms": 406.6,
+            "predicted_per_token_ms": 6.353,
+            "predicted_per_second": 157.4,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 2,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5851,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.9,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1877.6,
+            "predicted_n": 64,
+            "predicted_ms": 455.9,
+            "predicted_per_token_ms": 7.123,
+            "predicted_per_second": 140.4,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 2,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5512,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.1,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1874.5,
+            "predicted_n": 64,
+            "predicted_ms": 423.7,
+            "predicted_per_token_ms": 6.62,
+            "predicted_per_second": 151.1,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 3,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5347,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.8,
+            "prompt_per_token_ms": 0.532,
+            "prompt_per_second": 1879.1,
+            "predicted_n": 64,
+            "predicted_ms": 407.0,
+            "predicted_per_token_ms": 6.359,
+            "predicted_per_second": 157.2,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 3,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.584,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.8,
+            "prompt_per_token_ms": 0.532,
+            "prompt_per_second": 1879.1,
+            "predicted_n": 64,
+            "predicted_ms": 456.1,
+            "predicted_per_token_ms": 7.127,
+            "predicted_per_second": 140.3,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 3,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5515,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 423.8,
+            "predicted_per_token_ms": 6.622,
+            "predicted_per_second": 151.0,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 4,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5348,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.9,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1877.6,
+            "predicted_n": 64,
+            "predicted_ms": 407.2,
+            "predicted_per_token_ms": 6.362,
+            "predicted_per_second": 157.2,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 4,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5829,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.8,
+            "prompt_per_token_ms": 0.532,
+            "prompt_per_second": 1879.1,
+            "predicted_n": 64,
+            "predicted_ms": 455.6,
+            "predicted_per_token_ms": 7.119,
+            "predicted_per_second": 140.5,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 4,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.552,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 424.3,
+            "predicted_per_token_ms": 6.63,
+            "predicted_per_second": 150.8,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 5,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5351,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.8,
+            "prompt_per_token_ms": 0.532,
+            "prompt_per_second": 1879.1,
+            "predicted_n": 64,
+            "predicted_ms": 407.5,
+            "predicted_per_token_ms": 6.367,
+            "predicted_per_second": 157.1,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 5,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5828,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 120.9,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1877.6,
+            "predicted_n": 64,
+            "predicted_ms": 455.0,
+            "predicted_per_token_ms": 7.109,
+            "predicted_per_second": 140.7,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 5,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5521,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.1,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1874.5,
+            "predicted_n": 64,
+            "predicted_ms": 424.5,
+            "predicted_per_token_ms": 6.633,
+            "predicted_per_second": 150.8,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        }
+      ],
+      "per_round_medians_prefill_decode_tok_s": [
+        [
+          1872.9,
+          150.9
+        ],
+        [
+          1877.6,
+          151.1
+        ],
+        [
+          1879.1,
+          151.0
+        ],
+        [
+          1877.6,
+          150.8
+        ],
+        [
+          1877.6,
+          150.8
+        ]
+      ],
+      "median_prefill_tok_s": 1877.6,
+      "median_decode_tok_s": 150.9
+    },
+    "cuda13": {
+      "vf": true,
+      "runs": [
+        {
+          "round": 1,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5361,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.6,
+            "prompt_per_token_ms": 0.536,
+            "prompt_per_second": 1866.8,
+            "predicted_n": 64,
+            "predicted_ms": 407.7,
+            "predicted_per_token_ms": 6.37,
+            "predicted_per_second": 157.0,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 1,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5804,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.4,
+            "prompt_per_token_ms": 0.535,
+            "prompt_per_second": 1869.9,
+            "predicted_n": 64,
+            "predicted_ms": 452.0,
+            "predicted_per_token_ms": 7.062,
+            "predicted_per_second": 141.6,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 1,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5497,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.6,
+            "prompt_per_token_ms": 0.536,
+            "prompt_per_second": 1866.8,
+            "predicted_n": 64,
+            "predicted_ms": 421.3,
+            "predicted_per_token_ms": 6.583,
+            "predicted_per_second": 151.9,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 2,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5315,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.1,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1874.5,
+            "predicted_n": 64,
+            "predicted_ms": 403.6,
+            "predicted_per_token_ms": 6.306,
+            "predicted_per_second": 158.6,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 2,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5828,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 453.0,
+            "predicted_per_token_ms": 7.078,
+            "predicted_per_second": 141.3,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 2,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5491,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.6,
+            "prompt_per_token_ms": 0.536,
+            "prompt_per_second": 1866.8,
+            "predicted_n": 64,
+            "predicted_ms": 420.6,
+            "predicted_per_token_ms": 6.572,
+            "predicted_per_second": 152.2,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 3,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5319,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 403.8,
+            "predicted_per_token_ms": 6.309,
+            "predicted_per_second": 158.5,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 3,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5796,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.3,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1871.4,
+            "predicted_n": 64,
+            "predicted_ms": 451.7,
+            "predicted_per_token_ms": 7.058,
+            "predicted_per_second": 141.7,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 3,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5484,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.6,
+            "prompt_per_token_ms": 0.536,
+            "prompt_per_second": 1866.8,
+            "predicted_n": 64,
+            "predicted_ms": 420.0,
+            "predicted_per_token_ms": 6.562,
+            "predicted_per_second": 152.4,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 4,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5318,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.2,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1872.9,
+            "predicted_n": 64,
+            "predicted_ms": 403.9,
+            "predicted_per_token_ms": 6.311,
+            "predicted_per_second": 158.5,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 4,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5798,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.3,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1871.4,
+            "predicted_n": 64,
+            "predicted_ms": 451.9,
+            "predicted_per_token_ms": 7.061,
+            "predicted_per_second": 141.6,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 4,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5493,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.6,
+            "prompt_per_token_ms": 0.536,
+            "prompt_per_second": 1866.8,
+            "predicted_n": 64,
+            "predicted_ms": 420.6,
+            "predicted_per_token_ms": 6.572,
+            "predicted_per_second": 152.2,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        },
+        {
+          "round": 5,
+          "id": "run1",
+          "answer": "Kyoto, Japan, serves as the meeting place for our volunteer group, where you will find a shared room located directly by the entrance. Each morning, a volunteer places a red notebook on the long table to record daily activities, while another checks the signs by the stairs to report any changes before the doors open. All",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5319,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.1,
+            "prompt_per_token_ms": 0.533,
+            "prompt_per_second": 1874.5,
+            "predicted_n": 64,
+            "predicted_ms": 403.7,
+            "predicted_per_token_ms": 6.308,
+            "predicted_per_second": 158.5,
+            "draft_n": 50,
+            "draft_n_accepted": 38
+          }
+        },
+        {
+          "round": 5,
+          "id": "run2",
+          "answer": "Lyon, France, serves as the meeting place for our volunteer group, where a shared room located by the entrance acts as our daily hub. Each morning, a volunteer places a green binder on the long table to organize our work, while another checks the signs by the stairs to report any changes before the doors open.",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5802,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.3,
+            "prompt_per_token_ms": 0.534,
+            "prompt_per_second": 1871.4,
+            "predicted_n": 64,
+            "predicted_ms": 451.8,
+            "predicted_per_token_ms": 7.059,
+            "predicted_per_second": 141.7,
+            "draft_n": 56,
+            "draft_n_accepted": 36
+          }
+        },
+        {
+          "round": 5,
+          "id": "run3",
+          "answer": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room located by the entrance facilitates our daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any necessary changes before the doors",
+          "first_word_matches": true,
+          "finish_reason": "length",
+          "wall_seconds": 0.5491,
+          "usage": {
+            "prompt_tokens": 227,
+            "completion_tokens": 64,
+            "total_tokens": 291,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 227,
+            "prompt_ms": 121.5,
+            "prompt_per_token_ms": 0.535,
+            "prompt_per_second": 1868.3,
+            "predicted_n": 64,
+            "predicted_ms": 421.0,
+            "predicted_per_token_ms": 6.578,
+            "predicted_per_second": 152.0,
+            "draft_n": 52,
+            "draft_n_accepted": 39
+          }
+        }
+      ],
+      "per_round_medians_prefill_decode_tok_s": [
+        [
+          1866.8,
+          151.9
+        ],
+        [
+          1872.9,
+          152.2
+        ],
+        [
+          1871.4,
+          152.4
+        ],
+        [
+          1871.4,
+          152.2
+        ],
+        [
+          1871.4,
+          152.0
+        ]
+      ],
+      "median_prefill_tok_s": 1871.4,
+      "median_decode_tok_s": 152.2
+    }
+  }
 }

@@ -60,13 +60,15 @@ export PATH="$CUDA_HOME/bin:$PATH"
 export PTXAS_OPTIONS='--override-directive-values --maxrregcount=192 --opt-level=3'
 export NVCC_APPEND_FLAGS='-gencode=arch=compute_75,code=compute_75'
 export SGLANG_MAMBA_CONV_DTYPE=float16 FLASHINFER_USE_CUDA_NORM=1
+export SGLANG_EXPERIMENTAL_LORA_OPTI=1 SGLANG_OPT_USE_JIT_KERNEL_MOE_ALIGN=1
+export SGLANG_OPT_LORA_FUSED_TOPK_PACK=0
 export TORCH_COMPILE_DISABLE=1 SGLANG_ENABLE_METRICS_DEVICE_TIMER=1
 export OMP_NUM_THREADS=4 MAX_JOBS=4
 awq='{"quantization_config":{"quant_method":"awq","bits":4,"group_size":128,"version":"gemm","zero_point":true,"modules_to_not_convert":["visual","linear_attn","self_attn.qkv_proj","self_attn.o_proj","shared_expert","mlp.gate","model.layers.0.","mtp"]}}'
 python -m sglang.launch_server --model-path QuantTrio/Qwen3.5-35B-A3B-AWQ \
   --served-model-name qwen --dtype float16 --quantization moe_wna16 \
   --json-model-override-args "$awq" --attention-backend triton --sampling-backend pytorch \
-  --context-length 512 --max-running-requests 1 --chunked-prefill-size 8 \
+  --context-length 512 --max-running-requests 1 --chunked-prefill-size 32 \
   --mem-fraction-static 0.85 --model-loader-extra-config '{"enable_multithread_load":false}' \
   --cuda-graph-backend-prefill disabled --cuda-graph-bs-decode 1 --cuda-graph-backend-decode full \
   --enable-metrics --skip-server-warmup --watchdog-timeout 3600 \
@@ -84,6 +86,10 @@ curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 With the server running, run `python3 docs/guides/benchmarks/sglang.py` from a checkout of this project. The client sends one warm-up and three distinct requests. Each measured request processed 227 uncached input tokens and generated 64 output tokens. SGLang’s GPU forward timers cover all 227 prefill tokens and the 63 output tokens after the first. [Client and prompts](./benchmarks/)
 
+The 32-token configuration above measured **180.82 tokens/s in prefill** and **38.12 tokens/s in decode**. SGLang uses its own JIT expert router and standard top-k layout. [32-token results](./benchmarks/sglang-stock-jit32.json)
+
+To isolate CUDA graphs, we also compared the same two launches at a smaller eight-token chunk size.
+
 | Decode CUDA graph | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
 | Enabled | 62.55 | 38.25 |
@@ -93,6 +99,6 @@ The two servers ran in sequence on the same V100. Changing `--cuda-graph-backend
 
 ## 6. Additional notes
 
-The stock run used VF 0.1.1, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA toolkit 13.5 and driver 580.178.04. The command selects WNA16 at VF’s default capability of 7.5. Eight-token chunks use the expert router that the wheel can run on this card.
+The stock run used VF 0.1.1, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA toolkit 13.5 and driver 580.178.04. The command selects WNA16 at VF’s default capability of 7.5. The experimental LoRA configuration switches select the wheel’s CUDA JIT expert router for 32-token chunks. The run used the checkpoint’s own weights.
 
 An earlier experiment with an SGLang adapter, larger chunks and CUDA graph decode measured 643.91 tokens/s in prefill and 67.30 in decode. [Archived measurements](./benchmarks/sglang-results.json) · [Archived configuration](https://github.com/nbald/volta-forever/blob/7ead7334d0909483b63139d253aead22cf97820a/docs/guides/sglang.md)

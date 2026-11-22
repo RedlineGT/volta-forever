@@ -91,9 +91,9 @@ Each measured request read 227 uncached tokens and generated 64. All three respo
 | Prefill | 169.57, 169.69, 169.31 | **169.57** |
 | Decode | 17.56, 17.10, 16.47 | **17.10** |
 
-Prefill uses TensorFold’s `prefill_seconds`. Decode counts the 63 tokens after the first. On two other V100s, native llama.cpp measured 468.67–474.57 prefill and 99.67–99.77 decode with the same prompts and a different Q4 packing (GGUF Q4_K_M). [Native reference](./benchmarks/llamacpp-reference.json)
+Prefill uses TensorFold’s `prefill_seconds`. Decode counts the 63 tokens after the first. On the same V100 and prompts, native llama.cpp reached **460.45 prefill and 99.12 decode tokens/s** using the Q4_K_M GGUF. TensorFold measured **170.35 and 17.18** with MLX affine Q4, or **326.80 and 17.01** with INT8 prompt activations. The two engines use different quantizations of Qwen3.5-35B-A3B. [Same-GPU reference and checkpoint revisions](./benchmarks/tensorfold-results.json)
 
-TensorFold also offers INT8 prompt activations. In a separate A/B test on one V100 with `--no-drafts`, adding `--prompt-precision int8` raised prefill from 170.42 to **327.37 tokens/s**. Decode stayed near 17 tokens/s. All three cities were correct and the generated continuations changed. During BF16 decoding, the CUDA graph replayed successfully and the routed experts’ fused gate/up kernel accounted for about 60% of sampled GPU kernel time. [Option tests and GPU measurements](./benchmarks/tensorfold-results.json)
+The INT8 run used `--no-drafts --prompt-precision int8`. All three cities were correct and the generated continuations changed. During BF16 decoding, the CUDA graph replayed successfully and the routed experts’ fused gate/up kernel accounted for about 60% of sampled GPU kernel time. [Option tests and GPU measurements](./benchmarks/tensorfold-results.json)
 
 ## 6. Additional notes
 
