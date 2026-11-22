@@ -266,6 +266,23 @@ static void run_all(CUmodule mod) {
         }
         verdict("guarded_copy", bad, 24, 0);
     }
+    if (want("checked_add") && !cuModuleGetFunction(&f, mod, "checked_add")) {
+        uint32_t inputs[] = {0, 123, 0xfffffff0u, 0x7fffffffu, 0x80000000u};
+        CUdeviceptr destination = dy + sizeof(uint32_t);
+        long bad = 0;
+        for (size_t i = 0; i < sizeof inputs / sizeof inputs[0]; i++) {
+            uint32_t result[3];
+            CK(cuMemsetD8_v2(dy, 0xa5, sizeof result));
+            void* args[] = {&destination, &inputs[i]};
+            CK(cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, NULL, args, NULL));
+            CK(cuCtxSynchronize());
+            CK(cuMemcpyDtoH_v2(result, dy, sizeof result));
+            bad += result[0] != 0xa5a5a5a5u;
+            bad += result[1] != inputs[i] + 42u;
+            bad += result[2] != 0xa5a5a5a5u;
+        }
+        verdict("checked_add", bad, 3 * (sizeof inputs / sizeof inputs[0]), 0);
+    }
     CK(cuMemFree_v2(dx)); CK(cuMemFree_v2(dy)); CK(cuMemFree_v2(dz));
     free(x); free(y);
 }

@@ -69,3 +69,75 @@ imad__RRU_RRU Rd URc | Pg=PT Ra=RZ Rb=RZ
 mov__RU Rd URb | Pg=PT PixMaskU04=15
 uiadd3__URsIUR_RIR URd UPu URa Sb | UPg=UPT UPv=UPT URc=URZ
 uiadd3_x__URURUR_URURUR URd URb UPp | UPg=UPT UPq=UPT UPq.not=1 UPu=UPT UPv=UPT URa=URZ URc=URZ X=X
+f2i_Rd64__Rb_32b Rd Rb | Pg=PT dstfmt=U64 rnd=TRUNC srcfmt=F32
+f2i__Rb_32b Rd Rb | Pg=PT dstfmt=U32 ftz=FTZ ntz=NTZ rnd=TRUNC srcfmt=F32
+i2f__Cb_32b Rd Sb_addr | Pg=PT dstfmt=F32 rnd=RP srcfmt=U32
+i2f__Rb_64b Rd Rb | Pg=PT dstfmt=F32 rnd=RP srcfmt=U64
+i2f__UR_64b Rd URb | Pg=PT dstfmt=F32 rnd=RP srcfmt=U64
+iadd3_imm__RsIR_RIR Pg Rd Ra Sb | Pu=PT Pv=PT Rc=RZ
+iadd3_imm__RsIR_RIR Rd Pu Ra Sb | Pg=PT Pv=PT Rc=RZ reuse_src_a=reuse
+iadd3_noimm__RCR_RCR Pg Rd Ra Sb_addr | Pu=PT Pv=PT Rc=RZ Sb.negate=1
+iadd3_noimm__RCR_RCR Rd Pu Sb_addr | Pg=PT Pv=PT Ra=RZ Rc=RZ Sb.negate=1
+iadd3_noimm__RRR_RRR Rd Pu Ra Rb | Pg=PT Pv=PT Ra.negate=1 Rc=RZ
+iadd3_noimm__RRR_RRR Rd Pu Ra Rb | Pg=PT Pv=PT Rb.negate=1 Rc=RZ
+iadd3_noimm__RRR_RRR Rd Pu Ra Rb | Pg=PT Pv=PT Rc=RZ
+iadd3_noimm__RRR_RRR Rd Pu Rb | Pg=PT Pv=PT Ra=RZ Rb.negate=1 Rc=RZ reuse_src_b=reuse
+iadd3_noimm__RUR_RUR Rd Pu Ra URb | Pg=PT Pv=PT Rc=RZ URb.negate=1
+iadd3_x_noimm__RCR_RCR Rd Sb_addr Pp | Pg=PT Pq=PT Pq.not=1 Pu=PT Pv=PT Ra=RZ Rc=RZ Sb.invert=1 X=X
+iadd3_x_noimm__RRR_RRR Rd Ra Rb Pp | Pg=PT Pq=PT Pq.not=1 Pu=PT Pv=PT Ra.invert=1 Rc=RZ X=X
+iadd3_x_noimm__RRR_RRR Rd Ra Rb Pp | Pg=PT Pq=PT Pq.not=1 Pu=PT Pv=PT Rb.invert=1 Rc=RZ X=X
+iadd3_x_noimm__RRR_RRR Rd Rb Pp | Pg=PT Pq=PT Pq.not=1 Pu=PT Pv=PT Ra=RZ Rb.invert=1 Rc=RZ X=X reuse_src_b=reuse
+iadd3_x_noimm__RRR_RRR Rd Rc Pp Pq | Pg=PT Pu=PT Pv=PT Ra=RZ Rb=RZ X=X
+iadd3_x_noimm__RUR_RUR Rd Ra URb Pp | Pg=PT Pq=PT Pq.not=1 Pu=PT Pv=PT Rc=RZ URb.invert=1 X=X
+imad__RRR_RRR Rd Ra Rb Rc | Pg=PT fmt=S32
+imad__RRR_RRR Rd Ra Rb Rc | Pg=PT fmt=S32 reuse_src_a=reuse
+imad__RRR_RRR Rd Ra Rb Rc | Pg=PT fmt=S32 reuse_src_b=reuse
+imad__RRR_RRR Rd Ra Rb | Pg=PT Rc=RZ fmt=S32 reuse_src_a=reuse reuse_src_b=reuse
+imad__RRR_RRR Rd Rc | Pg=PT Ra=RZ Rb=RZ Rc.negate=1 fmt=S32
+imad__RRsI_RRI Rd Sc | Pg=PT Ra=RZ Rb=RZ
+imad__RUR_RUR Rd Ra URb Rc | Pg=PT fmt=S32
+imad__RUR_RUR Rd Ra URb Rc | Pg=PT fmt=S32 reuse_src_a=reuse
+imad__RsIR_RIR Rd Ra Sb | Pg=PT Rc=RZ reuse_src_a=reuse
+imad_hi__RRR_RRR Rd Pu Ra Rb Rc | Pg=PT
+imad_wide__RCR_RCR Rd Ra Sb_addr Rc | Pg=PT Pu=PT reuse_src_a=reuse
+imad_wide__RRR_RRR Rd Pu Ra Rb Rc | Pg=PT
+imad_wide__RRR_RRR Rd Ra Rb | Pg=PT Pu=PT Rc=RZ reuse_src_a=reuse reuse_src_b=reuse
+imad_wide__RUR_RUR Rd Ra URb | Pg=PT Pu=PT Rc=RZ
+imad_x__RRC_RRC Rd Sc_addr Pp | Pg=PT Ra=RZ Rb=RZ X=X fmt=S32
+imad_x__RRR_RRR Rd Rc Pp | Pg=PT Ra=RZ Rb=RZ Rc.invert=1 X=X fmt=S32
+imad_x__RRR_RRR Rd Rc Pp | Pg=PT Ra=RZ Rb=RZ X=X fmt=S32
+imad_x__RsIR_RIR Rd Ra Sb Rc Pp | Pg=PT Rc.invert=1 X=X fmt=S32
+imad_x__RsIR_RIR Rd Ra Sb Rc Pp | Pg=PT X=X fmt=S32
+isetp__RCR_RCR_EX/isetp__RCR_RCR Pu Sb_addr Pr | Pg=PT Pp=PT Pv=PT Ra=RZ ex=EX fmt=S32 icmp=NE
+isetp__RCR_RCR_noEX/isetp__RCR_RCR Pu Sb_addr | Pg=PT Pp=PT Pv=PT Ra=RZ fmt=S32 icmp=LE sm75.Pr=PT
+isetp__RCR_RCR_noEX/isetp__RCR_RCR Pu Sb_addr | Pg=PT Pp=PT Pv=PT Ra=RZ icmp=NE sm75.Pr=PT
+isetp__RRR_RRR_EX/isetp__RRR_RRR Pu Ra Rb Pp Pr | Pg=PT Pv=PT ex=EX icmp=NE
+isetp__RRR_RRR_EX/isetp__RRR_RRR Pu Ra Rb Pr | Pg=PT Pp=PT Pv=PT ex=EX icmp=GE
+isetp__RRR_RRR_EX/isetp__RRR_RRR Pu Ra Rb Pr | Pg=PT Pp=PT Pv=PT ex=EX icmp=GE reuse_src_a=reuse reuse_src_b=reuse
+isetp__RRR_RRR_noEX/isetp__RRR_RRR Pu Ra Pp | Pg=PT Pp.not=1 Pv=PT Rb=RZ bop=XOR fmt=S32 icmp=LT sm75.Pr=PT
+isetp__RRR_RRR_noEX/isetp__RRR_RRR Pu Ra Rb | Pg=PT Pp=PT Pv=PT icmp=GE sm75.Pr=PT
+isetp__RRR_RRR_noEX/isetp__RRR_RRR Pu Ra Rb | Pg=PT Pp=PT Pv=PT icmp=NE sm75.Pr=PT
+isetp__RRR_RRR_noEX/isetp__RRR_RRR Pu Ra | Pg=PT Pp=PT Pv=PT Rb=RZ fmt=S32 icmp=GE sm75.Pr=PT
+isetp__RUR_RUR_EX/isetp__RUR_RUR Pu Ra URb Pr | Pg=PT Pp=PT Pv=PT ex=EX icmp=GE
+isetp__RUR_RUR_EX/isetp__RUR_RUR Pu Ra URb Pr | Pg=PT Pp=PT Pv=PT ex=EX icmp=GE reuse_src_a=reuse
+isetp__RUR_RUR_noEX/isetp__RUR_RUR Pu Ra URb | Pg=PT Pp=PT Pv=PT icmp=GE sm75.Pr=PT
+lds__uImmOffset | Pg=PT Pg.not=1 Ra=RZ Ra_offset=0 Rd=RZ sz=_32
+lea_lo_noimm__RCR_RCR Rd Pu Ra Sb_addr scaleU5 | Pg=PT reuse_src_a=reuse
+lop3_lut__RCR_RCR Pg Rd Sb_addr imm8 | Pg.not=1 Pp=PT Pp.not=1 Pu=PT Ra=RZ Rc=RZ
+lop3_lut__RCR_RCR Rd Ra Sb_addr imm8 | Pg=PT Pp=PT Pp.not=1 Pu=PT Rc=RZ
+mov__RI Rd Sb | Pg=PT PixMaskU04=15
+mov__RR Rd Rb | Pg=PT PixMaskU04=15
+mufu__RRR_RR Rd Rb | Pg=PT mufuop=RCP
+sel__RCR_RCR Rd Ra Sb_addr Pp | Pg=PT Pp.not=1
+sel__RRR_RRR Rd Ra Rb Pp | Pg=PT
+sel__RRR_RRR Rd Ra Rb Pp | Pg=PT Pp.not=1
+sel__RuIR_RIR Rd Ra Sb Pp | Pg=PT
+sel__RuIR_RIR Rd Sb Pp | Pg=PT Pp.not=1 Ra=RZ
+shf__RuIR_RIR Rd Ra Sb | Pg=PT Rc=RZ fmt=U32 reuse_src_a=reuse
+uiadd3__URURUR_URURUR URd UPu URb | UPg=UPT UPv=UPT URa=URZ URb.negate=1 URc=URZ
+uiadd3_x__URURUR_URURUR URd URb UPp | UPg=UPT UPq=UPT UPq.not=1 UPu=UPT UPv=UPT URa=URZ URb.invert=1 URc=URZ X=X
+uisetp__URURUR_URURUR UPu URb | UPg=UPT UPp=UPT UPv=UPT URa=URZ fmt=S32 icmp=LE
+usel__URURUR_UUU URd URa URb UPp | UPg=UPT UPp.not=1
+call_rel__RIR Sa | Pg=PT Pp=PT depth=NOINC
+ret__REL Ra Ra_offset | Pg=PT Pp=PT depth=NODEC
+uldc_const__RCR Sa_addr URd | UPg=UPT sz=_32

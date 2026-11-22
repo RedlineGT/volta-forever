@@ -2609,9 +2609,16 @@ def translate(data, mc=None, listing=None, lives=None):
             sec = e.index(s)
             code = s.data
             if arch == 80:
-                if relocations.get(sec) or any(y[3] == sec and y[1] & 15 == 2 and y[4] for y in symbols):
-                    raise Refused('a relocation or secondary entry in sm_80 code')
-                code, operations = ampere.normalize(code, mc, relative, signed, Refused)
+                secondary = [y for y in symbols if y[3] == sec and y[1] & 15 == 2 and y[4]]
+                helper = None
+                if secondary:
+                    _, info_byte, other, _, at, size, _ = secondary[0]
+                    if len(secondary) != 1 or info_byte >> 4 != 0 or other & 0x10 or not size or at % 16 or at + size != len(code):
+                        raise Refused('unsupported secondary entry in sm_80 code')
+                    helper = at // 16
+                if relocations.get(sec):
+                    raise Refused('a relocation in sm_80 code')
+                code, operations = ampere.normalize(code, mc, relative, signed, Refused, helper)
             functions[sec] = Function(mc, name, code, s.info >> 24, tables_of(info.data) if info is not None else {})
             functions[sec].ampere = arch == 80
             if arch == 80:
@@ -2996,7 +3003,7 @@ def translate(data, mc=None, listing=None, lives=None):
                     elif sym[4]:
                         report[name] = 'a symbol at 0x%x, which is not an instruction' % sym[4]
                     if sym[1] & 0xf == 2:
-                        sym[5] = len(code)
+                        sym[5] = len(code) - (sym[4] if arch == 80 else 0)
         else:
             # Never to run: the proxy refuses its kernels. What reads the file must still find valid
             # sm_70 code that agrees with its attributes (the driver visits the instructions they

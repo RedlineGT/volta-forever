@@ -78,8 +78,9 @@ Builds from `main` also translate a subset of stripped `sm_80` executables. VF c
 instruction forms, branches and memory addressing. Global loads and stores, including 128-bit
 accesses, require the CUDA system descriptor on every path. VF lowers the supported 16-byte
 global-to-shared copy to a guarded Volta load and store and waits for the completed group.
-This covers SGLang’s top-eight expert sum and FlashInfer’s 2D CuTe RMSNorm and fused residual
-RMSNorm kernels on V100. Unsupported functions are refused individually. Other stripped targets above
+This covers SGLang’s top-eight expert sum, FlashInfer’s 2D RMSNorm and fused residual RMSNorm,
+and its 3D query/key normalization. The latter calls a private helper in the same text section.
+VF checks the call target, return register and descriptor writes before translating the helper. Unsupported functions are refused individually. Other stripped targets above
 `sm_75`, including `sm_86`, still require compatible PTX or a second supported image.
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of

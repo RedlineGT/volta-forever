@@ -11,7 +11,7 @@ use crate::assemble::{
     OpVal::{Int, Str},
     assemble,
 };
-use crate::decode::{Decoded, Decoder, LETTER_U};
+use crate::decode::{Decoded, Decoder, Kind, LETTER_R, LETTER_U};
 use crate::field;
 use crate::generated::fields::*;
 use crate::generated::special::{READ_BARRIER, USCHED, WAIT, WRITE_BARRIER};
@@ -64,7 +64,7 @@ struct Step {
 /// A binary has no textual descriptor on sm_80's default LDG/STG form. Even when
 /// the uniform register number is known, its contents must be the system descriptor
 /// on every path leading here before an ordinary Volta global pointer can replace it.
-pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Normalized, Refused> {
+pub(super) fn normalize(code: &[u8], decoder: &mut Decoder, helper: Option<usize>) -> Result<Normalized, Refused> {
     let (instructions, tail) = code.as_chunks::<16>();
     if instructions.is_empty() || !tail.is_empty() {
         return Err(Refused("sm_80 code is empty or contains a partial instruction".into()));
@@ -73,6 +73,11 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Normalized
     let mut operations = HashMap::new();
     let mut joins = [None; 16];
     let mut syncs = Vec::new();
+    let mut returns = None;
+    let mut previous_move = None;
+    let mut calls = Vec::new();
+    let mut saw_return = false;
+    let mut helper_writes = 0;
     let mut steps = Vec::with_capacity(instructions.len());
     for (i, &chunk) in instructions.iter().enumerate() {
         let w = u128::from_le_bytes(chunk);
@@ -241,7 +246,7 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Normalized
         } else {
             0
         };
-        let branch = if let Some((fid, scale)) = find_relative(&d, 75) {
+        let mut branch = if let Some((fid, scale)) = find_relative(&d, 75) {
             let target = at as i64 + 16 + field::signed(fid, d.word) * i64::from(scale);
             if target < 0 || target >= code.len() as i64 || target % 16 != 0 {
                 return Err(Refused(format!("sm_80 branch at 0x{at:x} leaves its function")));
@@ -270,14 +275,87 @@ pub(super) fn normalize(code: &[u8], decoder: &mut Decoder) -> Result<Normalized
             || d.op_or(OP_PP, 7) != 7
             || d.op_or(OP_PP_AT_NOT, 0) != 0
             || d.op_or(OP_COND, 0) != 0;
+        let is_call = d.mnemonic == "CALL";
+        let is_return = d.mnemonic == "RET";
+        let mut falls_through = conditional || !matches!(d.mnemonic, "BRA" | "EXIT" | "RET");
+        if is_call || is_return || helper.is_some() {
+            let Some(start) = helper else {
+                return Err(Refused("sm_80 CALL or RET without a local function symbol".into()));
+            };
+            let in_helper = i >= start;
+            if is_call {
+                let Some((from, reg, back)) = previous_move else {
+                    return Err(Refused(format!("unproven sm_80 return address at 0x{at:x}")));
+                };
+                if back as usize != at + 16
+                    || in_helper
+                    || branch != Some(start)
+                    || i + 1 >= start
+                    || conditional
+                    || returns.is_some_and(|r| r != reg)
+                {
+                    return Err(Refused(format!("unsupported sm_80 local call at 0x{at:x}")));
+                }
+                returns = Some(reg);
+                calls.push((from, i));
+            } else if is_return {
+                if !in_helper || returns.is_none() || d.op(OP_RA) != returns || branch != Some(0) || conditional {
+                    return Err(Refused(format!("unproven sm_80 return at 0x{at:x}")));
+                }
+                saw_return = true;
+                branch = None;
+                falls_through = false;
+            } else if branch.is_some_and(|target| (target >= start) != in_helper) || (i + 1 == start && falls_through) {
+                return Err(Refused(format!(
+                    "sm_80 control flow crosses local function boundary at 0x{at:x}"
+                )));
+            }
+            if in_helper && returns.is_some_and(|r| d.writes.contains(&(LETTER_R, r))) {
+                return Err(Refused(format!(
+                    "sm_80 local function overwrites its return register at 0x{at:x}"
+                )));
+            }
+            if in_helper {
+                helper_writes |= killed;
+            }
+            if d.name == "mov__RI" && !conditional {
+                previous_move = d
+                    .op(OP_RD)
+                    .filter(|r| *r < 255)
+                    .zip(d.op(OP_SB))
+                    .map(|(reg, back)| (i, reg, back));
+            } else if d.kind == Kind::BRU
+                || previous_move.is_some_and(|(_, reg, _)| d.writes.contains(&(LETTER_R, reg)))
+            {
+                previous_move = None;
+            }
+        }
         steps.push(Step {
             killed,
             initialized,
             uses: descriptor,
             branch,
-            falls_through: conditional || !matches!(d.mnemonic, "BRA" | "EXIT"),
+            falls_through,
         });
         result.extend_from_slice(&word.to_le_bytes());
+    }
+    if helper.is_some() {
+        if !saw_return
+            || calls.is_empty()
+            || steps.iter().any(|s| {
+                s.branch
+                    .is_some_and(|t| calls.iter().any(|&(from, call)| from < t && t <= call))
+            })
+        {
+            return Err(Refused(
+                "sm_80 local function lacks a proven call and return path".into(),
+            ));
+        }
+        // A descriptor is valid on return only when neither half can be overwritten by
+        // any instruction of the callee. Forget those pairs on both outgoing CALL edges.
+        for (_, call) in calls {
+            steps[call].killed |= helper_writes;
+        }
     }
     for (i, barrier) in syncs {
         if joins[barrier] != Some(i + 1) {
@@ -543,7 +621,7 @@ mod tests {
         ))
         .unwrap();
         let body = &e.sections[e.section(".text.guarded_copy").unwrap()].data;
-        let result = normalize(body, &mut Decoder::new(75)).unwrap();
+        let result = normalize(body, &mut Decoder::new(75), None).unwrap();
         let mut copies: Vec<_> = result
             .operations
             .iter()
@@ -576,8 +654,83 @@ mod tests {
         ] {
             let mut input = body.clone();
             input[16 * i..16 * i + 16].copy_from_slice(&wrong.to_le_bytes());
-            let error = normalize(&input, &mut Decoder::new(75)).unwrap_err();
+            let error = normalize(&input, &mut Decoder::new(75), None).unwrap_err();
             assert!(error.0.contains(why), "{}", error.0);
+        }
+    }
+
+    const LOCAL: &[u8] = include_bytes!("../../../../tests/kernels/translate/k_ampere_helper.sm80.cubin");
+
+    #[test]
+    fn relocates_the_private_helper_and_preserves_an_untouched_descriptor_across_the_call() {
+        let translation = translate(LOCAL, false).unwrap();
+        assert_eq!(translation.report.len(), 1);
+        assert_eq!(translation.report[0].refused, None);
+        let image = Elf::parse(&translation.bytes).unwrap();
+        let section = image.section(".text.checked_add").unwrap();
+        let length = image.sections[section].data.len() as u64;
+        let symbols = image.symbols().unwrap();
+        let helper = symbols
+            .iter()
+            .find(|s| s.info == 2 && s.shndx as usize == section)
+            .unwrap();
+        assert!(helper.value > 0);
+        assert_eq!(helper.value + helper.size, length);
+    }
+
+    #[test]
+    fn rejects_unproven_calls_returns_and_descriptor_clobbers() {
+        let image = Elf::parse(LOCAL).unwrap();
+        let code = &image.sections[image.section(".text.checked_add").unwrap()].data;
+        let instruction = |at| u128::from_le_bytes(code[at..at + 16].try_into().unwrap());
+        let check = |at, word: u128, reason: &str| {
+            let mut changed = code.clone();
+            changed[at..at + 16].copy_from_slice(&word.to_le_bytes());
+            let error = normalize(&changed, &mut Decoder::new(75), Some(8)).unwrap_err();
+            assert!(error.0.contains(reason), "{}", error.0);
+        };
+        // The caller establishes UR6:UR7 before the CALL and uses the pair after return.
+        // Changing the callee's scalar ULDC to write either half invalidates that use.
+        for half in [6u128, 7] {
+            check(
+                0x80,
+                (instruction(0x80) & !(255 << 16)) | (half << 16),
+                "descriptor UR6",
+            );
+        }
+        // Move the call past the declared helper entry. Change its recorded return
+        // address, or skip its setup with a direct branch to the call.
+        check(0x30, instruction(0x30) + (16 << 32), "unsupported sm_80 local call");
+        check(0x10, instruction(0x10) + (16 << 32), "unsupported sm_80 local call");
+        let jump_to_call = 0x0000000003800000_0000002000000947 | (instruction(0) & CONTROLS);
+        check(0, jump_to_call, "lacks a proven call and return path");
+        // An indirect return through another register or an altered relative base
+        // does not prove the fast path reaches the original continuation.
+        check(0xc0, instruction(0xc0) ^ (1 << 24), "unproven sm_80 return");
+        check(0xc0, instruction(0xc0) + (16 << 32), "unproven sm_80 return");
+        check(
+            0xb0,
+            (instruction(0xb0) & !(255 << 16)) | (2 << 16),
+            "overwrites its return register",
+        );
+        assert!(normalize(code, &mut Decoder::new(75), None).is_err());
+    }
+
+    #[test]
+    fn rejects_helpers_exposed_as_an_entry_or_with_ambiguous_extent() {
+        for variant in 0..4 {
+            let mut image = Elf::parse(LOCAL).unwrap();
+            let mut symbols = image.symbols().unwrap();
+            let helper = symbols.iter_mut().find(|s| s.info == 2 && s.value != 0).unwrap();
+            match variant {
+                0 => helper.info |= 0x10,
+                1 => helper.other |= 0x10,
+                2 => helper.size -= 16,
+                _ => helper.value += 1,
+            }
+            image.set_symbols(&symbols);
+            let result = translate(&image.write(), false).unwrap();
+            assert!(result.report[0].refused.as_deref().unwrap().contains("secondary entry"));
         }
     }
 
@@ -590,14 +743,14 @@ mod tests {
         let put = |code: &mut [u8], at: usize, word: u128| code[at..at + 16].copy_from_slice(&word.to_le_bytes());
         let word = |at: usize| u128::from_le_bytes(body[at..at + 16].try_into().unwrap());
         let check = |code: &[u8], why: &str| {
-            let refusal = normalize(code, &mut Decoder::new(75)).unwrap_err();
+            let refusal = normalize(code, &mut Decoder::new(75), None).unwrap_err();
             assert!(refusal.0.contains(why), "{}", refusal.0);
         };
-        assert!(normalize(body, &mut Decoder::new(75)).is_ok());
+        assert!(normalize(body, &mut Decoder::new(75), None).is_ok());
         // The immediate in FADD is an operand. A different immediate retains its full encoding.
         let fadd = (word(0xa0) & !(u128::from(u32::MAX) << 32)) | (u128::from((-123.5f32).to_bits()) << 32);
         put(&mut code, 0xa0, fadd);
-        let normalized = normalize(&code, &mut Decoder::new(75)).unwrap();
+        let normalized = normalize(&code, &mut Decoder::new(75), None).unwrap();
         assert_eq!(&normalized.words[0xa0..0xb0], &fadd.to_le_bytes());
         code.copy_from_slice(body);
         put(&mut code, 0x30, word(0x30) ^ (8 << 38));
@@ -619,7 +772,7 @@ mod tests {
         let bsync = 0x000fea0003800000_0000000000007941;
         put(&mut code, 0x10, bssy | (0x10 << 32)); // BSSY B0, 0x30
         put(&mut code, 0x20, bsync);
-        assert!(normalize(&code, &mut Decoder::new(75)).is_ok());
+        assert!(normalize(&code, &mut Decoder::new(75), None).is_ok());
         put(&mut code, 0x10, bssy | (0x30 << 32)); // BSYNC would jump past the ULDC.
         check(&code, "does not fall through to its convergence target");
 

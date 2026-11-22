@@ -170,14 +170,26 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
             if arch != 80 {
                 return parse_function(&mut dec75, &name, code, registers, tables);
             }
-            if relocations.contains_key(&si)
-                || symbols
-                    .iter()
-                    .any(|s| s.shndx as usize == si && s.info & 15 == 2 && s.value != 0)
-            {
-                return Err(Refused("a relocation or secondary entry in sm_80 code".into()));
+            let mut helpers = symbols
+                .iter()
+                .filter(|s| s.shndx as usize == si && s.info & 15 == 2 && s.value != 0);
+            let mut helper = None;
+            if let Some(s) = helpers.next() {
+                if helpers.next().is_some()
+                    || s.info >> 4 != 0
+                    || s.other & 0x10 != 0
+                    || s.size == 0
+                    || !s.value.is_multiple_of(16)
+                    || s.value.checked_add(s.size) != Some(code.len() as u64)
+                {
+                    return Err(Refused("unsupported secondary entry in sm_80 code".into()));
+                }
+                helper = Some(s.value as usize / 16);
             }
-            let normalized = super::ampere::normalize(code, &mut dec75)?;
+            if relocations.contains_key(&si) {
+                return Err(Refused("a relocation in sm_80 code".into()));
+            }
+            let normalized = super::ampere::normalize(code, &mut dec75, helper)?;
             let mut fd = parse_function(&mut dec75, &name, &normalized.words, registers, tables)?;
             fd.ampere_ops = normalized.operations;
             for (i, op) in &fd.ampere_ops {
@@ -942,7 +954,8 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                         );
                     }
                     if sym.info & 0xf == 2 {
-                        sym.size = tr.code.len() as u64;
+                        // An accepted sm_80 local helper fills the tail of its section.
+                        sym.size = tr.code.len() as u64 - if arch == 80 { sym.value } else { 0 };
                     }
                 }
             }

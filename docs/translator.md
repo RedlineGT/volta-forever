@@ -30,7 +30,9 @@ operands against both architectures' instruction descriptions. The translator
 lowers supported global loads and stores, paired FP32-to-FP16 conversions, and
 16-byte asynchronous copies. Each copy uses a four-register temporary for a global
 load followed by a shared store. Both instructions preserve the original predicate.
-It verifies the system descriptor along every path to a memory access. Supported
+It verifies the system descriptor along every path to a memory access. A kernel can call a single,
+private helper at the end of its section when each direct call establishes the return address and
+the helper preserves its return register. Any descriptor the helper can write is invalidated on return. Supported
 functions then pass through the existing register allocator and Volta scheduler.
 A function outside this subset is refused at lookup. The supported forms are
 listed in `reference/ampere-forms.txt` and `reference/ampere_forms.py`.

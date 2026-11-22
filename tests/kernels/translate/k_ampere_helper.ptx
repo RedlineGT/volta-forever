@@ -1,0 +1,25 @@
+// CUDA 13.5: ptxas -arch=sm_80 k_ampere_helper.ptx -o k_ampere_helper.sm80.cubin
+// The private trailing function overwrites UR4 and leaves the global descriptor UR6:UR7 live.
+.version 8.8
+.target sm_80
+.address_size 64
+.func (.param .s32 answer) arithmetic(.param .s32 val) {
+    .reg .s32 x;
+    ld.param.s32 x,[val];
+    add.s32 x,x,42;
+    st.param.s32 [answer],x;
+    ret;
+}
+.visible .entry checked_add(.param .u64 output, .param .s32 val) {
+    .reg .u64 dst;
+    .reg .s32 x;
+    ld.param.u64 dst,[output];
+    ld.param.s32 x,[val];
+    .param .s32 input;
+    .param .s32 answer;
+    st.param.s32 [input],x;
+    call (answer),arithmetic,(input);
+    ld.param.s32 x,[answer];
+    st.global.u32 [dst],x;
+    ret;
+}
