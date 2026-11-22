@@ -102,7 +102,14 @@ rather set it by hand.
 
 ## Inference engines on Ubuntu
 
-Start with Ubuntu 24.04 and a Tesla V100. The common 35B benchmark runs with **MTP and all other speculative decoding disabled**. Each guide checks for the NVIDIA R580 driver, explains which CUDA components the engine needs, and gives commands to install `vf` and test a model.
+Both native V100 builds below ran **without Volta-Forever** on Qwen3.5-35B-A3B in 4 bits. All 35B comparisons use one request at a time with **MTP and all other speculative decoding disabled**. After a warm-up, each build processed the same three prompts of 227 tokens and generated 64 tokens per prompt.
+
+| Native reference on a Tesla V100-SXM2-32GB | 4-bit checkpoint format | Median prefill (tokens/s) | Median decode (tokens/s) | Measurements |
+|---|---|---:|---:|---|
+| [1Cat-vLLM, native V100 build](https://github.com/1CatAI/1Cat-vLLM/commit/6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc), CUDA 12.8 | QuantTrio AWQ W4A16 | 1,443.33 | 76.09 | [1Cat-vLLM results](docs/guides/benchmarks/vllm-graphs.json) |
+| [Strata, upstream 0.1.64](https://github.com/Niko1221/Strata), CUDA 12.9 | Unsloth GGUF UD-Q4_K_XL | 1,948.50 | 99.07 | [Strata results](docs/guides/benchmarks/strata-uniform-divisor.json) |
+
+Each Ubuntu 24.04 guide checks for the NVIDIA R580 driver, explains which CUDA components the engine needs, and gives commands to install `vf` and test a model.
 
 | Ubuntu guide | Model in the example | V100 result |
 |---|---|---|
