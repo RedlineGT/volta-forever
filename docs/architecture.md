@@ -111,8 +111,11 @@ leads to:
 - **The image has PTX and machine code for sm_75**: by default the PTX path is
   taken (PTX was written to be compiled for any target; machine code was written
   for one). `VF_TRANSLATE=first` reverses the preference.
-- **The image has machine code for sm_80 or later only**: not translated (the
-  translator handles sm_75). The image is loaded as is and the driver refuses it.
+- **The only image is a cubin for sm_80 or later.** NVIDIA's assembler can retain its source in
+  the `.nv_debug_ptx_txt` ELF section. VF checks for a single PTX module with the same target and
+  kernel names. Executables exporting additional device symbols and relocatable objects require a
+  separate PTX image. With matching source, VF uses the same lowering and driver JIT as for ordinary
+  PTX. An executable with stripped source is passed to the driver unchanged.
 
 When the proxy has told a program a capability of 8.0 (`VF_CAPABILITY=8.0`), the
 code taken from a fat binary is the program's code for the highest target not above

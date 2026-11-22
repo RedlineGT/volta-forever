@@ -679,6 +679,9 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
         return adapt_fatbin(who, bytes, unsafe { fatbin::parse_at(bytes) }, None);
     }
     if head == *b"\x7fELF" {
+        if len.is_some_and(|len| len < 0x40) {
+            return None;
+        }
         let header = unsafe { std::slice::from_raw_parts(bytes, 0x40) };
         if !policy.translates_cubin(header) {
             return finish(who, "cubin", policy.adapt_cubin(header), None, false, None);
@@ -686,7 +689,9 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
         // To be translated, all of it: how far it reaches is in its tables, which the driver would
         // read as well.
         let whole = fatbin::cubin_tables_len(header)
-            .and_then(|tables| fatbin::cubin_len(unsafe { std::slice::from_raw_parts(bytes, tables) }));
+            .filter(|&tables| len.is_none_or(|len| tables <= len))
+            .and_then(|tables| fatbin::cubin_len(unsafe { std::slice::from_raw_parts(bytes, tables) }))
+            .filter(|&length| len.is_none_or(|len| length <= len));
         let Some(length) = whole else {
             log::warn(format_args!(
                 "{who}: cubin with machine code to translate, whose length its tables do not tell; loaded as is"
@@ -694,14 +699,9 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
             return None;
         };
         let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
-        return finish(
-            who,
-            "cubin",
-            adapted(who, cubin, || policy.adapt_cubin(cubin)),
-            None,
-            false,
-            Some(cubin),
-        );
+        let replacement = adapted(who, cubin, || policy.adapt_cubin(cubin));
+        let text = matches!(replacement.outcome, Outcome::Retargeted { .. });
+        return finish(who, "cubin", replacement, None, text, Some(cubin));
     }
     log::trace(format_args!(
         "{who}: image with unknown magic {magic:#010x} loaded as is"

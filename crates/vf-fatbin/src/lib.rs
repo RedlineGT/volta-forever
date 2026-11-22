@@ -218,6 +218,28 @@ impl NewEntry {
         }
     }
 
+    /// An ordinary uncompressed PTX entry, with the platform flags of its source cubin.
+    /// fatbinary's PTX header includes a pointer to the empty compiler-options string.
+    pub fn from_ptx(text: Vec<u8>, sm: u32, version: (u16, u16), source: &Entry<'_>) -> NewEntry {
+        let mut header = [0u8; 80];
+        header[..2].copy_from_slice(&KIND_PTX.to_le_bytes());
+        header[2..4].copy_from_slice(&source.header[2..4]);
+        header[4..8].copy_from_slice(&80u32.to_le_bytes());
+        header[0x14..0x18].copy_from_slice(&64u32.to_le_bytes());
+        header[0x1c..0x20].copy_from_slice(&source.sm().to_le_bytes());
+        header[0x28..0x30].copy_from_slice(&source.flags().to_le_bytes());
+        header[0x40..0x44].copy_from_slice(&72u32.to_le_bytes());
+        Self::replace(
+            &Entry {
+                header: &header,
+                stored: &[],
+            },
+            text,
+            sm,
+            version,
+        )
+    }
+
     /// `entry` with a new uncompressed payload, for architecture `sm`, with content version
     /// `(major, minor)`. Architecture-specific and family flags only apply to their original SM.
     pub fn replace(entry: &Entry<'_>, mut payload: Vec<u8>, sm: u32, version: (u16, u16)) -> NewEntry {
@@ -337,20 +359,61 @@ pub fn cubin_len(bytes: &[u8]) -> Option<usize> {
     (end <= CUBIN_MAX).then_some(end as usize)
 }
 
-/// Entry points retained by the device linker in a little-endian 64-bit CUDA ELF.
-/// Borrow the names, so reading a large linked cubin does not copy its code sections.
-pub fn cubin_entries(bytes: &[u8]) -> Option<Vec<&str>> {
+/// Section headers of a 64-bit little-endian CUDA ELF, borrowed from the input.
+fn cubin_sections(bytes: &[u8]) -> Option<&[[u8; 64]]> {
     if bytes.len() < cubin_tables_len(bytes)? || u16_at(bytes, 18) != 190 {
         return None;
     }
-    let shoff = u64_at(bytes, 40) as usize;
-    let sections = bytes.get(shoff..shoff + 64 * usize::from(u16_at(bytes, 60)))?;
-    let contents = |section: &[u8]| {
-        let start = usize::try_from(u64_at(section, 24)).ok()?;
-        let size = usize::try_from(u64_at(section, 32)).ok()?;
-        bytes.get(start..start.checked_add(size)?)
-    };
-    let (sections, _) = sections.as_chunks::<64>();
+    let start = u64_at(bytes, 40) as usize;
+    let sections = bytes.get(start..start + 64 * usize::from(u16_at(bytes, 60)))?;
+    Some(sections.as_chunks::<64>().0)
+}
+
+fn section_data<'a>(bytes: &'a [u8], section: &[u8; 64]) -> Option<&'a [u8]> {
+    let start = usize::try_from(u64_at(section, 24)).ok()?;
+    let size = usize::try_from(u64_at(section, 32)).ok()?;
+    bytes.get(start..start.checked_add(size)?)
+}
+
+fn elf_string(table: &[u8], offset: u32) -> Option<&str> {
+    let name = table.get(offset as usize..)?;
+    std::str::from_utf8(&name[..name.iter().position(|&b| b == 0)?]).ok()
+}
+
+/// Source retained by ptxas with line information. Treat a linked or relocatable object with
+/// additional externally visible symbols conservatively: kernel names alone cannot check its ABI.
+pub fn cubin_debug_ptx(bytes: &[u8]) -> Option<&[u8]> {
+    let sections = cubin_sections(bytes)?;
+    if u16_at(bytes, 16) != 2 {
+        return None;
+    }
+    let names = sections.get(usize::from(u16_at(bytes, 62)))?;
+    if u32_at(names, 4) != 3 {
+        return None;
+    }
+    let names = section_data(bytes, names)?;
+    let mut source = None;
+    for section in sections {
+        if elf_string(names, u32_at(section, 0))? == ".nv_debug_ptx_txt" {
+            if u32_at(section, 4) != 1 || source.is_some() {
+                return None;
+            }
+            source = Some(section_data(bytes, section)?);
+        }
+    }
+    let source = source?;
+    let (symbols, _) = cubin_symbols(bytes, sections)?;
+    if symbols.iter().any(|s| s[4] >> 4 != 0 && !is_kernel(s)) {
+        return None;
+    }
+    Some(source)
+}
+
+fn is_kernel(symbol: &[u8; 24]) -> bool {
+    symbol[4] & 0xf == 2 && symbol[5] & 0x10 != 0 && u16_at(symbol, 6) != 0
+}
+
+fn cubin_symbols<'a>(bytes: &'a [u8], sections: &[[u8; 64]]) -> Option<(&'a [[u8; 24]], &'a [u8])> {
     let symbols = sections.iter().find(|s| u32_at(*s, 4) == 2)?;
     if u64_at(symbols, 56) != 24 {
         return None;
@@ -359,18 +422,16 @@ pub fn cubin_entries(bytes: &[u8]) -> Option<Vec<&str>> {
     if u32_at(strings, 4) != 3 {
         return None;
     }
-    let strings = contents(strings)?;
+    let (symbols, trailing) = section_data(bytes, symbols)?.as_chunks::<24>();
+    trailing.is_empty().then_some((symbols, section_data(bytes, strings)?))
+}
+
+/// Entry points retained by the device linker in a little-endian 64-bit CUDA ELF.
+pub fn cubin_entries(bytes: &[u8]) -> Option<Vec<&str>> {
+    let (symbols, strings) = cubin_symbols(bytes, cubin_sections(bytes)?)?;
     let mut entries = Vec::new();
-    let (symbols, trailing) = contents(symbols)?.as_chunks::<24>();
-    if !trailing.is_empty() {
-        return None;
-    }
-    for symbol in symbols {
-        if symbol[4] & 0xf == 2 && symbol[5] & 0x10 != 0 && u16_at(symbol, 6) != 0 {
-            let name = strings.get(u32_at(symbol, 0) as usize..)?;
-            let end = name.iter().position(|&b| b == 0)?;
-            entries.push(std::str::from_utf8(&name[..end]).ok()?);
-        }
+    for symbol in symbols.iter().filter(|s| is_kernel(s)) {
+        entries.push(elf_string(strings, u32_at(symbol, 0))?);
     }
     Some(entries)
 }

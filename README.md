@@ -69,8 +69,10 @@ To select a program's Ampere kernels, have `vf` report compute capability 8.0 to
 VF_CAPABILITY=8.0 vf ./my_program
 ```
 
-The program must include compatible PTX that `vf` can adapt for Volta (`sm_70`). A binary
-that contains only compiled `sm_80` machine code (a cubin) cannot run this way.
+VF needs compatible PTX to compile for Volta (`sm_70`). It can read a standalone PTX module or
+a PTX entry in a fat binary. Builds from `main` also recognize complete PTX retained inside an
+Ampere cubin by NVIDIA's assembler, including cubins from Triton. A stripped Ampere cubin needs
+a separate PTX image. [Supported images](LIMITS.md)
 
 On a V100 with this setting, ZML reported capability 8.0 and answered the test prompt with
 the expected word using Qwen3.5-9B. [Validation results](docs/validation.md#vllm-sglang-zml).

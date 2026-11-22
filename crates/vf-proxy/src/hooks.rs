@@ -20,6 +20,7 @@ const JIT_ERROR_LOG_BUFFER_SIZE: c_int = 6;
 const ATTRIBUTE_CAPABILITY_MAJOR: c_int = 75;
 const ATTRIBUTE_CAPABILITY_MINOR: c_int = 76;
 /// `CUjitInputType` values.
+const INPUT_CUBIN: c_int = 0;
 const INPUT_PTX: c_int = 1;
 const INPUT_FATBINARY: c_int = 2;
 
@@ -1323,22 +1324,22 @@ type LinkAddData = unsafe extern "C" fn(
     *mut *mut c_void,
 ) -> CUresult;
 
-/// Add `data` to a link, adapted if it is PTX or a fat binary. The linker reads its input during the
+/// Add `data` to a link, with the CUDA input type matching the replacement image. The linker reads its input during the
 /// call, so the replacement does not outlive it.
 unsafe fn link_add_data(
     who: &str,
     input: c_int,
     data: *mut c_void,
     size: usize,
-    call: impl Fn(*mut c_void, usize) -> CUresult,
+    call: impl Fn(c_int, *mut c_void, usize) -> CUresult,
 ) -> CUresult {
     let replacement = match input {
-        INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
+        INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
         INPUT_FATBINARY => unsafe { images::adapt(who, data, None) },
         _ => None,
     };
     let Some(replacement) = replacement else {
-        return call(data, size);
+        return call(input, data, size);
     };
     if let Some(first) = replacement.refused().first() {
         // Linked code comes back as one image of machine code: its lookups cannot be told apart.
@@ -1350,14 +1351,19 @@ unsafe fn link_add_data(
             first.reason
         ));
     }
-    let result = call(replacement.as_ptr() as *mut c_void, replacement.len());
+    let kind = if input == INPUT_CUBIN && matches!(replacement.origin, Some(kernels::Origin::PtxRewritten)) {
+        INPUT_PTX
+    } else {
+        input
+    };
+    let result = call(kind, replacement.as_ptr() as *mut c_void, replacement.len());
     if result == CUDA_SUCCESS {
         return result;
     }
     log::warn(format_args!(
         "{who}: the driver refused the adapted input (error {result}); adding the original"
     ));
-    call(data, size)
+    call(input, data, size)
 }
 
 #[unsafe(no_mangle)]
@@ -1373,7 +1379,7 @@ pub unsafe extern "C" fn cuLinkAddData(
 ) -> CUresult {
     let real = real!(cuLinkAddData: LinkAddData);
     unsafe {
-        link_add_data("cuLinkAddData", input, data, size, |data, size| {
+        link_add_data("cuLinkAddData", input, data, size, |input, data, size| {
             real(state, input, data, size, name, count, options, values)
         })
     }
@@ -1392,7 +1398,7 @@ pub unsafe extern "C" fn cuLinkAddData_v2(
 ) -> CUresult {
     let real = real!(cuLinkAddData_v2: LinkAddData);
     unsafe {
-        link_add_data("cuLinkAddData", input, data, size, |data, size| {
+        link_add_data("cuLinkAddData", input, data, size, |input, data, size| {
             real(state, input, data, size, name, count, options, values)
         })
     }

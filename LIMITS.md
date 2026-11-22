@@ -68,8 +68,10 @@ precision are among them (relocations that the translator cannot carry with thei
 The CUDA 13 libraries are not meant to be translated: the layer puts the CUDA 12.9 builds, which
 have code for Volta, behind their names (`INSTALL.md`).
 
-**Machine code for sm_80 and later.** Not translated. A program that carries neither machine
-code for sm_75 nor PTX cannot run.
+**Cubins for sm_80 and later.** VF can use the PTX that NVIDIA's assembler retains in
+`.nv_debug_ptx_txt` with line information. It checks the architecture and the kernel names
+before compiling that PTX for Volta. This covers standalone cubins from Triton and cubins in
+fat binaries. Stripped cubins still need a separate PTX image or a supported machine-code target.
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of
 blocks, Hopper's barriers, tensor maps (`docs/emulations.md`, "Other instructions").

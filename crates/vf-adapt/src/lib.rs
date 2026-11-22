@@ -192,6 +192,48 @@ struct Translation {
     over_budget: bool,
 }
 
+/// Reconstruct the single PTX module kept as NUL-separated lines by ptxas. Match the
+/// architecture and the complete set of entry points before handing it to the usual PTX path.
+fn embedded_ptx(cubin: &[u8], sm: u32) -> Option<(Vec<u8>, vf_ptx::Header)> {
+    if fatbin::cubin_sm(cubin)? != sm {
+        return None;
+    }
+    let source = fatbin::cubin_debug_ptx(cubin)?;
+    if source.last() != Some(&0) || !source.is_ascii() {
+        return None;
+    }
+    let mut text = source.to_vec();
+    for byte in &mut text {
+        if *byte == 0 {
+            *byte = b'\n';
+        }
+    }
+    let mut directives = text.split(|&b| b == b'\n').filter_map(|line| {
+        let keyword = line.trim_ascii_start().split(|b| b.is_ascii_whitespace()).next()?;
+        matches!(keyword, b".version" | b".target").then_some(keyword)
+    });
+    let header = vf_ptx::header(&text)?;
+    if directives.next() != Some(b".version")
+        || directives.next() != Some(b".target")
+        || directives.next().is_some()
+        || header.target != sm
+    {
+        return None;
+    }
+    let mut names = fatbin::cubin_entries(cubin)?;
+    let mut entries: Vec<_> = vf_ptx::functions(&text)
+        .into_iter()
+        .filter(|f| f.entry)
+        .map(|f| &text[f.name])
+        .collect();
+    names.sort_unstable();
+    entries.sort_unstable();
+    if entries.is_empty() || !names.iter().map(|name| name.as_bytes()).eq(entries) {
+        return None;
+    }
+    Some((text, header))
+}
+
 impl Policy {
     /// This policy with what the environment asks for. `VF_ALIGNED_ROWS=0`: do not take the rows
     /// that `ldmatrix` reads to be at multiples of 16; test their addresses when the code runs, for a
@@ -354,7 +396,7 @@ impl Policy {
     }
 
     /// Adapt a cubin, all of it: machine code for Turing is translated for the device. (A cubin for
-    /// the device, or one that nothing translates, is recognised from its header alone.)
+    /// the device is recognised from its header alone.) Later executables may carry their original PTX.
     pub fn adapt_cubin(&self, cubin: &[u8]) -> Adapted {
         match fatbin::cubin_sm(cubin) {
             Some(sm) if self.runs(sm) => Adapted::unchanged(Outcome::Native),
@@ -372,6 +414,9 @@ impl Policy {
                 },
                 Err(reason) => Adapted::unchanged(Outcome::NotTranslated { from_sm: sm, reason }),
             },
+            Some(sm) if self.retargetable(sm) => embedded_ptx(cubin, sm)
+                .map(|(text, _)| self.adapt_ptx(&text))
+                .unwrap_or_else(|| Adapted::unchanged(Outcome::NeedsTranslation { lowest_sm: sm })),
             Some(sm) => Adapted::unchanged(Outcome::NeedsTranslation { lowest_sm: sm }),
             None => Adapted::unchanged(Outcome::Unknown),
         }
@@ -379,7 +424,7 @@ impl Policy {
 
     /// Whether `adapt_cubin` would need all of a cubin with this header, not the header alone.
     pub fn translates_cubin(&self, header: &[u8]) -> bool {
-        fatbin::cubin_sm(header).is_some_and(|sm| !self.runs(sm) && self.translatable(sm))
+        fatbin::cubin_sm(header).is_some_and(|sm| !self.runs(sm) && (self.translatable(sm) || self.retargetable(sm)))
     }
 
     /// `fat`, which has no PTX to rewrite, with its machine code for Turing translated for the device;
@@ -436,7 +481,7 @@ impl Policy {
         }))
     }
 
-    /// The architecture whose PTX entries of `fat` are rewritten for the device.
+    /// The architecture to use for PTX entries or, when none exist, PTX retained inside cubins.
     ///
     /// A program takes its decisions (which kernels to launch, with which parameters) for the GPU it
     /// is told it runs on, and the driver of that GPU would give it the code of the highest target
@@ -446,11 +491,11 @@ impl Policy {
     /// Otherwise a program is told the lowest architecture it has code for (`callers` in the proxy):
     /// PTX at or below the device target in a dialect too new for the driver, else the nearest
     /// target above. The same when nothing reaches what the user chose.
-    fn source_of(&self, fat: &FatBinary<'_>) -> Option<u32> {
+    fn source_of(&self, fat: &FatBinary<'_>, kind: u16) -> Option<u32> {
         let targets = || {
             fat.entries
                 .iter()
-                .filter(|e| e.kind() == KIND_PTX && (e.sm() <= self.device_sm || self.retargetable(e.sm())))
+                .filter(|e| e.kind() == kind && (e.sm() <= self.device_sm || self.retargetable(e.sm())))
                 .map(|e| e.sm())
         };
         let nearest = targets().min_by_key(|&sm| if sm <= self.device_sm { 0 } else { sm });
@@ -460,6 +505,7 @@ impl Policy {
 
     /// Adapt a fat binary: when nothing in it is for the device, rewrite the PTX entries of one
     /// architecture (`source_of`) as device PTX; without PTX, translate its machine code for Turing.
+    /// An executable for a later target can supply the PTX that ptxas kept with its line information.
     /// The other entries are kept.
     pub fn adapt_fatbin(&self, fat: &FatBinary<'_>) -> Result<Adapted, fatbin::Error> {
         if self.translate == Translate::Force
@@ -475,43 +521,58 @@ impl Policy {
         {
             return Ok(adapted);
         }
-        let Some(source) = self.source_of(fat) else {
+        let (kind, source) = if let Some(source) = self.source_of(fat, KIND_PTX) {
+            (KIND_PTX, source)
+        } else {
             if let Some(adapted) = self.translate_fatbin(fat)? {
                 return Ok(adapted);
             }
-            let lowest = fat
-                .entries
-                .iter()
-                .filter(|e| e.kind() == KIND_ELF)
-                .map(|e| e.sm())
-                .min();
-            return Ok(Adapted::unchanged(match lowest {
-                Some(lowest_sm) => Outcome::NeedsTranslation { lowest_sm },
-                None => Outcome::Unknown,
-            }));
+            let Some(source) = self.source_of(fat, KIND_ELF) else {
+                return Ok(Adapted::unchanged(Outcome::Unknown));
+            };
+            (KIND_ELF, source)
         };
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut rewritten, mut tensor_rewritten, mut tanh_expanded, mut trapped) = (0, 0, 0, Vec::new());
         let (mut refused, mut emulated) = (Vec::new(), Vec::new());
         for entry in &fat.entries {
-            if entry.kind() != KIND_PTX || entry.sm() != source {
+            if entry.kind() != kind || entry.sm() != source {
                 entries.push(NewEntry::copy_of(entry));
                 continue;
             }
-            let (text, lowering) = self.lower_ptx(&entry.payload()?);
+            let payload = entry.payload()?;
+            let (text, version) = if kind == KIND_ELF {
+                // Every cubin of the selected architecture must carry its complete source.
+                // Returning a partially rewritten image would silently hide some entry points.
+                let Some((ptx, header)) = embedded_ptx(&payload, source).filter(|_| self.retargetable(source)) else {
+                    let lowest_sm = fat
+                        .entries
+                        .iter()
+                        .filter(|e| e.kind() == KIND_ELF)
+                        .map(Entry::sm)
+                        .min()
+                        .unwrap_or(source);
+                    return Ok(Adapted::unchanged(Outcome::NeedsTranslation { lowest_sm }));
+                };
+                (std::borrow::Cow::Owned(ptx), header.version)
+            } else {
+                let (major, minor) = entry.content_version();
+                (payload, (u32::from(major), u32::from(minor)))
+            };
+            let (text, lowering) = self.lower_ptx(&text);
             tensor_rewritten += lowering.tensor_rewritten;
             tanh_expanded += lowering.tanh_expanded;
             trapped.extend(lowering.trapped);
             refused.extend(lowering.refused);
             emulated.extend(lowering.emulated);
-            let (major, minor) = entry.content_version();
-            let version = (major as u32, minor as u32).min(self.ptx_max);
-            entries.push(NewEntry::replace(
-                entry,
-                text,
-                self.device_sm.min(source),
-                (version.0 as u16, version.1 as u16),
-            ));
+            let (major, minor) = version.min(self.ptx_max);
+            let version = (major as u16, minor as u16);
+            let target = self.device_sm.min(source);
+            entries.push(if kind == KIND_ELF {
+                NewEntry::from_ptx(text, target, version, entry)
+            } else {
+                NewEntry::replace(entry, text, target, version)
+            });
             rewritten += 1;
         }
         Ok(Adapted {
@@ -1153,6 +1214,75 @@ mod tests {
         assert_eq!(policy.embedded(&file), Embedded::Other { lowest_sm: 75 });
         file.extend_from_slice(ELF70_ELF75_PTX70);
         assert_eq!(policy.embedded(&file), Embedded::Usable);
+    }
+
+    const DEBUG_CUBIN: &[u8] = include_bytes!("../../../tests/kernels/ptx-cases/copy-octal.sm80.cubin");
+
+    #[test]
+    fn embedded_ptx_uses_the_same_lowering_in_a_cubin_and_fat_binary() {
+        let policy = Policy::default();
+        let adapted = policy.adapt_cubin(DEBUG_CUBIN);
+        assert!(matches!(&adapted.outcome, Outcome::Retargeted { from_sm: 80, refused, .. } if refused.is_empty()));
+        let image = adapted.image.unwrap();
+        assert_eq!(vf_ptx::header(&image).unwrap().target, 70);
+        let template = fatbin::parse(ELF75_PTX75).unwrap().entries[0];
+        let bytes = fatbin::build(&[NewEntry::replace(&template, DEBUG_CUBIN.to_vec(), 80, (1, 7))]);
+        let rewritten = policy.adapt_fatbin(&fatbin::parse(&bytes).unwrap()).unwrap();
+        assert_eq!(rewritten.outcome, adapted.outcome);
+        let bytes = rewritten.image.unwrap();
+        let fat = fatbin::parse(&bytes).unwrap();
+        assert_eq!(fat.entries.len(), 1);
+        let entry = fat.entries[0];
+        assert_eq!(
+            (entry.kind(), entry.sm(), entry.content_version()),
+            (KIND_PTX, 70, (7, 0))
+        );
+        assert_eq!(&*entry.payload().unwrap(), image.as_slice());
+    }
+
+    #[test]
+    fn partial_mismatched_and_relocatable_debug_sources_are_left_alone() {
+        let policy = Policy::default();
+        let edit = |from: &[u8], to: &[u8]| {
+            let mut elf = vf_sass::elf::Elf::parse(DEBUG_CUBIN).unwrap();
+            let index = elf.section(".nv_debug_ptx_txt").unwrap();
+            let text = &mut elf.sections[index].data;
+            let at = text.windows(from.len()).position(|w| w == from).unwrap();
+            text.splice(at..at + from.len(), to.iter().copied());
+            elf.write()
+        };
+        let mut relocatable = DEBUG_CUBIN.to_vec();
+        relocatable[16] = 1;
+        let mut with_global = vf_sass::elf::Elf::parse(DEBUG_CUBIN).unwrap();
+        let mut symbols = with_global.symbols().unwrap();
+        symbols.iter_mut().find(|s| s.name == "source").unwrap().info |= 0x10;
+        with_global.set_symbols(&symbols);
+        for bad in [
+            edit(b".version 7.0", b".version 7.0\0.version 7.0"),
+            edit(b".target sm_80", b".target sm_80\0.target sm_80"),
+            edit(b".target sm_80", b".target sm_86"),
+            edit(b".entry k(", b".entry q("),
+            edit(b"ret;", b"\xff"),
+            relocatable,
+            with_global.write(),
+        ] {
+            assert_eq!(
+                policy.adapt_cubin(&bad).outcome,
+                Outcome::NeedsTranslation { lowest_sm: 80 }
+            );
+            let template = fatbin::parse(ELF75_PTX75).unwrap().entries[0];
+            let bytes = fatbin::build(&[
+                NewEntry::replace(&template, DEBUG_CUBIN.to_vec(), 80, (1, 7)),
+                NewEntry::replace(&template, bad, 80, (1, 7)),
+            ]);
+            assert!(
+                policy
+                    .adapt_fatbin(&fatbin::parse(&bytes).unwrap())
+                    .unwrap()
+                    .image
+                    .is_none()
+            );
+        }
     }
 
     #[test]

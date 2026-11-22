@@ -110,6 +110,8 @@ px ptx-padded-chain-read-commented "$G/ptx-cases/padded-chain-read-commented.ptx
 px ptx-chain-nonconsecutive "$G/ptx-cases/chain-nonconsecutive.ptx" 42000000 42000000 42800000 42800000
 px ptx-reduction-exited "$G/ptx-cases/reduction-exited.ptx" 5 1 4 5
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
+# Built from the same source with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
+px cubin-embedded-ptx "$G/ptx-cases/copy-octal.sm80.cubin" 12345678 abcdef01 0 0
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"
 # FP8: the conversions both ways, and the products, which run on the tensor cores as products of halves.
 tc fp8 "$G/k_fp8.135.sm89.ptx" "PTX for sm_89 retargeted \(1 module, 8 tensor-core instructions rewritten\)" "19 kernels, 0 wrong"
