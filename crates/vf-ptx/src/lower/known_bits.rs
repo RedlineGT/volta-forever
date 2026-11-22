@@ -1,4 +1,5 @@
 //! Bit facts for straight-line operations that construct packed floating-point operands.
+mod literals;
 pub(super) mod nibbles;
 use std::collections::HashMap;
 
@@ -61,6 +62,23 @@ impl Word {
             _ => return None,
         };
         (value != Self::UNKNOWN).then_some((scan::register(dest)?, value))
+    }
+
+    /// Normalize a multiply by one, so the bounded input to a cancellation can occur
+    /// in either multiplicand as well as the addend. Returns the index of that input.
+    fn exact_sum([a, b, c]: [Self; 3]) -> Option<([u32; 2], usize)> {
+        const ONE: Word = Word {
+            low: 0x3f803f80,
+            high: 0x3f803f80,
+        };
+        let (left, right, bounded, index) = if b == ONE && c.low == c.high {
+            (c, b, a, 0)
+        } else if a == ONE && c.low == c.high {
+            (a, c, b, 1)
+        } else {
+            (a, b, c, 2)
+        };
+        Self::cancelling_products(left, right, bounded).map(|bits| (bits, index))
     }
 
     /// The exact f32 products if each packed BF16 lane of a*b+c is a cancellation
@@ -137,21 +155,16 @@ pub(super) fn exact_bf16_sums<'a>(
         if opcode == "fma.rn.bf16x2"
             && let [_, a, b, c] = &scan::split_operands(operands)[..]
         {
-            let [x, y, z] = [a, b, c].map(|src| Word::get(&registers, constants, src));
-            let one = Word {
-                low: 0x3f803f80,
-                high: 0x3f803f80,
-            };
-            // With an exact multiplier of one the same cancellation proof applies to x+c or y+c.
-            let (left, right, bounded, operand) = if y == one && z.low == z.high {
-                (z, y, x, *a)
-            } else if x == one && z.low == z.high {
-                (x, z, y, *b)
-            } else {
-                (x, y, z, *c)
-            };
-            if let Some(bits) = Word::cancelling_products(left, right, bounded) {
-                found.insert(index, ExactSum { operand, bits });
+            let inputs = [*a, *b, *c];
+            let words = inputs.map(|src| Word::get(&registers, constants, src));
+            if let Some((bits, index_of_addend)) = Word::exact_sum(words) {
+                found.insert(
+                    index,
+                    ExactSum {
+                        operand: inputs[index_of_addend],
+                        bits,
+                    },
+                );
             }
         }
         let result = if !guarded && matches!(opcode, "mov.b32" | "mov.u32" | "mov.s32" | "and.b32" | "or.b32") {

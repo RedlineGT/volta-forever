@@ -20,12 +20,13 @@ fn value(bits: u16) -> f32 {
 /// The product and the cancellation are exact in BF16. Enumerating at most sixteen
 /// encodings per lane proves integrality as well as range; endpoints alone cannot.
 fn packed_sum(a: Word, b: Word, c: Word) -> bool {
-    let Some(products) = Word::cancelling_products(a, b, c) else {
+    let words = [a, b, c];
+    let Some((products, index)) = Word::exact_sum(words) else {
         return false;
     };
     [0, 16].into_iter().zip(products).all(|(shift, product)| {
-        let lo = half(c.low, shift);
-        let hi = half(c.high, shift);
+        let lo = half(words[index].low, shift);
+        let hi = half(words[index].high, shift);
         hi - lo <= 15 && (lo..=hi).all(|bits| small_integer(f32::from_bits(product) + value(bits)))
     })
 }
@@ -57,11 +58,12 @@ pub(in crate::lower) fn at_products(text: &str, items: &[Item], mma: &str) -> Ha
             _ => {}
         }
     }
-    let constants = HashMap::new();
     let mut words: HashMap<&str, Word> = HashMap::new();
     let mut small: HashSet<&str> = HashSet::new();
     let mut proved = HashSet::new();
     let unshadowed = |name: &str| shadow.width(name).is_none() && !other_names.contains(name);
+    let mut constants = super::literals::immutable(text, items);
+    constants.retain(|name, _| unshadowed(name));
     for (index, item) in items.iter().enumerate() {
         let (guarded, op, args) = match &item.kind {
             Kind::Statement {
@@ -205,6 +207,8 @@ mod tests {
     #[test]
     fn every_accepted_halfword_reconstructs_a_nonnegative_small_integer() {
         let word = |bits| Word { low: bits, high: bits };
+        let one = word(0x3f803f80);
+        let negative_offset = word(0xc300c300);
         let product = word(0x43004300);
         let minus = word(0xbf80bf80);
         // Check the full domain of either half while the other half is known-good.
@@ -214,6 +218,8 @@ mod tests {
                 let exact = value(h) - 128.0;
                 let expected = (0..=15).any(|n| exact.to_bits() == (n as f32).to_bits());
                 assert_eq!(packed_sum(product, minus, c), expected, "{lo:04x}, {hi:04x}");
+                assert_eq!(packed_sum(c, one, negative_offset), expected);
+                assert_eq!(packed_sum(one, c, negative_offset), expected);
             }
         }
         for boost in [0u16, 1, 7, 15] {
