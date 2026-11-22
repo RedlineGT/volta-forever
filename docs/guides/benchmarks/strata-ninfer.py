@@ -61,12 +61,15 @@ def main():
         row = chat(args.engine, url, model, prompt["prompt"], 64)
         row["id"] = prompt["id"]
         row["first_word_matches"] = bool(re.match(r"^\W*" + re.escape(prompt["city"]) + r"\b", row["answer"], re.I))
+        if not row["first_word_matches"]:
+            raise SystemExit(f"Expected {prompt['city']} at the start of the reply to {row['id']}: {row['answer']!r}")
         t = row["timings"]
-        if row["id"] != "warmup":
-            if t["cache_n"] != 0 or t["prompt_n"] != row["usage"]["prompt_tokens"]:
-                raise SystemExit(f"Unexpected prompt-cache reuse or inconsistent counts in {row['id']}.")
-            if not row["answer"] or t["prompt_n"] <= 0 or t["predicted_n"] < 2:
-                raise SystemExit(f"Missing text or phase measurements in {row['id']}.")
+        if t["cache_n"] != 0 or t["prompt_n"] != row["usage"]["prompt_tokens"]:
+            raise SystemExit(f"Unexpected prompt-cache reuse or inconsistent input count in {row['id']}.")
+        if t["predicted_n"] != row["usage"]["completion_tokens"]:
+            raise SystemExit(f"Inconsistent output count in {row['id']}.")
+        if t["prompt_n"] <= 0 or t["predicted_n"] < 2 or min(t["prompt_ms"], t["predicted_ms"]) <= 0:
+            raise SystemExit(f"Missing phase measurements in {row['id']}.")
         rows.append(row)
 
     measured = rows[1:]
