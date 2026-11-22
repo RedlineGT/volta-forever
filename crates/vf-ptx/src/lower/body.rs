@@ -12,7 +12,7 @@ use crate::scan;
 use super::lane::Lane;
 use super::parse::{Tensor, is_branch, is_later, is_plain, is_tensor, parse};
 use super::plan::Plan;
-use super::types::{Declarations, Form, Key, ScopeFrame, all_ones, first_operand, integer, is_zero};
+use super::types::{Declarations, Form, Key, ScopeFrame, all_ones, first_operand, is_zero};
 use super::{Counts, NEVER, Options, SPLIT_AFTER, TANH, Unsupported, later_only};
 
 pub(super) struct Body<'a> {
@@ -334,15 +334,12 @@ impl<'a> Body<'a> {
         } else {
             Some(parse(opcode, operands, &self.plan.constants16)?)
         };
-        // A copy of all or nothing under a predicate is a load and a store under it (so CUTLASS
-        // writes its copies). A warp matrix store may also be uniformly predicated.
-        let whole_copy = match &tensor {
-            Some(Tensor::Copy { size, amount, .. }) => {
-                amount.is_none_or(|amount| matches!(integer(amount), Some(bytes) if bytes == *size || bytes == 0))
-            }
-            _ => false,
-        };
-        if guarded && !matches!(tensor, Some(Tensor::Copied | Tensor::Store { .. })) && !whole_copy {
+        if guarded
+            && !matches!(
+                tensor,
+                Some(Tensor::Copy { .. } | Tensor::Copied | Tensor::Store { .. })
+            )
+        {
             return Err(Unsupported(format!("{opcode}: guarded by a predicate")));
         }
         // The statement is `<guard><opcode><operands>;`.

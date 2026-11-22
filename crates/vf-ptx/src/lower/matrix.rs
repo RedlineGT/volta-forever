@@ -436,8 +436,7 @@ impl<'a> Body<'a> {
     ///
     /// `amount` bytes of the source are copied and the rest of the destination is zeroed. The two
     /// cases compilers produce, all or nothing, take one predicated load; any other amount goes
-    /// through a byte loop behind a branch. `guard`: the predicate the statement is under, if any
-    /// (only for a copy of a constant all or nothing).
+    /// through a byte loop behind a branch. A false outer guard leaves both source and destination untouched.
     pub(super) fn copy(
         &mut self,
         guard: &str,
@@ -466,7 +465,14 @@ impl<'a> Body<'a> {
             Some(_) if constant == Some(0) => zero(self),
             Some(ignore) if self.declarations.width(ignore) == Some(1) => {
                 zero(self);
-                emit!(self, "@!{ignore} {load}");
+                if guard.is_empty() {
+                    emit!(self, "@!{ignore} {load}");
+                } else {
+                    self.scratch_predicate = true;
+                    emit!(self, "mov.pred %vf_n, 0;");
+                    emit!(self, "{guard}not.pred %vf_n, {ignore};");
+                    emit!(self, "@%vf_n {load}");
+                }
             }
             Some(amount) => {
                 let amount = match constant {
@@ -478,14 +484,21 @@ impl<'a> Body<'a> {
                     None if self.declarations.width(amount) == Some(32) => amount.to_string(),
                     None => return Err(Unsupported(format!("cp.async: amount {amount} not recognised"))),
                 };
+                let done = format!("$vf_c{}", self.partial_copies);
+                self.partial_copies += 1;
+                // Disabled lanes skip the zero fill, the full load and the partial byte loop.
+                if let Some(predicate) = guard.trim().strip_prefix('@') {
+                    let inverse = predicate
+                        .strip_prefix('!')
+                        .map_or_else(|| format!("!{predicate}"), str::to_owned);
+                    emit!(self, "@{inverse} bra {done};");
+                }
                 zero(self);
                 emit!(self, "setp.eq.u32 %vf_n, {amount}, {size};");
                 emit!(self, "@%vf_n {load}");
                 emit!(self, "{store}");
                 // Neither nothing nor everything: 0 < amount < size.
                 let [less, byte]: [String; 2] = self.fresh_n();
-                let done = format!("$vf_c{}", self.partial_copies);
-                self.partial_copies += 1;
                 emit!(self, "sub.u32 {less}, {amount}, 1;");
                 emit!(self, "setp.lt.u32 %vf_n, {less}, {};", size - 1);
                 emit!(self, "@!%vf_n bra {done};");

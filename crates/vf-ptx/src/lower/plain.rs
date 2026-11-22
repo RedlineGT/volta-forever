@@ -635,10 +635,18 @@ impl<'a> Body<'a> {
                 .copied()
                 .filter(|word| !(local && *word == "volatile"))
                 .collect();
-            if kept
-                .iter()
-                .any(|word| word.contains("::") && !word.starts_with("shared::"))
-            {
+            if kept.iter().any(|word| {
+                word.contains("::")
+                    && !word.starts_with("shared::")
+                    && !matches!(
+                        *word,
+                        "L1::evict_normal"
+                            | "L1::evict_first"
+                            | "L1::evict_last"
+                            | "L1::evict_unchanged"
+                            | "L1::no_allocate"
+                    )
+            }) {
                 return Err(unsupported("no Volta sequence for this form"));
             }
             if words[0] == "ld" {

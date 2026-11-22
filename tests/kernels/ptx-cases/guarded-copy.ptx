@@ -1,0 +1,59 @@
+.version 8.4
+.target sm_80
+.address_size 64
+.global .align 4 .u32 source = 0x12345678;
+.visible .entry k(.param .u64 output) .reqntid 32,1,1 {
+    .reg .b32 lane, off, dst, amount, bits, partial, a, b, c, d, expected;
+    .reg .b16 h;
+    .reg .b64 src, yes, no, read_ptr, policy, out;
+    .reg .pred even, ignore;
+    .shared .align 16 .b8 rows[512];
+    mov.u32 lane, %laneid;
+    mov.u32 dst, rows;
+    mad.lo.u32 dst, lane, 16, dst;
+    mov.u32 a, 0xdeadbeef;
+    st.shared.v4.u32 [dst], {a,a,a,a};
+    and.b32 off, lane, 1;
+    setp.eq.u32 even, off, 0;
+    and.b32 off, lane, 2;
+    setp.ne.u32 ignore, off, 0;
+    rem.u32 amount, lane, 5;
+    mov.u64 src, source;
+    // Disabled lanes carry a null source. Each active lane copies 0 to 4 bytes.
+    selp.u64 yes, src, 0, even;
+    selp.u64 no, 0, src, even;
+    @even cp.async.ca.shared.global [dst], [yes], 4, amount;
+    @!even cp.async.ca.shared.global [dst+4], [no], 4, amount;
+    // Ignoring the source zeroes the destination only if the outer guard is true.
+    selp.u64 yes, 0, yes, ignore;
+    selp.u64 no, 0, no, ignore;
+    @even cp.async.ca.shared.global [dst+8], [yes], 4, ignore;
+    @!even cp.async.ca.shared.global [dst+12], [no], 4, ignore;
+    cp.async.commit_group;
+    cp.async.wait_group 0;
+    ld.shared.v4.u32 {a,b,c,d}, [dst];
+    shl.b32 bits, amount, 3;
+    bfe.u32 partial, 0x12345678, 0, bits;
+    selp.b32 expected, partial, 0xdeadbeef, even;
+    xor.b32 a, a, expected;
+    selp.b32 expected, 0xdeadbeef, partial, even;
+    xor.b32 b, b, expected;
+    selp.b32 partial, 0, 0x12345678, ignore;
+    selp.b32 expected, partial, 0xdeadbeef, even;
+    xor.b32 c, c, expected;
+    selp.b32 expected, 0xdeadbeef, partial, even;
+    xor.b32 d, d, expected;
+    // Keep the first-level hint and the predicate when dropping the second-level policy.
+    createpolicy.fractional.L2::evict_last.b64 policy, 1.0;
+    mov.b16 h, 0xace0;
+    selp.u64 read_ptr, src, 0, even;
+    @even ld.global.L1::evict_first.L2::cache_hint.b16 h, [read_ptr], policy;
+    cvt.u32.u16 off, h;
+    selp.u32 expected, 0x5678, 0xace0, even;
+    xor.b32 off, off, expected;
+    or.b32 a, a, off;
+    ld.param.u64 out, [output];
+    mad.wide.u32 out, lane, 16, out;
+    st.global.v4.b32 [out], {a,b,c,d};
+    ret;
+}

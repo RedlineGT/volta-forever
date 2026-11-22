@@ -1198,15 +1198,6 @@ fn an_asynchronous_copy_is_made_where_it_starts() {
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%r1], [%rd1], %r2, [%r3];",
             "no Volta sequence for this form",
         ),
-        // Under a predicate, only a copy of all or of nothing.
-        (
-            "@%p1 cp.async.ca.shared.global [%r1], [%rd1], 4, %r2;",
-            "guarded by a predicate",
-        ),
-        (
-            "@%p1 cp.async.ca.shared.global [%r1], [%rd1], 4, %p2;",
-            "guarded by a predicate",
-        ),
     ] {
         let refused = refusal(&format!(
             "{{\n\t.reg .b32 %r<4>;\n\t.reg .pred %p<3>;\n\t{statement}\n\tret;\n}}"
@@ -1225,6 +1216,22 @@ fn an_asynchronous_copy_is_made_where_it_starts() {
     let last = lower("{\n\t.reg .b32 %r<4>;\n\tcp.async.ca.shared.global [%r1], [%rd1], 4, %r2;\n}");
     assert!(last.contains("\n$vf_c0:\n\tmov.b32 %vf_r"), "{last}");
     assert!(last.trim_end().ends_with(", 0;\n}"), "{last}");
+    // A disabled runtime-sized copy must jump past both the vector store and the byte loop.
+    for (guard, inverse) in [("@%p1", "@!%p1"), ("@!%p1", "@%p1")] {
+        let code = lower(&format!(
+            "{{\n\t.reg .b32 %r<4>;\n\t.reg .b64 %rd1;\n\t.reg .pred %p1;\n\t{guard} cp.async.ca.shared.global [%r1], [%rd1], 4, %r2;\n\tret;\n}}"
+        ));
+        let branch = code.find(&format!("{inverse} bra $vf_c0;")).unwrap();
+        assert!(branch < code.find("ld.global.u32").unwrap());
+        assert!(branch < code.find("st.shared.u32").unwrap());
+        assert!(code.find("st.shared.u8").unwrap() < code.find("\n$vf_c0:").unwrap());
+    }
+    let ignored = lower(
+        "{\n\t.reg .b32 %r1;\n\t.reg .b64 %rd1;\n\t.reg .pred %p<3>;\n\t@!%p1 cp.async.ca.shared.global [%r1], [%rd1], 4, %p2;\n\tret;\n}",
+    );
+    assert!(ignored.contains("@!%p1 not.pred %vf_n, %p2;"));
+    assert!(ignored.contains("@%vf_n ld.global.u32"));
+    assert!(ignored.contains("@!%p1 st.shared.u32"));
     // Of nothing: zeros are stored under it, and no load is made.
     let nothing = lower("{\n\t.reg .b32 %r<4>;\n\t@!%p1 cp.async.ca.shared.global [%r1], [%rd1], 4, 0;\n\tret;\n}");
     assert_eq!(count(&nothing, "ld."), 0);
@@ -1842,6 +1849,10 @@ fn what_a_load_says_to_the_second_level_cache_is_dropped() {
         (
             "@%p1 ld.global.L2::256B.L2::cache_hint.f32 %f1, [%rd1], %rd2;",
             "@%p1 ld.global.f32 %f1, [%rd1];",
+        ),
+        (
+            "@!%p1 ld.global.L1::evict_first.L2::cache_hint.b16 %h1, [%rd1], %rd2;",
+            "@!%p1 ld.global.L1::evict_first.b16 %h1, [%rd1];",
         ),
         // A cache policy is a value nothing else reads.
         (
