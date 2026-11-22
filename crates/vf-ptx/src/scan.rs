@@ -12,7 +12,7 @@ pub enum Kind {
     Close,
     /// `name:`
     Label,
-    /// A directive that ends with its line (`.loc`, `.file`).
+    /// A debug directive without a semicolon terminator (`.loc`, `.file`).
     Line,
     /// An instruction or a directive ended by `;`.
     Statement {
@@ -52,15 +52,19 @@ pub(crate) fn skip_comment(text: &[u8], at: usize) -> Option<usize> {
 
 /// Position after the string literal that starts at `at` (a `"`).
 pub(crate) fn skip_string(text: &[u8], at: usize) -> usize {
+    string_end(text, at).unwrap_or(text.len())
+}
+
+fn string_end(text: &[u8], at: usize) -> Option<usize> {
     let mut cursor = at + 1;
     while cursor < text.len() {
         match text[cursor] {
             b'\\' => cursor += 2,
-            b'"' => return cursor + 1,
+            b'"' => return Some(cursor + 1),
             _ => cursor += 1,
         }
     }
-    text.len()
+    None
 }
 
 /// `text` with each comment and each string literal replaced by a space: what is left is what
@@ -135,6 +139,75 @@ fn statement_end(text: &[u8], at: usize, limit: usize) -> Option<usize> {
     None
 }
 
+/// Skip whitespace and comments between the fields of a debug directive.
+fn debug_space(mut text: &[u8]) -> &[u8] {
+    loop {
+        text = text.trim_ascii_start();
+        match skip_comment(text, 0) {
+            Some(end) => text = &text[end..],
+            None => return text,
+        }
+    }
+}
+
+fn debug_keyword<'a>(text: &'a [u8], keyword: &[u8]) -> Option<&'a [u8]> {
+    let tail = text.strip_prefix(keyword)?;
+    (tail.first().is_some_and(u8::is_ascii_whitespace) || skip_comment(tail, 0).is_some()).then_some(tail)
+}
+
+fn debug_number(text: &[u8]) -> Option<&[u8]> {
+    let text = debug_space(text);
+    let end = text.iter().take_while(|b| b.is_ascii_alphanumeric()).count();
+    let word = text[..end].strip_suffix(b"U").unwrap_or(&text[..end]);
+    let valid = if let Some(hex) = word.strip_prefix(b"0x").or_else(|| word.strip_prefix(b"0X")) {
+        !hex.is_empty() && hex.iter().all(u8::is_ascii_hexdigit)
+    } else if let Some(binary) = word.strip_prefix(b"0b").or_else(|| word.strip_prefix(b"0B")) {
+        !binary.is_empty() && binary.iter().all(|b| matches!(b, b'0' | b'1'))
+    } else {
+        !word.is_empty() && word.iter().all(u8::is_ascii_digit)
+    };
+    valid.then_some(&text[end..])
+}
+
+fn debug_position(text: &[u8]) -> Option<&[u8]> {
+    debug_number(debug_number(debug_number(text)?)?)
+}
+
+/// Each directive ends after its last operand. The next label or instruction can be on
+/// the very same line; swallowing it would hide register writes from the lowering passes.
+fn debug_end(text: &[u8], directive: &[u8]) -> Option<usize> {
+    let args = &text[directive.len()..];
+    let mut tail;
+    if directive == b".file" {
+        let filename = debug_space(debug_number(args)?);
+        filename.strip_prefix(b"\"")?;
+        tail = &filename[string_end(filename, 0)?..];
+        if let Some(timestamp) = debug_space(tail).strip_prefix(b",") {
+            let size = debug_space(debug_number(timestamp)?).strip_prefix(b",")?;
+            tail = debug_number(size)?;
+        }
+    } else {
+        tail = debug_position(args)?;
+        if directive == b".loc"
+            && let Some(clause) = debug_space(tail).strip_prefix(b",")
+        {
+            let name = debug_space(debug_keyword(debug_space(clause), b"function_name")?);
+            let end = name.iter().take_while(|&&b| is_identifier_byte(b) || b == b'.').count();
+            if end == 0 {
+                return None;
+            }
+            tail = &name[end..];
+            if let Some(offset) = debug_space(tail).strip_prefix(b"+") {
+                tail = debug_number(offset)?;
+            }
+            if let Some(clause) = debug_space(tail).strip_prefix(b",") {
+                tail = debug_position(debug_keyword(debug_space(clause), b"inlined_at")?)?;
+            }
+        }
+    }
+    Some(text.len() - tail.len())
+}
+
 /// The items of the function body `text[body]` (`body` includes the outer braces, which are not
 /// returned). `None` when the text does not divide into items: an unterminated statement or
 /// unbalanced braces.
@@ -171,15 +244,12 @@ pub fn items(text: &[u8], body: Range<usize>) -> Option<Vec<Item>> {
             at += 1;
             continue;
         }
-        // `.loc` and `.file` end with the line, not with `;`.
-        let line_directive = [&b".loc"[..], b".file"]
-            .iter()
-            .any(|d| text[at..limit].starts_with(d) && text.get(at + d.len()).is_some_and(|b| b.is_ascii_whitespace()));
-        if line_directive {
-            let end = text[at..limit]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(limit, |p| at + p);
+        let rest = &text[at..limit];
+        if let Some(directive) = [b".loc".as_slice(), b".loc_intermediate", b".file"]
+            .into_iter()
+            .find(|d| debug_keyword(rest, d).is_some())
+        {
+            let end = at + debug_end(rest, directive)?;
             found.push(Item {
                 range: at..end,
                 kind: Kind::Line,
@@ -374,6 +444,38 @@ mod tests {
         assert_eq!(found.len(), expected.len());
         for (found, expected) in found.iter().zip(expected) {
             assert_eq!((found.0.as_str(), found.1), expected);
+        }
+    }
+
+    #[test]
+    fn debug_directives_stop_before_same_line_code() {
+        for location in [
+            ".loc 1 2 3",
+            ".loc 0x1 02 0b1U",
+            ".loc_intermediate 4 5 6",
+            ".loc 1 2 3, function_name f",
+            ".loc 1 2 3, function_name .debug_str + 16, inlined_at 3 4 5",
+            ".loc 1/* comment */2 3",
+            r##".file 1 "a file; with \"quotes\"""##,
+            r#".file 1 "k" , 1700, 901"#,
+        ] {
+            let text = format!("{{ {location} L: @%p mov.u32 %r,0; }}");
+            assert_eq!(
+                kinds(&text),
+                [
+                    (location.to_owned(), "line"),
+                    ("L:".to_owned(), "label"),
+                    ("@%p mov.u32 %r,0;".to_owned(), "guarded"),
+                ]
+            );
+        }
+        for bad in [
+            ".loc 1 2",
+            ".loc 1 2 0, xyz",
+            ".loc 1 2 0, function_name label+, inlined_at 1 2 3",
+        ] {
+            let text = format!("{{ {bad} mov.u32 %r,7; }}");
+            assert!(items(text.as_bytes(), 0..text.len()).is_none(), "{bad}");
         }
     }
 

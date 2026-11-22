@@ -1691,6 +1691,10 @@ $L__debug1:
                 .unwrap()
         }
         assert_eq!(key(first), key(&renamed));
+        let same_line = first.replace("inlined_at 1 4 0\n    @%p bra", "inlined_at 1 4 0 @%p bra");
+        assert_ne!(same_line, first);
+        assert_eq!(key(first), key(&same_line));
+        assert_ne!(key(first), key(&same_line.replace("@%p bra", "@!%p bra")));
         assert_eq!(
             key(first),
             key(&renamed.replace("    @%p", "    // different nvcc backend comment\n    @%p"))
