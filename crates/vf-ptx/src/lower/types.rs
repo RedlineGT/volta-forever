@@ -11,6 +11,8 @@ use crate::scan;
 pub(super) enum Form {
     /// Both registers of an FP16 A operand with their halves swapped (2 registers).
     Swapped,
+    /// The two exact FP32 values used to make a packed BF16 word, low lane first.
+    Bf16Lanes,
     /// The B operands of the two Volta instructions, made from an FP16 B register (4 registers).
     Columns,
     /// f32 accumulators in Volta layout (8 registers), for the Turing registers they were last

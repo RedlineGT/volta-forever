@@ -405,6 +405,11 @@ pub fn body_in(
         row_at: HashMap::new(),
         options,
         counts: Counts::default(),
+        forward_bf16: grouped.is_some()
+            && options.bf16_row != Bf16Row::Off
+            && items
+                .iter()
+                .all(|item| item.kind != Kind::Line || crate::deps::debug_location(&text[item.range.clone()])),
         active_chains: BTreeMap::new(),
         kept_halves: BTreeMap::new(),
         current_index: 0,

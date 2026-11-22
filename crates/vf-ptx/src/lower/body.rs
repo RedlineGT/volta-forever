@@ -65,6 +65,7 @@ pub(super) struct Body<'a> {
     /// of the thread's row since the `ldmatrix`.
     pub(super) row_at: HashMap<String, String>,
     pub(super) options: Options,
+    pub(super) forward_bf16: bool,
     pub(super) counts: Counts,
     /// The chains of f32 products in the single-instruction arrangement that are open here: the
     /// names of the four accumulator registers of the program, and the eight registers that hold
@@ -323,6 +324,28 @@ impl<'a> Body<'a> {
         // The two-input FP32 bounds are native. Blackwell also accepts a third input.
         let three_input_bound = matches!(opcode, "min.f32" | "max.f32" | "min.ftz.f32" | "max.ftz.f32")
             && scan::split_operands(operands).len() == 4;
+        // The two FP32 results of a proven exact packed cancellation already have
+        // zero low halves. A row-specialized product can use them without first
+        // packing the result, shifting it and masking it again.
+        if self.forward_bf16
+            && !guarded
+            && matches!(opcode, "shl.b32" | "and.b32")
+            && let [dst, packed, bits] = scan::split_operands(operands).as_slice()
+            && dst.starts_with("%bfgroup_")
+            && let Some(lane) = match (opcode, *bits) {
+                ("shl.b32", "16") => Some(0),
+                ("and.b32", "0xffff0000") => Some(1),
+                _ => None,
+            }
+            && let Some(pair) = self.recall(Form::Bf16Lanes, &[packed])
+        {
+            self.other(false, opcode, operands)?;
+            self.out.push_str(&self.text[self.copied..range.start]);
+            self.copied = range.end;
+            self.first_line = true;
+            emit!(self, "mov.b32 {dst}, {};", pair[lane]);
+            return Ok(());
+        }
         if is_plain(opcode) || three_input_bound {
             return self.plain(range, opcode, operands, followed);
         }

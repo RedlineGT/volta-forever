@@ -275,6 +275,48 @@ mod tests {
     }
 
     #[test]
+    fn tree_uses_the_two_exact_f32_lanes_until_the_packed_word_changes() {
+        let tree = |guard: &str, gap: &str| {
+            let source = format!(
+                "{{.reg .pred %p; .reg .b32 %a<4>,%b<4>,%n,%q,%k,tmp,%c<8>;
+                 mov.b32 %k,0x43004300; mov.b32 tmp,0xbf80bf80;
+                 and.b32 %n,%a0,0x000f000f; or.b32 %q,%n,0x43004300;
+                 {guard}fma.rn.bf16x2 %b0,%k,tmp,%q;
+                 {gap}
+                 {MMA} {{%c0,%c1,%c2,%c3}},{{%a0,%a1,%a2,%a3}},{{%b0,%b1}},{{%c0,%c1,%c2,%c3}};
+                 mov.b32 %b2,%b3;
+                 {MMA} {{%c4,%c5,%c6,%c7}},{{%a0,%a1,%a2,%a3}},{{%b2,%b3}},{{%c4,%c5,%c6,%c7}};}}"
+            );
+            body(
+                &source,
+                64,
+                Options {
+                    bf16_row: Bf16Row::Tree,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .0
+        };
+        let from_low = "mov.b32 %bfgroup_0_rlo, %vf_r";
+        let from_high = "mov.b32 %bfgroup_0_rhi, %vf_r";
+        let unpack = "shl.b32 %bfgroup_0_rlo,%b0,16;";
+        let exact = tree("", "");
+        assert!(exact.contains(from_low) && exact.contains(from_high));
+        assert!(!exact.contains(unpack));
+        for (guard, gap) in [
+            ("@%p ", ""),
+            ("", "@%p mov.b32 %b00, %a0;"),
+            ("", "{.reg .b32 %b<2>; mov.b32 %b0,0;}"),
+            ("", "join:"),
+        ] {
+            let lowered = tree(guard, gap);
+            assert!(lowered.contains(unpack), "{guard}{gap}");
+            assert!(!lowered.contains(from_low) && !lowered.contains(from_high));
+        }
+    }
+
+    #[test]
     fn bounded_quartets_use_original_c_and_require_all_eight_words() {
         let mut body_text = "{.reg .pred %p; .reg .b32 %a<4>,%b<8>,%n,%q,%k,tmp,%c<16>;".to_string();
         body_text.push_str("mov.b32 %k,0x43004300; mov.b32 tmp,0xbf80bf80;");

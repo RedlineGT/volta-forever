@@ -409,6 +409,9 @@ impl<'a> Body<'a> {
                 emit!(self, "add.rn.f32 {c_hi}, {c_hi}, 0f{high:08x};");
                 self.written(d);
                 emit!(self, "{guard}prmt.b32 {d}, {c_lo}, {c_hi}, 0x7632;");
+                if self.forward_bf16 && guard.is_empty() {
+                    self.remember(super::types::Form::Bf16Lanes, &[d], &[c_lo, c_hi]);
+                }
                 self.counts.other += 1;
                 return Ok(());
             }
