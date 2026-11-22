@@ -1,0 +1,141 @@
+{
+  "engine": "ZML examples/llm with local native AWQ, selected-expert and chat patches",
+  "upstream_commit": "f430c3530fbc6d99f734b641eb8f3fd699868843",
+  "checkpoint": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+  "checkpoint_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+  "pci": "00000000:18:00.0",
+  "driver": "580.178.04",
+  "vf": "Development build at 48c3634 (locally identified as 0.1.2)",
+  "top_k": 1,
+  "batch": 1,
+  "compiled_sequence_length": 320,
+  "thinking": false,
+  "sessions": "Independent; no reused KV cache.",
+  "timing": "Prefill includes synchronous readback of first generated token. Decode measures subsequent model steps including synchronous token readback, tokenization output and writes to an in-memory buffer.",
+  "verification": "Five input token vectors identical to the checkpoint template with enable_thinking=False. Each response begins with the expected city.",
+  "trials": [
+    {
+      "prompt_file": "warmup.txt",
+      "input_tokens": 228,
+      "output_tokens": 64,
+      "prefill_ns": 660136056,
+      "decode_ns": 2085087930,
+      "decode_steps": 63,
+      "stop_reason": "length",
+      "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find a shared room situated directly by the entrance where a blue folder is placed on the long table each morning to track our activities. Before the doors open, another team member inspects the signs",
+      "prompt_rendered_sha256": "e0ac2e7247b775e67ba80840cfabe8851a6c968dce032c98de6ff561febf1136",
+      "prefill_tokens_per_s": 345.3833462476408,
+      "decode_tokens_per_s": 30.21455310999762
+    },
+    {
+      "prompt_file": "run1.txt",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "prefill_ns": 660851561,
+      "decode_ns": 2086841022,
+      "decode_steps": 63,
+      "stop_reason": "length",
+      "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage our shared space. Upon arrival, you will find a dedicated room situated by the entrance where a red notebook is placed on the long table each morning to record our activities. Before the doors open, another team member inspects the signs by",
+      "prompt_rendered_sha256": "cfaae033b6900b2c12c2585888c5f8e266356f1fc4678937268d9445412e3d45",
+      "prefill_tokens_per_s": 343.49620004907575,
+      "decode_tokens_per_s": 30.189170778146607
+    },
+    {
+      "prompt_file": "run2.txt",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "prefill_ns": 660295644,
+      "decode_ns": 2088254321,
+      "decode_steps": 63,
+      "stop_reason": "length",
+      "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another team member inspects the signs by",
+      "prompt_rendered_sha256": "f4c04895d9eb75f0f2f40efc88b5c392f3e3f3f51f3f571805d660e13d0e0db1",
+      "prefill_tokens_per_s": 343.78539683354325,
+      "decode_tokens_per_s": 30.168739203102074
+    },
+    {
+      "prompt_file": "run3.txt",
+      "input_tokens": 227,
+      "output_tokens": 64,
+      "prefill_ns": 660104482,
+      "decode_ns": 2092293646,
+      "decode_steps": 63,
+      "stop_reason": "length",
+      "text": "Lima, Peru, is the location where our volunteer group convenes daily to ensure smooth operations. Upon arrival, you will find a shared room situated directly by the entrance where a yellow envelope is placed on the long table each morning to signal the start of duties. Before the doors open, please check the signs by the",
+      "prompt_rendered_sha256": "338703623feabe2dbd89a203b45eb9a4164936f7760484ad3b9b8d934a14e624",
+      "prefill_tokens_per_s": 343.88495486688726,
+      "decode_tokens_per_s": 30.110496258707272
+    }
+  ],
+  "medians": {
+    "prefill_tokens_per_s": 343.78539683354325,
+    "decode_tokens_per_s": 30.168739203102074
+  },
+  "same_gpu_native_reference": {
+    "engine": "1Cat-vLLM",
+    "revision": "6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc",
+    "source": "vllm-expert-tiles.json",
+    "uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "checkpoint_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+    "median": {
+      "prefill_tokens_per_s": 1427.4138226292546,
+      "decode_tokens_per_s": 76.13127062703167
+    },
+    "requests": [
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.16194482217542827,
+        "decode_s": 0.8287737530190498,
+        "prefill_tokens_per_s": 1401.711996411346,
+        "decode_tokens_per_s": 76.01592083545619,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record activities. Before the doors open, another team member inspects the signs by the"
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.15820683911442757,
+        "decode_s": 0.8275180419441313,
+        "prefill_tokens_per_s": 1434.8305121993862,
+        "decode_tokens_per_s": 76.13127062703167,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.15902886493131518,
+        "decode_s": 0.8275062669999897,
+        "prefill_tokens_per_s": 1427.4138226292546,
+        "decode_tokens_per_s": 76.1323539317688,
+        "text": "Lima, Peru, is the meeting place where our volunteer group gathers in a shared room located by the entrance. Each morning, one volunteer places a yellow envelope on the long table while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to review the morning and agree on"
+      }
+    ]
+  },
+  "zml_to_reference": {
+    "prefill_tokens_per_s": 0.24084494025726932,
+    "decode_tokens_per_s": 0.39627263481387587
+  },
+  "visible_answer": {
+    "text": "Paris",
+    "input_tokens": 26,
+    "output_tokens": 1,
+    "stop_reason": "eos"
+  },
+  "gpu_profile_flags": {
+    "capability": "8.0",
+    "VF_FIT_SHARED": "1",
+    "backend": "stablehlo"
+  },
+  "local_changes": {
+    "scope": "Private native ZML source experiment; upstream f430c353 does not load this split-expert checkpoint.",
+    "model": "Native AWQ INT4/asymmetric, group size 128; BF16 weights in layer 0, AWQ weights in 39 layers; decode dequantizes only the eight selected experts.",
+    "chat": "The local CLI implements the checkpoint chat template with thinking disabled and recognizes both generation EOS IDs.",
+    "build": "Bazel CUDA backend. Sequential compilation, 128 MiB loader DMA pool.",
+    "binary_sha256": "1f91379748814d0c04a54c822a8ba0859bcc473659ac9476e7324cc9990bdfee"
+  }
+}

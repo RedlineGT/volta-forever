@@ -48,6 +48,10 @@ The client sets a fresh cache salt on every chat. It verifies the input and outp
 Run the streaming client and read the scheduler timings as described in the [FreeToken guide](../freetoken.md#5-benchmarks).
 With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 decode** tokens/s. Native llama.cpp on the same V100 and Q4_K_M checkpoint measured **474.57** and **99.77** tokens/s. Each of the three measured requests read 227 uncached tokens and generated 64. [FreeToken measurements](freetoken-graphs.json) · [Native reference and commands](llamacpp-reference.json) · [Earlier eager run](freetoken-results.json)
 
+## ZML
+
+A local change to the ZML Qwen example loaded the same QuantTrio AWQ checkpoint used for vLLM and SGLang. It read 227 tokens and generated 64 for each measured prompt with a fresh session. The median rates were 343.79 prefill and 30.17 decode tokens/s. Native 1Cat-vLLM reached 1427.41 and 76.13 on the same card. The unmodified ZML example still requires a compatible 35B loader. [Experimental phase timings and answers](zml-awq-experimental.json) · [Ubuntu guide](../zml.md)
+
 ## Strata
 
 Strata CUDA 13 with VF and cuBLAS FP32 prompt projections reached **1894.8 prefill and 152.5 decode tokens/s** on Qwen3.5-35B-A3B-MTP. The default projections reached 1869.9 and 152.4 on the same V100. Each setting ran 15 uncached chats, with 227 prompt and 64 generated tokens each. [Ubuntu guide](../strata.md#5-benchmarks) · [Per-request results and native CUDA comparison](strata-results.json)
