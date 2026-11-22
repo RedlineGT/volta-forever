@@ -107,6 +107,7 @@ macro_rules! emit {
 }
 
 mod barrier;
+mod bf16_cases;
 mod bf16_groups;
 mod body;
 mod convert;
@@ -339,6 +340,16 @@ pub fn body_in(
     };
     // This pass tracks dependencies by register name as the other lowering passes do.
     // Only group products after names such as %d00 and %d0 have been canonicalized.
+    let specialized = bf16_cases::rewrite(text, &items);
+    let (text, items, extra) = match &specialized {
+        Some((text, extra)) => (
+            text.as_str(),
+            scan::items(text.as_bytes(), 0..text.len())
+                .ok_or_else(|| Unsupported("generated branches not recognised".to_string()))?,
+            *extra,
+        ),
+        None => (text, items, Counts::default()),
+    };
     let grouped = if options.bf16_tc_groups {
         bf16_groups::rewrite(text, &items, outside)
     } else {
@@ -452,7 +463,8 @@ pub fn body_in(
     }
     body.out.push_str(&text[body.copied..]);
     // The fast and fallback paths implement the same group of source operations.
-    body.counts.tensor -= added_products;
+    body.counts.tensor -= added_products + extra.tensor;
+    body.counts.other -= extra.other;
     let prologue = body.prologue();
     let lowered = format!("{{{prologue}{}", body.out);
     if lowered == blanked {

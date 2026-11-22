@@ -1,0 +1,110 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+// One warp cycles through no products, one, both, then an outside branch to the final join.
+// Each product accumulates 16 ones. The gaps increment a pair of BF16 counters on all paths.
+.visible .entry k(.param .u64 output) {
+.reg .u64 %out,%offset;
+.reg .b32 %lane,%a,%mode,%sum,%errors,%prep,%tmp,%want,%actual,%bit,%d<4>;
+.reg .pred %skip,%one,%external,%again,%mismatch,%expected;
+ld.param.u64 %out,[output];
+mov.u32 %lane,%laneid;
+mul.wide.u32 %offset,%lane,16;
+add.u64 %out,%out,%offset;
+mov.b32 %a,0x3f803f80;
+mov.u32 %mode,0;
+mov.u32 %sum,0;
+mov.u32 %errors,0;
+loop:
+mov.u32 %prep,0;
+mov.u32 %d0,0;
+mov.u32 %d1,0;
+mov.u32 %d2,0;
+mov.u32 %d3,0;
+setp.le.u32 %one,%mode,3;
+setp.eq.u32 %skip,%mode,0;
+setp.eq.u32 %external,%mode,3;
+@%external bra join7;
+@%skip bra join0;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join0;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join0:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join1;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join1:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join2;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join2;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join2:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join3;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join3;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join3:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join4;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join4;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join4:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join5;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join5;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join5:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join6;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join6;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join6:
+{ .reg .b32 local_one; mov.b32 local_one,%a; fma.rn.bf16x2 %prep,%prep,local_one,local_one; }
+@%skip bra join7;
+setp.eq.u32 %one,%mode,1;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+@%one bra join7;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3},{%a,%a,%a,%a},{%a,%a},{%d0,%d1,%d2,%d3};
+join7:
+// Check the individual accumulator words, final predicate and every scalar increment.
+shl.b32 %want,%mode,7;
+selp.b32 %want,0,%want,%external;
+cvt.rzi.u32.f32 %actual,%d0;
+xor.b32 %tmp,%want,%actual;
+or.b32 %errors,%errors,%tmp;
+xor.b32 %tmp,%d0,%d1;
+or.b32 %errors,%errors,%tmp;
+xor.b32 %tmp,%d0,%d2;
+or.b32 %errors,%errors,%tmp;
+xor.b32 %tmp,%d0,%d3;
+or.b32 %errors,%errors,%tmp;
+add.u32 %sum,%sum,%actual;
+selp.b32 %want,0,0x40e040e0,%external;
+xor.b32 %tmp,%want,%prep;
+or.b32 %errors,%errors,%tmp;
+setp.ne.u32 %expected,%mode,2;
+xor.pred %mismatch,%one,%expected;
+selp.b32 %bit,1,0,%mismatch;
+or.b32 %errors,%errors,%bit;
+add.u32 %mode,%mode,1;
+setp.lt.u32 %again,%mode,4;
+@%again bra loop;
+st.global.u32 [%out],%sum;
+st.global.u32 [%out+4],%errors;
+ret;
+}
