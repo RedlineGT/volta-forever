@@ -135,6 +135,8 @@ mod tests {
             (0x000fe4000f8fe0ff_0000000e02007c11, 0x000fe400078fe0ff_0000007202007211),
             // ULEA.HI UR4, UR4, 0x1, URZ, 0x1e -> LEA.HI R104, R104, 0x1, RZ, 0x1e
             (0x000fce000f8ff03f_0000000104047891, 0x000fce00078ff0ff_0000000168687811),
+            // ULEA.HI in speculative attention: a different immediate, shift and destination.
+            (0x000fe2000f8fe83f_0000800018057891, 0x000fe200078fe8ff_000080007c697811),
         ];
         let mut decoder = Decoder::new(75);
         for (source, expected) in cases {
