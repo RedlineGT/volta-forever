@@ -95,7 +95,7 @@ The official NInfer server processed each 227-token prompt without a prefix-cach
 
 ## TensorFold
 
-Official TensorFold 1.3.3 ran the MLX affine Q4 checkpoint at **463.54 prefill and 57.69 decode tokens/s**. The three measured requests used 227 uncached input tokens, 64 output tokens and drafting disabled. Native llama.cpp on the same V100 measured **468.67 / 99.67** with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [TensorFold timings](tensorfold-generic.json) · [Native reference](llamacpp-reference.json)
+Official TensorFold 1.3.3 ran the MLX affine Q4 checkpoint at **462.85 prefill and 57.65 decode tokens/s**. The three measured requests used 227 uncached input tokens, 64 output tokens and drafting disabled. Native llama.cpp on the same V100 measured **470.60 / 99.49** with GGUF Q4_K_M. [Ubuntu guide](../tensorfold.md#5-benchmarks) · [TensorFold timings](tensorfold-generic.json) · [Native reference](tensorfold-stock-vf.json)
 
 ## llama.cpp
 

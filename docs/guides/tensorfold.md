@@ -89,10 +89,10 @@ TensorFold answered Paris and generated 64 tokens for each of the three uncached
 
 | Engine on the same V100 | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: |
-| Official TensorFold with VF, MLX affine Q4 | **463.54** | **57.69** |
-| Native llama.cpp, GGUF Q4_K_M | 468.67 | 99.67 |
+| Official TensorFold with VF, MLX affine Q4 | **462.85** | **57.65** |
+| Native llama.cpp, GGUF Q4_K_M | 470.60 | 99.49 |
 
-Both engines used Qwen3.5-35B-A3B with speculative decoding disabled. The checkpoints use different four-bit formats. [Native checkpoint and timings](./benchmarks/llamacpp-reference.json)
+Both engines used Qwen3.5-35B-A3B with speculative decoding disabled. The checkpoints use different four-bit formats. [Native checkpoint and timings](./benchmarks/tensorfold-stock-vf.json)
 
 ## 6. Additional notes
 

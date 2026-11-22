@@ -49,7 +49,7 @@ All eight engines ran **Qwen3.5-35B-A3B** on a Tesla V100-SXM2-32GB with **MTP a
 | [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_M | 1,968.80 | 105.19 | 2,000.00 | 109.13 |
 | [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | Can't run | Can't run | 774.63² | 50.16 |
 | [NInfer](docs/guides/ninfer.md) | Mixed Q4/Q5/Q6/Q8 `.ninfer` | Can't run | Can't run | 556.51 | 117.08 |
-| [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | Can't run | Can't run | 463.54 | 57.69 |
+| [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | Can't run | Can't run | 462.85 | 57.65 |
 
 ¹ The CUDA 12 figures for vLLM are from **1Cat-vLLM** running CUDA 12.8. The native Strata and llama.cpp builds used CUDA 12.9 and 12.9.2 respectively. [1Cat-vLLM measurements](docs/guides/benchmarks/vllm-graphs.json)
 
