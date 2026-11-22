@@ -1,6 +1,6 @@
 # Run NInfer on a V100
 
-The official NInfer CLI ran Qwen3.6-35B-A3B on one 32 GB Tesla V100. Set `VF_CAPABILITY=12.0` when launching NInfer so its hardware check accepts the device.
+Run the official NInfer server with Qwen3.5-35B-A3B on one 32 GB Tesla V100. Set `VF_CAPABILITY=12.0` when launching NInfer so its hardware check accepts the device.
 
 ## 1. CUDA
 
@@ -46,65 +46,74 @@ vf doctor
 
 ## 3. Engine
 
-Upstream distributes the CLI as source. Build its official x86-64 preset. [NInfer build instructions](https://github.com/Neroued/ninfer#build)
+Build the official server, then create a VF virtual environment for the Hugging Face CLI and NInfer’s CPU weight converter. [NInfer build instructions](https://github.com/Neroued/ninfer#build) · [Upstream conversion guide](https://github.com/Neroued/ninfer/blob/ebdc67e584bcd9ebe16ee63af9abeb2118bac6cd/docs/weight-conversion.md)
 
 ```sh
-sudo apt install -y build-essential cmake ninja-build git pkg-config \
+sudo apt install -y build-essential cmake ninja-build git pkg-config python3-venv \
   libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libjpeg-dev \
   libhwloc-dev liburing-dev libcurl4-openssl-dev
-git clone https://github.com/Neroued/ninfer.git
-cd ninfer
+git clone https://github.com/Neroued/ninfer.git ~/ninfer
+cd ~/ninfer
 cmake --preset rtx5090-release
-cmake --build build/rtx5090-release --parallel 4 --target ninfer
+cmake --build build/rtx5090-release --parallel 4 --target ninfer-serve
+vf venv .venv
+. .venv/bin/activate
+pip install --index-url https://download.pytorch.org/whl/cpu torch
+pip install numpy huggingface_hub
+```
+
+Download the original Qwen3.5 weights and text resources, then convert them using NInfer’s built-in MoE recipe. The recipe name contains `qwen3_6` and the weights come from Qwen3.5. The BF16 download and converted file together occupy about 93 GB. [Source checkpoint](https://huggingface.co/Qwen/Qwen3.5-35B-A3B/tree/2508b2437e382c605eb0fc52b83f5545960f6b4a)
+
+```sh
+cd ~/ninfer
+hf download Qwen/Qwen3.5-35B-A3B --local-dir "$HOME/models/Qwen3.5-35B-A3B" \
+  --include 'model.safetensors-*.safetensors' --include model.safetensors.index.json \
+  --include config.json --include tokenizer.json --include tokenizer_config.json \
+  --include chat_template.jinja --include generation_config.json
+python -m tools.convert --model "$HOME/models/Qwen3.5-35B-A3B" \
+  --recipe qwen3_6_35b_a3b --components text --device cpu \
+  --cpu-threads 6 --source-cache-mib 1024 \
+  --name qwen3.5-35b-a3b --out "$HOME/models/qwen3.5-35b-a3b.ninfer"
 ```
 
 ## 4. Test
 
-Use upstream's 22.8 GB Qwen3.6-35B-A3B artifact. Routed experts use Q4 gate/up and Q5/Q6 down projections. [Model card](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer)
+Start the server in the NInfer directory. Drafting is off by default (`--spec none`). Prefix reuse is disabled so each benchmark prompt is measured in full.
 
 ```sh
-curl -fL --retry 3 -o qwen3_6_35b_a3b.ninfer \
-  https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer/resolve/main/qwen3_6_35b_a3b.ninfer
-VF_CAPABILITY=12.0 vf ./build/rtx5090-release/apps/ninfer qwen3_6_35b_a3b.ninfer \
-  --prompt 'What is the capital of France? Answer with one word.' \
-  --max-context 512 --max-tokens 12 --no-thinking --temperature 0
+cd ~/ninfer
+VF_CAPABILITY=12.0 VF_BF16_TC_GROUPS=1 vf ./build/rtx5090-release/apps/ninfer-serve \
+  "$HOME/models/qwen3.5-35b-a3b.ninfer" --host 127.0.0.1 --port 9086 \
+  --max-context 512 --no-thinking --no-prefix-reuse --host-cache-capacity 0B
 ```
 
-The test returned **Paris** on a Tesla V100-SXM2-32GB with driver 580.178.04, VF 0.1.1 and the upstream CLI built with CUDA 13.5. The CLI reported 24 input tokens and two output tokens for this answer.
+In a second terminal, ask for the capital of France. The measured server returned **Paris**.
+
+```sh
+curl -fsS http://127.0.0.1:9086/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5-35b-a3b","messages":[{"role":"user","content":"What is the capital of France? Answer in one word."}],"max_tokens":12,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}'
+```
 
 ## 5. Benchmarks
 
-Start the official server from the same NInfer directory. Disable prefix reuse to measure each full prompt, and set the host cache capacity to zero for this single-client run.
-
-```sh
-cmake --build build/rtx5090-release --parallel 4 --target ninfer-serve
-VF_CAPABILITY=12.0 VF_BF16_TC_GROUPS=1 vf ./build/rtx5090-release/apps/ninfer-serve qwen3_6_35b_a3b.ninfer \
-  --host 127.0.0.1 --port 9086 --max-context 512 --no-thinking --no-prefix-reuse --host-cache-capacity 0B
-```
-
-In a second terminal, run the shared warm-up and three measured chats. The client records the server’s prefill and decode times for each reply.
+Keep the server running and execute the shared client in the second terminal.
 
 ```sh
 python3 ~/volta-forever/docs/guides/benchmarks/strata-ninfer.py ninfer
 ```
 
-After the warm-up, three prompts of 227 tokens produced 64 tokens each, with zero cached tokens. All replies began with the expected city. Both engines ran on the same Tesla V100-SXM2-32GB. [Original per-request timings and replies](benchmarks/ninfer-results.json)
+Each measured chat processed 227 uncached tokens and generated 64. All three replies began with the expected city. The server reported zero draft rounds, proposed tokens and accepted tokens on every request. [Qwen3.5 requests, token IDs and phase timings](benchmarks/ninfer-qwen35-native.json)
 
-| Engine and checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
+| Qwen3.5-35B-A3B on the same V100 | Median prefill (tokens/s) | Median decode (tokens/s) |
 |---|---:|---:|
-| NInfer with the command above, Qwen3.6 mixed Q4/Q5/Q6/Q8 | **570.65** | **116.93** |
-| Same server with the default VF translation | 431.70 | 117.04 |
-| Same NInfer weights, 128-token prefill chunks | 308.2 | 117.1 |
-| Native llama.cpp, Qwen3.5 Q4_K_M | 470.6 | 99.5 |
+| NInfer with the command above | **556.51** | **117.08** |
+| NInfer with `VF_BF16_TC_GROUPS=0` | 419.40 | 117.09 |
+| Native llama.cpp, Q4_K_M GGUF | 470.60 | 99.49 |
 
-To reproduce the second row, set `VF_BF16_TC_GROUPS=0` in the server command. Enabling the option raised prefill throughput by 32.2%. FP32 accumulation order and the sign of a zero result can change. At temperature zero, the Kyoto and Lima continuations changed. All 64 token IDs matched for Lyon. [Matched timings, token IDs and GPU profile](benchmarks/ninfer-bf16-mma.json)
-
-The 128-token run used `--prefill-chunk 128` and processed each prompt in two chunks (128 and 99 tokens). The native llama.cpp reference uses a different checkpoint and quantization in GGUF. [NInfer chunk settings](https://github.com/Neroued/ninfer/blob/master/docs/startup-configuration.md#model-and-execution)
+NInfer used its mixed Q4/Q5/Q6/Q8 conversion. The native reference used the same prompts with a Q4_K_M GGUF. Across the two NInfer runs, all 64 token IDs matched for Kyoto and Lyon. The first 58 matched for Lima. [Native reference and quantization details](benchmarks/ninfer-qwen35-native.json)
 
 ## 6. Additional notes
 
-This demo needs the linked-kernel fixes included in VF 0.1.1. VF 0.1.0 stopped with `cudaErrorSymbolNotFound` in NInfer’s token-count test even with the 12.0 profile. [VF release](https://github.com/nbald/volta-forever/releases/tag/v0.1.1)
+The tested Qwen3.5 artifact was 21,058,396,672 bytes. Its routed experts use Q4 gate/up and mixed Q5/Q6 down projections. [Artifact SHA256 and tensor formats](benchmarks/ninfer-qwen35-native.json)
 
-The Qwen3.6 file uses mixed precision. Across the 40 text layers, routed gate and up projections use Q4. Routed down projections use Q5 in 37 layers and Q6 in three. NInfer requires Q5 or Q6 down projections for this Q4 profile, and Q8 for the shared experts. The token embedding uses Q8 and the output head uses Q6. [Upstream weight checks](https://github.com/Neroued/ninfer/blob/ebdc67e584bcd9ebe16ee63af9abeb2118bac6cd/src/ops/moe/operands.cpp#L81-L103)
-
-Qwen3.5-35B-A3B Q4_K_M GGUF was rejected with `NInfer accepts only .ninfer artifacts`. The official `qwen3_6_35b_a3b` conversion recipe accepted the Qwen3.5 BF16 tensor names and shapes across all 14 source shards. Inference was verified with the published Qwen3.6 artifact. [NInfer conversion recipes](https://github.com/Neroued/ninfer/blob/master/docs/weight-conversion.md)
+For Qwen3.6 instead, upstream provides a ready-to-use `qwen3_6_35b_a3b.ninfer` file. With the same server settings it measured 570.65 tokens/s prefill and 116.93 decode, with zero draft rounds. [Upstream Qwen3.6 download](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) · [Qwen3.6 results](benchmarks/ninfer-bf16-mma.json)

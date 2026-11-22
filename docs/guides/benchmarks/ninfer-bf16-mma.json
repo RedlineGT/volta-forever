@@ -2506,5 +2506,41 @@
       "v100_regression_cases_per_mode": 96,
       "source_verification": "All 14 captured matrix kernel bodies matched the benchmarked translation byte for byte in each mode. Enabled mode selected 102 groups across the captured kernels."
     }
+  },
+  "speculative_decoding": {
+    "off": {
+      "request_log_sha256": "2e55d801aaa45f42bdc592879ae1b25dc0b68c521ce08a81d014076c7776a997",
+      "startup_backend": "none",
+      "configuration_source": "default",
+      "requests_checked": 6,
+      "request_backends": [
+        "none"
+      ],
+      "max_per_request": {
+        "accepted_tokens": 0,
+        "committed_draft_tokens": 0,
+        "draft_window": 0,
+        "drafted_tokens": 0,
+        "fallback_steps": 0,
+        "rounds": 0
+      }
+    },
+    "on": {
+      "request_log_sha256": "8d6aa63e33c49d80e4080ca27b24d7e9a685dee24cb9ab40b26e125b3efb4d4b",
+      "startup_backend": "none",
+      "configuration_source": "default",
+      "requests_checked": 6,
+      "request_backends": [
+        "none"
+      ],
+      "max_per_request": {
+        "accepted_tokens": 0,
+        "committed_draft_tokens": 0,
+        "draft_window": 0,
+        "drafted_tokens": 0,
+        "fallback_steps": 0,
+        "rounds": 0
+      }
+    }
   }
 }

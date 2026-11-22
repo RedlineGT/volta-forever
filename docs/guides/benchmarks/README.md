@@ -2,7 +2,7 @@
 
 The common comparison uses single-token autoregressive decoding with **MTP and all other speculative decoding disabled**. Start the engine using its Ubuntu guide. Run the benchmark on the same computer, with one model loaded and the server idle. Each run uses the model's chat template at temperature zero, with thinking disabled and a limit of 64 output tokens. The warm-up starts with Lisbon. The three measured prompts start with Kyoto, Lyon and Lima and ask for a handover based on different notebook entries. Read the generated text when checking a new engine. [Common prompts](prompts.json)
 
-The measured vLLM server reported `speculative_config=None`, and SGLang reported `speculative_algorithm=None` and no draft-model path. FreeToken used the standard Q4_K_M file with no drafter supplied. Strata reported zero proposed and accepted drafts on every measured request. TensorFold reported `drafts=false`. NInfer’s Qwen3.6 run reported the speculative backend as `none` and zero draft rounds.
+The measured vLLM server reported `speculative_config=None`, and SGLang reported `speculative_algorithm=None` and no draft-model path. FreeToken used the standard Q4_K_M file with no drafter supplied. Strata reported zero proposed and accepted drafts on every measured request. TensorFold reported `drafts=false`. NInfer’s Qwen3.5 and Qwen3.6 servers reported `speculative.backend=none` and zero draft rounds on every request.
 
 ## vLLM
 
@@ -62,7 +62,7 @@ With **MTP and all other drafting disabled**, Strata CUDA 13 with VF reached **1
 
 ## NInfer
 
-The official NInfer server ran its published Qwen3.6-35B-A3B quantization with all weights on the V100. Each measured chat processed 227 uncached tokens and returned 64. With `VF_BF16_TC_GROUPS=1`, the server measured 570.65 tokens/s prefill and 116.93 tokens/s decode. With the default translation it measured 431.70 and 117.04. Native llama.cpp on the same card measured 470.60 and 99.49 with Qwen3.5 Q4_K_M. The comparison uses different checkpoints and quantizations. [Ubuntu guide and commands](../ninfer.md#5-benchmarks) · [Paired timings and responses](ninfer-bf16-mma.json)
+The official NInfer server processed each 227-token prompt without a prefix-cache hit and generated 64 tokens. With grouped BF16 Tensor Cores enabled, Qwen3.5 reached 556.51 tokens/s prefill and 117.08 decode. The scalar control reached 419.40 and 117.09. Native llama.cpp on the same V100 and prompts reached 470.60 and 99.49 with the Qwen3.5 Q4_K_M GGUF. NInfer used its own mixed Q4/Q5/Q6/Q8 conversion. Upstream’s published Qwen3.6 artifact measured 570.65 and 116.93 with groups enabled, or 431.70 and 117.04 with groups disabled. [Ubuntu guide](../ninfer.md#5-benchmarks) · [Qwen3.5 timings and replies](ninfer-qwen35-native.json) · [Qwen3.6 timings and replies](ninfer-bf16-mma.json)
 
 ## TensorFold
 
