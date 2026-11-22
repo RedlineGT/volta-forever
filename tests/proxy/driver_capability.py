@@ -11,6 +11,9 @@ import tempfile
 
 
 DRIVER = """
+#define _GNU_SOURCE
+#include <stddef.h>
+#include <string.h>
 static const int sm[] = {70, 75, 80, 86};
 int cuDeviceGetAttribute(int *v, int a, int d) {
     if (!v) return 101;
@@ -28,6 +31,27 @@ int cuDeviceComputeCapability(int *major, int *minor, int d) {
 }
 int cuFuncGetAttribute(int *v, int a, void *f) { *v = a == 6 ? 70 : 42; return 0; }
 int cuKernelGetAttribute(int *v, int a, void *k, int d) { return cuFuncGetAttribute(v, a, k); }
+/* The device of the current context (-1: no context), and the .target line of the last PTX given
+   to the loading functions ("file" for cuModuleLoad). */
+int mock_device = -1;
+char mock_seen[64];
+static int seen(const char *what, size_t length) {
+    const char *line = memmem(what, length, ".target", 7);
+    size_t n = 0;
+    if (!line) line = what;
+    while (line + n < what + length && line[n] != '\\n' && n < sizeof mock_seen - 1) n++;
+    memset(mock_seen, 0, sizeof mock_seen);
+    memcpy(mock_seen, line, n);
+    return 0;
+}
+int cuCtxGetDevice(int *d) { if (mock_device < 0) return 201; *d = mock_device; return 0; }
+int cuModuleLoadData(void **m, const void *image) { *m = (void *)0x2000; return seen(image, strlen(image)); }
+int cuModuleLoadDataEx(void **m, const void *image, unsigned n, int *o, void **v) { return cuModuleLoadData(m, image); }
+int cuModuleLoad(void **m, const char *path) { *m = (void *)0x2000; return seen("file", 4); }
+int cuModuleUnload(void *m) { return 0; }
+int cuLinkAddData_v2(void *s, int type, void *data, size_t size, const char *name, unsigned n, int *o, void **v) {
+    return seen(data, size);
+}
 """
 
 # A normal (non-tail) call makes this DSO the return address seen by the proxy.
@@ -208,6 +232,32 @@ def build(directory):
                         directory / "bin" / name], check=True)
 
 
+def run_mixed(proxy, directory):
+    """In a machine that also has a later card, a module loaded into a context on that card is
+    given as the program gave it; one loaded into a context on the V100 is adapted, and so is one
+    loaded when the driver does not say which device the context is on."""
+    api = c.CDLL(str(proxy))
+    mock = c.CDLL(str(directory / "mock.so"))
+    device = c.c_int.in_dll(mock, "mock_device")
+    ptx_file = Path(__file__).resolve().parents[2] / "tests/kernels/k_basic.135.sm75.ptx"
+    ptx = ptx_file.read_bytes()
+    module = c.c_void_p()
+    loads = {
+        "cuModuleLoadData": lambda: api.cuModuleLoadData(c.byref(module), c.c_char_p(ptx)),
+        "cuModuleLoadDataEx": lambda: api.cuModuleLoadDataEx(c.byref(module), c.c_char_p(ptx), 0, None, None),
+        "cuModuleLoad": lambda: api.cuModuleLoad(c.byref(module), c.c_char_p(bytes(ptx_file))),
+        "cuLinkAddData_v2": lambda: api.cuLinkAddData_v2(None, 1, c.c_char_p(ptx), c.c_size_t(len(ptx)), None, 0,
+                                                         None, None),
+    }
+    for ordinal, adapted in ((-1, True), (0, True), (1, False), (3, False)):
+        device.value = ordinal
+        for name, load in loads.items():
+            assert load() == 0, name
+            seen = (c.c_char * 64).in_dll(mock, "mock_seen").value
+            expected = b".target sm_70" if adapted else b"file" if name == "cuModuleLoad" else b".target sm_75"
+            assert seen == expected, (name, ordinal, seen)
+
+
 def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
     through PATH, before a change of directory)."""
@@ -227,6 +277,8 @@ if __name__ == "__main__":
     proxy = Path(sys.argv[1]).resolve(strict=True)
     if len(sys.argv) == 4 and sys.argv[3] == "--runtimes":
         run_runtimes(proxy, Path(sys.argv[2]))
+    elif len(sys.argv) == 4 and sys.argv[3] == "--mixed":
+        run_mixed(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 3:
         run(proxy, Path(sys.argv[2]))
     else:
@@ -255,6 +307,8 @@ if __name__ == "__main__":
                 else:
                     assert not lines, log
             run_main(proxy, directory, env)
+            subprocess.run([sys.executable, __file__, proxy, directory, "--mixed"],
+                           env={**env, "VOLTA_FOREVER": "test", "VF_PROXY_CACHE": "0"}, check=True)
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
               "machine code that limits what its callers are told, values of VF_CAPABILITY that are not used, "
-              "and main programs however they were started")
+              "main programs however they were started, and modules loaded on a later card")
