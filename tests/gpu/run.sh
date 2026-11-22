@@ -135,6 +135,10 @@ px ptx-padded-chain-read "$G/ptx-cases/padded-chain-read.ptx" 42000000 42800000 
 px ptx-padded-chain-read-commented "$G/ptx-cases/padded-chain-read-commented.ptx" 42000000 42800000 42800000 42800000
 px ptx-chain-nonconsecutive "$G/ptx-cases/chain-nonconsecutive.ptx" 42000000 42000000 42800000 42800000
 px ptx-reduction-exited "$G/ptx-cases/reduction-exited.ptx" 5 1 4 5
+# The same over floats, a form of sm_100a: the sign of a zero (+0 > -0) and the canonical NaN, in
+# every surviving lane. (Each lane reduces in the same order since 2026-11-22; Volta's minimum
+# and maximum give the same for both orders of their operands, so this passed before too.)
+px ptx-reduction-exited-f32 "$G/ptx-cases/reduction-exited-f32.ptx" 80000000 00000000 7fffffff 7fffffff
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
 px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
 # Built from the same source with CUDA 12.9 ptxas -lineinfo -arch=sm_80.

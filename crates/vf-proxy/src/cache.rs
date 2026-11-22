@@ -220,7 +220,13 @@ fn checked_read(path: &Path, key: u128, uid: u32) -> Option<Vec<u8>> {
     if !meta.is_file() || meta.uid() != uid {
         return None;
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    // Longer than any entry can be (its length is a 32-bit number): not read. Nor is a file that
+    // there is not the memory for: a failed allocation would end the program.
+    let len = usize::try_from(meta.len())
+        .ok()
+        .filter(|&len| len <= HEADER_LEN + u32::MAX as usize)?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).ok()?;
     file.read_to_end(&mut bytes).ok()?;
     if bytes.len() < HEADER_LEN || bytes[0..4] != FILE_MAGIC {
         // Too short to be a cache entry, or not ours: do not delete.
@@ -394,7 +400,8 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
         Some(s)
     };
     let count = read_u32(&mut pos)? as usize;
-    let mut entries = Vec::with_capacity(count);
+    // (An entry takes 5 bytes at least: no more room than the data can fill.)
+    let mut entries = Vec::with_capacity(count.min(data.len() / 5));
     for _ in 0..count {
         let name = read_str(&mut pos)?;
         if pos >= data.len() {
@@ -847,6 +854,27 @@ mod tests {
         assert!(checked_read(&path, key, uid).is_none());
         // File should have been deleted.
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sizes_beyond_the_data_are_not_allocated() {
+        // (Until 2026-11-22 each of these allocated what it was told, and the allocation of 1 TB
+        // or more failed: that ends the program.)
+        assert!(decode_manifest(&u32::MAX.to_le_bytes()).is_none());
+        let dir = test_dir("long");
+        let key: u128 = 5;
+        let uid = unsafe { libc::geteuid() };
+        let path = dir.join("long.bin");
+        atomic_write(&path, b"payload", key).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(1 << 40)
+            .unwrap();
+        assert!(checked_read(&path, key, uid).is_none());
+        assert!(path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

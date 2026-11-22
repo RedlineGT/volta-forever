@@ -533,6 +533,7 @@ pub(super) fn translate_function(
     schedule(&mut items, &targets)?;
     let (code, new_of, count) = finish(&mut items, &fd.src, ctx.next_register, ctx.dec70)?;
     let frame_bytes = ctx.borrow.as_ref().map_or(0, |b| b.frame_bytes);
+    let lives = lives(predicates, hold_at, ctx.borrow.as_deref(), &ctx.given_at, &ctx.spilled);
     Ok(TransResult {
         code,
         new_of,
@@ -541,7 +542,72 @@ pub(super) fn translate_function(
         relocate,
         moved: Vec::new(),
         frame_bytes,
+        lives,
     })
+}
+
+/// What the validator is told of a function (`MAP.lives`), in the order in which
+/// `reference/translate.py` writes it: the lives of the uniform predicates, those held, and with
+/// borrowed registers the homes, the pools and the room taken at each instruction, the words of
+/// the frame and its size.
+fn lives(
+    predicates: &Predicates,
+    hold_at: &HashMap<u32, u32>,
+    borrow: Option<&Borrowed>,
+    given_at: &HashMap<usize, Vec<(u32, u32)>>,
+    spilled: &HashMap<usize, Vec<u32>>,
+) -> Vec<(i64, i64, &'static str, Vec<u64>)> {
+    let offsets = |part: &[usize]| part.iter().map(|&at| 16 * at as u64).collect::<Vec<_>>();
+    let mut lives: Vec<_> = predicates
+        .lives
+        .iter()
+        .map(|(q, p, saved, part)| {
+            let how = if *saved { "saved" } else { "free" };
+            (i64::from(*q), i64::from(*p), how, offsets(part))
+        })
+        .collect();
+    for (q, part) in &predicates.held_lives {
+        // (In a register, or else in the frame: the translation of the function has one or the
+        // other for each held predicate.)
+        let held = match hold_at.get(q) {
+            Some(&r) => Some((i64::from(r), "held")),
+            None => borrow.and_then(|b| Some((-b.slot_offset(*b.predicate_slots.get(q)?), "held-slot"))),
+        };
+        if let Some((location, kind)) = held {
+            lives.push((i64::from(*q), location, kind, offsets(part)));
+        }
+    }
+    if let Some(b) = borrow {
+        let mut homes: Vec<(u32, u32)> = b.homes.iter().map(|(&u, &r)| (u, r)).collect();
+        homes.sort_unstable();
+        for (u, r) in homes {
+            let span = b.spans.get(&u).map_or_else(Vec::new, |span| offsets(span));
+            lives.push((i64::from(u), i64::from(r), "home", span));
+        }
+        let mut given: Vec<_> = given_at.iter().collect();
+        given.sort_unstable();
+        for (&at, runs) in given {
+            for &(first, width) in runs {
+                lives.push((i64::from(width), i64::from(first), "pool", vec![16 * at as u64]));
+            }
+        }
+        let mut room: Vec<_> = spilled.iter().collect();
+        room.sort_unstable();
+        for (&at, registers) in room {
+            for &r in registers {
+                lives.push((1, i64::from(r), "room", vec![16 * at as u64]));
+            }
+        }
+        let mut slots: Vec<(u32, u32)> = b.slots.iter().map(|(&u, &word)| (u, word)).collect();
+        slots.sort_unstable();
+        for (u, word) in slots {
+            lives.push((i64::from(u), -b.slot_offset(word), "slot", Vec::new()));
+        }
+        if b.frame_bytes != 0 {
+            lives.push((i64::from(b.frame_bytes), 0, "frame", Vec::new()));
+        }
+    }
+    lives
 }
 
 /// Where each relocation on the code of a function applies once the function is translated: on

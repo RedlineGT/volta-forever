@@ -9,7 +9,9 @@
 //! vf-translate translate IN OUT [MAP [REPORT]]
 //!                             write the sm_70 cubin for a supported sm_75 or sm_80 cubin IN; MAP gets one line per
 //!                             instruction of the result (function, new offset, old offset, what was
-//!                             done), REPORT one per function (`ok` or why it was refused, the name)
+//!                             done), MAP.lives what reference/validate.py reads beside it (where the
+//!                             uniform predicates live, what was borrowed), REPORT one line per
+//!                             function (`ok` or why it was refused, the name)
 //! ```
 
 use std::collections::BTreeMap;
@@ -196,6 +198,19 @@ fn translate(input: &str, output: &str, map: Option<&str>, report: Option<&str>)
         }
         std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
     }
+    if let (Some(map), Some(lives)) = (map, &result.lives) {
+        // As reference/translate.py writes it (`write_lives`).
+        let mut text = String::new();
+        for (function, first, second, how, offsets) in lives {
+            let offsets: Vec<String> = offsets.iter().map(|at| format!("{at:x}")).collect();
+            text.push_str(&format!(
+                "{function}\t{first}\t{second}\t{how}\t{}\n",
+                offsets.join(",")
+            ));
+        }
+        let path = format!("{map}.lives");
+        std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
+    }
     if let Some(path) = report {
         let mut text = String::new();
         for function in &result.report {
@@ -279,6 +294,31 @@ mod tests {
         assert_eq!(std::fs::read(path.join("0000.sm_75.ptx")).unwrap(), b"first");
         assert_eq!(std::fs::read(path.join("0000-2.sm_75.ptx")).unwrap(), b"second");
         assert!(!path.join("0000.sm_80.ptx").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn translate_writes_the_lives_beside_the_map() {
+        // What reference/translate.py writes for this cubin; reference/validate.py reads it beside
+        // the map. (Until 2026-11-22 there was no such file: every uniform predicate "had no life".)
+        let cubin = include_bytes!("../../../tests/kernels/translate/k_memory.sm75.cubin");
+        let tmp = std::process::Command::new("mktemp").arg("-d").output().unwrap();
+        assert!(tmp.status.success());
+        let path = std::path::Path::new(std::str::from_utf8(&tmp.stdout).unwrap().trim());
+        let input = path.join("k_memory.sm75.cubin");
+        std::fs::write(&input, cubin).unwrap();
+        let (output, map) = (path.join("out.cubin"), path.join("out.map"));
+        translate(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            Some(map.to_str().unwrap()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("out.map.lives")).unwrap(),
+            "k_generic_index\t0\t2\tfree\tb0,c0,d0,e0,f0,100\nk_generic\t0\t0\tfree\t30,40,50,60,70,80\n"
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 }

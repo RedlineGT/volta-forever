@@ -120,25 +120,46 @@ impl<'a> Entry<'a> {
             return Ok(Cow::Borrowed(stored));
         }
         let compressed_size = u32_at(self.header, 0x10) as usize;
-        let size = u64_at(self.header, 0x38) as usize;
+        let size = u64_at(self.header, 0x38);
         let compressed = self
             .stored
             .get(..compressed_size)
             .ok_or(Error::Compression("compressed size exceeds the entry"))?;
-        let data = if flags & FLAG_ZSTD != 0 {
+        // The output is allocated at the announced size before anything is decompressed, and a
+        // failed allocation ends the process (it is not a panic). A size that no entry has, or
+        // more than LZ4 can make of the bytes there are (at most 255 for each), is not believed.
+        // (The largest entry of PyTorch 2.14 and the CUDA 13.5 libraries: 136 MB.)
+        if size > CUBIN_MAX || (flags & FLAG_ZSTD == 0 && size > 255 * compressed.len() as u64) {
+            return Err(Error::Compression("announced size too large"));
+        }
+        let size = size as usize;
+        let mut data = Vec::new();
+        data.try_reserve_exact(size)
+            .map_err(|_| Error::Compression("no memory for the announced size"))?;
+        if flags & FLAG_ZSTD != 0 {
             use std::io::Read;
-            let mut out = Vec::with_capacity(size);
             let mut decoder = ruzstd::decoding::StreamingDecoder::new(compressed)
                 .map_err(|_| Error::Compression("bad zstd frame"))?;
-            decoder
-                .read_to_end(&mut out)
+            // No more than announced: a frame can make far more than it holds, and the vector
+            // would grow until an allocation fails. One byte more says that there is more.
+            (&mut decoder)
+                .take(size as u64)
+                .read_to_end(&mut data)
                 .map_err(|_| Error::Compression("bad zstd data"))?;
-            out
+            let more = decoder
+                .read(&mut [0])
+                .map_err(|_| Error::Compression("bad zstd data"))?;
+            if more != 0 {
+                return Err(Error::Compression("unexpected uncompressed size"));
+            }
         } else if flags & FLAG_LZ4 != 0 {
-            lz4_flex::block::decompress(compressed, size).map_err(|_| Error::Compression("bad LZ4 block"))?
+            data.resize(size, 0);
+            let written = lz4_flex::block::decompress_into(compressed, &mut data)
+                .map_err(|_| Error::Compression("bad LZ4 block"))?;
+            data.truncate(written);
         } else {
             return Err(Error::Compression("deflate is not supported"));
-        };
+        }
         if data.len() != size {
             return Err(Error::Compression("unexpected uncompressed size"));
         }
@@ -558,6 +579,80 @@ mod tests {
         let elf = fat.entries[0].payload().unwrap();
         assert_eq!(cubin_sm(&elf), Some(75));
         assert_eq!(elf.len(), 18592);
+    }
+
+    /// The header of `entry` with the uncompressed size it announces set to `size`.
+    fn announcing(entry: &Entry<'_>, size: u64) -> Vec<u8> {
+        let mut header = entry.header.to_vec();
+        header[0x38..0x40].copy_from_slice(&size.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn an_announced_size_beyond_any_entry_is_refused_before_it_is_allocated() {
+        // (Until 2026-11-22 the allocation of 1 TB failed, and that ended the process.)
+        let zstd = parse(ALL_ZSTD).unwrap();
+        let lz4 = parse(ELF70_ELF75_PTX70_LZ4).unwrap();
+        for entry in [&zstd.entries[0], &zstd.entries[1], &lz4.entries[2]] {
+            for size in [1 << 40, CUBIN_MAX + 1, u64::MAX >> 1] {
+                let header = announcing(entry, size);
+                let claimed = Entry {
+                    header: &header,
+                    stored: entry.stored,
+                };
+                assert_eq!(
+                    claimed.payload().err(),
+                    Some(Error::Compression("announced size too large"))
+                );
+            }
+        }
+        // LZ4 makes at most 255 bytes of each byte it reads.
+        let entry = &lz4.entries[2];
+        let most = 255 * u64::from(u32_at(entry.header, 0x10));
+        for (size, error) in [
+            (most + 1, "announced size too large"),
+            (most, "unexpected uncompressed size"),
+        ] {
+            let header = announcing(entry, size);
+            let claimed = Entry {
+                header: &header,
+                stored: entry.stored,
+            };
+            assert_eq!(claimed.payload().err(), Some(Error::Compression(error)));
+        }
+    }
+
+    #[test]
+    fn a_zstd_frame_is_read_no_further_than_the_announced_size() {
+        // A frame can make far more than it holds. Here, with a window of 1 kB (the decoder hands
+        // out what is beyond it): two blocks of 1 kB of the same value, then a block of the
+        // reserved kind, announced as 16 bytes. The third block is not decoded. (Until 2026-11-22
+        // the frame was decoded to its end whatever the entry announced, into a vector that grew
+        // until an allocation was refused: 1 TB from 32 MB of such blocks.)
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00];
+        for _ in 0..2 {
+            frame.extend_from_slice(&(1024u32 << 3 | 1 << 1).to_le_bytes()[..3]);
+            frame.push(0x5a);
+        }
+        frame.extend_from_slice(&(1u32 << 3 | 3 << 1 | 1).to_le_bytes()[..3]);
+        let entry = &parse(ALL_ZSTD).unwrap().entries[1];
+        let mut header = announcing(entry, 16);
+        header[0x10..0x14].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+        let claimed = Entry {
+            header: &header,
+            stored: &frame,
+        };
+        assert_eq!(
+            claimed.payload().err(),
+            Some(Error::Compression("unexpected uncompressed size"))
+        );
+        // Announced as all it makes: the 2 kB, then the block that cannot be read.
+        let header = announcing(&claimed, 2048);
+        let claimed = Entry {
+            header: &header,
+            stored: &frame,
+        };
+        assert_eq!(claimed.payload().err(), Some(Error::Compression("bad zstd data")));
     }
 
     #[test]

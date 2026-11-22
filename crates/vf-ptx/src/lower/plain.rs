@@ -545,6 +545,12 @@ impl<'a> Body<'a> {
             kind,
         ] = words[..]
             && (qualifiers.is_empty() || (qualifiers == ["NaN"] && kind == "f32" && matches!(operation, "min" | "max")))
+            // The forms of the PTX ISA: `add` of floats is not one (ptxas refuses it).
+            && match operation {
+                "and" | "or" | "xor" => kind == "b32",
+                "add" => matches!(kind, "u32" | "s32"),
+                _ => matches!(kind, "u32" | "s32" | "f32"),
+            }
         {
             // The member mask names the whole warp. Some of its threads may have exited.
             let [d, a, mask] = parts[..] else {
@@ -560,7 +566,6 @@ impl<'a> Body<'a> {
             };
             let value = self.fresh();
             let [live, remaining, peer, bit, other]: [String; 5] = self.fresh_n();
-            let lane = self.lane(super::lane::Lane::Id);
             let n = self.current_index;
             self.scratch_predicate = true;
             emit!(self, "mov.b32 {value}, {a};");
@@ -573,10 +578,13 @@ impl<'a> Body<'a> {
             }
             emit!(self, "bra.uni $vf_reduced{n};");
 
-            // Start with this lane's own input, then visit each surviving peer once.
-            // Every lane iterates popc(live) - 1 times and shuffles with the same mask.
+            // The inputs of the surviving lanes, from the highest lane down: in one order for every
+            // lane, so that every lane computes the same result, bit for bit. Every lane iterates
+            // popc(live) - 1 times and shuffles with the same mask.
             let _ = write!(self.out, "\n$vf_partial{n}:");
-            emit!(self, "shl.b32 {bit}, 1, {lane};");
+            emit!(self, "bfind.u32 {peer}, {live};");
+            emit!(self, "shfl.sync.idx.b32 {value}, {a}, {peer}, 31, {live};");
+            emit!(self, "shl.b32 {bit}, 1, {peer};");
             emit!(self, "xor.b32 {remaining}, {live}, {bit};");
             let _ = write!(self.out, "\n$vf_peers{n}:");
             emit!(self, "setp.eq.u32 %vf_n, {remaining}, 0;");

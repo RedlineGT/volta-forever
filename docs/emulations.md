@@ -616,7 +616,7 @@ The reference vectors are in `tests/kernels/blackwell/ref_scaled/`.
 | `cvt.rn.f16x2.f32` (pack two f32 to f16x2) | `cvt.rn.f16.f32` for each, then `mov.b32` to pack. |
 | `cvt.rn.bf16x2.f32` | The same with bf16 (a shift to f32, `cvt.rn.f16.f32` of that, shifts to assemble). |
 | `cvt.rn.tf32.f32` | The 10-bit mantissa (zero the low 13 bits), ties to even: 9 instructions. |
-| `redux.sync.{add,min,max}.{s32,u32}` | A ballot identifies the participating lanes. A full warp uses five butterfly shuffles. A partial warp gathers each remaining lane once. |
+| `redux.sync.{add,min,max}.{s32,u32}` | A ballot identifies the participating lanes. A full warp uses five butterfly shuffles. A partial warp gathers the input of each participating lane once, from the highest lane down: in the same order in every lane. |
 | `redux.sync.{min,max}.NaN.f32` | Reduce the active lanes and use a warp vote to propagate a NaN from any participating lane. |
 | `{min,max}.NaN.f32` | Compare two or three operands and propagate a NaN from any operand. |
 | `{min,max,add,mul,...}.relu.{s32,f32,...}` | The operation followed by a clamp to zero. |

@@ -3,18 +3,33 @@
 #[path = "vf-ptxas/runfiles.rs"]
 mod runfiles;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_char, c_int, c_uint, c_ulong};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::{ffi::OsStrExt, fs::MetadataExt, process::CommandExt};
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::MetadataExt,
+    process::{CommandExt, ExitStatusExt},
+};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use vf_adapt::{Outcome, Policy};
 
 unsafe extern "C" {
-    fn memfd_create(name: *const std::ffi::c_char, flags: std::ffi::c_uint) -> std::ffi::c_int;
+    fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
+    fn prctl(option: c_int, ...) -> c_int;
+    fn getpid() -> c_int;
+    fn getppid() -> c_int;
+    fn signal(signum: c_int, handler: usize) -> usize;
+    fn raise(signum: c_int) -> c_int;
 }
+
+const PR_SET_PDEATHSIG: c_int = 1;
+const SIGTERM: c_int = 15;
+const SIG_DFL: usize = 0;
+/// What ptxas ends with on every error it finds, and so this program on those it finds itself.
+const FATAL: u8 = 255;
 
 fn backend() -> Result<PathBuf, String> {
     let path = match std::env::var_os("VF_PTXAS_REAL") {
@@ -56,8 +71,10 @@ fn target(name: &OsStr) -> Option<&'static str> {
     }
 }
 
-// These options consume the following argument when their value is not joined with '='.
-// In particular, the output file must never be opened as a PTX input.
+// These options consume the following argument when their value is not joined with '=': those of
+// ptxas 13.5 (each given alone, it says "argument expected"), but the ones handled in `compile`.
+// In particular, the output file must never be opened as a PTX input. (`-O` takes its level joined,
+// `-O3`: alone, it is an option of its own, and what follows is an input.)
 fn consumes_value(option: &[u8]) -> bool {
     matches!(
         option,
@@ -65,7 +82,6 @@ fn consumes_value(option: &[u8]) -> bool {
             | b"--output-file"
             | b"-e"
             | b"--entry"
-            | b"-O"
             | b"--opt-level"
             | b"-m"
             | b"--machine"
@@ -99,6 +115,12 @@ fn consumes_value(option: &[u8]) -> bool {
             | b"--register-usage-level"
             | b"--split-compile"
             | b"-split-compile"
+            | b"--apply-controls"
+            | b"-apply-controls"
+            | b"--enable-func-clone-sc"
+            | b"-enable-func-clone-sc"
+            | b"--sanitize"
+            | b"-sanitize"
     )
 }
 
@@ -123,7 +145,7 @@ fn adapted_input(data: &[u8], policy: &Policy) -> Result<Option<File>, String> {
     Ok(Some(file))
 }
 
-fn compile(args: Vec<OsString>) -> Result<(), String> {
+fn compile(args: Vec<OsString>) -> Result<ExitCode, String> {
     let backend = backend()?;
     let mut process = Command::new(&backend);
     if args
@@ -133,7 +155,9 @@ fn compile(args: Vec<OsString>) -> Result<(), String> {
         return Err(process.args(args).exec().to_string());
     }
     let policy = Policy::cuda_12_9().with_environment();
+    // The adapted inputs, and what the user called them.
     let mut retained = Vec::new();
+    let mut names = Vec::new();
     let mut explicit_arch = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -169,7 +193,9 @@ fn compile(args: Vec<OsString>) -> Result<(), String> {
                 if let Some(file) =
                     adapted_input(&data, &policy).map_err(|e| format!("{}: {e}", Path::new(&arg).display()))?
                 {
-                    process.arg(format!("/proc/self/fd/{}", file.as_raw_fd()));
+                    let given = format!("/proc/self/fd/{}", file.as_raw_fd());
+                    process.arg(&given);
+                    names.push((given.into_bytes(), arg.as_bytes().to_vec()));
                     retained.push(file);
                 } else {
                     process.arg(arg);
@@ -180,10 +206,75 @@ fn compile(args: Vec<OsString>) -> Result<(), String> {
     if !explicit_arch {
         process.arg("-arch=sm_70");
     }
-    Err(process.exec().to_string())
+    if names.is_empty() {
+        return Err(process.exec().to_string());
+    }
+    assemble(process, &names).map_err(|e| format!("{}: {e}", backend.display()))
 }
 
-fn run(args: Vec<OsString>) -> Result<(), String> {
+/// Run the assembler on adapted inputs, which it is given as `/proc/self/fd/N`: its messages
+/// (all on its standard error) name the files the user gave instead (`names`: what it was given,
+/// what the user gave). This ends with the status the assembler ends with, or by the signal that
+/// ended it; the assembler is sent SIGTERM if this ends first.
+fn assemble(mut process: Command, names: &[(Vec<u8>, Vec<u8>)]) -> io::Result<ExitCode> {
+    let parent = unsafe { getpid() };
+    unsafe {
+        process.pre_exec(move || {
+            prctl(PR_SET_PDEATHSIG, SIGTERM as c_ulong);
+            if getppid() != parent {
+                // (This front end has ended already: ESRCH, and nothing that allocates.)
+                return Err(io::Error::from_raw_os_error(3));
+            }
+            Ok(())
+        });
+    }
+    let mut child = process.stderr(Stdio::piped()).spawn()?;
+    let mut messages = io::BufReader::new(child.stderr.take().expect("piped"));
+    let mut stderr = io::stderr().lock();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match messages.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let _ = stderr.write_all(&renamed(&line, names));
+                let _ = stderr.flush();
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    drop(messages);
+    let status = child.wait()?;
+    if let Some(number) = status.signal() {
+        unsafe {
+            signal(number, SIG_DFL);
+            raise(number);
+        }
+    }
+    Ok(ExitCode::from(status.code().map_or(FATAL, |code| code as u8)))
+}
+
+/// `line` with each name the assembler was given (`/proc/self/fd/3`, not followed by a digit)
+/// replaced by the one the user gave.
+fn renamed(line: &[u8], names: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(line.len());
+    let mut at = 0;
+    'scan: while at < line.len() {
+        for (given, user) in names {
+            if line[at..].starts_with(given) && !line.get(at + given.len()).is_some_and(u8::is_ascii_digit) {
+                out.extend_from_slice(user);
+                at += given.len();
+                continue 'scan;
+            }
+        }
+        out.push(line[at]);
+        at += 1;
+    }
+    out
+}
+
+fn run(args: Vec<OsString>) -> Result<ExitCode, String> {
     if args.first().is_none_or(|a| a != "--vf-runfiles") {
         return compile(args);
     }
@@ -196,15 +287,16 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         out.write_all(path.as_os_str().as_bytes())?;
         out.write_all(b"\n")
     };
-    write_view().map_err(|e| format!("CUDA runfiles: {e}"))
+    write_view().map_err(|e| format!("CUDA runfiles: {e}"))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1).collect()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("vf-ptxas: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(FATAL)
         }
     }
 }
@@ -212,6 +304,17 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_name_the_inputs_as_the_user_gave_them() {
+        let names = [(b"/proc/self/fd/3".to_vec(), b"kernel.ptx".to_vec())];
+        assert_eq!(
+            renamed(b"ptxas /proc/self/fd/3, line 2; error\n", &names),
+            b"ptxas kernel.ptx, line 2; error\n"
+        );
+        assert_eq!(renamed(b"/proc/self/fd/30\n", &names), b"/proc/self/fd/30\n");
+        assert_eq!(renamed(b"/proc/self/fd/3", &names), b"kernel.ptx");
+    }
 
     #[test]
     fn recent_targets_retain_architecture_kind() {
@@ -260,6 +363,109 @@ mod tests {
         assert_eq!(runfiles::view(&next, &compiler, &cache).unwrap(), next);
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn runfiles_views_are_named_the_same_by_every_build() {
+        // The name of a view is the FNV-1a hash of its links (each path and each target with a
+        // zero byte after it). (Until 2026-11-22 it was DefaultHasher's, which may change from
+        // one version of Rust to the next: each upgrade left the views made before it.)
+        let tmp = std::process::Command::new("mktemp").arg("-d").output().unwrap();
+        assert!(tmp.status.success());
+        let dir = Path::new(std::str::from_utf8(&tmp.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        let src = dir.join("app.runfiles");
+        let compiler = dir.join("vf-ptxas");
+        fs::create_dir_all(src.join("cuda/bin")).unwrap();
+        fs::write(&compiler, "VF").unwrap();
+        fs::write(src.join("cuda/bin/ptxas"), "NVIDIA").unwrap();
+        fs::write(src.join("cuda/bin/nvlink"), "linker").unwrap();
+        let links = [
+            ("cuda/bin/nvlink", src.join("cuda/bin/nvlink")),
+            ("cuda/bin/ptxas", compiler.clone()),
+        ];
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for (rel, target) in &links {
+            for part in [rel.as_bytes(), target.as_os_str().as_bytes()] {
+                for &byte in part.iter().chain(&[0]) {
+                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        let view = runfiles::view(&src, &compiler, &dir.join("cache")).unwrap();
+        assert_eq!(view, dir.join("cache").join(format!("{hash:016x}")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runfiles_views_that_nothing_will_use_again_are_removed() {
+        let tmp = std::process::Command::new("mktemp").arg("-d").output().unwrap();
+        assert!(tmp.status.success());
+        let dir = Path::new(std::str::from_utf8(&tmp.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        let (cache, compiler) = (dir.join("cache"), dir.join("vf-ptxas"));
+        fs::write(&compiler, "VF").unwrap();
+        let app = |name: &str| {
+            let src = dir.join(name);
+            fs::create_dir_all(src.join("cuda/bin")).unwrap();
+            fs::write(src.join("cuda/bin/ptxas"), "NVIDIA").unwrap();
+            fs::write(src.join("cuda/bin/nvlink"), "linker").unwrap();
+            src
+        };
+        let days_ago = |path: &Path, days: u64| {
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 60 * 60);
+            File::open(path).unwrap().set_modified(when).unwrap();
+        };
+        // Views of three applications, made two days ago; one is used today.
+        let (kept, changed, recent) = (app("kept.runfiles"), app("changed.runfiles"), app("recent.runfiles"));
+        let kept_view = runfiles::view(&kept, &compiler, &cache).unwrap();
+        let changed_view = runfiles::view(&changed, &compiler, &cache).unwrap();
+        let recent_view = runfiles::view(&recent, &compiler, &cache).unwrap();
+        for view in [&kept_view, &changed_view, &recent_view] {
+            days_ago(view, 2);
+        }
+        assert_eq!(runfiles::view(&recent, &compiler, &cache).unwrap(), recent_view);
+        // Two of them change; a view of runfiles that are gone; what a process that ended left,
+        // and what one that runs (this one) is making.
+        fs::write(changed.join("cuda/bin/nvcc"), "compiler driver").unwrap();
+        fs::write(recent.join("cuda/bin/nvcc"), "compiler driver").unwrap();
+        let gone = cache.join("0123456789abcdef");
+        fs::create_dir(&gone).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.runfiles/cuda/bin/nvcc"), gone.join("nvcc")).unwrap();
+        days_ago(&gone, 2);
+        // The view of the first, as a version that named views otherwise would have made it.
+        let renamed = cache.join("fedcba9876543210");
+        fs::create_dir_all(renamed.join("cuda/bin")).unwrap();
+        std::os::unix::fs::symlink(&compiler, renamed.join("cuda/bin/ptxas")).unwrap();
+        std::os::unix::fs::symlink(kept.join("cuda/bin/nvlink"), renamed.join("cuda/bin/nvlink")).unwrap();
+        days_ago(&renamed, 2);
+        let (ended, running) = (
+            cache.join(".tmp-4294967295-0"),
+            cache.join(format!(".tmp-{}-7", std::process::id())),
+        );
+        fs::create_dir(&ended).unwrap();
+        fs::create_dir(&running).unwrap();
+        // A new view: the stale ones go, with what they hold and nothing it points to.
+        let changed_now = runfiles::view(&changed, &compiler, &cache).unwrap();
+        assert_ne!(changed_now, changed_view);
+        for (path, there) in [
+            (&kept_view, true),
+            (&recent_view, true),
+            (&running, true),
+            (&changed_now, true),
+            (&changed_view, false),
+            (&gone, false),
+            (&renamed, false),
+            (&ended, false),
+        ] {
+            assert_eq!(path.exists(), there, "{}", path.display());
+        }
+        assert_eq!(fs::read_to_string(changed.join("cuda/bin/ptxas")).unwrap(), "NVIDIA");
+        assert_eq!(fs::read_to_string(&compiler).unwrap(), "VF");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn concurrent_runfiles_for_different_apps_preserve_each_layout() {
         const THREADS: usize = 12;
