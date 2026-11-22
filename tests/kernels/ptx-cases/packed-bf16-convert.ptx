@@ -1,0 +1,29 @@
+.version 8.8
+.target sm_100
+.address_size 64
+.visible .entry k(.param .u64 output) .reqntid 32,1,1
+{
+    .reg .b32 %in, %abs, %fp8, %edge, %edge_fp8, %lane;
+    .reg .b16 %e4, %e5;
+    .reg .b64 %out;
+    .reg .pred %off;
+
+    // -2.5 and a halfway input in E4M3; negative NaN and a negative subnormal.
+    mov.b32 %in, 0xc0203f88;
+    mov.b32 %edge, 0xffff8001;
+    abs.bf16x2 %abs, %in;
+    cvt.rn.satfinite.e4m3x2.bf16x2 %e4, %in;
+    cvt.rn.satfinite.e5m2x2.bf16x2 %e5, %in;
+    mov.b32 %fp8, {%e4, %e5};
+    cvt.rn.satfinite.e4m3x2.bf16x2 %e4, %edge;
+    cvt.rn.satfinite.e5m2x2.bf16x2 %e5, %edge;
+    mov.b32 %edge_fp8, {%e4, %e5};
+    abs.bf16x2 %edge, %edge;
+    mov.u32 %lane, %laneid;
+    setp.ge.u32 %off, %lane, 32;
+    @%off abs.bf16x2 %abs, %edge;
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.b32 [%out], {%abs, %fp8, %edge, %edge_fp8};
+    ret;
+}

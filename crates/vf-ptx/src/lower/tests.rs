@@ -1489,6 +1489,33 @@ fn fp8_values_become_halves_where_they_are() {
 }
 
 #[test]
+fn ordinary_bfloat_bounds_select_numeric_lanes() {
+    for op in ["min", "max"] {
+        let text = lower(&format!(
+            "{{\n.reg .b32 %r<2>;\n.reg .pred %p;\n@%p {op}.bf16x2 %r0, %r0, %r1;\n}}"
+        ));
+        assert_eq!(text.matches(&format!("{op}.f32 ")).count(), 2);
+        assert!(!text.contains("setp.nan"));
+        assert!(text.contains("@%p prmt.b32 %r0,"));
+        assert!(undeclared(&text).is_empty());
+    }
+}
+
+#[test]
+fn packed_bfloat_sign_and_fp8_conversion_keep_both_lanes() {
+    for kind in ["e4m3x2", "e5m2x2"] {
+        let text = lower(&format!(
+            "{{\n.reg .pred %p;\n.reg .b32 %r;\n.reg .b16 %h;\n@%p abs.bf16x2 %r, %r;\n@%p cvt.rn.satfinite.{kind}.bf16x2 %h, %r;\n}}"
+        ));
+        assert!(text.contains("@%p and.b32 %r, %r, 0x7fff7fff;"));
+        assert!(text.contains("and.b32 %vf_r0, %r, 0xffff0000;"));
+        assert!(text.contains("shl.b32 %vf_r1, %r, 16;"));
+        assert!(text.contains("@%p cvt.u16.u32 %h,"));
+        assert!(undeclared(&text).is_empty());
+    }
+}
+
+#[test]
 fn floats_become_fp8_bytes_with_one_rounding() {
     for (kind, largest, low) in [("e4m3x2", "0f43E00000", 7), ("e5m2x2", "0f47600000", 8)] {
         let lowered = lower(&format!(

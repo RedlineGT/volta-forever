@@ -188,13 +188,14 @@ impl<'a> Body<'a> {
             "rn",
             "satfinite",
             kind @ ("e4m3x2" | "e5m2x2"),
-            source @ ("f32" | "f16x2"),
+            source @ ("f32" | "f16x2" | "bf16x2"),
         ] = words[..]
             && let Some(kind) = Fp8::named(kind)
         {
             // The first value (or the upper half) in the upper byte.
             let (upper, lower) = match (source, &parts[..]) {
                 ("f32", [_, a, b]) => (a.to_string(), b.to_string()),
+                ("bf16x2", [_, a]) => self.bf16x2_to_f32(a),
                 ("f16x2", [_, a]) => {
                     // The halves as f32, exactly.
                     let halves = [self.fresh_half(), self.fresh_half()];
@@ -315,7 +316,7 @@ impl<'a> Body<'a> {
             emit!(self, "shr.u32 {result}, {result}, 16;");
             self.written(d);
             emit!(self, "{guard}cvt.u16.u32 {d}, {result};");
-        } else if let [op @ ("max" | "min"), "NaN", "bf16x2"] = words[..] {
+        } else if let [op @ ("max" | "min"), "bf16x2"] | [op @ ("max" | "min"), "NaN", "bf16x2"] = words[..] {
             let [d, a, b] = parts[..] else {
                 return Err(unsupported("operands not recognised"));
             };
@@ -323,17 +324,26 @@ impl<'a> Body<'a> {
             let (b_hi, b_lo) = self.bf16x2_to_f32(b);
             let [high, low]: [String; 2] = self.fresh_n();
             let plain = format!("{op}.f32");
-            self.bound(&plain, &high, &a_hi, &b_hi);
-            self.bound(&plain, &low, &a_lo, &b_lo);
+            if words.len() == 3 {
+                self.bound(&plain, &high, &a_hi, &b_hi);
+                self.bound(&plain, &low, &a_lo, &b_lo);
+            } else {
+                emit!(self, "{plain} {high}, {a_hi}, {b_hi};");
+                emit!(self, "{plain} {low}, {a_lo}, {b_lo};");
+            }
             // Each result is an input bf16 or a canonical NaN. Pack the two high halfwords.
             self.written(d);
             emit!(self, "{guard}prmt.b32 {d}, {low}, {high}, 0x7632;");
-        } else if let ["abs", "bf16"] = words[..] {
+        } else if let ["abs", kind @ ("bf16" | "bf16x2")] = words[..] {
             let [d, a] = parts[..] else {
                 return Err(unsupported("operands not recognised"));
             };
             self.written(d);
-            emit!(self, "{guard}and.b16 {d}, {a}, 0x7fff;");
+            if kind == "bf16" {
+                emit!(self, "{guard}and.b16 {d}, {a}, 0x7fff;");
+            } else {
+                emit!(self, "{guard}and.b32 {d}, {a}, 0x7fff7fff;");
+            }
         } else if let [op @ ("add" | "sub"), "rn", "f32", "bf16"] = words[..] {
             // Only the first input is bf16. The accumulator and destination are f32.
             let [d, a, b] = parts[..] else {

@@ -19,6 +19,10 @@
     mov.u32 %lane, %laneid;
     setp.ge.u32 %p, %lane, 32;
     @%p min.NaN.bf16x2 %r0, %r2, %r3;
+    // Ordinary bounds keep the numeric operand when its partner is NaN.
+    mov.b32 %a, 0xff817fc1;
+    max.bf16x2 %r0, %a, %r0;
+    min.bf16x2 %r1, %r1, %a;
     ld.param.u64 %out, [output];
     mad.wide.u32 %out, %lane, 16, %out;
     st.global.v4.b32 [%out], {%r0,%r1,%r2,%r3};
