@@ -367,6 +367,11 @@ told=("ALL CHECKS PASSED"
 refuse refuse-library library "${told[@]}"
 refuse refuse-module module "${told[@]}"
 VF_LAZY=0 refuse refuse-library-lazy-off library "${told[@]}"
+# Through the driver's linker: the image that the link makes refuses the kernel too, and announces
+# the emulated one (until 0.1.2 both were given to the program, the refused one as a trap).
+refuse refuse-link link "ALL CHECKS PASSED" \
+    "kernel refused_by_layer cannot run on this GPU and is not given to the program: barrier.cluster.arrive: no Volta sequence" \
+    "emulated in soft: 1 tanh" "1 kernel with emulated instructions was given to the program: 1 tanh"
 
 # A kernel whose usual translation takes more registers than a block of 1,024 threads can have is
 # launched from a second translation that keeps to the kernel's own count (`docs/architecture.md`, "Launch"): taken
