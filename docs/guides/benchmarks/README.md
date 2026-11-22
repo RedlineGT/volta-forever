@@ -54,7 +54,7 @@ With batch-one CUDA graphs, FreeToken measured **905.68 prefill** and **108.75 d
 
 ## ZML
 
-With guarded BF16 tiles enabled, the official LLMD server measured **741.99 GPU prefill tokens/s and 49.19 server decode steps/s** using the single-column tree reduction, compared with 748.68 and 45.57 on the same V100 with the column pass off. On a second V100, ordered accumulation measured **750.70 / 47.18** versus 744.01 / 45.94. All runs used the AMD MXFP4 checkpoint, 256-token chunks and three uncached 227/64 requests. [Ubuntu guide and commands](../zml.md#5-benchmarks) · [Per-request timings, replies and numerical checks](zml-llmd-column.json) · [Earlier two-by-two tile comparison](zml-llmd-autotune.json)
+On the same V100, the general BF16 multiply optimization took official LLMD from **746.45 to 774.63 GPU prefill tokens/s** and **48.55 to 50.16 post-first-token decode tokens/s** with tree accumulation. Both runs used the AMD MXFP4 checkpoint and three 227-token prompts with 64-token replies after warm-up. [Ubuntu guide and commands](../zml.md#5-benchmarks) · [Per-request measurements](zml-llmd-bf16-product.json) · [Earlier column modes](zml-llmd-column.json)
 
 ### LLMD GPU prefill
 

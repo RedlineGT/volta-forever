@@ -81,14 +81,16 @@ In a second terminal, run the client against the idle server. For a paired compa
 python3 "$HOME/volta-forever/docs/guides/benchmarks/zml.py"
 ```
 
-Each median covers three uncached 227-token prompts and 64-token replies after warm-up. All replies began with the expected city. LLMD times 63 decode steps after the first token. The GPU columns use a separate series of marked requests and time the complete forward graphs. [Per-request replies, counters and graph spans](./benchmarks/zml-llmd-column.json)
+After a Lisbon warm-up, each request used a distinct 227-token prompt and produced 64 tokens. All replies named the expected city and object. The table compares the general BF16 multiply optimization on the same V100 with tree accumulation. The GPU prefill column comes from a separate CUPTI run.
 
-| Single-card pair | Column mode | GPU prefill (tokens/s) | GPU decode (graphs/s) | Prompt tokens / server TTFT (tokens/s) | Server decode (steps/s) |
-| --- | --- | ---: | ---: | ---: | ---: |
-| V100 `08cd61f4` | Off → ordered | 744.01 → 750.70 | 49.58 → 50.82 | 737.01 → 746.71 | 45.94 → **47.18** |
-| V100 `148f2829` | Off → tree | 748.68 → 741.99 | 49.18 → 54.17 | 737.01 → 737.01 | 45.57 → **49.19** |
+| VF build | GPU prefill (tokens/s) | Prompt tokens / server TTFT (tokens/s) | Decode after first token (tokens/s) |
+| --- | ---: | ---: | ---: |
+| Before the BF16 change | 746.45 | 725.24 | 48.55 |
+| With the BF16 change | **774.63** | **751.66** | **50.16** |
 
-Tree saved **1.87 ms per decode graph**, including **1.72 ms** in the two expert projections. Its reassociated FP32 sums can differ under cancellation. Ordered matched scalar bits on all 16,384 operator outputs tested. A clean Ubuntu 24.04 run on a third V100 reproduced **750.11 GPU prefill tokens/s** with ordered. Native 1Cat-vLLM reached **1427.41 / 76.13** and **1443.33 / 76.09** prefill/decode on the two respective cards with QuantTrio AWQ. Both LLMD pairs remain below those reference rates, which use a different Q4 checkpoint and server phase timers. [Column results and numerical limits](./benchmarks/zml-llmd-column.json) · [Earlier two-by-two tile comparison](./benchmarks/zml-llmd-autotune.json) · [Earlier chunk-size comparison](./benchmarks/zml-llmd-mxfp4.json)
+Each reply contributes 63 visible tokens after the first. LLMD counted 64 internal steps per measured reply in this pair, giving 49.32 and 50.95 internal steps/s respectively. The decode column uses 63 divided by the server’s decode time for each request. Native 1Cat-vLLM on this card reached 1,443.33 / 76.09 with a different checkpoint, QuantTrio AWQ. [Per-request replies, counters and graph spans](./benchmarks/zml-llmd-bf16-product.json)
+
+Tree accumulation saved 1.87 ms per decode graph in an earlier comparison with the column optimization off. Its FP32 sums can differ under cancellation. Ordered accumulation matched scalar bits on all 16,384 operator outputs tested. [Column results](./benchmarks/zml-llmd-column.json) · [Tile comparison](./benchmarks/zml-llmd-autotune.json) · [Chunk-size comparison](./benchmarks/zml-llmd-mxfp4.json)
 
 ## 6. Additional notes
 
