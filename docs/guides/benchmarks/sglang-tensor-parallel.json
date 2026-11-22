@@ -61,7 +61,9 @@
           "decode_s": 2.908301310539246
         }
       ]
-    }
+    },
+    "cuda_visible_devices": "GPU UUID list",
+    "sglang_custom_all_reduce": "Setup reported invalid literal for int() while parsing a GPU UUID; scheduler used the NCCL fallback."
   },
   "tensor_parallel": {
     "2": {
@@ -189,7 +191,77 @@
         "decode_tokens_per_s": 86.36516977074264,
         "client_ttft_s": 0.09534478094428778,
         "client_first_to_last_text_s": 0.7329542671795934
-      }
+      },
+      "cuda_visible_devices": "GPU UUID list",
+      "sglang_custom_all_reduce": "Setup reported invalid literal for int() while parsing a GPU UUID; scheduler used the NCCL fallback."
     }
+  },
+  "first_four_gpu_startup": {
+    "cuda_visible_devices": "GPU UUID list",
+    "sglang_custom_all_reduce": "Setup reported invalid literal for int() while parsing a GPU UUID; scheduler used the NCCL fallback.",
+    "gpus": [
+      {
+        "uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+        "pci_bus": "00000000:3B:00.0"
+      },
+      {
+        "uuid": "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd",
+        "pci_bus": "00000000:AF:00.0"
+      },
+      {
+        "uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+        "pci_bus": "00000000:18:00.0"
+      },
+      {
+        "uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+        "pci_bus": "00000000:86:00.0"
+      }
+    ],
+    "checkpoint_shards_loaded_by_each_rank": 9,
+    "nccl_version": "2.32.6+cuda12.9",
+    "nccl_topology_log": "type NVL/PIX, 6 channels",
+    "completed_prefill_graph_capture_ranks": 4,
+    "outcome": "Host headroom guard stopped decode graph capture before requests.",
+    "host_available_mib_at_stop": 4464,
+    "host_reserve_mib": 4608,
+    "last_observed_cgroup_peak_bytes": 17010253824,
+    "oom_events": 0,
+    "new_xid_count": 0
+  },
+  "four_gpu_numeric_ordinal_operator_check": {
+    "test": "Standalone stock SGLang custom all-reduce with no weights loaded",
+    "ranks": [
+      {
+        "uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+        "pci_bus": "00000000:3B:00.0"
+      },
+      {
+        "uuid": "GPU-31db4201-9d0a-7d48-e7d2-a3afdd8848bd",
+        "pci_bus": "00000000:AF:00.0"
+      },
+      {
+        "uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+        "pci_bus": "00000000:18:00.0"
+      },
+      {
+        "uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+        "pci_bus": "00000000:86:00.0"
+      }
+    ],
+    "cuda_visible_devices": [
+      1,
+      3,
+      0,
+      2
+    ],
+    "cuda_and_nvml_uuid_matches": 4,
+    "physical_links": "All six GPU pairs report NV2",
+    "nccl_version": "2.32.6+cuda12.9",
+    "cpus": 6,
+    "host_cgroup_limit_bytes": 8589934592,
+    "sglang_backend": "CustomAllReduceV2 selected on all four ranks",
+    "result": "CUDA 13.5 nvcc stopped compiling sgl_kernel_jit_communicator. The pre-Hopper branches in sgl_kernel/distributed/ptx.cuh use assert without its declaration. No reduction kernel ran.",
+    "new_xid_count": 0,
+    "model_performance_measured": false
   }
 }

@@ -30,7 +30,7 @@ On another V100, a paired comparison with a 192-register cap measured 1468.21 pr
 
 ## SGLang
 
-The official SGLang server selected Marlin for the AWQ experts and used CUDA graphs in both phases. It processed each 227-token prompt in one prefill chunk and generated 64 tokens. Median GPU throughput was **2015.34 tokens/s prefill** and **77.36 tokens/s decode** on the same V100 where native 1Cat reached 1427.41 and 76.13. A separate same-GPU comparison of 128- and 256-token chunks measured 1565.10 and 2001.75 prefill tokens/s. Decode held at 77.38 and 77.39. [Marlin responses, timers and native references](sglang-stock-marlin.json)
+An earlier SGLang run selected Marlin for the AWQ experts and used CUDA graphs in both phases. It processed each 227-token prompt in one prefill chunk and generated 64 tokens. Median GPU throughput was **2015.34 tokens/s prefill** and **77.36 tokens/s decode** on the same V100 where native 1Cat reached 1427.41 and 76.13. A separate same-GPU comparison of 128- and 256-token chunks measured 1565.10 and 2001.75 prefill tokens/s. Decode held at 77.38 and 77.39. [Marlin responses, timers and native references](sglang-stock-marlin.json)
 
 An earlier WNA16 configuration with 32-token chunks measured 311.97 prefill and 52.68 decode tokens/s. [WNA16 results](sglang-stock-sm80.json)
 
@@ -43,7 +43,7 @@ curl -fsSLO "$base/sglang.py" && curl -fsSLO "$base/prompts.json"
 python3 sglang.py
 ```
 
-The client gives each chat a fresh cache salt and checks the token counts and cache hits. It measures 227 input tokens with the GPU prefill timer and 63 subsequent tokens with the decode timer. With its default expert router and FlashInfer’s CUDA normalization, the official wheel reached 2016.06 prefill and 77.33 decode tokens/s. With FlashInfer’s default CuTe normalization it reached 1988.55 and 74.62. [Phase timings and replies](sglang-default-operators.json) · [Ubuntu guide](../sglang.md)
+The client gives each chat a fresh cache salt and checks the token counts and cache hits. It measures 227 input tokens with the GPU prefill timer and 63 subsequent tokens with the decode timer. The configuration in the Ubuntu guide uses the default expert router and FlashInfer’s CUDA normalization. Its medians were **2016.06 prefill and 77.33 decode tokens/s**. With FlashInfer’s default CuTe normalization it reached 1988.55 and 74.62. [Phase timings and replies](sglang-default-operators.json) · [Ubuntu guide](../sglang.md)
 
 The common client checks for ordinary prefill and decode phases. The archived NEXTN experiment measured speculative decoding separately. [NEXTN measurements](sglang-stock-mtp.json) · [Earlier Marlin comparisons](sglang-stock-marlin.json) · [Historical adapter experiment](sglang-results.json)
 
