@@ -60,7 +60,7 @@ Strata CUDA 13 with VF and cuBLAS FP32 prompt projections reached **1894.8 prefi
 
 ## NInfer
 
-The official NInfer server ran its published Qwen3.6-35B-A3B quantization with all weights on the V100. Each measured chat processed 227 uncached tokens and returned 64. Median throughput was 431.60 tokens/s prefill and 117.08 tokens/s decode. Native llama.cpp on the same card measured 470.60 and 99.49 with Qwen3.5 Q4_K_M. The comparison uses different checkpoints and quantizations. [Ubuntu guide and commands](../ninfer.md#5-benchmarks) · [Phase timings and responses](ninfer-results.json)
+The official NInfer server ran its published Qwen3.6-35B-A3B quantization with all weights on the V100. Each measured chat processed 227 uncached tokens and returned 64. With `VF_BF16_TC_GROUPS=1`, the server measured 570.65 tokens/s prefill and 116.93 tokens/s decode. With the default translation it measured 431.70 and 117.04. Native llama.cpp on the same card measured 470.60 and 99.49 with Qwen3.5 Q4_K_M. The comparison uses different checkpoints and quantizations. [Ubuntu guide and commands](../ninfer.md#5-benchmarks) · [Paired timings and responses](ninfer-bf16-mma.json)
 
 ## TensorFold
 

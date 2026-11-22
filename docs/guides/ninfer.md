@@ -78,7 +78,7 @@ Start the official server from the same NInfer directory. Disable prefix reuse t
 
 ```sh
 cmake --build build/rtx5090-release --parallel 4 --target ninfer-serve
-VF_CAPABILITY=12.0 vf ./build/rtx5090-release/apps/ninfer-serve qwen3_6_35b_a3b.ninfer \
+VF_CAPABILITY=12.0 VF_BF16_TC_GROUPS=1 vf ./build/rtx5090-release/apps/ninfer-serve qwen3_6_35b_a3b.ninfer \
   --host 127.0.0.1 --port 9086 --max-context 512 --no-thinking --no-prefix-reuse --host-cache-capacity 0B
 ```
 
@@ -88,18 +88,23 @@ In a second terminal, run the shared warm-up and three measured chats. The clien
 python3 ~/volta-forever/docs/guides/benchmarks/strata-ninfer.py ninfer
 ```
 
-After the warm-up, the three responses began with Kyoto, Lyon and Lima. Each used 227 input tokens, 64 output tokens and zero cached tokens. Both engines ran on the same Tesla V100-SXM2-32GB. [Per-request timings and replies](benchmarks/ninfer-results.json)
+After the warm-up, three prompts of 227 tokens produced 64 tokens each, with zero cached tokens. All replies began with the expected city. Both engines ran on the same Tesla V100-SXM2-32GB. [Original per-request timings and replies](benchmarks/ninfer-results.json)
 
 | Engine and checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
 |---|---:|---:|
-| NInfer, Qwen3.6 mixed Q4/Q5/Q6/Q8, default prefill | 431.6 | 117.1 |
-| Same NInfer server and weights, 128-token prefill chunks | 308.2 | 117.1 |
+| NInfer with the command above, Qwen3.6 mixed Q4/Q5/Q6/Q8 | **570.65** | **116.93** |
+| Same server with the default VF translation | 431.70 | 117.04 |
+| Same NInfer weights, 128-token prefill chunks | 308.2 | 117.1 |
 | Native llama.cpp, Qwen3.5 Q4_K_M | 470.6 | 99.5 |
 
-To reproduce the second row, add `--prefill-chunk 128` to the server command and rerun the same client. Splitting each prompt into 128 and 99 tokens reduced prefill throughput by 28.6%. Native llama.cpp needs GGUF weights, so its row uses a different checkpoint and quantization. [NInfer chunk settings](https://github.com/Neroued/ninfer/blob/master/docs/startup-configuration.md#model-and-execution)
+To reproduce the second row, set `VF_BF16_TC_GROUPS=0` in the server command. Enabling the option raised prefill throughput by 32.2%. FP32 accumulation order and the sign of a zero result can change. At temperature zero, the Kyoto and Lima continuations changed. All 64 token IDs matched for Lyon. [Matched timings, token IDs and GPU profile](benchmarks/ninfer-bf16-mma.json)
+
+The 128-token run used `--prefill-chunk 128` and processed each prompt in two chunks (128 and 99 tokens). The native llama.cpp reference uses a different checkpoint and quantization in GGUF. [NInfer chunk settings](https://github.com/Neroued/ninfer/blob/master/docs/startup-configuration.md#model-and-execution)
 
 ## 6. Additional notes
 
 This demo needs the linked-kernel fixes included in VF 0.1.1. VF 0.1.0 stopped with `cudaErrorSymbolNotFound` in NInfer’s token-count test even with the 12.0 profile. [VF release](https://github.com/nbald/volta-forever/releases/tag/v0.1.1)
+
+The Qwen3.6 file uses mixed precision. Across the 40 text layers, routed gate and up projections use Q4. Routed down projections use Q5 in 37 layers and Q6 in three. NInfer requires Q5 or Q6 down projections for this Q4 profile, and Q8 for the shared experts. The token embedding uses Q8 and the output head uses Q6. [Upstream weight checks](https://github.com/Neroued/ninfer/blob/ebdc67e584bcd9ebe16ee63af9abeb2118bac6cd/src/ops/moe/operands.cpp#L81-L103)
 
 Qwen3.5-35B-A3B Q4_K_M GGUF was rejected with `NInfer accepts only .ninfer artifacts`. The official `qwen3_6_35b_a3b` conversion recipe accepted the Qwen3.5 BF16 tensor names and shapes across all 14 source shards. Inference was verified with the published Qwen3.6 artifact. [NInfer conversion recipes](https://github.com/Neroued/ninfer/blob/master/docs/weight-conversion.md)
