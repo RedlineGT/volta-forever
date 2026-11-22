@@ -229,16 +229,27 @@ const OPTIONS_13_ONLY_ERROR: &[&str] = &["-r"];
 
 /// Rewrite the options array: change `-arch=sm_NN` (NN > 70) to `-arch=sm_70`, drop or reject
 /// 13.5-only options. Returns Ok((new options, original arch)) or Err(error code).
+///
+/// A null array is NVJITLINK_ERROR_INVALID_INPUT, even of no options, as nvJitLink 12.9.2 has it;
+/// so is a null option (where 12.9.2 reads through it).
 fn rewrite_options(
     num_options: c_uint,
     options: *const *const c_char,
 ) -> Result<(Vec<CString>, Option<String>), c_int> {
-    let mut result = Vec::with_capacity(num_options as usize);
+    if options.is_null() {
+        return Err(NVJITLINK_ERROR_INVALID_INPUT);
+    }
+    // (Not reserved by the number the caller gives.)
+    let mut result = Vec::new();
     let mut original_arch = None;
 
     for i in 0..num_options as usize {
-        // Safety: options array has num_options valid pointers to C strings.
-        let opt = unsafe { CStr::from_ptr(*options.add(i)) };
+        // Safety: options array has num_options pointers, each null or to a C string.
+        let opt = unsafe { *options.add(i) };
+        if opt.is_null() {
+            return Err(NVJITLINK_ERROR_INVALID_INPUT);
+        }
+        let opt = unsafe { CStr::from_ptr(opt) };
         let opt_str = opt.to_string_lossy();
 
         // Error on options that change semantics.
@@ -558,7 +569,9 @@ fn do_add_data(handle: HandlePtr, input_type: c_int, data: *const c_void, size: 
         Ok(l) => l,
         Err(e) => return e,
     };
-    if handle.is_null() || (data.is_null() && size > 0) {
+    // No data, or none at all: NVJITLINK_ERROR_INVALID_INPUT for every kind of input, as nvJitLink
+    // 12.9.2 has it (and before a slice is made of a null pointer).
+    if handle.is_null() || data.is_null() || size == 0 {
         return NVJITLINK_ERROR_INVALID_INPUT;
     }
 
@@ -1160,6 +1173,26 @@ mod tests {
         assert_eq!(result, NVJITLINK_SUCCESS);
         assert_eq!(major, 13);
         assert_eq!(minor, 5);
+    }
+
+    #[test]
+    fn null_options_are_invalid_input() {
+        // (Until 2026-11-22 a null array was read through, and so was a null option.)
+        assert_eq!(
+            rewrite_options(1, ptr::null()).unwrap_err(),
+            NVJITLINK_ERROR_INVALID_INPUT
+        );
+        assert_eq!(
+            rewrite_options(0, ptr::null()).unwrap_err(),
+            NVJITLINK_ERROR_INVALID_INPUT
+        );
+        let arch = CString::new("-arch=sm_75").unwrap();
+        let ptrs = [arch.as_ptr(), ptr::null()];
+        assert_eq!(
+            rewrite_options(2, ptrs.as_ptr()).unwrap_err(),
+            NVJITLINK_ERROR_INVALID_INPUT
+        );
+        assert_eq!(rewrite_options(0, ptrs.as_ptr()).unwrap().0.len(), 0);
     }
 
     #[test]
