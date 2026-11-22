@@ -200,5 +200,66 @@
         "tuned_relative_l2": 0.00043568891123868525
       }
     ]
+  },
+  "native_reference": {
+    "engine": "1Cat-vLLM",
+    "revision": "6db9c816cd9b936fa7d6aed31a404b4d23d1e6fc",
+    "pytorch": "2.10.0+cu128",
+    "gpu": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+    "model_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+    "speculative_decoding": false,
+    "prefix_caching": false,
+    "quality_check": {
+      "answer": "Paris",
+      "prompt_tokens": 25,
+      "completion_tokens": 2
+    },
+    "server_command": "vllm serve QuantTrio/Qwen3.5-35B-A3B-AWQ --served-model-name qwen --host 127.0.0.1 --port 18941 --tensor-parallel-size 1 --dtype half --language-model-only --max-model-len 512 --max-num-seqs 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching",
+    "warmup": {
+      "id": "warmup",
+      "input_tokens": 228,
+      "output_tokens": 64,
+      "prefill_s": 0.8403371120803058,
+      "decode_s": 0.8393507529981434,
+      "prefill_tokens_per_s": 271.3196843533092,
+      "decode_tokens_per_s": 75.05801332156469,
+      "text": "Lisbon, Portugal, is the location where our volunteer group gathers in a shared room situated directly by the entrance. Each morning, one team member places a blue folder on the long table while another inspects the signs near the stairs to report any changes before the doors open. We meet after lunch to review the morning"
+    },
+    "measurements": [
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.16194482217542827,
+        "decode_s": 0.8287737530190498,
+        "prefill_tokens_per_s": 1401.711996411346,
+        "decode_tokens_per_s": 76.01592083545619,
+        "text": "Kyoto, Japan, is the location where our volunteer group convenes daily to manage visitor interactions. Upon arrival, you will find a shared room situated directly by the entrance where a red notebook is placed on the long table each morning to record activities. Before the doors open, another team member inspects the signs by the"
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.15820683911442757,
+        "decode_s": 0.8275180419441313,
+        "prefill_tokens_per_s": 1434.8305121993862,
+        "decode_tokens_per_s": 76.13127062703167,
+        "text": "Lyon, France, is the location where our volunteer group convenes daily to serve the community. Upon arrival, you will find a shared room situated directly by the entrance where a green binder is placed on the long table each morning to organize our materials. Before the doors open, please assist by checking the signs near the"
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_s": 0.15902886493131518,
+        "decode_s": 0.8275062669999897,
+        "prefill_tokens_per_s": 1427.4138226292546,
+        "decode_tokens_per_s": 76.1323539317688,
+        "text": "Lima, Peru, is the meeting place where our volunteer group gathers in a shared room located by the entrance. Each morning, one volunteer places a yellow envelope on the long table while another checks the signs by the stairs to report any changes before the doors open. We meet after lunch to review the morning and agree on"
+      }
+    ],
+    "median": {
+      "prefill_tokens_per_s": 1427.4138226292546,
+      "decode_tokens_per_s": 76.13127062703167
+    }
   }
 }

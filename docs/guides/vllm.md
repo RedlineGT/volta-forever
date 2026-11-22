@@ -95,7 +95,7 @@ Each measured request processed 227 prompt tokens and generated 64 tokens. The c
 
 To reproduce the default run, stop the server, run `unset VLLM_TUNED_CONFIG_FOLDER` and repeat the same launch and benchmark. Both configurations used vLLM 0.34.0, PyTorch 2.14.0+cu130, VF at `c5e6295` and the same nine AWQ shards. [Per-request measurements and generated text](./benchmarks/vllm-expert-tiles.json)
 
-The native 1Cat-vLLM reference used to set the targets reached **1443.33 prefill** and **76.09 decode** tokens/s on a second V100-SXM2-32GB, with the same AWQ checkpoint, prompts and output lengths. [Native reference and earlier CUDA graph comparison](./benchmarks/vllm-graphs.json)
+Native 1Cat-vLLM on the same physical GPU reached **1427.41 prefill** and **76.13 decode** tokens/s with the same checkpoint and prompts. Both servers returned Paris and the three requested cities. An earlier run on another V100 set the targets at 1443.33 and 76.09. [Same-GPU results](./benchmarks/vllm-expert-tiles.json) · [Earlier native reference](./benchmarks/vllm-graphs.json)
 
 ## 6. Additional notes
 
