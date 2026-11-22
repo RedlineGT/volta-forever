@@ -1,0 +1,74 @@
+.version 8.8
+.target sm_90
+.address_size 64
+.visible .func bad() {
+    barrier.cluster.arrive;
+    ret;
+}
+.visible .global .u64 exported = bad;
+.func good() { ret; }
+.func invoke(.reg .b64 f) {
+    proto: .callprototype _ ();
+    call.uni f, (), proto;
+    ret;
+}
+.entry dispatch(.param .u64 pointer) {
+    .reg .b64 f;
+    ld.param.u64 f, [pointer];
+    call invoke, (f);
+    ret;
+}
+.entry bounded(.param .u64 pointer) {
+    .reg .b64 f;
+    ld.param.u64 f, [pointer];
+    unused: .callprototype _ ();
+    known: .calltargets good;
+    call.uni f, known;
+    ret;
+}
+.entry unrelated() { ret; }
+
+.visible .func good_u32(.param .b32 word) {
+    ret;
+}
+.visible .entry different_signature(.param .u64 pointer) {
+    .reg .b64 f;
+    .reg .u32 x;
+    ld.param.u64 f, [pointer];
+    other: .callprototype _ (.param .b32 x);
+    mov.u32 x, 9;
+    { .param .b32 arg;
+      st.param.b32 [arg], x;
+      call.uni f, (arg), other;
+    }
+    ret;
+}
+
+// A concrete return slot is part of the ABI.
+.func (.reg .b32 result) good_result() {
+    mov.b32 result, 7;
+    ret;
+}
+.visible .entry different_return(.param .u64 pointer) {
+    .reg .b64 f;
+    .reg .b32 result;
+    ld.param.u64 f, [pointer];
+    out_only: .callprototype (.reg .b32 _) _ ();
+    call.uni (result), f, (), out_only;
+    ret;
+}
+// Only two_args matches the following prototype. Its direct call can still reach bad.
+.func two_args(.reg .b32 x, .reg .b32 y) {
+    call bad, ();
+    ret;
+}
+.visible .entry transitive_dispatch(.param .u64 pointer) {
+    .reg .b64 f;
+    .reg .b32 x, y;
+    ld.param.u64 f, [pointer];
+    pair: .callprototype _ (.reg .b32 _, .reg .b32 _);
+    mov.b32 x, 1;
+    mov.b32 y, 2;
+    call.uni f, (x, y), pair;
+    ret;
+}

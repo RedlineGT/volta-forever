@@ -20,6 +20,8 @@ use std::ops::Range;
 
 use crate::scan;
 
+mod calls;
+
 fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'%' | b'.' | b'@')
 }
@@ -61,8 +63,9 @@ struct FuncDef {
     name: String,
     /// Range of the body (between the braces, inclusive).
     body: Range<usize>,
+    /// Range from the .func or .entry keyword to the opening brace.
+    signature: Range<usize>,
     /// Is this an `.entry` (kernel)?
-    #[allow(dead_code)]
     is_entry: bool,
 }
 
@@ -85,6 +88,8 @@ pub struct ModuleInfo {
     pub entries: Vec<String>,
     /// For each function (by name), functions it references in its body or through variable initializers.
     func_refs: HashMap<String, HashSet<String>>,
+    /// Functions containing a call through a prototype, whose runtime target is unknown.
+    unbounded_calls: HashSet<String>,
     /// For each function, module variables it references in its body or through initializers.
     var_refs: HashMap<String, HashSet<String>>,
     /// Module-level variable names that are written (stored to) by at least one function.
@@ -874,6 +879,7 @@ fn module_structure(text_str: &str) -> (usize, Vec<FuncDef>, Vec<String>, Module
         func_defs.push(FuncDef {
             range: def_start..def_end,
             name: name.clone(),
+            signature: directive..body.start,
             body,
             is_entry,
         });
@@ -1004,6 +1010,16 @@ impl ModuleInfo {
             .map(|d| d.name.clone())
             .collect();
 
+        let mut unbounded_calls = HashSet::new();
+        let mut targets = Vec::new();
+        if text_str.contains(".callprototype") {
+            for f in func_defs.iter().filter(|f| !f.is_entry) {
+                let signature = text_str[f.signature.clone()]
+                    .strip_prefix(".func")
+                    .and_then(|text| calls::Signature::parse(text, &f.name));
+                targets.push((&f.name, signature));
+            }
+        }
         let mut func_refs_map: HashMap<String, HashSet<String>> = HashMap::new();
         let mut var_refs_map: HashMap<String, HashSet<String>> = HashMap::new();
         let mut written_vars = HashSet::new();
@@ -1049,7 +1065,25 @@ impl ModuleInfo {
                     }
                 }
             }
-            let fn_refs: HashSet<String> = all_names.intersection(&all_func_names).cloned().collect();
+            let mut fn_refs: HashSet<String> = all_names.intersection(&all_func_names).cloned().collect();
+            if body_text.contains(".callprototype") {
+                let possible = scan::items(text_str.as_bytes(), func.body.clone())
+                    .map(|items| calls::used(text_str, &items))
+                    .unwrap_or_else(|| HashSet::from([None]));
+                if !possible.is_empty() {
+                    // Keep runtime pointers in one loaded module. The ordinary call graph
+                    // then propagates through each compatible target and its own callees.
+                    unbounded_calls.insert(func.name.clone());
+                    for (name, target) in &targets {
+                        if possible
+                            .iter()
+                            .any(|proto| proto.as_ref().zip(target.as_ref()).is_none_or(|(a, b)| a.compatible(b)))
+                        {
+                            fn_refs.insert((*name).clone());
+                        }
+                    }
+                }
+            }
             let vr: HashSet<String> = all_names.intersection(&all_var_names).cloned().collect();
             if need_taint {
                 let (var_writes, var_loads) = find_writes_to_globals(body_text, &persistent_names, &safe_callees);
@@ -1069,6 +1103,7 @@ impl ModuleInfo {
             func_defs,
             entries,
             func_refs: func_refs_map,
+            unbounded_calls,
             var_refs: var_refs_map,
             written_vars,
             escaped_vars,
@@ -1154,28 +1189,32 @@ impl ModuleInfo {
         visited
     }
 
+    fn may_call_unknown(&self, entry: &str, callees: &HashSet<String>) -> bool {
+        self.unbounded_calls.contains(entry) || !self.unbounded_calls.is_disjoint(callees)
+    }
+
     /// The transitive closure of module-level variables referenced by `entry` and its callees.
-    fn transitive_vars(&self, entry: &str) -> HashSet<String> {
-        let callees = self.transitive_callees(entry);
+    fn transitive_vars(&self, entry: &str, callees: &HashSet<String>) -> HashSet<String> {
         let mut vars = HashSet::new();
-        for func in std::iter::once(entry.to_string()).chain(callees) {
-            if let Some(vr) = self.var_refs.get(&func) {
+        for func in std::iter::once(entry).chain(callees.iter().map(String::as_str)) {
+            if let Some(vr) = self.var_refs.get(func) {
                 vars.extend(vr.iter().cloned());
             }
         }
         vars
     }
 
-    /// Whether an entry is independent: it references no persistent variable (.global, .const)
+    /// Whether an entry has statically known callees and references no persistent variable (.global, .const)
     /// transitively, except for message strings whose address flows only into vprintf/__assertfail.
     ///
     /// An independent entry compiles on demand in its own sub-module (with any message strings
     /// duplicated). A dependent entry comes from the whole module (materialized once).
     pub fn is_entry_independent(&self, entry: &str) -> bool {
-        if self.has_module_pragma {
+        let callees = self.transitive_callees(entry);
+        if self.has_module_pragma || self.may_call_unknown(entry, &callees) {
             return false;
         }
-        let vars = self.transitive_vars(entry);
+        let vars = self.transitive_vars(entry, &callees);
         let persistent_refs: Vec<&String> = vars.iter().filter(|v| self.persistent_names.contains(*v)).collect();
         if persistent_refs.is_empty() {
             return true;
@@ -1334,7 +1373,7 @@ impl ModuleInfo {
     /// The persistent variables that make `entry` dependent (not a message string).
     /// Empty if the entry is independent.
     pub fn dependent_vars(&self, entry: &str) -> Vec<String> {
-        let vars = self.transitive_vars(entry);
+        let vars = self.transitive_vars(entry, &self.transitive_callees(entry));
         vars.iter()
             .filter(|v| self.persistent_names.contains(*v))
             .filter(|v| !self.is_message_string_only(v))
@@ -1353,7 +1392,7 @@ impl ModuleInfo {
     }
 
     /// Extract a sub-module containing only the named entry function and its dependencies.
-    /// Returns `None` if the entry function is not in this module.
+    /// Returns `None` if the entry is missing or needs a module pragma.
     pub fn extract(&self, entry_name: &str) -> Option<Vec<u8>> {
         self.extract_with_debug(entry_name, &self.file_directives, None)
     }
@@ -1369,7 +1408,7 @@ impl ModuleInfo {
         }
 
         let needed_funcs = self.transitive_callees(entry_name);
-        let needed_vars = self.transitive_vars(entry_name);
+        let needed_vars = self.transitive_vars(entry_name, &needed_funcs);
 
         // A declaration or definition used as an initializer must precede that initializer.
         // Keep the original relative order of all selected items.
@@ -1418,10 +1457,11 @@ impl ModuleInfo {
     }
 
     /// Each kernel with the functions it reaches: itself first, then those it references, directly or
-    /// through others, in the order of their names.
+    /// through others, in the order of their names. A call through a runtime pointer with only
+    /// a prototype can reach any ABI-compatible device-function definition in the module.
     pub fn reach(&self) -> impl Iterator<Item = (&str, Vec<String>)> + '_ {
         self.entries.iter().map(|entry| {
-            let mut callees: Vec<String> = self.transitive_callees(entry).into_iter().collect();
+            let mut callees: Vec<_> = self.transitive_callees(entry).into_iter().collect();
             callees.sort();
             let mut reached = Vec::with_capacity(callees.len() + 1);
             reached.push(entry.clone());
@@ -1441,34 +1481,6 @@ pub struct LinkedDependencies {
     kernels: Vec<(usize, String)>,
     trapped: Vec<(usize, crate::Trapped)>,
     indirect: Vec<(usize, String)>,
-}
-
-/// Indirect calls specify either a complete target list (an array or a .calltargets directive),
-/// whose referenced functions are already in the graph, or only a .callprototype signature.
-fn calls_through_prototype(source: &str, items: &[scan::Item]) -> bool {
-    let mut prototypes = HashSet::new();
-    for (index, item) in items.iter().enumerate() {
-        if matches!(&item.kind, scan::Kind::Statement { opcode, .. } if &source[opcode.clone()] == ".callprototype") {
-            let Some(label) = index
-                .checked_sub(1)
-                .and_then(|i| items.get(i))
-                .filter(|item| item.kind == scan::Kind::Label)
-            else {
-                return true;
-            };
-            prototypes.insert(source[label.range.clone()].trim_end_matches(':').trim());
-        }
-    }
-    !prototypes.is_empty()
-        && items.iter().any(|item| {
-            let scan::Kind::Statement { opcode, operands, .. } = &item.kind else {
-                return false;
-            };
-            source[opcode.clone()].split('.').next() == Some("call")
-                && scan::split_operands(&source[operands.clone()])
-                    .last()
-                    .is_some_and(|target| prototypes.contains(target))
-        })
 }
 
 impl LinkedDependencies {
@@ -1519,7 +1531,7 @@ impl LinkedDependencies {
             let Some(items) = scan::items(source.as_bytes(), f.body.clone()) else {
                 return false;
             };
-            if calls_through_prototype(source, &items) {
+            if !calls::used(source, &items).is_empty() {
                 self.indirect.push((caller, f.name.clone()));
             }
             for target in functions.iter().chain(&info.var_refs[&f.name]) {

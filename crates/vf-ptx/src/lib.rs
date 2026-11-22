@@ -825,6 +825,39 @@ mod tests {
     }
 
     #[test]
+    fn single_module_refuses_an_unbounded_call_to_a_trapped_function() {
+        let text = include_bytes!("../tests/data/indirect-calls.ptx");
+        let (_, result) = lower_to_volta(text);
+        assert_eq!(result.trapped.len(), 1);
+        assert_eq!(result.trapped[0].function, "bad");
+        let refused = result
+            .refused
+            .iter()
+            .map(|r| (r.kernel.as_str(), r.function.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(refused, [("dispatch", "bad"), ("transitive_dispatch", "bad")]);
+
+        let recovered = crate::without_refused(text, "ptxas input, line 5; error : fixture").unwrap();
+        let refused_again: Vec<_> = recovered
+            .kernels
+            .iter()
+            .map(|r| (r.kernel.as_str(), r.function.as_str()))
+            .collect();
+        assert_eq!(refused_again, refused);
+        assert!(recovered.kernels.iter().all(|r| r.reason == "fixture"));
+        let info = deps::ModuleInfo::analyse(text);
+        assert!(!info.is_entry_independent("dispatch"));
+        assert!(
+            String::from_utf8(info.extract("dispatch").unwrap())
+                .unwrap()
+                .contains(".func bad()")
+        );
+        assert!(info.extract("bounded").is_some());
+        assert!(info.is_entry_independent("bounded"));
+        assert!(info.is_entry_independent("unrelated"));
+    }
+
+    #[test]
     fn kernels_answer_for_the_functions_they_call() {
         let text = "\
 .version 9.5

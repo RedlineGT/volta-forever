@@ -328,6 +328,15 @@ log=$out/logs/translated-guard-written.log
 VF_BORROW=8 LD_LIBRARY_PATH=$proxy VF_LOG_LEVEL=1 "$out/bin/diffrun" "$G/translate/k_guards.sm70.cubin" "$G/translate/k_guards.guard-written.sm75.cubin" >"$log" 2>&1
 check translated-guard-written "SUMMARY: 3 PASS, 0 FAIL" "3 kernels with emulated instructions were given to the program"
 
+
+for lazy in 0 1; do
+    log=$out/logs/indirect-lookup-$lazy.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LAZY=$lazy python3 "$W/tests/gpu/lookup.py" \
+        "$W/crates/vf-ptx/tests/data/indirect-calls.ptx" dispatch=218 bounded=0 unrelated=0 \
+        different_signature=0 different_return=0 transitive_dispatch=218 >"$log" 2>&1
+    check "indirect-lookup-$lazy" "^all lookup results match$"
+done
+
 rt runtime-12.9 rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "own kernel: 0/65536 wrong" "sgemm check: 0 wrong" "half gemm check: 0 wrong"
 rt runtime-13.5-ptx rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "runtime 13050, driver API 13000" "rt_probe.135.sm75ptx is told compute capability 7.5: its code starts there" "device 0: .*sm_75" "PTX for sm_75 retargeted" "own kernel: 0/65536 wrong" "machine code for sm_75 translated" "kernel volta_sgemm_.* is not given to the program: its machine code for sm_75 is not translated" "cublasCreate -> 0 " "cublasSgemm -> 13 "
 rt runtime-13.5-cublas-forwarded rt_probe.135.sm75ptx "$W/dist/forward:$T/cuda-12.9.2/lib" "device 0: .*sm_75" "own kernel: 0/65536 wrong" "libcublas.so.12[0-9.]* is told the real compute capability" "cuBLAS version 120902" "sgemm check: 0 wrong" "half gemm check: 0 wrong"

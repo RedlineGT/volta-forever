@@ -87,6 +87,11 @@ and descriptor writes. Unsupported functions are refused individually. Other str
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of
 blocks, Hopper's barriers, tensor maps (`docs/emulations.md`, "Other instructions").
+For an indirect call in a PTX module, an explicit `.calltargets` list identifies the
+possible callees. With only a `.callprototype`, VF follows each device function that
+could match the declared input and return lists. It distinguishes ordinary 32-bit and
+64-bit scalars. Unfamiliar declarations, including array parameters, leave all targets
+possible. A kernel is refused if one of those paths reaches a trapped function.
 
 ## Kernels launched from a second translation
 
