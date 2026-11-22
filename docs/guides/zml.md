@@ -54,34 +54,33 @@ Read the final `decode` line after running the command above. On one Tesla V100-
 
 The official **LLMD** server also runs the full AMD MXFP4 Qwen3.5-35B-A3B checkpoint on one V100. The measured September distribution includes an `llmd` executable and its adjacent `llmd.runfiles` directory. The 35B run uses a VF build from the main branch with external assembler support. Sections 3 and 4 install and run the separate open-source ZML example. [LLMD distribution](https://zml.ai/llmd/) · [VF compiler support](https://github.com/nbald/volta-forever/commit/9013f262ee3866d999013736f6886429eb4803c4)
 
-With the tested LLMD distribution installed, set `MODEL` to the local AMD checkpoint directory and run the following in the directory containing `llmd`. The defaults enable XLA autotuning. MTP is disabled. [Tested AMD checkpoint](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1)
+Set `MODEL` to the local AMD checkpoint directory. From the directory containing `llmd` and `llmd.runfiles`, run the server with the desired column mode. Use `0` for the tiles-only control, `ordered` to preserve the scalar order of FP32 accumulation, or `tree` to allow reassociation. All three keep XLA autotuning enabled and use single-token decoding with drafting disabled. [AMD checkpoint](https://huggingface.co/amd/Qwen3.5-35B-A3B-MXFP4/tree/2e19c6576db91e5d5a93455415619262218bf8a1) · [VF column modes](https://github.com/nbald/volta-forever/commit/97ebef26f1d14d26174be189d35b795950844456)
 
 ```bash
-VF_CAPABILITY=8.0 VF_BF16_TC_TILES=1 XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 \
+export VF_BF16_COLUMN=tree
+VF_CAPABILITY=8.0 VF_BF16_TC_TILES=1 VF_PROXY_CACHE=0 \
+  XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 \
+  XDG_CACHE_HOME="$(mktemp -d)" CUDA_CACHE_PATH="$(mktemp -d)" \
   vf ./llmd --model="${MODEL:?Set MODEL to the local AMD checkpoint directory}" --model-name=qwen \
   --backend=triton --batch-size=1 --prefill-chunk-size=256 --token-batch-size=256 \
   --page-chunk-size=16 --max-context-len=512 --gpu-memory-fraction=0.94 \
   --cache-memory-fraction=0.97 --topk=1 --listen=127.0.0.1:8000
 ```
 
-Run the client from a second terminal while the server is idle. It streams four answers with `reasoning_effort="none"`, checks the expected city in each and reads the server counters before and after each request. Use a VF build containing the guarded BF16 tiles option. [VF change](https://github.com/nbald/volta-forever/commit/e2437776d38ed3dde9e8cc67fd0ffe68c7f55bbf)
+In a second terminal, run the client against the idle server. For a paired comparison, stop LLMD, change `VF_BF16_COLUMN`, repeat the server command on the same card and rerun the client. For the separate GPU timings, start a fresh server with the CUPTI collector. [Common prompts](./benchmarks/prompts.json) · [CUPTI commands](./benchmarks/README.md#llmd-gpu-prefill)
 
 ```bash
-base=https://raw.githubusercontent.com/nbald/volta-forever/main/docs/guides/benchmarks
-curl -fsSLO "$base/zml.py" && curl -fsSLO "$base/prompts.json"
-python3 zml.py
+python3 "$HOME/volta-forever/docs/guides/benchmarks/zml.py"
 ```
 
-| Prompt | Input / output tokens | GPU prefill (tokens/s) | Server decode (steps/s) |
-|---|---:|---:|---:|
-| Kyoto | 227 / 64 | 745.82 | 46.01 |
-| Lyon | 227 / 64 | 745.71 | 46.10 |
-| Lima | 227 / 64 | 743.52 | 46.07 |
-| **Median** | **227 / 64** | **745.71** | **46.07** |
+Each median covers three uncached 227-token prompts and 64-token replies after warm-up. All replies began with the expected city. LLMD times 63 decode steps after the first token. The GPU columns use a separate series of marked requests and time the complete forward graphs. [Per-request replies, counters and graph spans](./benchmarks/zml-llmd-column.json)
 
-On the same V100, enabling guarded BF16 tiles raised GPU prefill from **681.68 to 745.71 tokens/s**. Decode measured **46.15** with tiles off and **46.07** with tiles on. CUPTI timed all kernels in each prefill graph in a separate run. The server measured **673.59 / 739.41 prompt tokens/s through the first token** with tiles off / on. An independent run of the client above reproduced **659.88 / 718.35** through the first token and **45.81 / 44.97** in decode. Each run produced the expected city and handover. [Request timings and replies](./benchmarks/zml-llmd-autotune.json) · [Reproduce GPU prefill with CUPTI](./benchmarks/README.md#llmd-gpu-prefill)
+| Single-card pair | Column mode | GPU prefill (tokens/s) | GPU decode (graphs/s) | Prompt tokens / server TTFT (tokens/s) | Server decode (steps/s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| V100 `08cd61f4` | Off → ordered | 744.01 → 750.70 | 49.58 → 50.82 | 737.01 → 746.71 | 45.94 → **47.18** |
+| V100 `148f2829` | Off → tree | 748.68 → 741.99 | 49.18 → 54.17 | 737.01 → 737.01 | 45.57 → **49.19** |
 
-With autotuning disabled, LLMD measured **482.98 / 38.35**. The input rate includes all server work through the first token. Native 1Cat-vLLM reached **1427.41 prefill / 76.13 decode** on the same GPU and prompts with QuantTrio AWQ. The checkpoint format and prompt timer differ. [Prior chunk size measurements](./benchmarks/zml-llmd-mxfp4.json) · [Native reference](./benchmarks/zml-awq-experimental.json)
+Tree saved **1.87 ms per decode graph**, including **1.72 ms** in the two expert projections. Its reassociated FP32 sums can differ under cancellation. Ordered matched scalar bits on all 16,384 operator outputs tested. A clean Ubuntu 24.04 run on a third V100 reproduced **750.11 GPU prefill tokens/s** with ordered. Native 1Cat-vLLM reached **1427.41 / 76.13** and **1443.33 / 76.09** prefill/decode on the two respective cards with QuantTrio AWQ. Both LLMD pairs remain below those reference rates, which use a different Q4 checkpoint and server phase timers. [Column results and numerical limits](./benchmarks/zml-llmd-column.json) · [Earlier two-by-two tile comparison](./benchmarks/zml-llmd-autotune.json) · [Earlier chunk-size comparison](./benchmarks/zml-llmd-mxfp4.json)
 
 ## 6. Additional notes
 

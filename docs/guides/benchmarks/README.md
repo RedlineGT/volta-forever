@@ -2,7 +2,7 @@
 
 The common comparison uses single-token autoregressive decoding with **MTP and all other speculative decoding disabled**. Start the engine using its Ubuntu guide. Run the benchmark on the same computer, with one model loaded and the server idle. Each run uses the model's chat template at temperature zero, with thinking disabled and a limit of 64 output tokens. The warm-up starts with Lisbon. The three measured prompts start with Kyoto, Lyon and Lima and ask for a handover based on different notebook entries. Read the generated text when checking a new engine. [Common prompts](prompts.json)
 
-The measured vLLM server reported `speculative_config=None`, and SGLang reported `speculative_algorithm=None` and no draft-model path. FreeToken used the standard Q4_K_M file with no drafter supplied. Strata reported zero proposed and accepted drafts on every measured request. TensorFold reported `drafts=false`. NInfer’s Qwen3.5 and Qwen3.6 servers reported `speculative.backend=none` and zero draft rounds on every request.
+The measured vLLM server reported `speculative_config=None`, and SGLang reported `speculative_algorithm=None` and no draft-model path. FreeToken reported `speculative_algorithm=None` on the common UD-Q4_K_M file. Strata reported zero proposed and accepted drafts on every measured request. TensorFold reported `drafts=false`. NInfer’s Qwen3.5 and Qwen3.6 servers reported `speculative.backend=none` and zero draft rounds on every request.
 
 ## vLLM
 
@@ -50,11 +50,11 @@ The common client checks for ordinary prefill and decode phases. The archived NE
 ## FreeToken
 
 Run the streaming client and read the scheduler timings as described in the [FreeToken guide](../freetoken.md#5-benchmarks).
-With batch-one CUDA graphs, FreeToken measured **884.56 prefill** and **109.26 decode** tokens/s. Native llama.cpp on the same V100 and Q4_K_M checkpoint measured **474.57** and **99.77** tokens/s. Each of the three measured requests read 227 uncached tokens and generated 64. [FreeToken measurements](freetoken-graphs.json) · [Native reference and commands](llamacpp-reference.json) · [Earlier eager run](freetoken-results.json)
+With batch-one CUDA graphs, FreeToken measured **905.68 prefill** and **108.75 decode** tokens/s. Native llama.cpp measured **494.57 / 101.27** using the same GGUF on the same card. [Requests and native reference](common-gguf-q4-k-m.json)
 
 ## ZML
 
-With 256-token batches and chunks, XLA autotuning and guarded BF16 tiles, the official LLMD server reached **745.71 tokens/s of GPU prefill** and **46.07 decode steps/s**. The paired control with tiles off reached **681.68 / 46.15**. The server also recorded **739.41** versus **673.59** input tokens/s through the first token. Each measured request processed 227 uncached input tokens and generated 64. [Ubuntu guide and client](../zml.md#5-benchmarks) · [Requests, GPU graph timings and independent repeat](zml-llmd-autotune.json)
+With guarded BF16 tiles enabled, the official LLMD server measured **741.99 GPU prefill tokens/s and 49.19 server decode steps/s** using the single-column tree reduction, compared with 748.68 and 45.57 on the same V100 with the column pass off. On a second V100, ordered accumulation measured **750.70 / 47.18** versus 744.01 / 45.94. All runs used the AMD MXFP4 checkpoint, 256-token chunks and three uncached 227/64 requests. [Ubuntu guide and commands](../zml.md#5-benchmarks) · [Per-request timings, replies and numerical checks](zml-llmd-column.json) · [Earlier two-by-two tile comparison](zml-llmd-autotune.json)
 
 ### LLMD GPU prefill
 
@@ -87,7 +87,7 @@ The result includes the input and output counts, the elapsed time from the first
 
 ## Strata
 
-With **MTP and all other drafting disabled**, Strata CUDA 13 with VF reached **1982.5 prefill and 104.25 decode tokens/s**. Native Strata CUDA 12 reached 1948.5 and 99.07 on the same V100, with the same checkpoint and cuBLAS setting. Each measured request read 227 uncached tokens and generated 64, with zero draft proposals and acceptances. The common decode numerator is 63. [Ubuntu guide](../strata.md#5-benchmarks) · [Non-speculative measurements](strata-uniform-divisor.json) · [Historical MTP experiment](strata-results.json)
+Strata CUDA 13 with VF reached **2000.00 prefill / 109.13 decode tokens/s**. Native CUDA 12 reached **1968.80 / 105.19** on the same card and UD-Q4_K_M file. Every request reported zero draft proposals and acceptances. The decode numerator is 63. [Ubuntu guide](../strata.md#5-benchmarks) · [Paired measurements](common-gguf-q4-k-m.json)
 
 ## NInfer
 
@@ -99,4 +99,4 @@ On the official TensorFold 1.3.3 server, each measured request read 227 uncached
 
 ## llama.cpp
 
-At upstream b12418, native CUDA 12.9.2 on sm_70 processed **497.33 prefill / 100.43 decode tokens/s**. The official CUDA 13.5 archive with VF 0.1.1 reached **1076.51 / 99.12**. Both used the same V100, Q4_K_M checkpoint, three uncached 227-token prompts and 64-token outputs. Flash attention was enabled and MTP disabled. [Ubuntu guide](../llamacpp.md) · [Paired timings and replies](llamacpp-cuda12-cuda13.json)
+At upstream b12418, native CUDA 12.9.2 measured **494.57 prefill / 101.27 decode tokens/s**. The official CUDA 13.5 archive with VF 0.1.1 measured **1089.57 / 101.11**. Both used flash attention and the same Unsloth UD-Q4_K_M file as Strata and FreeToken. [Ubuntu guide](../llamacpp.md) · [Paired measurements](common-gguf-q4-k-m.json)

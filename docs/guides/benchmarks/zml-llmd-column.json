@@ -1,0 +1,621 @@
+{
+  "engine": {
+    "name": "Official ZML LLMD",
+    "distribution": "20260924.0-cuda",
+    "executable_sha256": "cd0c30103e38608fde2a3cc629b1a9cd940389de771912fa19a3dc1cfee0b075",
+    "upstream_binary_modified": false
+  },
+  "vf": {
+    "public_column_pass_commit": "97ebef26f1d14d26174be189d35b795950844456",
+    "cuda_ptxas": "12.9.2 toolkit",
+    "build_evidence": "The server pairs used pre-integration builds. The reviewed revision and measured builds produced byte-identical cubins for both observed expert PTX inputs and the independent test tile, separately for ordered and tree."
+  },
+  "checkpoint": {
+    "repository": "amd/Qwen3.5-35B-A3B-MXFP4",
+    "revision": "2e19c6576db91e5d5a93455415619262218bf8a1",
+    "weight_shards": 14,
+    "weight_bytes": 24600620848,
+    "format": "AMD MXFP4",
+    "sha256_evidence": "zml-llmd-mxfp4.json"
+  },
+  "hardware": {
+    "model": "Tesla V100-SXM2-32GB",
+    "driver": "580.178.04"
+  },
+  "workload": {
+    "prompts": "prompts.json",
+    "batch_size": 1,
+    "temperature": 0,
+    "reasoning_effort": "none",
+    "speculative_decoding": false,
+    "warmup": "Lisbon",
+    "measured_cities": [
+      "Kyoto",
+      "Lyon",
+      "Lima"
+    ],
+    "prefill_chunk_size": 256,
+    "token_batch_size": 256,
+    "xla_autotuning": "default",
+    "paired_server_start": "Each pair used one physical V100, two fresh server processes and private compilation caches. The 2x2 tile option was on in both modes."
+  },
+  "reproduction": {
+    "working_directory": "Directory containing the September LLMD executable and its adjacent llmd.runfiles. Set MODEL to the verified local AMD checkpoint. Install VF from the Ubuntu guide.",
+    "environment_by_mode": [
+      "export VF_BF16_COLUMN=0",
+      "export VF_BF16_COLUMN=ordered",
+      "export VF_BF16_COLUMN=tree"
+    ],
+    "server": "VF_CAPABILITY=8.0 VF_BF16_TC_TILES=1 VF_PROXY_CACHE=0 XLA_FLAGS=--xla_gpu_force_compilation_parallelism=1 XDG_CACHE_HOME=\"$(mktemp -d)\" CUDA_CACHE_PATH=\"$(mktemp -d)\" vf ./llmd --model=\"${MODEL:?Set MODEL to the local AMD checkpoint directory}\" --model-name=qwen --backend=triton --batch-size=1 --prefill-chunk-size=256 --token-batch-size=256 --page-chunk-size=16 --max-context-len=512 --gpu-memory-fraction=0.94 --cache-memory-fraction=0.97 --topk=1 --listen=127.0.0.1:8000",
+    "client_in_second_terminal": "python3 \"$HOME/volta-forever/docs/guides/benchmarks/zml.py\"",
+    "profile": "Follow README.md#llmd-gpu-prefill for the collector and a fresh server in each mode.",
+    "client_for_profile": "bench=\"$HOME/volta-forever/docs/guides/benchmarks\"; python3 \"$bench/zml.py\" --profile-dir \"$VF_LLMD_PROFILE_DIR\" > \"$VF_LLMD_PROFILE_DIR/responses.jsonl\"",
+    "read_gpu_graphs": "python3 \"$bench/zml-profile.py\" \"$VF_LLMD_PROFILE_DIR/activity.tsv\" \"$VF_LLMD_PROFILE_DIR/responses.jsonl\""
+  },
+  "metric_definitions": {
+    "prompt_tokens_per_server_ttft_s": "Delta of prefill_tokens_total divided by the single observation in gen_ai_server_time_to_first_token_sum. This includes first-token work.",
+    "server_decode_steps_per_s": "Delta of decode_steps_total divided by delta of decode_seconds_total. The 64-token completions each contribute 63 post-first-token decode steps.",
+    "gpu_prefill_tokens_per_s": "227 divided by the span in seconds from first kernel start to last kernel end of the single prefill graph. CUPTI recorded an independent set of requests.",
+    "gpu_decode_graphs_per_s": "Reciprocal of the median of complete single-token decode graph spans within each request. Each graph has 40 gate/up and 40 down projection launches. The median across requests is reported.",
+    "expert_ms_per_decode_graph": "Total kernel duration in both expert projections, summed across all complete decode graphs for the request and divided by their count.",
+    "median": "Median of the three individual request rates. Warmup is excluded."
+  },
+  "paired_runs": {
+    "ordered": {
+      "gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+      "server_counters_and_cupti": "Ordered used separate request series on the same servers. Tree used another OFF/ON server pair on the same UUID for the GPU trace.",
+      "modes": {
+        "off": {
+          "VF_BF16_COLUMN": "0",
+          "observed_vf_ptxas_sha256": "2b853aa7bacb86d6a504baa5133ca7d2dbc6e9f6552c3cc5060c3bf597ad9ef2",
+          "semantic_reply": "Paris",
+          "server_requests": [
+            {
+              "id": "warmup",
+              "city": "Lisbon",
+              "input_tokens": 228,
+              "output_tokens": 64,
+              "server_ttft_s": 0.31299999999999994,
+              "decode_steps": 63,
+              "server_decode_s": 1.3672424320000003,
+              "prompt_tokens_per_server_ttft_s": 728.4345047923324,
+              "server_decode_steps_per_s": 46.07814863370184,
+              "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another checks the signs by the stairs to report any changes before the doors open"
+            },
+            {
+              "id": "run1",
+              "city": "Kyoto",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30800000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.3811532070000012,
+              "prompt_tokens_per_server_ttft_s": 737.0129870129869,
+              "server_decode_steps_per_s": 45.61405619644624,
+              "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors open"
+            },
+            {
+              "id": "run2",
+              "city": "Lyon",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.31000000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.3714090019999996,
+              "prompt_tokens_per_server_ttft_s": 732.2580645161289,
+              "server_decode_steps_per_s": 45.93815550876778,
+              "text": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in the shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another volunteer"
+            },
+            {
+              "id": "run3",
+              "city": "Lima",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30799999999999983,
+              "decode_steps": 63,
+              "server_decode_s": 1.3709143100000007,
+              "prompt_tokens_per_server_ttft_s": 737.0129870129874,
+              "server_decode_steps_per_s": 45.95473221079731,
+              "text": "Lima, Peru, is the location where our volunteer group convenes daily in a shared room situated by the entrance. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any changes before the doors open. We meet after"
+            }
+          ],
+          "server_medians": {
+            "prompt_tokens_per_server_ttft_s": 737.0129870129869,
+            "server_decode_steps_per_s": 45.93815550876778
+          },
+          "separate_cupti_requests": [
+            {
+              "id": "run1",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 305.103102,
+              "gpu_prefill_tokens_per_s": 744.0107901623367,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 20.1694545,
+              "gpu_decode_graphs_per_s": 49.57992294734595,
+              "experts_ms_per_decode_graph": 9.954188109375,
+              "first_word": "Kyoto"
+            },
+            {
+              "id": "run2",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 304.727266,
+              "gpu_prefill_tokens_per_s": 744.9284173999711,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 20.1829425,
+              "gpu_decode_graphs_per_s": 49.546789324698324,
+              "experts_ms_per_decode_graph": 9.95657740625,
+              "first_word": "Lyon"
+            },
+            {
+              "id": "run3",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 305.488411,
+              "gpu_prefill_tokens_per_s": 743.0723779567534,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 20.167053499999998,
+              "gpu_decode_graphs_per_s": 49.58582571321091,
+              "experts_ms_per_decode_graph": 9.953006953125,
+              "first_word": "Lima"
+            }
+          ],
+          "cupti_medians": {
+            "gpu_prefill_tokens_per_s": 744.0107901623367,
+            "gpu_decode_graphs_per_s": 49.57992294734595,
+            "median_decode_graph_ms": 20.1694545,
+            "experts_ms_per_decode_graph": 9.954188109375
+          },
+          "cupti_dropped_records": 0
+        },
+        "ordered": {
+          "VF_BF16_COLUMN": "ordered",
+          "observed_vf_ptxas_sha256": "2b853aa7bacb86d6a504baa5133ca7d2dbc6e9f6552c3cc5060c3bf597ad9ef2",
+          "semantic_reply": "Paris",
+          "server_requests": [
+            {
+              "id": "warmup",
+              "city": "Lisbon",
+              "input_tokens": 228,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30999999999999994,
+              "decode_steps": 63,
+              "server_decode_s": 1.3389446139999996,
+              "prompt_tokens_per_server_ttft_s": 735.4838709677421,
+              "server_decode_steps_per_s": 47.051983585633224,
+              "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another carefully inspects the signs by the stairs to report any changes before the"
+            },
+            {
+              "id": "run1",
+              "city": "Kyoto",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30400000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.3351964699999999,
+              "prompt_tokens_per_server_ttft_s": 746.7105263157894,
+              "server_decode_steps_per_s": 47.184067225702,
+              "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to document our activities, while another checks the signs by the stairs to report any changes before the doors open. We write"
+            },
+            {
+              "id": "run2",
+              "city": "Lyon",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30400000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.3359998940000004,
+              "prompt_tokens_per_server_ttft_s": 746.7105263157894,
+              "server_decode_steps_per_s": 47.15569236414923,
+              "text": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in the shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another volunteer"
+            },
+            {
+              "id": "run3",
+              "city": "Lima",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30499999999999994,
+              "decode_steps": 63,
+              "server_decode_s": 1.3335487900000027,
+              "prompt_tokens_per_server_ttft_s": 744.2622950819674,
+              "server_decode_steps_per_s": 47.24236598797399,
+              "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in the shared room situated by the entrance, where a yellow envelope is placed on the long table each morning to signal the start of operations. Before the doors open, another volunteer"
+            }
+          ],
+          "server_medians": {
+            "prompt_tokens_per_server_ttft_s": 746.7105263157894,
+            "server_decode_steps_per_s": 47.184067225702
+          },
+          "separate_cupti_requests": [
+            {
+              "id": "run1",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 302.383645,
+              "gpu_prefill_tokens_per_s": 750.7019766231074,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 19.678897499999998,
+              "gpu_decode_graphs_per_s": 50.81585490244055,
+              "experts_ms_per_decode_graph": 9.48486884375,
+              "first_word": "Kyoto"
+            },
+            {
+              "id": "run2",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 302.08284699999996,
+              "gpu_prefill_tokens_per_s": 751.4494856439169,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 19.706065000000002,
+              "gpu_decode_graphs_per_s": 50.74579831133207,
+              "experts_ms_per_decode_graph": 9.4937303125,
+              "first_word": "Lyon"
+            },
+            {
+              "id": "run3",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 303.742415,
+              "gpu_prefill_tokens_per_s": 747.3437649463609,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 19.65426,
+              "gpu_decode_graphs_per_s": 50.87955486495039,
+              "experts_ms_per_decode_graph": 9.486249421875,
+              "first_word": "Lima"
+            }
+          ],
+          "cupti_medians": {
+            "gpu_prefill_tokens_per_s": 750.7019766231074,
+            "gpu_decode_graphs_per_s": 50.81585490244055,
+            "median_decode_graph_ms": 19.678897499999998,
+            "experts_ms_per_decode_graph": 9.486249421875
+          },
+          "cupti_dropped_records": 0
+        }
+      },
+      "change": {
+        "server_decode_percent": 2.7121500703188417,
+        "gpu_prefill_percent": 0.8993399758773446,
+        "gpu_decode_percent": 2.4928073333376544,
+        "gpu_decode_graph_saved_ms": 0.4905570000000026,
+        "experts_saved_ms": 0.4679386875000002,
+        "expert_share_of_graph_saving": 0.953892590463489
+      },
+      "reference": {
+        "engine": "Native 1Cat-vLLM",
+        "checkpoint": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+        "checkpoint_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+        "same_gpu_uuid": "GPU-08cd61f4-a5ac-9432-bf41-f8148bb38c5c",
+        "prefill_tokens_per_s": 1427.4138226292546,
+        "decode_tokens_per_s": 76.13127062703167,
+        "evidence": "zml-awq-experimental.json",
+        "comparison": "Same prompts and GPU. Native phases come from server timers. LLMD uses a different checkpoint quantization and a separate CUPTI measurement for GPU prefill."
+      },
+      "visible_answer_identical_to_pair_control": {
+        "warmup": false,
+        "run1": false,
+        "run2": true,
+        "run3": false
+      }
+    },
+    "tree": {
+      "gpu_uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+      "server_counters_and_cupti": "Ordered used separate request series on the same servers. Tree used another OFF/ON server pair on the same UUID for the GPU trace.",
+      "modes": {
+        "off": {
+          "VF_BF16_COLUMN": "0",
+          "observed_vf_ptxas_sha256": "78a8cd76cfb4a40cf5e7816f735af957154e2f1432c9687e4bef5268ce7cbe8f",
+          "semantic_reply": "Paris",
+          "server_requests": [
+            {
+              "id": "warmup",
+              "city": "Lisbon",
+              "input_tokens": 228,
+              "output_tokens": 64,
+              "server_ttft_s": 0.31100000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.3821368780000005,
+              "prompt_tokens_per_server_ttft_s": 733.1189710610931,
+              "server_decode_steps_per_s": 45.58159253457093,
+              "text": "Lisbon, Portugal, serves as the meeting point for our volunteer group, where we operate from a shared room located directly by the entrance. Each morning, one volunteer places a blue folder on the long table to organize our daily activities, while another carefully inspects the signs by the stairs to report any changes before the"
+            },
+            {
+              "id": "run1",
+              "city": "Kyoto",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30899999999999994,
+              "decode_steps": 63,
+              "server_decode_s": 1.3816927600000009,
+              "prompt_tokens_per_server_ttft_s": 734.6278317152105,
+              "server_decode_steps_per_s": 45.59624384222724,
+              "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to mark the start of the day, while another checks the signs by the stairs to report any changes before the doors open"
+            },
+            {
+              "id": "run2",
+              "city": "Lyon",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30600000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.3823894840000013,
+              "prompt_tokens_per_server_ttft_s": 741.830065359477,
+              "server_decode_steps_per_s": 45.57326334522373,
+              "text": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, another volunteer"
+            },
+            {
+              "id": "run3",
+              "city": "Lima",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30799999999999983,
+              "decode_steps": 63,
+              "server_decode_s": 1.3931461360000021,
+              "prompt_tokens_per_server_ttft_s": 737.0129870129874,
+              "server_decode_steps_per_s": 45.221386595440336,
+              "text": "Lima, Peru, serves as the meeting point for our volunteer group, where a shared room by the entrance provides a central hub for daily operations. Each morning, one volunteer places a yellow envelope on the long table to initiate the day's workflow, while another checks the signs by the stairs to report any changes before the"
+            }
+          ],
+          "server_medians": {
+            "prompt_tokens_per_server_ttft_s": 737.0129870129874,
+            "server_decode_steps_per_s": 45.57326334522373
+          },
+          "separate_cupti_requests": [
+            {
+              "id": "run1",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 303.20014199999997,
+              "gpu_prefill_tokens_per_s": 748.6803881510057,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 20.360194999999997,
+              "gpu_decode_graphs_per_s": 49.11544314776947,
+              "experts_ms_per_decode_graph": 9.98889846875,
+              "first_word": "Kyoto"
+            },
+            {
+              "id": "run2",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 302.14385999999996,
+              "gpu_prefill_tokens_per_s": 751.2977427375159,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 20.333571499999998,
+              "gpu_decode_graphs_per_s": 49.179751820775806,
+              "experts_ms_per_decode_graph": 9.992845718749999,
+              "first_word": "Lyon"
+            },
+            {
+              "id": "run3",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 304.57325099999997,
+              "gpu_prefill_tokens_per_s": 745.305108884956,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 20.329205,
+              "gpu_decode_graphs_per_s": 49.19031511561814,
+              "experts_ms_per_decode_graph": 9.976463703124999,
+              "first_word": "Lima"
+            }
+          ],
+          "cupti_medians": {
+            "gpu_prefill_tokens_per_s": 748.6803881510057,
+            "gpu_decode_graphs_per_s": 49.179751820775806,
+            "median_decode_graph_ms": 20.333571499999998,
+            "experts_ms_per_decode_graph": 9.98889846875
+          },
+          "cupti_dropped_records": 0
+        },
+        "tree": {
+          "VF_BF16_COLUMN": "tree",
+          "observed_vf_ptxas_sha256": "78a8cd76cfb4a40cf5e7816f735af957154e2f1432c9687e4bef5268ce7cbe8f",
+          "semantic_reply": "Paris",
+          "server_requests": [
+            {
+              "id": "warmup",
+              "city": "Lisbon",
+              "input_tokens": 228,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30999999999999994,
+              "decode_steps": 63,
+              "server_decode_s": 1.2657980889999993,
+              "prompt_tokens_per_server_ttft_s": 735.4838709677421,
+              "server_decode_steps_per_s": 49.77097101621555,
+              "text": "Lisbon, Portugal, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a blue folder on this table to document"
+            },
+            {
+              "id": "run1",
+              "city": "Kyoto",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30800000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.2672646100000002,
+              "prompt_tokens_per_server_ttft_s": 737.0129870129869,
+              "server_decode_steps_per_s": 49.7133743835867,
+              "text": "Kyoto, Japan, serves as the meeting point for our volunteer group, where we gather in a shared room located by the entrance. Each morning, one volunteer places a red notebook on the long table to document our activities, while another checks the signs by the stairs to report any changes before the doors open. We write"
+            },
+            {
+              "id": "run2",
+              "city": "Lyon",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.30800000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.2807484809999998,
+              "prompt_tokens_per_server_ttft_s": 737.0129870129869,
+              "server_decode_steps_per_s": 49.189986117188305,
+              "text": "Lyon, France, is the location where our volunteer group convenes daily to support our community initiatives. Upon arrival, you will find the team gathered in the shared room situated directly by the entrance, where a green binder is placed on the long table each morning to organize our materials. Before the doors open, a dedicated"
+            },
+            {
+              "id": "run3",
+              "city": "Lima",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "server_ttft_s": 0.31000000000000005,
+              "decode_steps": 63,
+              "server_decode_s": 1.2845043319999983,
+              "prompt_tokens_per_server_ttft_s": 732.2580645161289,
+              "server_decode_steps_per_s": 49.04615611681727,
+              "text": "Lima, Peru, is the location where our volunteer group convenes daily to support our mission. Upon arrival, you will find the team gathered in a shared room situated directly by the entrance, where a long table serves as our central hub. Each morning, a volunteer places a yellow envelope on this table to signal the"
+            }
+          ],
+          "server_medians": {
+            "prompt_tokens_per_server_ttft_s": 737.0129870129869,
+            "server_decode_steps_per_s": 49.189986117188305
+          },
+          "separate_cupti_requests": [
+            {
+              "id": "run1",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 305.935043,
+              "gpu_prefill_tokens_per_s": 741.9875728325767,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 18.468561,
+              "gpu_decode_graphs_per_s": 54.14607017839668,
+              "experts_ms_per_decode_graph": 8.26976228125,
+              "first_word": "Kyoto"
+            },
+            {
+              "id": "run2",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 303.622386,
+              "gpu_prefill_tokens_per_s": 747.6392073409238,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 18.460033,
+              "gpu_decode_graphs_per_s": 54.17108409286159,
+              "experts_ms_per_decode_graph": 8.270918234375,
+              "first_word": "Lyon"
+            },
+            {
+              "id": "run3",
+              "input_tokens": 227,
+              "output_tokens": 64,
+              "prefill_ms": 306.504734,
+              "gpu_prefill_tokens_per_s": 740.6084631632476,
+              "complete_decode_graphs": 64,
+              "median_decode_graph_ms": 18.454273,
+              "gpu_decode_graphs_per_s": 54.18799212518423,
+              "experts_ms_per_decode_graph": 8.2691406875,
+              "first_word": "Lima"
+            }
+          ],
+          "cupti_medians": {
+            "gpu_prefill_tokens_per_s": 741.9875728325767,
+            "gpu_decode_graphs_per_s": 54.17108409286159,
+            "median_decode_graph_ms": 18.460033,
+            "experts_ms_per_decode_graph": 8.26976228125
+          },
+          "cupti_dropped_records": 0
+        }
+      },
+      "change": {
+        "server_decode_percent": 7.9360627404875705,
+        "gpu_prefill_percent": -0.8939482620825778,
+        "gpu_decode_percent": 10.149161163471376,
+        "gpu_decode_graph_saved_ms": 1.8735384999999987,
+        "experts_saved_ms": 1.7191361875000002,
+        "expert_share_of_graph_saving": 0.9175878624858798
+      },
+      "reference": {
+        "engine": "Native 1Cat-vLLM",
+        "checkpoint": "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+        "checkpoint_revision": "2f4fac011fc06e736782b0b59394577790da7d79",
+        "same_gpu_uuid": "GPU-148f2829-a481-44be-5c82-fa58cb185712",
+        "prefill_tokens_per_s": 1443.3315311116594,
+        "decode_tokens_per_s": 76.08893160386029,
+        "evidence": "vllm-graphs.json",
+        "comparison": "Same prompts and GPU. Native phases come from server timers. LLMD uses a different checkpoint quantization and a separate CUPTI measurement for GPU prefill."
+      },
+      "visible_answer_identical_to_pair_control": {
+        "warmup": false,
+        "run1": false,
+        "run2": false,
+        "run3": false
+      }
+    }
+  },
+  "independent_ubuntu_repeat": {
+    "system": "Ubuntu 24.04, source-built VF, published CUPTI collector",
+    "gpu_uuid": "GPU-09a31760-d33d-5df5-9c98-2696d7860948",
+    "mode": "ordered",
+    "dropped_records": 0,
+    "vf_libcuda_sha256": "7a93fd679f20be483cf4a8feb2ddc79272677bec1fd21f2ae8bf3e3d7fe05e1b",
+    "llmd_sha256": "cd0c30103e38608fde2a3cc629b1a9cd940389de771912fa19a3dc1cfee0b075",
+    "measurements": [
+      {
+        "id": "run1",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_ms": 302.622636,
+        "gpu_prefill_tokens_per_s": 750.1091227029032,
+        "complete_decode_graphs": 64,
+        "median_decode_graph_ms": 19.793761500000002
+      },
+      {
+        "id": "run2",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_ms": 302.467277,
+        "gpu_prefill_tokens_per_s": 750.4944080281451,
+        "complete_decode_graphs": 64,
+        "median_decode_graph_ms": 19.804705
+      },
+      {
+        "id": "run3",
+        "input_tokens": 227,
+        "output_tokens": 64,
+        "prefill_ms": 305.375867,
+        "gpu_prefill_tokens_per_s": 743.3462317439772,
+        "complete_decode_graphs": 63,
+        "median_decode_graph_ms": 19.798338
+      },
+      {
+        "id": "median",
+        "gpu_prefill_tokens_per_s": 750.1091227029032
+      }
+    ]
+  },
+  "arithmetic": {
+    "guard": "Four successive BF16 matrix products with the same accumulator, only B column 0 active, inactive C elements +0. Failed guards retain the original scalar products.",
+    "ordered": "Finite multiplicands. Keeps the scalar sequence of FP32 fused multiply-adds. Matched all 16,384 measured output words across 32 physical trials with four warps per trial.",
+    "tree": "Requires signed zero or 2^-32 <= |A,B| < 2^32, |active C| < 2^120 and active C different from -0. Four partial sums change FP32 rounding. Matched scalar fallback on all 16 deliberately ineligible trials.",
+    "ordinary_cases_max_absolute_error_vs_fp64": {
+      "seeded_cases": 12,
+      "scalar": 3.337860107421875e-06,
+      "ordered": 3.337860107421875e-06,
+      "tree": 1.9073486328125e-06
+    },
+    "ill_conditioned_component": {
+      "fp64_reference": 38.25,
+      "scalar": 37.5,
+      "ordered": 37.5,
+      "tree": 42.25
+    },
+    "hardware_tested_inputs": [
+      "signed zero",
+      "subnormal",
+      "NaN",
+      "infinity",
+      "large exponents",
+      "second active B column",
+      "nonzero inactive C",
+      "cancellation"
+    ],
+    "model_spot_check": {
+      "gate_up_samples": 5117,
+      "down_samples": 2559,
+      "sampled_active_b_columns": [
+        0
+      ],
+      "sampled_expert_ptx_sha256": [
+        "032668fcdcd4cdfcf063782b90b4edf20872a7395a362eabdc72a63e2bd3a949",
+        "7a04f154ae556c5062e3a9874e2f5d89b1fb24a8701e283f85d27766bc4c43c1"
+      ]
+    },
+    "semantic_check": "Every server and CUPTI series produced the expected cities. The greedy visible wording can vary across independent XLA autotuning runs, including scalar-only controls."
+  }
+}

@@ -56,14 +56,14 @@ cmake --build native --target llama-server --parallel 2
 
 ## 4. Test
 
-Download the GGUF once. Both servers use this exact file. [Unsloth Qwen3.5-35B-A3B Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/blob/bc014a17be43adabd7066b7a86075ff935c6a4e2/Qwen3.5-35B-A3B-Q4_K_M.gguf)
+Download the GGUF once. Both servers use this exact file. [Unsloth Qwen3.5-35B-A3B UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/blob/63af8373893a7a73c6dfcb84cb63d815981da5e0/Qwen3.5-35B-A3B-UD-Q4_K_M.gguf)
 
 ```bash
 cd ~/llama-v100
-model=Qwen3.5-35B-A3B-Q4_K_M.gguf
-curl -fL --retry 3 -C - -o "$model" "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/bc014a17be43adabd7066b7a86075ff935c6a4e2/$model"
-echo "3b46d1066bc91cc2d613e3bc22ce691dd77e6f0d33c9060690d24ce6de494375  $model" | sha256sum -c -
-args=(-m "$model" --alias qwen --host 127.0.0.1 --port 8080 -ngl 999 -np 1 -c 512 -fa on --cache-ram 0 --spec-type none --jinja)
+model=Qwen3.5-35B-A3B-UD-Q4_K_M.gguf
+curl -fL --retry 3 -C - -o "$model" "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-MTP-GGUF/resolve/63af8373893a7a73c6dfcb84cb63d815981da5e0/$model" &&
+echo "a20c5a9f0cee94d24af3553e7828df1337c7d24213789911c74e1f4936894936  $model" | sha256sum -c - &&
+args=(-m "$model" --alias qwen --host 127.0.0.1 --port 8080 -ngl 999 -np 1 -c 512 -fa on --cache-ram 0 --spec-type none --jinja) &&
 LD_LIBRARY_PATH="$PWD/cuda13${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" vf ./cuda13/llama-server "${args[@]}"
 ```
 
@@ -93,12 +93,12 @@ curl -fsSLO "$base/freetoken.py" && curl -fsSLO "$base/prompts.json"
 python3 freetoken.py --url http://127.0.0.1:8080 --disable-prompt-cache
 ```
 
-Both b12418 servers answered **Paris**. After warm-up, each processed three 227-token prompts with zero cached tokens and generated 64 tokens per prompt. Each server ran in a fresh Ubuntu 24.04.5 environment. The table uses the server’s own prefill and decode timers. [Per-request timings and replies](./benchmarks/llamacpp-cuda12-cuda13.json)
+Both b12418 servers answered **Paris**. After warm-up, each processed three 227-token prompts with zero cached tokens and generated 64 tokens per prompt. Each server ran in a fresh Ubuntu 24.04.5 environment. The table uses the server’s own prefill and decode timers. [Per-request timings and replies](./benchmarks/common-gguf-q4-k-m.json)
 
 | Build on the same V100 | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Native sm_70, CUDA 12.9.2 | 497.33 | 100.43 |
-| Official CUDA 13.5 archive with VF 0.1.1 | 1076.51 | 99.12 |
+| Native sm_70, CUDA 12.9.2 | 494.57 | 101.27 |
+| Official CUDA 13.5 archive with VF 0.1.1 | 1089.57 | 101.11 |
 
 ## 6. Additional notes
 

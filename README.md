@@ -38,22 +38,22 @@ CUDA 13 programs see capability 7.5 by default. Applications with native Volta k
 
 ## Inference engines
 
-All eight engines ran **Qwen3.5-35B-A3B** on a Tesla V100-SXM2-32GB with **MTP and all other speculative decoding disabled**. Each engine processed one warm-up followed by three distinct 227-token prompts at concurrency 1 and generated 64 tokens per prompt. Rates are medians in tokens/s. Each native/VF pair used the same card and checkpoint.
+All eight engines ran **Qwen3.5-35B-A3B** on a Tesla V100-SXM2-32GB with **MTP and all other speculative decoding disabled**. Each engine processed one warm-up followed by three distinct 227-token prompts at concurrency 1 and generated 64 tokens per prompt. Rates are medians in tokens/s. Each native/VF pair used the same card and checkpoint. Strata, FreeToken and llama.cpp shared the same GGUF file.
 
 | Engine (Ubuntu guide) | Tested model / quantization | CUDA 12 prefill | CUDA 12 decode | CUDA 13 + VF prefill | CUDA 13 + VF decode |
 |---|---|---:|---:|---:|---:|
 | [vLLM](docs/guides/vllm.md) | QuantTrio AWQ W4A16 | 1,443.33¹ | 76.09¹ | 1,449.98 | 80.23 |
 | [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | Can't run | Can't run | 2,016.06 | 77.33 |
-| [llama.cpp](docs/guides/llamacpp.md) | Unsloth GGUF Q4_K_M | 497.33 | 100.43 | 1,076.51 | 99.12 |
-| [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF Q4_K_M | Can't run | Can't run | 884.56 | 109.26 |
-| [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_XL | 1,948.50 | 99.07 | 1,982.50 | 104.25 |
-| [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | Can't run | Can't run | 745.71² | 46.07 |
+| [llama.cpp](docs/guides/llamacpp.md) | Unsloth GGUF UD-Q4_K_M | 494.57 | 101.27 | 1,089.57 | 101.11 |
+| [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF UD-Q4_K_M | Can't run | Can't run | 905.68 | 108.75 |
+| [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_M | 1,968.80 | 105.19 | 2,000.00 | 109.13 |
+| [ZML / LLMD](docs/guides/zml.md) | AMD MXFP4 | Can't run | Can't run | 741.99² | 49.19 |
 | [NInfer](docs/guides/ninfer.md) | Mixed Q4/Q5/Q6/Q8 `.ninfer` | Can't run | Can't run | 556.51 | 117.08 |
 | [TensorFold](docs/guides/tensorfold.md) | MLX 4-bit experts, 8-bit routers | Can't run | Can't run | 461.94 | 70.31 |
 
 ¹ The CUDA 12 figures for vLLM are from **1Cat-vLLM** running CUDA 12.8. The native Strata and llama.cpp builds used CUDA 12.9 and 12.9.2 respectively. [1Cat-vLLM measurements](docs/guides/benchmarks/vllm-graphs.json)
 
-² LLMD prefill uses the GPU span of its complete prefill graph. The server measured 739.41 input tokens/s through the first token. Decode uses its own step timer. [Phase timings](docs/guides/benchmarks/zml-llmd-autotune.json)
+² LLMD prefill uses the GPU span of its complete prefill graph. The server measured 737.01 input tokens/s through the first token. Decode uses the server’s step timer. [Phase timings](docs/guides/benchmarks/zml-llmd-column.json)
 
 Compatibility applies to the listed checkpoint and upstream engine on a native V100. [Checkpoint revisions and per-request results](docs/guides/benchmarks/README.md)
 
