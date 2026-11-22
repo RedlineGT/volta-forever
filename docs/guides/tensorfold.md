@@ -59,7 +59,7 @@ Download the 20.4 GB MLX checkpoint with 4-bit experts and 8-bit routers. Tensor
 
 ```sh
 hf download henrybravo/Qwen3.5-35B-A3B-4bit --local-dir ~/models/qwen35-4bit
-VF_CAPABILITY=8.0 VF_FIT_SHARED=1 TF_QWEN_KV_PAGES=0 \
+VF_CAPABILITY=8.0 VF_FIT_SHARED=1 VF_BF16_TC_GROUPS=1 TF_QWEN_KV_PAGES=0 \
   vf tensorfold-native serve ~/models/qwen35-4bit --backend cuda \
   --context 512 --parallel 1 --prompt-cache-gib 0 --name qwen --no-thinking \
   --no-drafts --prompt-precision int8
@@ -89,11 +89,13 @@ Each measured request read 227 uncached tokens and generated 64. The answers beg
 
 | On the same Tesla V100-SXM2-32GB | Median prefill (tokens/s) | Median decode (tokens/s) |
 | --- | ---: | ---: |
-| Official TensorFold 1.3.3 with VF `a9a4044` | **366.90** | **19.29** |
-| Same TensorFold executable with VF `1740d8f` | 324.46 | 16.92 |
+| Official TensorFold with both VF optimizations (command above) | **461.63** | **34.04** |
+| VF with prefill optimization alone | 460.65 | 20.10 |
+| VF with grouped BF16 Tensor Cores alone | 367.80 | 34.04 |
+| Same executable before either optimization | 367.92 | 20.10 |
 | Native llama.cpp, Qwen3.5-35B-A3B GGUF Q4_K_M | 470.60 | 99.49 |
 
-Both TensorFold runs answered Paris and produced identical token IDs for the warm-up and the three measured prompts. The improvement comes from VF’s translation of packed BF16 arithmetic. [Requests, phase timings and token hashes](./benchmarks/tensorfold-stock-vf.json) · [Native reference on the same GPU](./benchmarks/ninfer-results.json)
+All four runs used the same TensorFold 1.3.3 executable and passed the answer, stop-sequence and output-length checks. VF’s prefill optimization preserved every output token. Grouped BF16 Tensor Core accumulation can round differently. With it enabled, Kyoto and Lyon produced identical token sequences to the control, while Lisbon (warm-up) and Lima produced different wording. Set `VF_BF16_TC_GROUPS=0` for the standard accumulation order. Both optimizations are in VF `70e2edb`. [Requests, phase timings and token hashes](./benchmarks/tensorfold-stock-vf.json) · [Native reference on the same GPU](./benchmarks/ninfer-results.json)
 
 ## 6. Additional notes
 

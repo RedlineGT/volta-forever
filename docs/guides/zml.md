@@ -45,7 +45,7 @@ Look for `platform: cuda` and `Tesla V100` in the device listing. The tested mod
 
 Read the final `decode` line after running the command above. On one Tesla V100-SXM2-32GB with driver 580.178.04 and VF 0.1.0, Qwen3.5-0.8B decoded at **96.1 tokens/s** over 0.458 seconds. This is a single run of the upstream example. [Tested ZML revision](https://github.com/zml/zml/commit/f430c3530fbc6d99f734b641eb8f3fd699868843)
 
-Five local ZML builds ran the split-expert AWQ checkpoint for Qwen3.5-35B-A3B. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
+The upstream build from step 3 stops before the first token with the QuantTrio 35B checkpoint. The following measurements required changes to ZML itself. Five local builds added support for the split AWQ expert weights, then optimized the GPU code for those experts. All used the original QuantTrio checkpoint. Each answered **Paris** and generated 64 tokens on each of three independent 227-token prompts. The medians below use the same V100 and checkpoint.
 
 | Engine | Prefill (tokens/s) | Decode (tokens/s) |
 | --- | ---: | ---: |
