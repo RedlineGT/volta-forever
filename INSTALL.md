@@ -46,7 +46,7 @@ It installs no package of the system, asks for no password and writes nowhere el
 | `VF_VERSION` | the version to install (default: the one the script was published with) |
 | `VF_PREFIX`, `VF_BIN` | where versions are unpacked, and where the commands are linked |
 | `VF_INSTALL_FETCH=0` | do not run `vf fetch` |
-| `VF_INSTALL_BASE` | where the archive and `SHA256SUMS` are taken from (a mirror, a directory served locally) |
+| `VF_INSTALL_BASE` | where the archive and `SHA256SUMS` are taken from (a mirror, a directory served locally): an `https://` URL, or a `file://` one; `VF_INSTALL_ALLOW_HTTP=1` takes an `http://` one too |
 
 Reinstalling or switching releases keeps existing `vf venv` environments pinned to their installed launcher. Releases share one `cuda-12.9.2` directory under `VF_PREFIX`. When upgrading an older installation, this path points to its existing CUDA directory so manual `vf fetch` commands share the same downloads. Keep that directory when removing individual old versions.
 

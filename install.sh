@@ -17,7 +17,10 @@
 #                     for root)
 #   VF_INSTALL_FETCH  0: do not run `vf fetch`
 #   VF_INSTALL_BASE   where the archive and SHA256SUMS are taken from (default: the release
-#                     of that version on GitHub)
+#                     of that version on GitHub): an https:// URL, or a file:// one
+#   VF_INSTALL_ALLOW_HTTP
+#                     1: take a VF_INSTALL_BASE of http:// too (a mirror on a network of
+#                     your own)
 #
 # To remove it: delete $VF_PREFIX and the two links in $VF_BIN.
 set -eu
@@ -48,10 +51,31 @@ main() {
     for tool in tar gzip sha256sum mktemp flock; do
         command -v "$tool" >/dev/null 2>&1 || fail "$tool is needed and was not found"
     done
+    # (Over HTTPS alone, redirections included: SHA256SUMS comes from the same place as the
+    # archive, and shows nothing if whoever is on the way can change both. A directory of this
+    # machine, file://, has nobody on the way.)
+    case $base in
+        https://*) proto='=https' ;;
+        file://*) proto='=file' ;;
+        http://*)
+            [ "${VF_INSTALL_ALLOW_HTTP:-0}" = 1 ] ||
+                fail "VF_INSTALL_BASE is $base: over plain HTTP, whoever is on the way can change the archive and SHA256SUMS both (VF_INSTALL_ALLOW_HTTP=1 takes a mirror there all the same)"
+            proto='=https,http' ;;
+        *) fail "VF_INSTALL_BASE is $base: an https:// or a file:// URL is needed" ;;
+    esac
     if command -v curl >/dev/null 2>&1; then
-        download() { curl -fsSL --retry 3 -o "$2" "$1"; }
+        download() { curl -fsSL --proto "$proto" --proto-redir "$proto" --retry 3 -o "$2" "$1"; }
     elif command -v wget >/dev/null 2>&1; then
-        download() { wget -q -O "$2" "$1"; }
+        [ "$proto" != '=file' ] || fail "a file:// VF_INSTALL_BASE needs curl, which was not found"
+        # (wget's --https-only holds only its recursive downloads to HTTPS: a redirection to
+        # another scheme, which the headers that it prints show, is refused here.)
+        download() {
+            wget -q -S -O "$2" "$1" 2>"$2.headers" || return 1
+            if [ "$proto" = '=https' ] && awk 'tolower($1) == "location:" && tolower($2) ~ /^[a-z][a-z0-9+.-]*:/ && tolower($2) !~ /^https:/ { found = 1 } END { exit !found }' "$2.headers"; then
+                printf 'volta-forever: %s was redirected to another scheme than https://\n' "$1" >&2
+                return 1
+            fi
+        }
     else
         fail "curl or wget is needed and neither was found"
     fi
