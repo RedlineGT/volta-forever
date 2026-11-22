@@ -1,6 +1,10 @@
 # volta-forever
 
-Run CUDA 13 applications on a Tesla V100. Prefix a command with `vf` to run supported GPU code on Volta using NVIDIA’s R580 driver. This works with stock PyTorch wheels and the official CUDA 13 build of llama.cpp.
+**Your Tesla V100 is not dead.**\
+CUDA 13 dropped Volta.\
+volta-forever brings it back.
+
+Run unmodified CUDA 13 applications on a Tesla V100 with a simple two-letter command prefix: `vf`.
 
 [Inference engines and Ubuntu guides](#inference-engines) · [Installation](INSTALL.md) · [Compatibility limits](LIMITS.md)
 
