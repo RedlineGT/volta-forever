@@ -1,0 +1,54 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+.visible .entry k(.param .u64 output) {
+.reg .u64 %out, %offset;
+.reg .b32 %lane, %t, %a, %b, %d<4>, %expect, %check, %other;
+.reg .pred %first, %owns;
+ld.param.u64 %out, [output];
+mov.u32 %lane, %laneid;
+mul.wide.u32 %offset, %lane, 16;
+add.u64 %out, %out, %offset;
+and.b32 %t, %lane, 3;
+setp.eq.u32 %owns, %t, 0;
+setp.lt.u32 %first, %lane, 4;
+mov.b32 %a, 0x3fc03fc0;
+selp.b32 %b, 0x3f003f00, 0, %first;
+selp.b32 %d0, 0x40000000, 0, %owns;
+mov.b32 %d2, %d0;
+mov.b32 %d1, 0;
+mov.b32 %d3, 0;
+
+// Starting from 2, the only active column accumulates 64 products of 1.5 and 0.5.
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+selp.b32 %expect, 0x42480000, 0, %owns;
+xor.b32 %check, %d0, %expect;
+xor.b32 %other, %d2, %expect;
+or.b32 %check, %check, %other;
+st.global.b32 [%out], %check;
+or.b32 %check, %d1, %d3;
+st.global.b32 [%out+4], %check;
+
+// A second active column forces the scalar path. The two active outputs now hold 98 and 48.
+setp.lt.u32 %first, %lane, 8;
+selp.b32 %b, 0x3f003f00, 0, %first;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%b}, {%d0,%d1,%d2,%d3};
+selp.b32 %expect, 0x42c40000, 0, %owns;
+xor.b32 %check, %d0, %expect;
+xor.b32 %other, %d2, %expect;
+or.b32 %check, %check, %other;
+st.global.b32 [%out+8], %check;
+selp.b32 %expect, 0x42400000, 0, %owns;
+xor.b32 %check, %d1, %expect;
+xor.b32 %other, %d3, %expect;
+or.b32 %check, %check, %other;
+st.global.b32 [%out+12], %check;
+ret;
+}

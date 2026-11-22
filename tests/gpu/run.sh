@@ -107,6 +107,8 @@ VF_BF16_TC_GROUPS=0 px bf16-mma-group-off "$G/ptx-cases/bf16-group.ptx" 42400000
 VF_BF16_TC_GROUPS=1 px bf16-mma-group-on "$G/ptx-cases/bf16-group.ptx" 42400000 5aa55aa5 12345678 0
 VF_BF16_TC_TILES=0 px bf16-mma-tiles-off "$G/ptx-cases/bf16-tiles.ptx" 42700000 c2200000 0 0
 VF_BF16_TC_TILES=1 px bf16-mma-tiles-on "$G/ptx-cases/bf16-tiles.ptx" 42700000 c2200000 0 0
+VF_BF16_COLUMN=ordered px bf16-column-ordered "$G/ptx-cases/bf16-column.ptx" 0 0 0 0
+VF_BF16_COLUMN=tree px bf16-column-tree "$G/ptx-cases/bf16-column.ptx" 0 0 0 0
 VF_BF16_ROW=ordered px bf16-row-ordered "$G/ptx-cases/bf16-row.ptx" 4b800000 4b800000 41800000 1
 VF_BF16_ROW=tree px bf16-row-tree "$G/ptx-cases/bf16-row.ptx" 4b800008 4b800008 41800000 1
 

@@ -1,6 +1,7 @@
 //! Convert consecutive BF16 MMAs to FP16 MMAs when every participating lane has exactly
 //! representable inputs. Keep the original operations behind a warp-uniform branch for all
 //! other inputs. A group shares one vote and converts each distinct multiplicand once.
+mod column;
 mod region;
 mod row;
 mod schedule;
@@ -159,7 +160,10 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
                 guarded: false,
                 opcode,
                 operands,
-            } if depth == 0 && options.bf16_row != Bf16Row::Off && &text[opcode.clone()] == ".reg" => {
+            } if depth == 0
+                && (options.bf16_row != Bf16Row::Off || options.bf16_column != super::Bf16Column::Off)
+                && &text[opcode.clone()] == ".reg" =>
+            {
                 declarations.declare(&text[operands.clone()]);
             }
             _ => {}
@@ -201,6 +205,17 @@ fn group(text: &str, items: &[Item], scheduled: &HashSet<usize>, options: Option
             } else if !matches!(item.kind, Kind::Line) || !crate::deps::debug_location(&text[item.range.clone()]) {
                 break;
             }
+        }
+        if options.bf16_column != super::Bf16Column::Off && column::accepts(&products, items, text, &declarations) {
+            let begin = items[first].range.start;
+            let end = items[last].range.end;
+            out.push_str(&text[copied..begin]);
+            column::write(&mut out, groups, &products, &text[begin..end], options.bf16_column);
+            added_products += products.len();
+            copied = end;
+            groups += 1;
+            first = last + 1;
+            continue;
         }
         if options.bf16_row != Bf16Row::Off
             && let Some((batch, small)) = row::batch(

@@ -265,6 +265,7 @@ impl Policy {
     /// program that does not follow the PTX manual there (slower: see `Policy::default`).
     /// `VF_BF16_TC_GROUPS=1`: use guarded Volta FP16 Tensor Cores for groups of BF16 products.
     /// `VF_BF16_TC_TILES=1`: apply the same guarded conversion to two-by-two BF16 tiles.
+    /// `VF_BF16_COLUMN=ordered|tree`: specialize four BF16 products with one active B column.
     /// `VF_CAPABILITY=<major>.<minor>`: the compute capability the programs are told (`told_sm`).
     /// `VF_TRANSLATE=0`: do not translate machine code; `VF_TRANSLATE=first`: translate it also
     /// where an image has PTX (`Translate`).
@@ -283,6 +284,14 @@ impl Policy {
         }
         if let Ok(value) = std::env::var("VF_BF16_TC_TILES") {
             self.lowering.bf16_tc_tiles = value == "1";
+        }
+        if let Ok(value) = std::env::var("VF_BF16_COLUMN") {
+            use vf_ptx::lower::Bf16Column;
+            self.lowering.bf16_column = match value.as_str() {
+                "ordered" => Bf16Column::Ordered,
+                "tree" => Bf16Column::Tree,
+                _ => Bf16Column::Off,
+            };
         }
         if let Ok(value) = std::env::var("VF_BF16_ROW") {
             use vf_ptx::lower::Bf16Row;

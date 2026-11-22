@@ -265,6 +265,17 @@ pub enum Bf16Row {
     Tree,
 }
 
+/// Accumulation order for matrix products with only B column zero active.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bf16Column {
+    #[default]
+    Off,
+    /// Match the scalar FP32 FMA order.
+    Ordered,
+    /// Reduce four bounded partial sums and add C last.
+    Tree,
+}
+
 /// What the rewriting may take for granted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Options {
@@ -279,6 +290,8 @@ pub struct Options {
     pub bf16_tc_groups: bool,
     /// Guarded BF16 products covering a two-by-two tile of both input fragments.
     pub bf16_tc_tiles: bool,
+    /// Four BF16 updates with only B column zero active.
+    pub bf16_column: Bf16Column,
     /// Optimize products with one active row, after a uniform runtime check.
     pub bf16_row: Bf16Row,
 }
@@ -373,7 +386,11 @@ pub fn body_in(
         ),
         None => (text, items, Counts::default()),
     };
-    let grouped = if options.bf16_tc_groups || options.bf16_tc_tiles || options.bf16_row != Bf16Row::Off {
+    let grouped = if options.bf16_tc_groups
+        || options.bf16_tc_tiles
+        || options.bf16_column != Bf16Column::Off
+        || options.bf16_row != Bf16Row::Off
+    {
         bf16_groups::rewrite(text, &items, outside, options)
     } else {
         None

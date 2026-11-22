@@ -958,6 +958,12 @@ mod tests {
         tiled.lowering.bf16_tc_tiles = true;
         assert_ne!(cache_hash(img, &tiled), h1);
         assert_ne!(cache_hash(img, &tiled), cache_hash(img, &grouped));
+        let mut column = vf_adapt::Policy::default();
+        column.lowering.bf16_column = vf_ptx::lower::Bf16Column::Ordered;
+        let ordered = cache_hash(img, &column);
+        assert_ne!(ordered, h1);
+        column.lowering.bf16_column = vf_ptx::lower::Bf16Column::Tree;
+        assert_ne!(cache_hash(img, &column), ordered);
         // Same policy, same image: same hash.
         let h1b = cache_hash(img, &p1);
         assert_eq!(h1, h1b);
