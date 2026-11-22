@@ -1271,6 +1271,13 @@ fn packed_conversions_and_nan_bounds_use_what_volta_has() {
         "add.rp.bf16 %r1, %r1, %r0;",
         "redux.sync.add.s32 %r1, %r0, %r1;",
         "max.NaN.abs.f32 %f3, %f1, %f2, %f0;",
+        // Not instructions of the PTX ISA: a sum of floats (ptxas refuses it), and operations on
+        // types that they do not take.
+        "redux.sync.add.f32 %r1, %r0, -1;",
+        "redux.sync.and.f32 %r1, %r0, -1;",
+        "redux.sync.add.b32 %r1, %r0, -1;",
+        "redux.sync.min.b32 %r1, %r0, -1;",
+        "redux.sync.xor.u32 %r1, %r0, -1;",
     ] {
         let refused = refusal(&format!("{{\n\t.reg .b32 %r<2>;\n\t{statement}\n\tret;\n}}"));
         assert!(
@@ -3330,6 +3337,40 @@ fn regression_reduction_keeps_only_live_lanes() {
         assert!(lowered.contains("shfl.sync.idx.b32"));
         assert_eq!(count(&lowered, "shfl.sync.bfly"), 5);
         assert!(undeclared(&lowered).is_empty());
+    }
+}
+
+#[test]
+fn regression_partial_reduction_in_one_order_for_every_lane() {
+    // Every surviving lane starts from the input of the highest one and takes the others from
+    // there down: the same operations on the same values, whichever lane it is. (Until
+    // 2026-11-22 each started with its own input: the order then depends on the lane, and for
+    // the minimum or maximum of floats so may the sign of a zero or the bits of a NaN.)
+    for op in ["add.u32", "min.s32", "max.f32", "min.NaN.f32", "and.b32"] {
+        let source = format!(
+            "{{\n.reg .b32 %r<2>;\n.reg .pred %p;\nmov.u32 %r0, %laneid;\n\
+             setp.ge.u32 %p, %r0, 16;\n@%p exit;\nredux.sync.{op} %r1, %r0, -1;\nret;\n}}"
+        );
+        let lowered = lower(&source);
+        // (%vf_r0 the value reduced, %vf_r1 the lanes alive, %vf_r2 those still to take, %vf_r3
+        // the one taken, %vf_r4 its bit.)
+        let partial = &lowered[nth(&lowered, "$vf_partial", 1)..nth(&lowered, "$vf_peers", 0)];
+        assert_eq!(
+            partial.lines().skip(1).map(str::trim).collect::<Vec<_>>(),
+            [
+                "bfind.u32 %vf_r3, %vf_r1;",
+                "shfl.sync.idx.b32 %vf_r0, %r0, %vf_r3, 31, %vf_r1;",
+                "shl.b32 %vf_r4, 1, %vf_r3;",
+                "xor.b32 %vf_r2, %vf_r1, %vf_r4;",
+            ],
+            "{op}"
+        );
+        let kind = op.rsplit('.').next().unwrap();
+        let operation = op.split('.').next().unwrap();
+        let reduce = format!("{operation}.{kind} %vf_r0, %vf_r0, ");
+        assert_eq!(count(&lowered, &reduce), 6, "{op}:\n{lowered}");
+        assert_eq!(count(&lowered, "%vf_l"), 0, "{op}");
+        assert!(undeclared(&lowered).is_empty(), "{op}");
     }
 }
 

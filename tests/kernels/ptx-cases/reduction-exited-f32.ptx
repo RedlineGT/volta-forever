@@ -1,0 +1,49 @@
+.version 8.8
+.target sm_100a
+.address_size 64
+.visible .entry k(.param .u64 output) .reqntid 32,1,1 {
+    .reg .b32 %lane, %zeros, %signs, %nans, %some, %least, %greatest, %none, %any;
+    .reg .b64 %out;
+    .reg .pred %leave, %three, %five, %six;
+    ld.param.u64 %out, [output];
+    mov.u32 %lane, %laneid;
+    mad.wide.u32 %out, %lane, 16, %out;
+    // Lanes 0, 3, 5 and 6 survive. All other lanes store the expected values before exiting for
+    // the one-warp harness: the least of +0, -0, +0 and 1 is -0 (+0 > -0 here), the greatest of
+    // -0, +0, -0 and -1 is +0, the least of four NaNs is the canonical NaN, and so is the greatest
+    // with .NaN of 1, a NaN, 2 and 3.
+    mov.b32 %least, 0x80000000;
+    mov.b32 %greatest, 0x00000000;
+    mov.b32 %none, 0x7fffffff;
+    mov.b32 %any, 0x7fffffff;
+    setp.ne.u32 %leave, %lane, 0;
+    setp.eq.u32 %three, %lane, 3;
+    setp.eq.u32 %five, %lane, 5;
+    setp.eq.u32 %six, %lane, 6;
+    @%three setp.ne.u32 %leave, %lane, 3;
+    @%five setp.ne.u32 %leave, %lane, 5;
+    @%six setp.ne.u32 %leave, %lane, 6;
+    @%leave st.global.v4.b32 [%out], {%least,%greatest,%none,%any};
+    @%leave exit;
+    // Lane 0's inputs, then those of lanes 3, 5 and 6.
+    mov.b32 %zeros, 0x00000000;
+    mov.b32 %signs, 0x80000000;
+    mov.b32 %nans, 0x7fc00001;
+    mov.b32 %some, 0x3f800000;
+    @%three mov.b32 %zeros, 0x80000000;
+    @%three mov.b32 %signs, 0x00000000;
+    @%three mov.b32 %nans, 0xffc00002;
+    @%three mov.b32 %some, 0x7fc00005;
+    @%five mov.b32 %nans, 0x7f800003;
+    @%five mov.b32 %some, 0x40000000;
+    @%six mov.b32 %zeros, 0x3f800000;
+    @%six mov.b32 %signs, 0xbf800000;
+    @%six mov.b32 %nans, 0x7fc00004;
+    @%six mov.b32 %some, 0x40400000;
+    redux.sync.min.f32 %least, %zeros, -1;
+    redux.sync.max.f32 %greatest, %signs, -1;
+    redux.sync.min.f32 %none, %nans, -1;
+    redux.sync.max.NaN.f32 %any, %some, -1;
+    st.global.v4.b32 [%out], {%least,%greatest,%none,%any};
+    ret;
+}
