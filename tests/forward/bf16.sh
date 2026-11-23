@@ -112,7 +112,16 @@ fails control-abort "control: abort when the runtime is missing"
 
 # What scripts/package.sh refuses, and the complete set of the variants packed: needs this tree's dist/
 # built (scripts/build.sh, scripts/build-forwarders.sh) after its last change; said and skipped otherwise.
+stale=
 if [ -f "$root/dist/forward/bf16tc/libvf_cublas_bf16.so" ] && [ -f "$root/dist/lib/libcuda.so.1" ]; then
+    for built in "$root/dist/lib/libcuda.so.1" "$root/dist/forward/bf16tc/libvf_cublas_bf16.so"; do
+        [ -n "$stale" ] || stale=$(find "$root/crates" "$root/Cargo.toml" "$root/Cargo.lock" "$root/scripts/build.sh" \
+            "$root/scripts/build-forwarders.sh" -newer "$built" -print -quit 2>/dev/null)
+    done
+fi
+if [ -n "$stale" ]; then
+    echo "SKIP  package-refusals.sh: dist/ is older than $stale (rebuild it to run the packaging test)"
+elif [ -f "$root/dist/forward/bf16tc/libvf_cublas_bf16.so" ] && [ -f "$root/dist/lib/libcuda.so.1" ]; then
     echo "packaging (tests/forward/package-refusals.sh, on dist/):"
     bash "$root/tests/forward/package-refusals.sh" > "$out/package-refusals.log" 2>&1
     pstatus=$?
