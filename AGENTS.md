@@ -49,7 +49,9 @@ Steps, in this order:
    NVML can report 8.0 while PyTorch's CUDA runtime still reports 7.5 because it uses translated
    `sm_75` kernels. Adding `VF_CAPABILITY_ALL=1` lifts that cap for such callers and can silently
    produce wrong results in PyTorch attention or cuDNN convolutions. Use the override only in a
-   configuration verified by the engine guide and compare its outputs. [Capability rules](LIMITS.md#the-capability-told-with-vf_capability)
+   configuration verified by the engine guide and compare its outputs. Triton takes PyTorch's
+   value: told 7.5, its `tl.dot` uses no tensor cores (right, but many times slower), and only
+   `VF_CAPABILITY_ALL=1` changes that in a program with PyTorch. [Capability rules](LIMITS.md#the-capability-told-with-vf_capability)
 7. **Prefer PTX.** If you build the program or its extensions yourself, build them with PTX
    retained. Use `TORCH_CUDA_ARCH_LIST="7.5+PTX"` for a PyTorch extension or add
    `-gencode arch=compute_75,code=compute_75` to the `nvcc` command. VF can then retarget the

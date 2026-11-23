@@ -302,6 +302,45 @@ Part of the distance to the native build is occupancy and not instructions: with
 count raised from 168 to 176, the native kernel itself goes from three blocks to two and from
 1.66 to 1.86 ms (12 %), and no further up to 208.
 
+### Triton's matrix products
+
+Triton 3.8 writes tensor-core instructions for `tl.dot` only for a GPU it is told is 8.0 or
+later. Told 7.5, it falls back to float32 `fma`, and says so when asked
+(`MLIR_ENABLE_DIAGNOSTICS=remarks`: "Dot op using MMA for compute capability 75 has been
+deprecated. It falls back to the FMA path."). In a program with PyTorch, Triton is told what
+PyTorch's CUDA runtime is told: 7.5 by default and with `VF_CAPABILITY=8.0` alone, 8.0 with
+`VF_CAPABILITY_ALL=1` (`LIMITS.md`, "The capability told with `VF_CAPABILITY`").
+
+The same kernels told 7.5 and told 8.0, through the layer, in one session (2026-11-23, one V100,
+Triton 3.8.0 and PyTorch 2.14.0 of a vLLM 0.34.0 installation; TFLOPS from the median of three
+batches of launches; every output compared with a float64 computation on the CPU, and as close
+to it told 7.5 as told 8.0, except the float32 GEMM, which Triton computes in tf32 told 8.0):
+
+| Kernel | Told 7.5 | Told 8.0 |
+|---|---:|---:|
+| float16 GEMM 2048x7344x1536, tiles 128x128x32, 8 warps, 1 stage | 0.23 | 33.1 |
+| the same, 3 stages | 0.23 | 27.2 |
+| the same, tiles 64x64x32, 4 warps, 3 stages | 3.25 | 25.6 |
+| bf16 GEMM, tiles 128x128x32, 3 stages (told 8.0: the scalar bf16 products, `docs/emulations.md`) | 0.23 | 10.1 |
+| float32 GEMM, tiles 64x64x32 (told 8.0: tf32) | 6.14 | 7.62 |
+| vLLM's `fused_moe_kernel`, float16, 256 tokens (E=128, top-8, K=2048, N=1536; vLLM's default tiles) | 0.095 | 4.38 |
+| the same, 2,048 tokens | 0.153 | 12.9 |
+| the same, bf16, 256 and 2,048 tokens | 0.097, 0.154 | 2.35, 6.86 |
+| vLLM's `kernel_unified_attention`, float16, prefill of 4 x 1,024 tokens (32 heads, 8 KV heads, size 128) | 2.57 | 13.6 |
+| the same, decode of 64 sequences of 2,048 tokens | 0.54 | 1.84 |
+
+Where the time goes told 7.5, for the first GEMM: Triton's sm_75 cubin, as NVIDIA's ptxas makes
+it from Triton's PTX, has 64 registers and 3,952 bytes of stack, and 5,952 instructions of which
+2,048 `FFMA`, 2,056 local loads and 1,151 local stores: the 64 accumulators of a thread and the
+operands do not fit, and ptxas keeps the kernel at 64 registers. The layer's translation of it has
+5,963 instructions (11 added), 66 registers and the same stack and local accesses. The PTX
+compiled for sm_70 directly by the same ptxas is worse: 7,800 instructions, 3,298 local loads and
+1,791 stores, 32 registers. The slowness is Triton's code for 7.5, not its translation; and no
+translation of a sum of scalar `fma` can reach the tensor cores, whose sums round otherwise.
+
+Told 8.0, Triton's cubins keep their PTX, which the layer lowers to Volta's products ("Pairs of
+products" in `docs/emulations.md`).
+
 ### Registers
 
 A translation needs registers of its own: one for each uniform register of the function, two

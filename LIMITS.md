@@ -230,6 +230,16 @@ is (224) and 1.95 times slower than the native build with its quantized kernels 
 **vLLM, SGLang, ZML**: no native build exists to compare with. vLLM 83 to 99 tokens a second
 and SGLang 45 to 59 (Qwen2.5-0.5B); ZML 27 to 29 (Qwen3.5-9B). Runs of 2026-11-20 and 21.
 
+**Triton's matrix products** (`tl.dot`). Told 7.5, which is what Triton is told by default in a
+program with PyTorch, Triton 3.8 uses no tensor-core instruction: it multiplies with float32
+`fma` (its own choice below 8.0; it says so with `MLIR_ENABLE_DIAGNOSTICS=remarks`). Its results
+are right and slow: a float16 GEMM at 0.23 to 3.2 TFLOPS, vLLM's mixture-of-experts kernel at
+0.1 to 0.15, its attention at 2.6 (prefill) and 0.54 (decode); the same kernels told 8.0 (with
+`VF_CAPABILITY_ALL=1`, and its hazards: [The capability told with
+`VF_CAPABILITY`](#the-capability-told-with-vf_capability)) at 26 to 33, 4.4 to 12.9, 13.6 and
+1.8 (2026-11-23, one session). The layer's translation adds 11 instructions to the 5,952 of
+Triton's GEMM kernel: the time is in that code (`docs/performance.md`, "Triton's matrix products").
+
 **Blackwell's block-scaled products** (NVFP4, MXFP4): a matrix-vector product written with them
 runs at 2.7 times the time of a kernel written by hand for Volta (2026-11-18).
 
@@ -277,6 +287,27 @@ What that does not cover:
   SGLang with the settings of its guide.
 - NVML, answered by the audit library, reports the value asked for to every caller: told 8.0, a
   program that reads NVML (vLLM does) and a CUDA runtime that is told 7.5 give it two answers.
+- Triton compiles for the capability that PyTorch reports (`torch.cuda.get_device_capability`)
+  whenever PyTorch is installed: Triton 3.8 imports PyTorch while it looks for a GPU, also in a
+  program that does not import it. With `VF_CAPABILITY=8.0` alone, Triton is then told 7.5, as
+  PyTorch's CUDA runtime is, and its `tl.dot` runs without tensor cores ([Speed](#speed)).
+  `VF_CAPABILITY_ALL=1` gives it 8.0 and the tensor cores, and gives PyTorch 8.0 too, with the
+  wrong results of the first item. Told 8.0, Triton also computes a float32 `tl.dot` of its
+  default precision in tf32 (10 bits of mantissa), as on an Ampere GPU, where told 7.5 it
+  computes it in float32; a bf16 `tl.dot` told 8.0 runs on the layer's scalar bf16 products,
+  unless a `VF_BF16_TC_*` switch is set (`docs/emulations.md`, "bf16"); the `tf32x3` precision
+  is refused. With `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`, vLLM's engine (greedy and sampling)
+  and HTTP server gave the CPU's text with the small model of `tests/gpu/vllm.sh` (its stages b
+  to d, 2026-11-23); `transformers` with its default attention, which is PyTorch's, does not.
+  A program that does not itself import PyTorch can keep Triton from importing it with
+  `TRITON_DEFAULT_BACKEND=nvidia`: Triton then asks the driver itself, and with
+  `VF_CAPABILITY=8.0` it is told 8.0 while the libraries whose code runs from sm_75 machine code
+  are still told 7.5.
+- `TRITON_OVERRIDE_ARCH=sm80` does not make Triton 3.8 use tensor cores on a GPU it is told is
+  7.5: Triton applies it to its own passes, but writes the PTX for, and calls ptxas with, the
+  capability it is told. ptxas refuses the result (`Feature '.m16n8k16' requires .target sm_80
+  or higher`), and a kernel with more than one stage (Triton's default is three) stops the
+  process inside Triton (`LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.cp.async.wait.group`).
 - What a caller is told is decided when it first asks. A library loaded after that (an extension
   opened once CUDA is in use) is not looked at, nor a library that opens the CUDA runtime with
   `dlopen` instead of naming it among the libraries it needs.
