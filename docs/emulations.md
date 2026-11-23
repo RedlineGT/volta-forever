@@ -840,10 +840,14 @@ design's measurements of this arithmetic (before the runtime existed), over 21 s
 against fp64 was 24.6 units of 2^-24 sum |a b| for k <= 16384, with a mean bias of -13 units, whatever
 kernel cuBLAS chose for a slice; the same arithmetic reached 32.8 units at k = 65536, so longer
 products are forwarded, and an RTX 5090's own bf16 product gave 37.9 to 42.1 units on the same
-same-sign data at k = 1024. On this runtime, with both operands uniform in [0.5, 1), the largest
-error over 256 sampled elements was 5.7 units at TN 4096 x 256 x 16384, 3.6 at 7344 x 512 x 4096 and
-1.8 at 2048 x 64 x 1024, with no measurable bias (`tests/gpu/forward/bf16-cost.c`); the GPU tests hold
-every tensor-core result to 32 units.
+same-sign data at k = 1024. On this runtime, with both operands uniform in (0, 1], over 256 sampled
+elements, the largest error was 19.4 units at TN 4096 x 256 x 16384, 16.0 at 7344 x 512 x 4096 and
+17.6 at 2048 x 64 x 1024, and the mean error -13.1, -13.1 and -13.2 units: such sums come out low by
+about 13 units, the truncation's bias (cuBLAS 12.9 on the same data: largest 96.5, 36.8 and 19.2
+units, mean -1.2, -1.9 and 0.1). With both operands in one binade, uniform in [0.5, 1), a slice's
+256-term sum of products is exact (16-bit products and 8 bits of growth fit in fp32's 24) and the
+truncation does not act: largest 5.8, 3.2 and 1.8 units, mean 0.3, -0.1 and 0.0
+(`tests/gpu/forward/bf16-cost.c`). The GPU tests hold every tensor-core result to 32 units.
 
 The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
 tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue: they are 12.9's

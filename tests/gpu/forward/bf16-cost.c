@@ -6,8 +6,10 @@
  *   2. the tensor-core path with every column of op(B) failing the strict check (one element of
  *      1e-30 in each), against the same call with no failure and against 12.9, at n = 480, for six
  *      shapes of linear layers (median of 5, CUDA events);
- *   3. same-sign data (bf16 uniform in [0.5, 1)): the largest error and the mean signed error over
- *      256 sampled elements, in units of 2^-24 sum |a b| against fp64, for three shapes.
+ *   3. same-sign data: the largest error and the mean signed error over 256 sampled elements, in units
+ *      of 2^-24 sum |a b| against fp64, for three shapes, of the tensor-core path and of cuBLAS 12.9,
+ *      with both operands uniform in (0, 1] (spread over many binades: the tensor cores' truncation
+ *      acts) and uniform in [0.5, 1) (one binade: a 256-term sum of products there is exact).
  * Prints its tables. */
 #include "bf16-common.h"
 #include <time.h>
@@ -117,43 +119,56 @@ int main(void)
         free(hB);
     }
 
-    /* 3. same-sign data */
+    /* 3. same-sign data: (0, 1] and [0.5, 1) */
     static const int ss[][3] = {{4096, 256, 16384}, {7344, 512, 4096}, {2048, 64, 1024}};
-    for (size_t s = 0; s < sizeof ss / sizeof *ss; ++s) {
-        const int m = ss[s][0], n = ss[s][1], k = ss[s][2];
-        uint16_t *hA = malloc((size_t)m * k * 2), *hB = malloc((size_t)n * k * 2);
-        for (size_t i = 0; i < (size_t)m * k; ++i) hA[i] = f2bf(0.5f + 0.5f * (rnd() / 4294967296.0f));
-        for (size_t i = 0; i < (size_t)n * k; ++i) hB[i] = f2bf(0.5f + 0.5f * (rnd() / 4294967296.0f));
-        void *A = to_device(hA, (size_t)m * k * 2), *B = to_device(hB, (size_t)n * k * 2), *C;
-        CU(cudaMalloc(&C, (size_t)m * n * 4));
-        CU(cudaDeviceSynchronize());
-        const Counts c0 = counts(API_GEMMEX);
-        gemm(1, m, n, k, A, B, C);
-        CU(cudaStreamSynchronize(st));
-        const Counts c1 = counts(API_GEMMEX);
-        float *hC = from_device(C, (size_t)m * n * 4);
-        double worst = 0, sum = 0;
-        for (int e = 0; e < 256; ++e) {
-            const int i = (int)(((long long)e * 7919) % m), j = (int)(((long long)e * 104729) % n);
-            double x = 0, mag = 0;
-            for (int l = 0; l < k; ++l) {
-                const double p = (double)bf2f(hA[l + (size_t)i * k]) * (double)bf2f(hB[l + (size_t)j * k]);
-                x += p;
-                mag += fabs(p);
+    for (int data = 0; data < 2; ++data)
+        for (size_t s = 0; s < sizeof ss / sizeof *ss; ++s) {
+            const int m = ss[s][0], n = ss[s][1], k = ss[s][2];
+            uint16_t *hA = malloc((size_t)m * k * 2), *hB = malloc((size_t)n * k * 2);
+            for (size_t i = 0; i < (size_t)m * k; ++i)
+                hA[i] = f2bf(data ? 0.5f + 0.5f * (rnd() / 4294967296.0f) : (float)((rnd() + 1.0) / 4294967296.0));
+            for (size_t i = 0; i < (size_t)n * k; ++i)
+                hB[i] = f2bf(data ? 0.5f + 0.5f * (rnd() / 4294967296.0f) : (float)((rnd() + 1.0) / 4294967296.0));
+            void *A = to_device(hA, (size_t)m * k * 2), *B = to_device(hB, (size_t)n * k * 2), *C, *C12;
+            CU(cudaMalloc(&C, (size_t)m * n * 4));
+            CU(cudaMalloc(&C12, (size_t)m * n * 4));
+            CU(cudaDeviceSynchronize());
+            const Counts c0 = counts(API_GEMMEX);
+            gemm(1, m, n, k, A, B, C);
+            CU(cudaStreamSynchronize(st));
+            const Counts c1 = counts(API_GEMMEX);
+            gemm(0, m, n, k, A, B, C12);
+            CU(cudaStreamSynchronize(st));
+            float *hC = from_device(C, (size_t)m * n * 4), *hC12 = from_device(C12, (size_t)m * n * 4);
+            double worst = 0, sum = 0, worst12 = 0, sum12 = 0;
+            for (int e = 0; e < 256; ++e) {
+                const int i = (int)(((long long)e * 7919) % m), j = (int)(((long long)e * 104729) % n);
+                double x = 0, mag = 0;
+                for (int l = 0; l < k; ++l) {
+                    const double p = (double)bf2f(hA[l + (size_t)i * k]) * (double)bf2f(hB[l + (size_t)j * k]);
+                    x += p;
+                    mag += fabs(p);
+                }
+                const double u = ((double)hC[i + (size_t)j * m] - x) / (mag * 0x1p-24),
+                             u12 = ((double)hC12[i + (size_t)j * m] - x) / (mag * 0x1p-24);
+                if (fabs(u) > worst) worst = fabs(u);
+                if (fabs(u12) > worst12) worst12 = fabs(u12);
+                sum += u;
+                sum12 += u12;
             }
-            const double u = ((double)hC[i + (size_t)j * m] - x) / (mag * 0x1p-24);
-            if (fabs(u) > worst) worst = fabs(u);
-            sum += u;
+            printf("same-sign %s TN %d x %d x %d: tensor-core path largest error %.1f units, mean %.1f units (served: "
+                   "%s); cuBLAS 12.9 largest %.1f units, mean %.1f units\n",
+                   data ? "[0.5, 1)" : "(0, 1]", m, n, k, worst, sum / 256,
+                   !rt_counters ? "not counted" : delta(&c0, &c1, SERVED_TC) == 1 ? "yes" : "NO", worst12, sum12 / 256);
+            cudaFree(A);
+            cudaFree(B);
+            cudaFree(C);
+            cudaFree(C12);
+            free(hA);
+            free(hB);
+            free(hC);
+            free(hC12);
         }
-        printf("same-sign TN %d x %d x %d: largest error %.1f units, mean %.1f units (served by the tensor-core path: %s)\n",
-               m, n, k, worst, sum / 256, !rt_counters ? "not counted" : delta(&c0, &c1, SERVED_TC) == 1 ? "yes" : "NO");
-        cudaFree(A);
-        cudaFree(B);
-        cudaFree(C);
-        free(hA);
-        free(hB);
-        free(hC);
-    }
     printf("ok bf16-cost\n");
     return 0;
 }

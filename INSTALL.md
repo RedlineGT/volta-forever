@@ -248,7 +248,8 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   (`docs/emulations.md`, section 11, says where exactly, and how that was established).
 - `VF_CUBLAS_BF16_TC=1`: larger products run on the tensor cores, with exact scaling to fp16 and
   fixed slices of k, and differ from 12.9's in the last bits (within 25 units of 2^-24 sum |a b|
-  measured, same-sign sums slightly low), except when they are captured in a CUDA graph; the skinny
+  measured; sums of products of one sign come out low, by about 13 units on average when the data
+  spans many binades), except when they are captured in a CUDA graph; the skinny
   path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`.
 
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,

@@ -365,7 +365,10 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   the code; not tested on a GPU). Two V100s in one process, and a V100 beside another GPU, were not
   run on real hardware: the host test, with a stand-in driver whose two devices have different compute
   capabilities, shows the decision taken per context's device at each call, every call of the other
-  device's context forwarded. A `fork` after the runtime has loaded is not tested.
+  device's context forwarded. After a `fork`, a child that calls through the variants gets status 13
+  and then `cudaErrorInitializationError`, as a child that calls cuBLAS 12.9 directly does, and the
+  parent's next call is served with 12.9's bits (`tests/gpu/forward/bf16-default.c`, mode `fork`, run
+  by hand).
 
 ## Several GPUs and NCCL
 
