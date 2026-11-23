@@ -2210,10 +2210,24 @@ pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     result
 }
 
+/// A release of the primary context of a device and the query of its state that tells whether the
+/// release was the last are one step for the retains of that device (`contexts::primary_released`):
+/// a retain by another thread between them would make the driver say the context is active, and
+/// what the layer kept for the modules of the context that the release destroyed would be kept.
+/// The retains of the device wait for the step (and the steps of a reset, the same way).
+static PRIMARY_STEPS: [std::sync::Mutex<()>; 16] = [const { std::sync::Mutex::new(()) }; 16];
+
+fn primary_step(device: c_int) -> std::sync::MutexGuard<'static, ()> {
+    PRIMARY_STEPS[device as usize % PRIMARY_STEPS.len()]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Only to know which context is the primary context of the device, for its release or reset.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRetain: unsafe extern "C" fn(*mut *mut c_void, c_int) -> CUresult);
+    let _step = primary_step(device);
     let result = unsafe { real(context, device) };
     if result == CUDA_SUCCESS && !context.is_null() {
         contexts::primary_retained(device, unsafe { *context } as usize);
@@ -2224,6 +2238,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, dev
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -2235,6 +2250,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -2246,6 +2262,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -2257,6 +2274,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
