@@ -116,6 +116,9 @@ hide one); a case that has not ended after `$VF_CASE_WAIT` seconds (default 600)
 counted as a CRASH. `python3 tests/gpu/torch-workers.py` checks that on the host, with fake
 workers (no GPU, no PyTorch, 15 seconds): kernels that print, a worker that fills its standard
 error or does not end, a line that is not a verdict, fewer verdicts than cases.
+`python3 tests/gpu/vllm-engine-verdicts.py` checks, with a stand-in for vLLM (no GPU, no vLLM),
+the verdict lines of `vllm-engine.py` (stages c and c2 of `vllm.sh`): fewer results than prompts,
+or none, or a reference with fewer texts, do not pass.
 
 ### Launcher tests (`tests/launcher/`)
 
@@ -164,7 +167,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Six more host regressions exercise the built libraries directly:
+Seven more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -173,6 +176,7 @@ python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
 python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
 python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
+python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -186,9 +190,16 @@ the capability that NVML gives through the audit library, by `ctypes` (as `pynvm
 to a library linked against it; it needs gcc. The fourth checks, with another stand-in, that
 a kernel refused in an input of the driver's linker is refused in the image the link makes,
 and in a copy of it, and that what is known of a link or a module made with a handle that the
-driver gives again, while the destruction or unload of the one before returns, is kept. The fifth checks that a refused kernel of NCCL makes the layer say once,
-at the default log level, that NCCL's CUDA 12 build is the remedy. The last links a native
-sm_70 device function from both a host object and a static library with the CUDA 12.9 toolkit.
+driver gives again, while the destruction or unload of the one before returns, is kept. The fifth
+checks that a refused kernel of NCCL makes the layer say once, at the default log level, that
+NCCL's CUDA 12 build is the remedy. The sixth links a native sm_70 device function from both a
+host object and a static library with the CUDA 12.9 toolkit, reads a file whose name is not
+UTF-8 by that name (not the one its text names), and checks that PTX in which every kernel
+traps is refused as text and in a fat binary alike (and Turing machine code whose every kernel
+the translator refuses), and that with one kernel that runs both are linked. The seventh
+checks, with a stand-in for nvJitLink 12.9.2, that a child made by `fork()` while another
+thread of the parent waits in a write of the adapter's log ends when it calls `exit()`; it
+needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 

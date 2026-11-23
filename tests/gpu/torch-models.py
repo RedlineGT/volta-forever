@@ -3,6 +3,7 @@
 
     torch-models.py [-v] [PATTERN...]     (run by tests/gpu/torch-models.sh, which sets the paths)
     torch-models.py --list
+    torch-models.py --comparison          (what decides ok, checked on tensors of the CPU)
 
 tests/gpu/torch-ops.py takes operations one by one. This runs small models end to end, as a program
 would: an image classifier (convolutions, normalisation, pooling), a transformer encoder and a causal
@@ -14,7 +15,8 @@ the same numbers.
 
 Each case runs in a process of its own (a fault on the GPU ends the process, not the run) and ends as
 
-    ok        the GPU's result is the CPU's within the case's tolerance
+    ok        the GPU's result is the CPU's within the case's tolerance, in the first run (in which
+              kernels are compiled and caches filled) and in a second
     DIFFERENT it is not
     refused   a kernel it needs is not given to the program (its function is not translated)
     error     PyTorch raised something else on the GPU
@@ -225,15 +227,14 @@ def worker(name, path):
     faulthandler.register(signal.SIGUSR1)
     build, tolerance = next((b, t) for n, b, t in cases() if n == name)
     reference = build(torch.device('cpu'))
-    reference = reference if isinstance(reference, tuple) else (reference,)
     try:
         device = torch.device('cuda')
         start = time.perf_counter()
-        result = build(device)
+        cold = build(device)
         torch.cuda.synchronize()
         first = time.perf_counter() - start
         start = time.perf_counter()
-        result = build(device)
+        warm = build(device)
         torch.cuda.synchronize()
         again = time.perf_counter() - start
     except Exception as e:                                   # noqa: BLE001 (whatever PyTorch raises is the result)
@@ -241,16 +242,61 @@ def worker(name, path):
         refused = 'PTX JIT compilation failed' in str(e) or 'invalid device function' in str(e)
         say('%s\t%s' % ('refused' if refused else 'error', '' if refused else '%s: %s' % (type(e).__name__, text)))
         return
-    result = result if isinstance(result, tuple) else (result,)
-    worst, nan = 0.0, 0
-    for got, want in zip(result, reference):
-        got = got.detach().float().cpu()
-        nan += int(torch.isnan(got).sum()) + int(torch.isinf(got).sum())
-        scale = float(want.abs().max()) or 1.0
-        worst = max(worst, float((got - want).abs().max()) / scale)
-    ok = worst <= tolerance and not nan
-    say('%s\tfrom the CPU by %.2e of the largest value (allowed %.0e)%s; %.0f ms, then %.0f ms' % (
-        'ok' if ok else 'DIFFERENT', worst, tolerance, ', %d NaN or infinite' % nan if nan else '', 1000 * first, 1000 * again))
+    ok, detail = verdict([cold, warm], reference, tolerance)
+    say('%s\t%s; %.0f ms, then %.0f ms' % ('ok' if ok else 'DIFFERENT', detail, 1000 * first, 1000 * again))
+
+
+def verdict(runs, reference, tolerance):
+    """(ok, what to say) of the results of the runs on the GPU (the first, in which kernels are
+    compiled and caches filled, then a second) against the CPU's: each run, as many tensors as the
+    CPU's, each within `tolerance` of the largest value of the CPU's, none NaN or infinite."""
+    import torch
+
+    def tensors(result):
+        return result if isinstance(result, tuple) else (result,)
+    reference = tensors(reference)
+    found = []
+    for result in map(tensors, runs):
+        if len(result) != len(reference):
+            found.append((None, 0, '%d tensors where the CPU has %d' % (len(result), len(reference))))
+            continue
+        worst, nan = 0.0, 0
+        for got, want in zip(result, reference):
+            got = got.detach().float().cpu()
+            nan += int(torch.isnan(got).sum()) + int(torch.isinf(got).sum())
+            scale = float(want.abs().max()) or 1.0
+            worst = max(worst, float((got - want).abs().max()) / scale)
+        found.append((worst, nan, 'by %.2e of the largest value%s' % (worst, ', %d NaN or infinite' % nan if nan else '')))
+    within = [worst is not None and worst <= tolerance and not nan for worst, nan, _ in found]
+    if all(within):
+        return True, 'from the CPU by %.2e of the largest value (allowed %.0e)' % (
+            max(worst for worst, _, _ in found), tolerance)
+    wrong = {(False, True): 'the first run differs', (True, False): 'the second run differs'}.get(
+        tuple(within), 'both runs differ')
+    return False, '%s from the CPU (the first run: %s; the second: %s; allowed %.0e)' % (
+        wrong, found[0][2], found[1][2], tolerance)
+
+
+def comparison_checks():
+    """What verdict must refuse, and take, on tensors of the CPU: a check that was never seen to
+    fail has not been shown to check. (Until 2026-11-23 the first run was not compared, and a
+    run with fewer tensors than the CPU's was compared on those it had.)"""
+    import torch
+    right, off = torch.ones(4), torch.ones(4) + 1
+    wrong = []
+    for runs, reference, ok, said in [
+        ([right, right], right, True, 'from the CPU by 0.00e+00'),
+        ([(right, right), (right, right)], (right, right), True, 'from the CPU by 0.00e+00'),
+        ([off, right], right, False, 'the first run differs'),
+        ([right, off], right, False, 'the second run differs'),
+        ([off, off], right, False, 'both runs differ'),
+        ([right, right * float('nan')], right, False, 'the second: by 0.00e+00 of the largest value, 4 NaN or infinite'),
+        ([(right,), (right,)], (right, right), False, 'the first run: 1 tensors where the CPU has 2'),
+    ]:
+        got, detail = verdict(runs, reference, 2e-3)
+        if got != ok or said not in detail:
+            wrong.append('%s (should %s, saying %r)' % (detail, 'pass' if ok else 'fail', said))
+    return wrong
 
 
 def stop(p):
@@ -273,6 +319,12 @@ def main():
     if args[:1] == ['--list']:
         print('\n'.join(n for n, b, t in cases()))
         return 0
+    if args[:1] == ['--comparison']:
+        wrong = comparison_checks()
+        for line in wrong:
+            print('WRONG  the comparison: ' + line)
+        print('FAIL  the comparison' if wrong else 'PASS  the comparison')
+        return 1 if wrong else 0
     verbose = '-v' in args
     patterns = [a for a in args if a != '-v']
     wait = int(os.environ.get('VF_CASE_WAIT', '600'))

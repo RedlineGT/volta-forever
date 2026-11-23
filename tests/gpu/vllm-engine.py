@@ -12,6 +12,8 @@ Environment:
   REF_FILE    JSON reference from vllm-ref.py (optional; compare greedy tokens: prints
               `verdict: ALL_MATCH`, `verdict: MATCH_BUT_NEAR_TIES n` or `verdict: SOME_DIFFER`, as
               greedy_compare.py defines them)
+There must be one result for each prompt; with fewer (or none), the verdict is SOME_DIFFER or
+SOME_OUTSIDE.
 With sampling and TOP_K: every token sampled must be among the TOP_K most likely, and within the
 TOP_P of their probability at TEMPERATURE, by the log-probabilities of the model's own logits that
 the engine gives with each token (`raw_logprobs`): what the kernels of the sampling did is checked,
@@ -105,6 +107,9 @@ def main():
                 kind, detail = greedy_compare.compare(ref[i], ids=token_ids)
                 kinds.append(kind)
                 print('    %s: %s' % ({'match': 'MATCH', 'near': 'NEAR TIE', 'differ': 'DIFFER'}[kind], detail))
+            elif ref:
+                kinds.append('differ')
+                print('    DIFFER: the reference has no text for this prompt')
             if checked:
                 places = o.outputs[0].logprobs or []
                 why = None if token_ids else 'no token'
@@ -115,6 +120,12 @@ def main():
                         break
                 wrong.append(why)
                 print('    %s' % ('OUTSIDE: ' + why if why else 'WITHIN: %d tokens, each among the %d most likely and within %g of their probability' % (n, TOP_K, TOP_P)))
+
+        # One result for each prompt: a verdict over fewer, or over none, is not one.
+        if len(outputs) != len(PROMPTS):
+            print(f'  {len(outputs)} results for {len(PROMPTS)} prompts')
+            kinds.append('differ')
+            wrong.append('%d results for %d prompts' % (len(outputs), len(PROMPTS)))
 
         if t_gen > 0:
             print(f'  {total_tokens} tokens in {t_gen:.2f}s = {total_tokens/t_gen:.1f} tok/s')

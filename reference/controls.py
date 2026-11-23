@@ -165,7 +165,8 @@ level 3):
                 address from it, with the waits that this order asks for: that access is
                 addressed from what the register held before
     missing_pool_line
-                the last register that the translator says it took at an instruction is not said
+                the last register of the program that the translator says it took at an
+                instruction is not said
     no_attr_raise
                 the attributes of the function are the original's, not raised by the frame
     no_borrow_wait_l3
@@ -271,9 +272,11 @@ With tensor-core products that take everything at the instruction (level 3):
     load_ur_no_wait_l3
                 the last such load names no scoreboard, and what follows does not wait for it
 
-Printed for each control and cubin: the number of problems, or `=` when the control changed
-nothing in that cubin's translation (it has nothing of what the control takes away, and says
-nothing). The exit status is 0 when the translation as it is has no problem and every control is
+Printed for each control and cubin: the number of problems; `=` when the control changed
+nothing in that cubin's translation, its map or its lives (it has nothing of what the control
+takes away, and says nothing); or `refused` when all that the control changed is functions that
+the translator then refused: they are traps, and nothing of what the control did reaches the
+validator. The exit status is 0 when the translation as it is has no problem and every control is
 objected to in one cubin at least. Which cubins: ones that have what the controls take away
 (predicates saved, a P2R of the program next to a uniform predicate, a call that is told where
 to return). With -c, only the controls named (and the translation as it is). With -u, the
@@ -290,7 +293,8 @@ in the same process.)
 A control may change a translation and find no objection: `blind` takes the lowest predicate the
 instructions of a life do not touch, and where the translator's own lives of predicates are more
 careful than nvdisasm's (they are, across calls within a function) that predicate may hold
-nothing after all. Such a 0 is worth a look, and is not a hole by itself.
+nothing after all. Such a 0 is worth a look, and is not a hole by itself: tests/sass/controls.sh
+fails on each but those it lists, each looked at (RIGHT_THERE).
 """
 import collections, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1085,6 +1089,34 @@ def naming_code(data):
     return None
 
 
+def frozen(row):
+    """A row of the map or of the lives, as a tuple of what it has (a list of offsets as a tuple)."""
+    return tuple(tuple(x) if isinstance(x, list) else x for x in row)
+
+
+def refused_only(out, listing, lives, report, before, rest):
+    """The functions that the translation `out` refuses and the translation as it is (`before`, and
+    `rest`: its map, lives and report) does not, when that is all the control changed: the code,
+    the attributes, the map and the lives of every other function are as they are. Empty
+    otherwise. (Nothing that the control did reaches the validator then: the translator refused it,
+    and those functions are traps.)"""
+    newly = {f for f, why in report.items() if why and not rest['report'].get(f)}
+    if not newly:
+        return set()
+    a, b = elf.Elf(before), elf.Elf(out)
+    for f in report:
+        if f not in newly:
+            for name in ('.text.' + f, '.nv.info.' + f):
+                x, y = a.section(name), b.section(name)
+                if (x.data if x else None) != (y.data if y else None):
+                    return set()
+    def others(rows):
+        return collections.Counter(frozen(row) for row in rows if row[0] not in newly)
+    if others(listing) != others(rest['listing']) or others(lives) != others(rest['lives']):
+        return set()
+    return newly
+
+
 def run(mc, control, path, out_dir, untouched, validated=True):
     """(problems validate.py finds, its first objection) for one cubin; (None, '') when the control
     changed nothing in its translation, which `untouched` holds by path. (`validated` false: the
@@ -1319,6 +1351,7 @@ def run(mc, control, path, out_dir, untouched, validated=True):
             setattr(Borrowed, name, original)
     if control == 'as it is':
         untouched[path] = out
+        untouched[(path, 'rest')] = {'listing': list(listing), 'lives': [frozen(row) for row in lives], 'report': dict(report)}
         if not validated:
             return None, ''
     elif control == 'unlisted':
@@ -1360,13 +1393,16 @@ def run(mc, control, path, out_dir, untouched, validated=True):
         given = os.path.join(out_dir, 'original.' + os.path.basename(path))
         open(given, 'wb').write(source)
     elif control == 'no_c3_wait':
-        # C3 control: find a pool register that the program writes late somewhere, at an
-        # original instruction that has NO mem: store after it. Clear the 63-wait.
+        # C3 control: find a pool register that the function writes late somewhere, at an
+        # original instruction that has NO mem: store after it. Clear the 63-wait. (Until
+        # 2026-11-23 the registers written late, the pool lines and the parts of the instructions
+        # were those of every function at once: it cleared a wait in one function at the offset of
+        # another's.)
         container = elf.Elf(out)
-        # Build: program registers written late (original sm_75 code).
+        # Build: program registers written late, by function (original sm_75 code).
         orig_data = open(path, 'rb').read()
         orig_e = elf.Elf(orig_data)
-        late_written = set()
+        late_written = collections.defaultdict(set)
         for s in orig_e.sections:
             if s.name.startswith('.text.') and s.type == 1:
                 for at in range(0, len(s.data), 16):
@@ -1378,27 +1414,27 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                     if wb != 7 and d75.kind in machine.LATE:
                         for l, r in d75.writes:
                             if l == 'R':
-                                late_written.add(r)
+                                late_written[s.name[len('.text.'):]].add(r)
         # Find pool declarations at instructions without stores.
         by_old = collections.defaultdict(list)
         for row in listing:
-            by_old[row[2]].append((row[1], row[3]))
-        pool_at = {}  # {old_offset: set of registers}
+            by_old[(row[0], row[2])].append((row[1], row[3]))
+        pool_at = {}  # {(function, old_offset): set of registers}
         for entry in lives:
             if len(entry) >= 4 and entry[3] == 'pool':
                 for off in entry[4]:
-                    pool_at.setdefault(off, set()).update(range(entry[2], entry[2] + entry[1]))
+                    pool_at.setdefault((entry[0], off), set()).update(range(entry[2], entry[2] + entry[1]))
         changed = False
-        for func_name in {row[0] for row in listing}:
+        for func_name in sorted({row[0] for row in listing}):
             section = container.section('.text.' + func_name)
             if section is None:
                 continue
             data = bytearray(section.data)
-            for old_off in sorted(pool_at):
-                regs = pool_at[old_off]
-                if not regs & late_written:
+            for function, old_off in sorted(pool_at):
+                regs = pool_at[(function, old_off)]
+                if function != func_name or not regs & late_written[func_name]:
                     continue
-                parts = by_old.get(old_off, [])
+                parts = by_old.get((func_name, old_off), [])
                 # No store AND no mem: at all (so B3 and the existing wait check cannot report).
                 has_mem = any(w.startswith('mem:') for _, w in parts)
                 if has_mem:
@@ -1483,12 +1519,14 @@ def run(mc, control, path, out_dir, untouched, validated=True):
             return None, ''
     elif control == 'no_load_wait':
         # Clear the wait bit on the instruction after the last mem: load of each instruction.
+        # (Until 2026-11-23 it patched the section of the first function at the offsets of the
+        # others, and tested bit 0 of the wait mask, not that of the scoreboard it clears.)
         container = elf.Elf(out)
         by_old = collections.defaultdict(list)
         for row in listing:
-            by_old[row[2]].append((row[1], row[3]))
+            by_old[(row[0], row[2])].append((row[1], row[3]))
         changed = False
-        for old_off, parts in by_old.items():
+        for (name, old_off), parts in by_old.items():
             loads = [(n, w) for n, w in sorted(parts) if w.startswith('mem: load ')]
             if not loads:
                 continue
@@ -1500,7 +1538,6 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                 next_new = all_news[after_idx]
             else:
                 next_new = last_load_new + 16
-            name = listing[0][0]
             section = container.section('.text.' + name)
             if section and next_new + 16 <= len(section.data):
                 data = bytearray(section.data)
@@ -1509,7 +1546,7 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                 wb = (lw >> WRITE_BARRIER) & 7
                 if wb != 7:
                     nw = int.from_bytes(data[next_new:next_new + 16], 'little')
-                    if (nw >> WAIT) & 63 >> wb & 1:
+                    if nw >> (WAIT + wb) & 1:
                         nw &= ~(1 << (WAIT + wb))
                         data[next_new:next_new + 16] = nw.to_bytes(16, 'little')
                         section.data = bytes(data)
@@ -1630,16 +1667,25 @@ def run(mc, control, path, out_dir, untouched, validated=True):
             return None, ''
         lives[:] = kept
     elif control == 'missing_pool_line':
-        # Remove the first pool line from the .lives output.
-        if lives:
-            removed = False
-            for k in range(len(lives) - 1, -1, -1):
-                if len(lives[k]) >= 4 and lives[k][3] == 'pool':
-                    lives.pop(k)
-                    removed = True
-                    break
-            if not removed:
-                return None, ''
+        # Remove the last pool line from the .lives output that names a register of the program:
+        # one above the highest that the original function names is the translation's own,
+        # which it may write without saying. (Until 2026-11-23 the last pool line, whatever it
+        # named; and with no lives at all, the translation as it was, counted as changed.)
+        original = elf.Elf(source)
+        def highest(function):
+            section = original.section('.text.' + function)
+            top = 0
+            for at in range(0, len(section.data) if section is not None else 0, 16):
+                d = mc.decode(75, int.from_bytes(section.data[at:at + 16], 'little'))
+                if d is not None:
+                    top = max([top] + [r for letter, r, *role in d.reads + d.writes if letter == 'R'])
+            return top
+        for k in range(len(lives or []) - 1, -1, -1):
+            if len(lives[k]) >= 5 and lives[k][3] == 'pool' and 2 <= lives[k][2] <= highest(lives[k][0]):
+                lives.pop(k)
+                break
+        else:
+            return None, ''
     # ---- room controls (VF_BORROW>=5, room made) ----
     elif control == 'room_reads_orig':
         # A register put away that the original instruction reads: replace the first room: away's
@@ -2193,6 +2239,13 @@ def run(mc, control, path, out_dir, untouched, validated=True):
         out = container.write()
     elif out == untouched[path]:
         return None, ''
+    if control != 'as it is':
+        rest = untouched[(path, 'rest')]
+        if out == untouched[path] and listing == rest['listing'] and [frozen(row) for row in lives] == rest['lives']:
+            return None, ''                 # (code, map and lives as they are: a control that found nothing to change)
+        newly = refused_only(out, listing, lives, report, untouched[path], rest)
+        if newly:
+            return 'refused', '%d functions refused by the translator, among them %s' % (len(newly), min(newly)[:60])
     new = os.path.join(out_dir, os.path.basename(path))
     open(new, 'wb').write(out)
     with open(new + '.map', 'w') as f:
@@ -2243,14 +2296,14 @@ def main():
                 continue
             results = [run(mc, control, path, out_dir, untouched) for path in paths]
             counts = [problems for problems, _ in results]
-            changed = [c for c in counts if c is not None]
+            changed = [c for c in counts if isinstance(c, int)]
             good = (all(c == 0 for c in counts) if control == 'as it is'
                     else all(c >= 0 for c in changed) if control in CHANGES_THE_PROGRAM and changed
                     else (any(c > 0 for c in changed) and all(c >= 0 for c in changed)))
             ok = ok and good
             verdict = 'as expected' if good else 'changes nothing in these cubins: name one that has what it takes away' if not changed else 'NOT AS EXPECTED'
-            print('%-10s %s   %s' % (control, '  '.join('%14s' % ('=' if c is None else 'failed' if c < 0 else c) for c in counts), verdict))
-            example = next((first for problems, first in results if problems and first), None)
+            print('%-10s %s   %s' % (control, '  '.join('%14s' % ('=' if c is None else c if isinstance(c, str) else 'failed' if c < 0 else c) for c in counts), verdict))
+            example = next((first for problems, first in results if problems and problems != 'refused' and first), None)
             if example:
                 print('           e.g. %s' % re.sub(r'_Z\w+', '<function>', example)[:150])
     if not translate.PAIRS:

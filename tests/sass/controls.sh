@@ -21,11 +21,18 @@
 # In each pass one process validates the translation as it is, and the others take it unvalidated.
 # OUT gets one file a pass and control (what controls.py printed), and `summary.tsv`: for each
 # control, in how many cubins it changed the translation, in how many of those the validator
-# objected, the passes where it did, and its first objection. The exit status is 1 when the
-# translation as it is has a problem somewhere, when a control changes translations and is
-# objected to nowhere (a hole in the validator, or a control that tests nothing), or when the
-# validator stopped without a verdict. A cubin whose translation as it is has problems in a pass
-# is left out of the counts of that pass: what a control adds there cannot be told apart.
+# objected, the passes where it did, its first objection, the cubins whose translation it changed
+# and where the validator found nothing, and in how many the translator refused all that it
+# changed (`refused` in controls.py's table, not counted as changed: nothing of it reaches the
+# validator). The exit status is 1 when the translation as it is has a problem somewhere, when a
+# control changes the translation of a cubin and is not objected to there (a hole in the
+# validator, or a control that tests nothing there), or when the validator stopped without a
+# verdict. Apart: the controls of CHANGES_THE_PROGRAM in reference/controls.py (no objection is no
+# hole), and the cases of RIGHT_THERE below, where what a control changed stays right, each looked
+# at. (Until 2026-11-23 a control had to be objected to in one cubin only: the validator could
+# have lost the objection in all others unnoticed.) A cubin whose translation as it is has
+# problems in a pass is left out of the counts of that pass: what a control adds there cannot be
+# told apart.
 #   JOBS          processes (default 32); 40 minutes with 64 for the cubins named below
 #   SUMMARY_ONLY  set: nothing is run, the summary is made again from the files of OUT
 set -u
@@ -83,9 +90,30 @@ fi
 python3 -I - "$out" <<'PY'
 import collections, os, re, sys
 out = sys.argv[1]
+# Where a control changes the translation of a cubin and the validator rightly finds nothing, each
+# looked at (2026-11-23): (pass, control, cubin): why. Any other such case fails the run.
+HOLDS_NOTHING = ('the instruction left out of the declared life is one where, by the validator\'s own lives, '
+                 'the uniform register holds nothing: the translator declares the life longer than it is')
+FREE_TOO = 'the next register, where every home is moved, is free too'
+NOTHING_IN_FLIGHT = ('no load of the program in flight writes the borrowed register: the wait for the six '
+                     'scoreboards that the control takes away is not needed there')
+RIGHT_THERE = {
+    ('default', 'short_home', '0161.sm_75.cubin'): HOLDS_NOTHING,
+    ('1', 'short_home', '0142.sm_75.cubin'): HOLDS_NOTHING,
+    ('1', 'alive_home', 'k_convert.sm75.cubin'): FREE_TOO,
+    ('1', 'alive_home', '0097.sm_75.cubin'): FREE_TOO,
+    ('1', 'alive_home', '0142.sm_75.cubin'): FREE_TOO,
+    ('1', 'no_borrow_wait', 'k_params.sm75.cubin'): NOTHING_IN_FLIGHT,
+    ('1', 'no_borrow_wait', '0142.sm_75.cubin'): NOTHING_IN_FLIGHT,
+    ('1', 'written_pair', '0086.sm_75.cubin'): ('the translator gives level 2 up for the pair (a borrowed register '
+                                                'receives a result that nothing announces) and translates the four '
+                                                'functions at level 1, with pairs that their instructions do not write'),
+}
 cubins = [os.path.basename(l.strip()) for l in open(os.path.join(out, 'cubins'))]
-changed, objected, failed = collections.Counter(), collections.Counter(), collections.Counter()
+changed, objected, failed, refused = collections.Counter(), collections.Counter(), collections.Counter(), collections.Counter()
 where, first, names, bad = collections.defaultdict(list), {}, [], []
+unobjected = collections.defaultdict(list)  # {control: ['PASS CUBIN', ...]}: changed, nothing found there, and not in RIGHT_THERE
+right = []                                 # the cases of RIGHT_THERE met in this run
 dirty = collections.defaultdict(set)       # {pass: the cubins whose translation as it is has problems there}
 for line in open(os.path.join(out, 'todo')):
     p, name = line.split()
@@ -106,10 +134,17 @@ for line in open(os.path.join(out, 'todo')):
         if 'every control is objected to' not in text and 'NOT EVERY CONTROL' not in text:
             bad.append('%s in pass %s: did not run (%s)' % (name, p, (text.strip().splitlines() or ['nothing'])[-1][:120]))
         continue                          # not run with this setting of the translator
+    for i, x in enumerate(m.group(1).split()):
+        if x == '0' and i not in dirty[p]:
+            if (p, name, cubins[i]) in RIGHT_THERE:
+                right.append((p, name, cubins[i]))
+            else:
+                unobjected[name].append('%s %s' % (p, cubins[i]))
     counts = [x for i, x in enumerate(m.group(1).split()) if i not in dirty[p]]
-    c = sum(1 for x in counts if x != '=')
-    o = sum(1 for x in counts if x not in ('=', '0', 'failed'))
+    c = sum(1 for x in counts if x not in ('=', 'refused'))
+    o = sum(1 for x in counts if x not in ('=', 'refused', '0', 'failed'))
     failed[name] += counts.count('failed')
+    refused[name] += counts.count('refused')
     changed[name] += c
     objected[name] += o
     if o:
@@ -118,19 +153,29 @@ for line in open(os.path.join(out, 'todo')):
         if e and name not in first:
             first[name] = re.sub(r'^\S+ ', '', e.group(1))[:110]
 with open(os.path.join(out, 'summary.tsv'), 'w') as f:
-    f.write('control\tcubins changed\tof which objected to\tpasses\tfirst objection\n')
+    f.write('control\tcubins changed\tof which objected to\tpasses\tfirst objection\tchanged and not objected to\t'
+            'refused by the translator\n')
     for name in names:
-        f.write('%s\t%d\t%d\t%s\t%s\n' % (name, changed[name], objected[name], ', '.join(where[name]) or '-', first.get(name, '')))
+        f.write('%s\t%d\t%d\t%s\t%s\t%s\t%d\n' % (name, changed[name], objected[name], ', '.join(where[name]) or '-', first.get(name, ''),
+                                                  ', '.join(['%s %s (RIGHT_THERE)' % (p, c) for p, n, c in right if n == name]
+                                                            + unobjected[name]) or '-', refused[name]))
 # (A control that changes the program, not the translation: no objection is no hole.)
 of_the_program = open(os.path.join(out, 'of-the-program')).read().split()
 silent = [n for n in names if changed[n] and not objected[n] and n not in of_the_program]
+# (A control makes the translation wrong: it is objected to wherever it changes it, but in RIGHT_THERE.)
+missed = [n for n in names if unobjected[n] and n not in of_the_program and n not in silent]
 idle = [n for n in names if not changed[n]]
 stopped = [n for n in names if failed[n]]
 print('%d controls on %d cubins: %d objected to; %d change translations and are objected to nowhere: %s; %d change nothing in these cubins: %s'
       % (len(names), len(cubins), sum(1 for n in names if objected[n]), len(silent), ' '.join(silent) or '-', len(idle), ' '.join(idle) or '-'))
+print('%d are not objected to in a cubin whose translation they change: %s' % (
+    len(missed), '; '.join('%s (%s)' % (n, ', '.join(unobjected[n])) for n in missed) or '-'))
+gone = sorted(set(RIGHT_THERE) - set(right))
+print('(%d cases where a control changes the translation and the validator rightly finds nothing, of RIGHT_THERE; %d of its cases not met%s)'
+      % (len(right), len(gone), ': ' + ', '.join(' '.join(case) for case in gone) if gone else ''))
 if stopped:
     print('the validator stopped without a verdict on translations of: %s' % ' '.join(stopped))
 for b in bad:
     print(b)
-sys.exit(1 if silent or bad or stopped else 0)
+sys.exit(1 if silent or missed or bad or stopped else 0)
 PY

@@ -3407,6 +3407,46 @@ fn regression_partial_reduction_in_one_order_for_every_lane() {
 }
 
 #[test]
+fn regression_reduction_of_floats_without_nan_gives_the_canonical_nan() {
+    // Without .NaN, the minimum or maximum of floats is the canonical NaN when every input is a
+    // NaN, and so when one lane alone is alive: its input is reduced with no other. (Until
+    // 2026-11-23 the NaN of that lane was given as it was, 0x7fc00001 for 0x7fc00001.)
+    let canonical = [
+        "setp.nan.f32 %vf_n, %vf_r0, %vf_r0;",
+        "selp.f32 %r1, 0f7FFFFFFF, %vf_r0, %vf_n;",
+    ];
+    let any_nan = [
+        "setp.nan.f32 %vf_n, %r0, %r0;",
+        "vote.sync.any.pred %vf_n, %vf_n, -1;",
+        "selp.f32 %r1, 0f7FFFFFFF, %vf_r0, %vf_n;",
+    ];
+    let integer = ["mov.b32 %r1, %vf_r0;"];
+    for (op, end) in [
+        ("min.f32", &canonical[..]),
+        ("max.f32", &canonical[..]),
+        ("max.NaN.f32", &any_nan[..]),
+        ("min.s32", &integer[..]),
+        ("max.u32", &integer[..]),
+    ] {
+        let source = format!(
+            "{{\n.reg .b32 %r<2>;\n.reg .pred %p;\nmov.u32 %r0, %laneid;\n\
+             setp.ne.u32 %p, %r0, 7;\n@%p exit;\nredux.sync.{op} %r1, %r0, -1;\nret;\n}}"
+        );
+        let lowered = lower(&source);
+        // What follows the end of the reduction, for every number of lanes alive.
+        let lines: Vec<&str> = lowered
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !(line.starts_with("$vf_reduced") && line.ends_with(':')))
+            .skip(1)
+            .take_while(|line| *line != "ret;")
+            .collect();
+        assert_eq!(lines, end, "{op}:\n{lowered}");
+        assert!(undeclared(&lowered).is_empty(), "{op}");
+    }
+}
+
+#[test]
 fn regression_ptx_integer_radices_in_sizes_and_offsets() {
     let source = "{\n.reg .b32 %r<8>;\n.reg .b64 %rd;\n\
                   cp.async.ca.shared.global [%r0+32], [%rd+64], 16, 8;\n\

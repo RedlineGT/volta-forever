@@ -597,6 +597,34 @@ case "$_st:$err" in
         fi ;;
     *) fail "$name" "exit $_st, said: $err" ;;
 esac
+# The same with a ';', at which the loader splits LD_LIBRARY_PATH too (until 2026-11-23 the
+# command ran, and a library of the directory was not found there).
+name="cuda12-semicolon"
+mkdir -p "$tmp/cuda;12/lib"
+: >"$tmp/cuda;12/lib/libcublas.so.12"
+for how in env option relative doctor; do
+    _st=0
+    case $how in
+        env) err=$(VF_CUDA12="$tmp/cuda;12/lib" "$vf" env 2>&1 >/dev/null) || _st=$? ;;
+        option) err=$("$vf" --cuda12 "$tmp/cuda;12/lib" sh -c 'echo ran' 2>&1) || _st=$? ;;
+        relative) err=$(cd "$tmp/cuda;12" && "$vf" --cuda12 lib env 2>&1 >/dev/null) || _st=$? ;;
+        doctor) err=$(VF_CUDA12="$tmp/cuda;12/lib" "$vf" doctor 2>&1 >/dev/null) || _st=$? ;;
+    esac
+    case "$_st:$err" in
+        *ran*) fail "$name-$how" "the command ran" ;;
+        2:*"$tmp/cuda;12/lib"*"';'"*) pass "$name-$how" ;;
+        *) fail "$name-$how" "exit $_st, said: $err" ;;
+    esac
+done
+name="home-semicolon"
+mk_archive "$tmp/inst;all" cuda12
+_st=0
+err=$("$tmp/inst;all/bin/vf" sh -c 'echo ran' 2>&1) || _st=$?
+case "$_st:$err" in
+    *ran*) fail "$name" "the command ran" ;;
+    2:*"$tmp/inst;all"*"';'"*) pass "$name" ;;
+    *) fail "$name" "exit $_st, said: $err" ;;
+esac
 
 # 9. Warning when CUDA 12.9.2 is absent.
 

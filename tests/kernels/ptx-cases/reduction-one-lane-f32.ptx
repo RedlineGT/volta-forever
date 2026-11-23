@@ -1,0 +1,32 @@
+.version 8.8
+.target sm_100a
+.address_size 64
+.visible .entry k(.param .u64 output) .reqntid 32,1,1 {
+    .reg .b32 %lane, %quiet, %negative, %zero, %one, %least, %greatest, %signed, %kept;
+    .reg .b64 %out;
+    .reg .pred %leave;
+    ld.param.u64 %out, [output];
+    mov.u32 %lane, %laneid;
+    mad.wide.u32 %out, %lane, 16, %out;
+    // Lane 7 alone survives. All other lanes store the expected values before exiting for the
+    // one-warp harness: without .NaN, the least and the greatest of one NaN (a quiet NaN with a
+    // payload, a negative signalling NaN) are the canonical NaN, as they are of any number of
+    // NaNs (PTX ISA, redux.sync); the least of -0 alone is -0, the greatest of -1 alone is -1.
+    mov.b32 %least, 0x7fffffff;
+    mov.b32 %greatest, 0x7fffffff;
+    mov.b32 %signed, 0x80000000;
+    mov.b32 %kept, 0xbf800000;
+    setp.ne.u32 %leave, %lane, 7;
+    @%leave st.global.v4.b32 [%out], {%least,%greatest,%signed,%kept};
+    @%leave exit;
+    mov.b32 %quiet, 0x7fc00001;
+    mov.b32 %negative, 0xff800001;
+    mov.b32 %zero, 0x80000000;
+    mov.b32 %one, 0xbf800000;
+    redux.sync.min.f32 %least, %quiet, -1;
+    redux.sync.max.f32 %greatest, %negative, -1;
+    redux.sync.min.f32 %signed, %zero, -1;
+    redux.sync.max.f32 %kept, %one, -1;
+    st.global.v4.b32 [%out], {%least,%greatest,%signed,%kept};
+    ret;
+}
