@@ -3,7 +3,8 @@
  * the epilogue give different bits. Every case uses the NT layout (op(A) = A, op(B) = B^T), where
  * 12.9 runs its sequential kernel at every size of the kernel sweep, and compares every bit with 12.9.
  * Prints "ok bf16-arith". Controls (tests/gpu/forward-bf16.sh): kernels with separate multiply and
- * add, and with beta * C rounded before it is added, must fail. */
+ * add, with beta * C rounded before it is added, without the +0 term, and with it only when beta is
+ * zero, must fail. */
 #include "bf16-common.h"
 
 static cublasHandle_t hv, h12;
@@ -12,9 +13,10 @@ static cublasLtHandle_t lt12;
 static uint16_t bfv(float f) { return f2bf(f); }
 
 /* C = alpha A B^T + beta C through the variant and through 12.9 (A m x k, B n x k, both column-major,
- * leading dimensions m and n); the number of output elements whose bits differ. */
-static size_t gemm_pair(const char *what, int m, int n, int k, const uint16_t *hA, const uint16_t *hB, float alpha,
-                        float beta, const void *hC, cudaDataType ct, int devmode, int want_path)
+ * leading dimensions m and n); the number of output elements whose bits differ, over every row, or
+ * with row_step > 0 over the rows i % row_step == 0 only. */
+static size_t gemm_pair_rows(const char *what, int m, int n, int k, const uint16_t *hA, const uint16_t *hB, float alpha,
+                             float beta, const void *hC, cudaDataType ct, int devmode, int want_path, int row_step)
 {
     const size_t es = ct == CUDA_R_32F ? 4 : 2, cb = (size_t)m * n * es;
     void *dA = to_device(hA, (size_t)m * k * 2), *dB = to_device(hB, (size_t)n * k * 2);
@@ -38,12 +40,16 @@ static size_t gemm_pair(const char *what, int m, int n, int k, const uint16_t *h
     cublasSetPointerMode(hv, CUBLAS_POINTER_MODE_HOST);
     c129.SetPointerMode(h12, CUBLAS_POINTER_MODE_HOST);
     void *ov = from_device(Cv, cb), *o12 = from_device(C12, cb);
-    const size_t d = ndiff(ov, o12, cb, es);
+    size_t d = 0;
+    for (size_t i = 0; i < (size_t)m * n; ++i)
+        d += (row_step <= 0 || (long long)(i % (size_t)m) % row_step == 0) &&
+             memcmp((char *)ov + i * es, (char *)o12 + i * es, es) != 0;
     CHECK(s1 == 0 && s2 == 0, "%s: status %d / %d", what, s1, s2);
     CHECK(!rt_counters || delta(&c0, &c1, want_path) == 1, "%s: not served by the expected path", what);
     if (d) {
         for (size_t i = 0; i < (size_t)m * n; ++i)
-            if (memcmp((char *)ov + i * es, (char *)o12 + i * es, es)) {
+            if ((row_step <= 0 || (long long)(i % (size_t)m) % row_step == 0) &&
+                memcmp((char *)ov + i * es, (char *)o12 + i * es, es)) {
                 if (es == 4)
                     printf("      %s: element %zu: %a (variant) %a (12.9)\n", what, i, ((float *)ov)[i], ((float *)o12)[i]);
                 else
@@ -60,6 +66,12 @@ static size_t gemm_pair(const char *what, int m, int n, int k, const uint16_t *h
     free(ov);
     free(o12);
     return d;
+}
+
+static size_t gemm_pair(const char *what, int m, int n, int k, const uint16_t *hA, const uint16_t *hB, float alpha,
+                        float beta, const void *hC, cudaDataType ct, int devmode, int want_path)
+{
+    return gemm_pair_rows(what, m, n, k, hA, hB, alpha, beta, hC, ct, devmode, want_path, 0);
 }
 
 static void *c_random(int m, int n, cudaDataType ct)
@@ -266,6 +278,56 @@ static void special_values(void)
     }
 }
 
+/* Signed zeros: with alpha < 0 and an exactly zero dot product, alpha * acc = -0; when beta * C = -0
+ * is added next (beta 1 or 0.5 with C = -0, beta -1 with C = +0), cuBLAS 12.9 gives +0, as when +0 is
+ * added to alpha * acc before beta * C. A's rows i % 3 == 0 are zeros (+0 and -0 by turns); host and
+ * device pointer modes, both output types. The skinny path: every element compared with 12.9. The
+ * tensor-core path (its epilogue and its fallback finish the same way): the zero rows compared, since
+ * elsewhere its bits are not 12.9's. The kernel control ZERO_BETA0 (+0 only when beta is zero, as
+ * before) must fail these cases. */
+static void signed_zeros(void)
+{
+    static const struct {
+        float alpha, beta, c;
+        int dev;
+        const char *what;
+    } cases[] = {
+        {-1.0f, 1.0f, -0.0f, 0, "alpha -1, beta 1, C = -0"},
+        {-1.0f, 0.5f, -0.0f, 0, "alpha -1, beta 0.5, C = -0"},
+        {-1.0f, 0.5f, -0.0f, 1, "alpha -1, beta 0.5, C = -0, device pointers"},
+        {-1.0f, -1.0f, 0.0f, 0, "alpha -1, beta -1, C = +0"},
+        {-1.0f, -1.0f, 0.0f, 1, "alpha -1, beta -1, C = +0, device pointers"},
+        {1.0f, 1.0f, -0.0f, 0, "alpha 1, beta 1, C = -0"},
+    };
+    for (int tc = 0; tc < 2; ++tc) {
+        const int m = tc ? 512 : 256, n = tc ? 64 : 4, k = tc ? 512 : 64;
+        for (int ct = 0; ct < 2; ++ct) {
+            const cudaDataType t = ct ? CUDA_R_16BF : CUDA_R_32F;
+            uint16_t *A = bf16_random((size_t)m * k, 0.05), *B = bf16_random((size_t)n * k, 1.0);
+            for (int i = 0; i < m; i += 3)
+                for (int l = 0; l < k; ++l) A[i + (size_t)l * m] = (i / 3) % 2 ? 0x8000 : 0x0000;
+            void *C = malloc((size_t)m * n * 4);
+            for (size_t c = 0; c < sizeof cases / sizeof *cases; ++c) {
+                for (size_t e = 0; e < (size_t)m * n; ++e) {
+                    if (ct)
+                        ((uint16_t *)C)[e] = bfv(cases[c].c);
+                    else
+                        ((float *)C)[e] = cases[c].c;
+                }
+                char what[128];
+                snprintf(what, sizeof what, "signed zeros, %s path, %s, %s", tc ? "tensor-core" : "skinny", cases[c].what,
+                         ct ? "bf16" : "fp32");
+                const size_t d = gemm_pair_rows(what, m, n, k, A, B, cases[c].alpha, cases[c].beta, C, t, cases[c].dev,
+                                                tc ? SERVED_TC : SERVED_SKINNY, tc ? 3 : 0);
+                CHECK(d == 0, "%s: %zu elements differ from 12.9", what, d);
+            }
+            free(A);
+            free(B);
+            free(C);
+        }
+    }
+}
+
 int main(void)
 {
     CU(cudaSetDevice(0));
@@ -281,6 +343,7 @@ int main(void)
     epilogue_order();
     lt_bias();
     special_values();
+    signed_zeros();
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;

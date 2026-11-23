@@ -772,16 +772,19 @@ element as one fp32 fused multiply-add chain over l = 0, 1, ..., k-1, from +0:
 - each product of two bf16 values is exact inside the fused multiply-add (also when it lies below
   2^-126 or above the largest fp32: `fma(2^64, 2^64, -2^104)` gives the largest fp32, not inf); one
   rounding to nearest per step; no flush of subnormals;
-- then `alpha * acc`, rounded; then `beta * C` added by one fused multiply-add when beta is not zero;
-  when beta is zero, C is not read and +0 is added, so a -0 becomes +0, also for beta = -0; then the
-  bias of a cuBLASLt bias epilogue, added and rounded;
+- then `alpha * acc`, rounded, and +0 added to it, so that a -0 becomes +0 (with alpha < 0 and a sum
+  that is exactly zero, `alpha * acc` is -0, and cuBLAS 12.9 gives +0 even when `beta * C` is -0); then
+  `beta * C` added by one fused multiply-add when beta is not zero (when beta is +0 or -0, C is not
+  read); then the bias of a cuBLASLt bias epilogue, added and rounded;
 - a NaN in fp32 output is the GPU's own (0x7fffffff); in bf16 output every NaN is 0x7fff; bf16 output
   is rounded to nearest even.
 
 This is what cuBLAS 12.9's sequential kernel on this GPU (`magma_sgemmEx_kernel`) computes, bit for
 bit, on every input that `tests/gpu/forward/bf16-arith.c` puts to both: subnormal products, a product
 brought back from overflow, beta 0.3 and 1/3 with alpha 0.7, the bias with alpha 0.7 and beta 0.3,
-device-mode alpha = 0 with NaN, rows of -0 products, NaN payloads. But 12.9 does not always run that
+device-mode alpha = 0 with NaN, rows of -0 products, NaN payloads, and signed zeros (alpha -1 and a
+zero sum with beta * C = -0: beta 1 or 0.5 with C = -0, beta -1 with C = +0, in both pointer modes and
+both output types). But 12.9 does not always run that
 kernel: on some shapes it runs `gemmSN_TN_kernel` or `gemmSN_NN_kernel`, which sum in another order,
 and its choice depends on the shape, the layout, the alignment of the operands and the workspace of
 the handle. The skinny path therefore serves only where 12.9 was seen to run its sequential kernel

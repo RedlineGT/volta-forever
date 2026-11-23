@@ -277,18 +277,22 @@ static __device__ __forceinline__ float rd_bias(const VfOut &o, int i)
                         : __ldg(reinterpret_cast<const float *>(o.bias) + i);
 }
 
-// v = alpha * acc already rounded; adds beta * C by one fused multiply-add, then the bias. When beta
-// is zero (+0 or -0) C is not read, and +0 is added instead, as cuBLAS 12.9 does: alpha * acc = -0
-// then becomes +0 (tests/gpu/forward/bf16-arith.c).
+// v = alpha * acc already rounded. +0 is added to it first, as cuBLAS 12.9 does: alpha * acc = -0
+// becomes +0, also when beta * C = -0 follows (-0 + -0 would stay -0); any other value is unchanged.
+// Then beta * C by one fused multiply-add (C is not read when beta is +0 or -0), then the bias
+// (tests/gpu/forward/bf16-arith.c: signed zeros, the epilogue's order).
 static __device__ __forceinline__ float finalize(const VfOut &o, const Scal &sc, float v, int i, long long cidx)
 {
+#if defined(VF_KERNEL_CONTROL_NO_ZERO_TERM)  // the control leaves alpha * acc as it is
+#elif defined(VF_KERNEL_CONTROL_ZERO_BETA0)  // the control adds +0 only when beta is zero
+    if (!sc.readc) v = __fadd_rn(v, 0.0f);
+#else
+    v = __fadd_rn(v, 0.0f);
+#endif
 #ifdef VF_KERNEL_CONTROL_EPI_SEPARATE  // beta * C rounded before it is added
     if (sc.readc) v = __fadd_rn(v, __fmul_rn(sc.beta, rd_c(o, cidx)));
 #else
     if (sc.readc) v = __fmaf_rn(sc.beta, rd_c(o, cidx), v);
-#endif
-#ifndef VF_KERNEL_CONTROL_NO_ZERO_TERM  // the control leaves alpha * acc as it is when beta is zero
-    else v = __fadd_rn(v, 0.0f);
 #endif
     if (o.btype >= 0) v = __fadd_rn(v, rd_bias(o, i));
     return v;
