@@ -212,7 +212,9 @@ the handle is that of a refused kernel, and the driver is not called
 (`crates/vf-proxy/src/guard.rs`, section 5). The driver says what a handle is
 (`cuKernelGetLibrary`, `cuFuncGetModule`, and the name), which leads to the records of
 refusals; a function of a module the layer does not know, which may be the module the driver made
-for a library in this context, is compared with that library's refused kernel of the same name.
+for a library in this context, is compared with the function of that library's refused kernel of
+the same name in the current context (when it is not that one, what is concluded is not kept: it
+may be the kernel's function in another context, asked about while that one is not current).
 The refusals of a library that is not deferred hold on the V100 only: in a context on a later
 card the driver runs the library's own code.
 

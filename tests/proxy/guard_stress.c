@@ -18,6 +18,9 @@
  *             functions to the next thread. green: the same, destroyed with cuGreenCtxDestroy.
  *   samename  a module that the layer keeps nothing of, with a function named as the refused kernel
  *             of a library, and another library whose kernel of that name runs: all three run.
+ *   nocontext the function of a library's refused kernel in context A, taken from the driver, asked
+ *             about while no context is current, then while another is; then, in A, asked about and
+ *             launched: refused there, whatever was concluded in the other contexts.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -225,6 +228,29 @@ int main(int argc, char **argv) {
                  "its function -> %d, a question -> %d; %lu of 3 launches reached the driver",
                  r1, r2, r3, r4, *launched - before);
         check(line, !r1 && !r2 && !r3 && !r4 && *launched - before == 3);
+    } else if (!strcmp(scenario, "nocontext")) {
+        void *a, *b, *library, *bad;
+        int value;
+        l_ctx_create(&a, 0, 0);
+        if (l_lib_load(&library, PTX, NULL, NULL, 0, NULL, NULL, 0)) return 2;
+        d_lib_kernel(&bad_kernel, library, "bad");
+        d_kernel_function(&bad, bad_kernel);
+        for (int other = 0; other < 2; ++other) {
+            if (other) l_ctx_create(&b, 0, 0);
+            else l_set_current(NULL);
+            CUresult elsewhere = l_attribute(&value, 0, bad);
+            l_set_current(a);
+            unsigned long launches = *launched_bad, questions = *asked_bad;
+            CUresult asked = l_attribute(&value, 0, bad), launched_in_a = go(bad);
+            char line[300];
+            snprintf(line, sizeof line,
+                     "nocontext: asked about while %s -> %d; then in its context: asked -> %d, launched -> %d; "
+                     "%lu questions and %lu launches reached the driver",
+                     other ? "another context is current" : "no context is current", elsewhere, asked,
+                     launched_in_a, *asked_bad - questions, *launched_bad - launches);
+            check(line, asked == REFUSED && launched_in_a == REFUSED && *launched_bad == launches &&
+                            *asked_bad == questions);
+        }
     } else {
         fprintf(stderr, "no scenario %s\n", scenario);
         return 2;

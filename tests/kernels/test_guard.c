@@ -11,6 +11,11 @@
  *                        the kernel from NVIDIA's cuLibraryGetKernel and its function from NVIDIA's
  *                        cuKernelGetFunction; in both cases, the function of the library's module
  *                        from NVIDIA's cuModuleGetFunction
+ *   test_guard contexts  (VF_LAZY=0) the function of the library's refused kernel in context A, from
+ *                        NVIDIA's cuKernelGetFunction, before the program asked the layer for anything
+ *                        of the library in A, asked about while no context is current, then while
+ *                        another context is; then asked about in A, where it must be refused whatever
+ *                        was answered elsewhere. Nothing is launched but add_one, at the end.
  *
  * Build: gcc -O2 -Wall -o test_guard test_guard.c -ldl
  * Run:   DRVRUN_LIBCUDA=<proxy> CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<gpu> ./test_guard module
@@ -232,11 +237,12 @@ static void refused_kernel(const char *what, void *k) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2 || (strcmp(argv[1], "library") && strcmp(argv[1], "module"))) {
-        fprintf(stderr, "usage: test_guard library|module\n");
+    if (argc != 2 || (strcmp(argv[1], "library") && strcmp(argv[1], "module") && strcmp(argv[1], "contexts"))) {
+        fprintf(stderr, "usage: test_guard library|module|contexts\n");
         return 2;
     }
-    library_mode = !strcmp(argv[1], "library");
+    int contexts_mode = !strcmp(argv[1], "contexts");
+    library_mode = contexts_mode || !strcmp(argv[1], "library");
     const char *path = getenv("DRVRUN_LIBCUDA");
     cuda = dlopen(path ? path : "libcuda.so.1", RTLD_NOW);
     if (!cuda) {
@@ -273,14 +279,46 @@ int main(int argc, char **argv) {
     }
     check("the module loads", r == 0);
     if (r) return 1;
-    check("add_one(10) is 11", add_one(10) == 11);
+    // (Not before the contexts mode's questions: through the layer, add_one makes the layer know the
+    // library's module in this context, which the questions are to find unknown.)
+    if (!contexts_mode) check("add_one(10) is 11", add_one(10) == 11);
     void *good = NULL, *refused = (void *)0xdeadbeef;
     CUresult (*get)(void **, void *, const char *) = LAYER(library_mode ? "cuLibraryGetKernel" : "cuModuleGetFunction");
     r = get(&refused, loaded, "refused_by_layer");
     check("the layer refuses refused_by_layer with 218 and a null handle", r == 218 && refused == NULL);
 
     CUresult (*nvidia_function)(void **, void *, const char *) = NVIDIA("cuModuleGetFunction");
-    if (library_mode) {
+    if (contexts_mode) {
+        CUresult (*nvidia_kernel)(void **, void *, const char *) = NVIDIA("cuLibraryGetKernel");
+        CUresult (*nvidia_kernel_function)(void **, void *) = NVIDIA("cuKernelGetFunction");
+        CUresult (*attribute)(int *, int, void *) = LAYER("cuFuncGetAttribute");
+        CUresult (*occupancy)(int *, void *, int, size_t) = LAYER("cuOccupancyMaxActiveBlocksPerMultiprocessor");
+        CUresult (*create)(void **, unsigned, int) = LAYER("cuCtxCreate_v2");
+        CUresult (*destroy)(void *) = LAYER("cuCtxDestroy_v2");
+        void *kernel = NULL, *function = NULL, *other = NULL;
+        int value = 0;
+        char line[200];
+        check("NVIDIA's cuLibraryGetKernel gives the refused kernel (VF_LAZY=0)",
+              nvidia_kernel(&kernel, loaded, "refused_by_layer") == 0 && kernel);
+        check("NVIDIA's cuKernelGetFunction gives its function in context A",
+              kernel && nvidia_kernel_function(&function, kernel) == 0 && function);
+        for (int elsewhere = 0; elsewhere < 2 && function; ++elsewhere) {
+            if (elsewhere) create(&other, 0, 0);
+            else set_current(NULL);
+            r = attribute(&value, 0, function);
+            printf("  asked about while %s: %d\n", elsewhere ? "context B is current" : "no context is current", r);
+            set_current(context);
+            r = attribute(&value, 0, function);
+            snprintf(line, sizeof line, "then in context A: cuFuncGetAttribute refused with 218 (got %d)", r);
+            check(line, r == 218);
+            r = occupancy(&value, function, 32, 0);
+            snprintf(line, sizeof line, "then in context A: cuOccupancyMaxActiveBlocksPerMultiprocessor refused with 218 (got %d)",
+                     r);
+            check(line, r == 218);
+        }
+        if (other) destroy(other);
+        set_current(context);
+    } else if (library_mode) {
         CUresult (*nvidia_kernel)(void **, void *, const char *) = NVIDIA("cuLibraryGetKernel");
         CUresult (*nvidia_kernel_function)(void **, void *) = NVIDIA("cuKernelGetFunction");
         void *kernel = NULL;

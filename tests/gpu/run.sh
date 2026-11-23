@@ -581,6 +581,9 @@ guard() {  # guard NAME INTERFACE
 guard guard-module module
 guard guard-library library
 VF_LAZY=0 guard guard-library-lazy-off library
+# The function of the refused kernel in its context is refused there, also after it was asked
+# about while no context, or another, was current (only questions: nothing that traps is launched).
+VF_LAZY=0 guard guard-contexts contexts
 
 # A kernel whose usual translation takes more registers than a block of 1,024 threads can have is
 # launched from a second translation that keeps to the kernel's own count (`docs/architecture.md`, "Launch"): taken

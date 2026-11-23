@@ -435,11 +435,15 @@ pub enum Verdict {
     Refused(Refusal),
     /// It is not, wherever it is used.
     Allowed,
-    /// It is a refused kernel of a library, or its function, used where the GPU is not the one
-    /// whose code the layer adapts: the driver runs the library's own code there (a library keeps
-    /// the entries of the other GPUs), as the module of the library in such a context gives the
-    /// kernel by name. Used on this GPU, it is refused. (Not for a deferred library, whose code is
-    /// the PTX adapted for this GPU on every GPU.)
+    /// It is not, where it is used now, which another use may not be: so this is not kept.
+    /// - A refused kernel of a library, or its function, used where the GPU is not the one whose
+    ///   code the layer adapts: the driver runs the library's own code there (a library keeps the
+    ///   entries of the other GPUs), as the module of the library in such a context gives the
+    ///   kernel by name. Used on this GPU, it is refused. (Not for a deferred library, whose code is
+    ///   the PTX adapted for this GPU on every GPU.)
+    /// - A function of a module unknown here, named as the refused kernel of a library, that is
+    ///   not that kernel's function in the current context: it may be its function in another
+    ///   context, which the driver is asked about while another context, or none, is current.
     AllowedHere,
 }
 
@@ -492,13 +496,17 @@ pub unsafe fn verdict(handle: usize, device: Option<c_int>) -> Verdict {
             .map(|(&library, _)| library)
             .collect()
     };
-    for library in libraries {
+    if libraries.is_empty() {
+        return Verdict::Allowed;
+    }
+    for &library in &libraries {
         if unsafe { of_library(handle, library, &name) } {
             let found = known().get(&library).and_then(refusal);
             return of_a_library(library, found);
         }
     }
-    Verdict::Allowed
+    // (Compared with the function of each library's kernel in the current context only.)
+    Verdict::AllowedHere
 }
 
 /// Kernel `name` of `handle` is given to the program: announce it if it runs emulated instructions.
