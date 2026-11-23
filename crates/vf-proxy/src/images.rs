@@ -1132,8 +1132,71 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
     None
 }
 
+/// The XXH64 of `bytes` (seed 0: what `xxhsum -H1` prints for a file of these bytes).
+pub fn xxh64(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = twox_hash::XxHash64::with_seed(0);
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+/// The bytes of the image at `ptr` as the adaptation reads them: the text until its terminating zero,
+/// the fat binary (the one a wrapper points to), the cubin by its tables; within `len` when it is
+/// known. `None` when the extent cannot be told.
+///
+/// # Safety
+/// As for `adapt`.
+unsafe fn image_extent<'a>(ptr: *const c_void, len: Option<usize>) -> Option<&'a [u8]> {
+    let bytes = ptr as *const u8;
+    let mut head = [0u8; 4];
+    for (i, byte) in head.iter_mut().enumerate() {
+        if len.is_some_and(|len| i >= len) {
+            break;
+        }
+        *byte = unsafe { *bytes.add(i) };
+        if *byte == 0 && len.is_none() {
+            break;
+        }
+    }
+    let magic = u32::from_le_bytes(head);
+    let fat_at = |at: *const u8| -> Option<&'a [u8]> {
+        let header = unsafe { std::slice::from_raw_parts(at, fatbin::HEADER_SIZE) };
+        let length = fatbin::container_len(header).ok()?;
+        Some(unsafe { std::slice::from_raw_parts(at, length) })
+    };
+    if magic == fatbin::WRAPPER_MAGIC {
+        if len.is_some_and(|len| len < std::mem::size_of::<Wrapper>()) {
+            return None;
+        }
+        let wrapper = unsafe { ptr.cast::<Wrapper>().read_unaligned() };
+        return (!wrapper.data.is_null()).then(|| fat_at(wrapper.data)).flatten();
+    }
+    if magic == fatbin::MAGIC {
+        return match len {
+            Some(len) => Some(unsafe { std::slice::from_raw_parts(bytes, len) }),
+            None => fat_at(bytes),
+        };
+    }
+    if head == *b"\x7fELF" {
+        if len.is_some_and(|len| len < 0x40) {
+            return None;
+        }
+        let length = unsafe { cubin_extent(bytes, len) }?;
+        return Some(unsafe { std::slice::from_raw_parts(bytes, length) });
+    }
+    // Text, as `adapt_unguarded` takes it; of anything else nothing more is read.
+    if !(head[0].is_ascii_graphic() || head[0].is_ascii_whitespace()) {
+        return None;
+    }
+    Some(match len {
+        Some(len) => unsafe { std::slice::from_raw_parts(bytes, len) },
+        None => unsafe { CStr::from_ptr(ptr.cast()) }.to_bytes(),
+    })
+}
+
 /// The image to load in place of the one at `ptr`, if it has to be adapted. `len` is its length when
-/// the caller states one (`cuLinkAddData`).
+/// the caller states one (`cuLinkAddData`). From log level 2, the lines said of it name it by its size
+/// and digest (`xxh64`), so that two images loaded for kernels of one name can be told apart.
 ///
 /// # Safety
 /// `ptr` must be null or point to an image the driver itself could read: a complete fat-binary wrapper,
@@ -1145,6 +1208,18 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
     if !config().adapt || ptr.is_null() {
         return None;
     }
+    let named = log::at_level(2)
+        .then(|| unsafe { image_extent(ptr, len) })
+        .flatten()
+        .map(|image| format!("{who} of {} bytes, XXH64 {:016x}", image.len(), xxh64(image)));
+    unsafe { adapt_as(named.as_deref().unwrap_or(who), ptr, len) }
+}
+
+/// `adapt`, its lines said as `who`.
+///
+/// # Safety
+/// As for `adapt`.
+unsafe fn adapt_as(who: &str, ptr: *const c_void, len: Option<usize>) -> Option<Replacement> {
     // Whatever goes wrong here, the program must get what it would get without this library.
     catch_unwind(AssertUnwindSafe(|| unsafe { adapt_unguarded(who, ptr, len) })).unwrap_or_else(|_| {
         log::error(format_args!(
@@ -1154,7 +1229,8 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
     })
 }
 
-/// The image to load in place of the contents of a file, if it has to be adapted.
+/// The image to load in place of the contents of a file, if it has to be adapted. From log level 2,
+/// the lines said of it name the file.
 pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     if config().profile {
         IMAGE_WAS_NATIVE.set(false);
@@ -1162,6 +1238,8 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     if !config().adapt {
         return None;
     }
+    let named = log::at_level(2).then(|| format!("{who} of {}", path.to_string_lossy()));
+    let who = named.as_deref().unwrap_or(who);
     // A path is bytes, in whatever encoding: it is read as the driver would read it.
     let mut contents = std::fs::read(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
     if contents.len() < 4 {
@@ -1181,5 +1259,25 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
         contents.push(0); // text
     }
     // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
-    unsafe { adapt(who, contents.as_ptr().cast(), None) }
+    unsafe { adapt_as(who, contents.as_ptr().cast(), None) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_extent_of_an_image_is_what_the_adaptation_reads() {
+        let text = b".version 8.8\n.target sm_75\n\0garbage";
+        let extent = unsafe { image_extent(text.as_ptr().cast(), None) }.unwrap();
+        assert_eq!(extent, &text[..27]);
+        let given = unsafe { image_extent(text.as_ptr().cast(), Some(9)) }.unwrap();
+        assert_eq!(given, &text[..9]);
+        // Of an image that is neither text nor a format the adaptation knows, nothing is read past
+        // its first bytes (it is loaded as it is, and its length is not known).
+        let unknown = [1u8, 2, 3, 4, 5, 6, 0];
+        assert_eq!(unsafe { image_extent(unknown.as_ptr().cast(), None) }, None);
+        assert_eq!(xxh64(b""), 0xEF46_DB37_51D8_E999);
+        assert_eq!(xxh64(b"abc"), 0x44BC_2CF5_AD77_0999);
+    }
 }

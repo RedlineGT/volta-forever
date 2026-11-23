@@ -435,7 +435,7 @@ in section 1). The ones of the test scripts are in `tests/README.md`; `docs/arch
 
 | Variable | Default | Description |
 |---|---|---|
-| `VF_LOG_LEVEL` | `1` | 0: fatal only; 1: kernels refused, emulated, images adapted; 2: what was adapted; 3: everything |
+| `VF_LOG_LEVEL` | `1` | 0: fatal only; 1: kernels refused, emulated, images adapted; 2: what was adapted, each image named by the file it was loaded from, or by its size and XXH64 digest (as `xxhsum -H1` gives it for a file of the same bytes) for an image loaded from memory; 3: everything |
 | `VF_LOG` | stderr | Log to a file instead of standard error |
 | `VF_EMULATION_WARNINGS` | `20` | How many kernels with emulated instructions are listed; 0 for none |
 | `VF_PROXY_CACHE` | `$XDG_CACHE_HOME/volta-forever/proxy`, else `~/.cache/volta-forever/proxy` | Directory for the proxy's cache (translated machine code, adapted PTX); `0` or empty to disable. Must be a directory of the user that no one else can write (group- or world-writable directories are refused, and the cache is then off); the layer makes it with mode 0700. The cache can grow to 2 GB (`VF_PROXY_CACHE_MAX`). On a system whose home directory is on a RAM filesystem, this is memory. A write that fails leaves no temporary file, and temporary files left more than ten minutes before are removed at the first use of the cache in a process. |

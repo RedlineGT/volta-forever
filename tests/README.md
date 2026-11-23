@@ -233,7 +233,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Eight more host regressions exercise the built libraries directly:
+Nine more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -244,6 +244,7 @@ python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
 python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
 python3 tests/proxy/readonly_tables.py dist/lib/libcuda.so.1
+python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -278,7 +279,11 @@ variable that kernels write is given; and that a table
 the program was given first keeps the kernels that read it in the whole module, also one that
 another thread asks for while the whole module is compiled for the table (the stand-in holds that
 compilation). Each case in a
-process of its own, a second time from the proxy cache; it needs a C compiler.
+process of its own, a second time from the proxy cache; it needs a C compiler. The ninth checks,
+with the stand-in of the fourth, that from `VF_LOG_LEVEL=2` the lines about an image name it (by
+the file of `cuModuleLoad`, by the size and XXH64 digest of an image that `cuModuleLoadData` or
+`cuLibraryLoadData` is given), so that two kernels of one name in two images are told apart, and
+that the default level prints none of them; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -295,7 +300,7 @@ libraries against a mock library.
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`, 422 at 0.1.3); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
-`link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py` and `nvml_capability.py` of
+`link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py`, `log_lines.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
