@@ -266,6 +266,18 @@ fn ldmatrix_becomes_a_shuffle_of_the_row_address_and_a_load() {
     let lowered = lower("{\n\t.reg .b64 %rd<3>;\n\tldmatrix.sync.aligned.m8n8.x1.shared::cta.b16 {%r1}, [%rd2];\n}");
     assert_eq!(count(&lowered, "cvta"), 0);
     assert!(lowered.contains("cvt.u32.u64 "));
+    // A variable of shared memory as the address, with and without an offset, as Triton writes it
+    // (until 2026-11-23 refused: "address register not recognised").
+    let lowered = lower("{\n\tldmatrix.sync.aligned.m8n8.x1.shared.b16 {%r1}, [global_smem];\n}");
+    assert!(lowered.contains(", global_smem;"), "{lowered}");
+    assert_eq!(count(&lowered, "cvta"), 0);
+    assert_eq!(count(&lowered, "ld.shared.u32 %r1"), 1);
+    let lowered =
+        lower("{\n\tldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%r1, %r2, %r3, %r4}, [global_smem+512];\n}");
+    assert!(
+        lowered.contains(", global_smem;") && lowered.contains(", 512;"),
+        "{lowered}"
+    );
     // In a module with 32-bit addresses.
     let lowered = body(text, 32, Options::default()).unwrap().0;
     assert_eq!(count(&lowered, "cvta.to.shared.u32 "), 1);

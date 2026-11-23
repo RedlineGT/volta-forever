@@ -165,6 +165,11 @@ px cubin-embedded-separate-product-import "$G/ptx-cases/product-sum-assert.fmad-
 px cubin-embedded-fused-product "$G/ptx-cases/product-sum.fmad-true.sm80.cubin" a8800000 3f800001 3f7ffffe bf800000
 # CUDA 12.9 ptxas -lineinfo -arch=sm_75 predicates the HMMA; the PTX keeps its uniform branch.
 px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 41400000 41500000 41600000
+# ldmatrix at a variable of shared memory, no register in the address (Triton's [global_smem]): as
+# PTX, and as the sm_75 machine code that CUDA 12.9 ptxas -lineinfo makes of it (LDSM [RZ], which the
+# translator refuses: the layer runs the PTX kept in the cubin). Both refused until 2026-11-23.
+px ptx-ldmatrix-variable "$G/ptx-cases/ldmatrix-variable.ptx" a0b0c000 a0b0c003 a0b0c005 a0b0c006
+px cubin-ldmatrix-variable "$G/ptx-cases/ldmatrix-variable.sm75.cubin" a0b0c000 a0b0c003 a0b0c005 a0b0c006
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"
 # FP8: the conversions both ways, and the products, which run on the tensor cores as products of halves.
 tc fp8 "$G/k_fp8.135.sm89.ptx" "PTX for sm_89 retargeted \(1 module, 8 tensor-core instructions rewritten\)" "19 kernels, 0 wrong"

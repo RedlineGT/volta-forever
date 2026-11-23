@@ -1,0 +1,36 @@
+.version 7.0
+.target sm_75
+.address_size 64
+// ldmatrix whose address is a variable of shared memory, without a register, as Triton writes
+// `ldmatrix... [global_smem]` (a layout conversion of a reduction): every lane gives the same row
+// address, so every row of the matrix is the 16 bytes there, and lane l holds their word l % 4. Lanes
+// 0-7 first store the words a0b0c000 + l at word l of the variable. Each lane then gathers the words
+// of its group of four by shuffles and stores words 0 and 3 of the row at the variable and words 1
+// and 2 of the row 16 bytes on: a0b0c000 a0b0c003 a0b0c005 a0b0c006 in every lane.
+.shared .align 16 .b8 rows[32];
+.visible .entry k(.param .u64 output) .reqntid 32,1,1 {
+    .reg .b32 %lane, %word, %at, %v, %u, %group, %src, %w0, %w1, %w2, %w3;
+    .reg .b64 %out;
+    .reg .pred %writer;
+    ld.param.u64 %out, [output];
+    mov.u32 %lane, %laneid;
+    mad.wide.u32 %out, %lane, 16, %out;
+    setp.lt.u32 %writer, %lane, 8;
+    add.u32 %word, %lane, 0xa0b0c000;
+    mov.u32 %at, rows;
+    mad.lo.u32 %at, %lane, 4, %at;
+    @%writer st.shared.b32 [%at], %word;
+    bar.sync 0;
+    ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%v}, [rows];
+    ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%u}, [rows+16];
+    and.b32 %group, %lane, 0xfffffffc;
+    shfl.sync.idx.b32 %w0, %v, %group, 31, -1;
+    or.b32 %src, %group, 3;
+    shfl.sync.idx.b32 %w1, %v, %src, 31, -1;
+    or.b32 %src, %group, 1;
+    shfl.sync.idx.b32 %w2, %u, %src, 31, -1;
+    or.b32 %src, %group, 2;
+    shfl.sync.idx.b32 %w3, %u, %src, 31, -1;
+    st.global.v4.b32 [%out], {%w0, %w1, %w2, %w3};
+    ret;
+}

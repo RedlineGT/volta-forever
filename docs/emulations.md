@@ -209,7 +209,11 @@ obtained by a shuffle from the lane that holds it, the offset of the thread's pa
 elements is added, and 4 bytes are loaded from shared memory. For the transposed form
 (`ldmatrix.trans`), each matrix needs two rows fetched by shuffles and two 2-byte loads,
 the two halves assembled. Other shapes and element types (`m16n16`, `m8n16`, `.b8`) are
-refused.
+refused. The address is a register, or, in the `.shared` form, a variable of shared memory
+(`[global_smem]`, `[global_smem+16]`, as Triton writes it for a layout conversion), whose
+address in the shared window then stands for every lane's row; the machine code `ptxas`
+makes of that (`LDSM [RZ]`) is refused by the machine-code translator, and the layer runs
+the PTX that the cubin keeps when there is one.
 
 A 16-byte load from shared memory faults on a V100 when its address is not a multiple of
 16. The PTX manual requires every address to be aligned
