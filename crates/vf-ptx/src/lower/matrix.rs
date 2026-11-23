@@ -421,7 +421,42 @@ impl<'a> Body<'a> {
                 emit!(self, "ld.shared.v2.u32 {{{}, {}}}, [{addr}];", y[0], y[1]);
             }
         }
+        // As the rows of A and the columns of B of the products of pairs (`docs/pairs.md`, sections
+        // 2 and 13): 16 bytes a lane. The columns of a pair's B are x's where `h` is clear and y's
+        // where it is set; when x's and y's B come from two `ldmatrix`, each loads its half.
+        let mut halves: Vec<(bool, String, Vec<String>)> = Vec::new();
+        if !transposed && !self.plan.pairs.second.is_empty() {
+            let at = |name: &str| r.iter().position(|loaded| *loaded == name).map(|m| m as u32);
+            for (low, high) in self.plan.pairs.rows.clone() {
+                if let (Some(first), Some(second)) = (at(low), at(high)) {
+                    let row = self.row_address(&start, Lane::QRows(first, second), &mut rows);
+                    wide.push((row, self.operand(Form::QRows, &[low, high], true)));
+                }
+            }
+            for (x, y) in self.plan.pairs.cols.clone() {
+                let (lane, upper) = match (at(x), at(y)) {
+                    (Some(first), Some(second)) => (Lane::QColumns(first, second), None),
+                    (Some(first), None) => (Lane::QColumnOf(first), Some(false)),
+                    (None, Some(second)) => (Lane::QColumnOf(second), Some(true)),
+                    (None, None) => continue,
+                };
+                let row = self.row_address(&start, lane, &mut rows);
+                let registers = self.operand(Form::QCols, &[x, y], true);
+                match upper {
+                    None => wide.push((row, registers)),
+                    Some(upper) => halves.push((upper, row, registers)),
+                }
+            }
+        }
         self.wide_loads(&wide, followed);
+        for (upper, row, registers) in halves {
+            let (not, h) = (if upper { "" } else { "!" }, self.lane(Lane::Has(16)));
+            emit!(
+                self,
+                "@{not}{h} ld.shared.v4.u32 {{{}}}, [{row}];",
+                registers.join(", ")
+            );
+        }
         Ok(())
     }
 

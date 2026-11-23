@@ -1,0 +1,298 @@
+.version 8.4
+.target sm_80
+.address_size 64
+// Pairs of FP16 products (docs/pairs.md, section 13) on values that make the order of the additions
+// show. Each turn of a loop fills a tile of shared memory with halves made from a hash of their place
+// and of the turn: normal values of every magnitude and sign; on the first two turns about one in 16
+// is instead a subnormal, an infinity, a NaN with a payload, a zero, the largest half or the smallest
+// normal one; an odd turn repeats the turn before with B negated, so that the sums cancel down to
+// what the order of their additions leaves. Six products a turn, all on one A: x and y with their B
+// from two ldmatrix, z and w with theirs from one, u and v (m16n8k8) on the second half of A's k.
+// A running word reads one register of x in the loop. After the loop every result register of
+// every lane goes into hashes that take the lane into account and are folded over the warp, so that
+// every lane stores the same four words: a hash of x and y, one of z and w, one of u, v and the
+// running word, and the number of NaN among the results. The second parameter is the number of
+// turns. The words expected are those of each product computed by itself (VF_PAIRS=0).
+.visible .entry k(.param .u64 output, .param .u32 turns) .reqntid 32,1,1 {
+    .reg .b32 lane, count, turn, even, flip, slot, place, seed, hash, mix, word, bits, rnd, sel;
+    .reg .b32 sign, power, mantissa, value, nonzero, kind, special, other, half0, tile0, at;
+    .reg .b32 rowa, rowx, rowy, rowz, running, fold0, fold1, fold2, nans, lanes;
+    .reg .b32 a<4>, bx<2>, by<2>, bz<4>;
+    .reg .b32 dx<4>, dy<4>, dz<4>, dw<4>, du<4>, dv<4>;
+    .reg .b32 zero;
+    .reg .b64 out, addr;
+    .reg .pred first, rare, which, more, isb, nan;
+    .shared .align 16 .b8 tile[1536];
+    ld.param.u32 count, [turns];
+    mov.u32 lane, %laneid;
+    mov.u32 tile0, tile;
+    // Row addresses: A (rows 0..15, k 0..7 then 8..15), x's and y's B (.x2: n 0..7, k 0..7 then
+    // 8..15), z's and w's B (.x4: z's two halves of k, then w's).
+    and.b32 at, lane, 15;
+    shl.b32 at, at, 5;
+    shr.u32 bits, lane, 4;
+    shl.b32 bits, bits, 4;
+    add.u32 rowa, tile0, at;
+    add.u32 rowa, rowa, bits;
+    and.b32 at, lane, 7;
+    shl.b32 at, at, 5;
+    shr.u32 bits, lane, 3;
+    and.b32 bits, bits, 1;
+    shl.b32 bits, bits, 4;
+    add.u32 at, at, bits;
+    add.u32 rowx, tile0, at;
+    add.u32 rowx, rowx, 512;
+    add.u32 rowy, rowx, 256;
+    shr.u32 bits, lane, 4;
+    shl.b32 bits, bits, 8;
+    add.u32 rowz, tile0, at;
+    add.u32 rowz, rowz, bits;
+    add.u32 rowz, rowz, 1024;
+    // The accumulators from zero, as compilers write it: a literal, copies of a register of the
+    // accumulators, copies of a register that holds zero.
+    mov.b32 dx0, 0f00000000;
+    mov.b32 dx1, dx0;
+    mov.b32 dx2, dx0;
+    mov.b32 dx3, dx0;
+    mov.b32 dy0, dx0;
+    mov.b32 dy1, dx0;
+    mov.b32 dy2, dx0;
+    mov.b32 dy3, dx0;
+    mov.b32 dz0, 0;
+    mov.b32 dz1, 0;
+    mov.b32 dz2, 0;
+    mov.b32 dz3, 0;
+    mov.b32 dw0, 0;
+    mov.b32 dw1, 0;
+    mov.b32 dw2, 0;
+    mov.b32 dw3, 0;
+    mov.b32 zero, 0f00000000;
+    mov.b32 du0, zero;
+    mov.b32 du1, zero;
+    mov.b32 du2, zero;
+    mov.b32 du3, zero;
+    mov.b32 dv0, zero;
+    mov.b32 dv1, zero;
+    mov.b32 dv2, zero;
+    mov.b32 dv3, zero;
+    mov.u32 running, 0;
+    mov.u32 turn, 0;
+$L__turn:
+    and.b32 even, turn, 0xfffffffe;
+    and.b32 flip, turn, 1;
+    setp.eq.u32 first, even, 0;
+    mov.u32 slot, 0;
+$L__fill:
+    // Word `place` (0..383) of the tile: A in words 0..127, the B in the others.
+    mad.lo.u32 place, slot, 32, lane;
+    mad.lo.u32 seed, even, 384, place;
+    add.u32 seed, seed, 4097;
+    mul.lo.u32 hash, seed, 0x9e3779b1;
+    shr.u32 bits, hash, 16;
+    xor.b32 hash, hash, bits;
+    mul.lo.u32 hash, hash, 0x85ebca6b;
+    shr.u32 bits, hash, 13;
+    xor.b32 hash, hash, bits;
+    mul.lo.u32 hash, hash, 0xc2b2ae35;
+    shr.u32 bits, hash, 16;
+    xor.b32 hash, hash, bits;
+    xor.b32 mix, seed, 0x5bd1e995;
+    mul.lo.u32 mix, mix, 0x9e3779b1;
+    shr.u32 bits, mix, 15;
+    xor.b32 mix, mix, bits;
+    mul.lo.u32 mix, mix, 0x85ebca6b;
+    shr.u32 bits, mix, 13;
+    xor.b32 mix, mix, bits;
+    // Two halves: the low one from the low bits of the hashes, then the high one.
+    mov.u32 rnd, hash;
+    mov.u32 sel, mix;
+    mov.u32 word, 0;
+    mov.u32 half0, 0;
+$L__half:
+    and.b32 sign, rnd, 0x8000;
+    shr.u32 power, rnd, 10;
+    and.b32 power, power, 31;
+    rem.u32 power, power, 30;
+    add.u32 power, power, 1;
+    shl.b32 power, power, 10;
+    and.b32 mantissa, rnd, 0x3ff;
+    or.b32 value, sign, power;
+    or.b32 value, value, mantissa;
+    and.b32 bits, sel, 15;
+    setp.eq.u32 rare, bits, 0;
+    and.pred rare, rare, first;
+    shr.u32 kind, sel, 6;
+    and.b32 kind, kind, 7;
+    or.b32 nonzero, mantissa, 1;
+    or.b32 special, sign, nonzero;
+    setp.eq.u32 which, kind, 1;
+    or.b32 other, sign, 0x7c00;
+    selp.b32 special, other, special, which;
+    setp.eq.u32 which, kind, 2;
+    or.b32 other, other, nonzero;
+    selp.b32 special, other, special, which;
+    setp.eq.u32 which, kind, 3;
+    selp.b32 special, sign, special, which;
+    setp.eq.u32 which, kind, 4;
+    or.b32 other, sign, 0x7bff;
+    selp.b32 special, other, special, which;
+    setp.eq.u32 which, kind, 5;
+    or.b32 other, sign, 0x0400;
+    selp.b32 special, other, special, which;
+    selp.b32 value, special, value, rare;
+    shl.b32 word, word, 16;
+    or.b32 word, word, value;
+    shr.u32 rnd, rnd, 16;
+    shr.u32 sel, sel, 16;
+    add.u32 half0, half0, 1;
+    setp.lt.u32 more, half0, 2;
+    @more bra $L__half;
+    // B of an odd turn: the turn before, negated.
+    setp.ge.u32 isb, place, 128;
+    setp.ne.u32 which, flip, 0;
+    and.pred isb, isb, which;
+    @isb xor.b32 word, word, 0x80008000;
+    shl.b32 at, place, 2;
+    add.u32 at, at, tile0;
+    st.shared.u32 [at], word;
+    add.u32 slot, slot, 1;
+    setp.lt.u32 more, slot, 12;
+    @more bra $L__fill;
+    bar.sync 0;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {a0, a1, a2, a3}, [rowa];
+    ldmatrix.sync.aligned.m8n8.x2.shared.b16 {bx0, bx1}, [rowx];
+    ldmatrix.sync.aligned.m8n8.x2.shared.b16 {by0, by1}, [rowy];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {bz0, bz1, bz2, bz3}, [rowz];
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {dx0, dx1, dx2, dx3}, {a0, a1, a2, a3}, {bx0, bx1}, {dx0, dx1, dx2, dx3};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {dy0, dy1, dy2, dy3}, {a0, a1, a2, a3}, {by0, by1}, {dy0, dy1, dy2, dy3};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {dz0, dz1, dz2, dz3}, {a0, a1, a2, a3}, {bz0, bz1}, {dz0, dz1, dz2, dz3};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {dw0, dw1, dw2, dw3}, {a0, a1, a2, a3}, {bz2, bz3}, {dw0, dw1, dw2, dw3};
+    mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {du0, du1, du2, du3}, {a2, a3}, {bx1}, {du0, du1, du2, du3};
+    mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {dv0, dv1, dv2, dv3}, {a2, a3}, {by1}, {dv0, dv1, dv2, dv3};
+    xor.b32 running, running, dx1;
+    shf.l.wrap.b32 running, running, running, 7;
+    bar.sync 0;
+    add.u32 turn, turn, 1;
+    setp.lt.u32 more, turn, count;
+    @more bra $L__turn;
+    // Hashes of the results, with the lane and the place of each register in them.
+    mul.lo.u32 fold0, lane, 0x9e3779b9;
+    mov.u32 fold1, fold0;
+    mov.u32 fold2, fold0;
+    mov.u32 nans, 0;
+    xor.b32 fold0, fold0, dx0;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dx1;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dx2;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dx3;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dy0;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dy1;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dy2;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold0, fold0, dy3;
+    mul.lo.u32 fold0, fold0, 0x01000193;
+    xor.b32 fold1, fold1, dz0;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dz1;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dz2;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dz3;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dw0;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dw1;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dw2;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold1, fold1, dw3;
+    mul.lo.u32 fold1, fold1, 0x01000193;
+    xor.b32 fold2, fold2, du0;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, du1;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, du2;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, du3;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, dv0;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, dv1;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, dv2;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, dv3;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    xor.b32 fold2, fold2, running;
+    mul.lo.u32 fold2, fold2, 0x01000193;
+    testp.notanumber.f32 nan, dx0;
+    selp.u32 bits, 1, 0, nan;
+    add.u32 nans, nans, bits;
+    testp.notanumber.f32 nan, dy1;
+    selp.u32 bits, 1, 0, nan;
+    add.u32 nans, nans, bits;
+    testp.notanumber.f32 nan, dz2;
+    selp.u32 bits, 1, 0, nan;
+    add.u32 nans, nans, bits;
+    testp.notanumber.f32 nan, dw3;
+    selp.u32 bits, 1, 0, nan;
+    add.u32 nans, nans, bits;
+    testp.notanumber.f32 nan, du0;
+    selp.u32 bits, 1, 0, nan;
+    add.u32 nans, nans, bits;
+    testp.notanumber.f32 nan, dv2;
+    selp.u32 bits, 1, 0, nan;
+    add.u32 nans, nans, bits;
+    // Folded over the warp: the same words in every lane.
+    shfl.sync.bfly.b32 bits, fold0, 16, 31, -1;
+    xor.b32 fold0, fold0, bits;
+    shfl.sync.bfly.b32 bits, fold0, 8, 31, -1;
+    xor.b32 fold0, fold0, bits;
+    shfl.sync.bfly.b32 bits, fold0, 4, 31, -1;
+    xor.b32 fold0, fold0, bits;
+    shfl.sync.bfly.b32 bits, fold0, 2, 31, -1;
+    xor.b32 fold0, fold0, bits;
+    shfl.sync.bfly.b32 bits, fold0, 1, 31, -1;
+    xor.b32 fold0, fold0, bits;
+    shfl.sync.bfly.b32 bits, fold1, 16, 31, -1;
+    xor.b32 fold1, fold1, bits;
+    shfl.sync.bfly.b32 bits, fold1, 8, 31, -1;
+    xor.b32 fold1, fold1, bits;
+    shfl.sync.bfly.b32 bits, fold1, 4, 31, -1;
+    xor.b32 fold1, fold1, bits;
+    shfl.sync.bfly.b32 bits, fold1, 2, 31, -1;
+    xor.b32 fold1, fold1, bits;
+    shfl.sync.bfly.b32 bits, fold1, 1, 31, -1;
+    xor.b32 fold1, fold1, bits;
+    shfl.sync.bfly.b32 bits, fold2, 16, 31, -1;
+    xor.b32 fold2, fold2, bits;
+    shfl.sync.bfly.b32 bits, fold2, 8, 31, -1;
+    xor.b32 fold2, fold2, bits;
+    shfl.sync.bfly.b32 bits, fold2, 4, 31, -1;
+    xor.b32 fold2, fold2, bits;
+    shfl.sync.bfly.b32 bits, fold2, 2, 31, -1;
+    xor.b32 fold2, fold2, bits;
+    shfl.sync.bfly.b32 bits, fold2, 1, 31, -1;
+    xor.b32 fold2, fold2, bits;
+    shfl.sync.bfly.b32 bits, nans, 16, 31, -1;
+    add.u32 nans, nans, bits;
+    shfl.sync.bfly.b32 bits, nans, 8, 31, -1;
+    add.u32 nans, nans, bits;
+    shfl.sync.bfly.b32 bits, nans, 4, 31, -1;
+    add.u32 nans, nans, bits;
+    shfl.sync.bfly.b32 bits, nans, 2, 31, -1;
+    add.u32 nans, nans, bits;
+    shfl.sync.bfly.b32 bits, nans, 1, 31, -1;
+    add.u32 nans, nans, bits;
+    ld.param.u64 out, [output];
+    cvta.to.global.u64 out, out;
+    mul.wide.u32 addr, lane, 16;
+    add.u64 out, out, addr;
+    st.global.v4.u32 [out], {fold0, fold1, fold2, nans};
+    ret;
+}

@@ -34,6 +34,12 @@ pub(super) enum Form {
     Rows,
     /// The column of B a thread provides in that case, likewise.
     Cols,
+    /// For the products of a pair (`docs/pairs.md`): the row of A a lane gives to both, from the two
+    /// A registers (4 registers: k 0..3, then k 4..7).
+    QRows,
+    /// For the products of a pair: the column of B a lane gives, from x's B register where `h` is
+    /// clear and from y's where it is set (sources: x's register, y's register; 4 registers).
+    QCols,
     /// The four `e4m3` bytes of a register as halves: bytes 0 and 1, then bytes 2 and 3 (2 registers).
     E4m3,
     /// The four `e5m2` bytes of a register, likewise.

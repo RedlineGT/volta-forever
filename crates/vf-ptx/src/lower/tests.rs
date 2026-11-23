@@ -3648,3 +3648,503 @@ fn packed_bf16_fma_with_a_unit_factor_uses_the_bounded_multiplicand() {
         assert_eq!(count(&program("%packed,%one", bad), "fma.rm.f32 "), 2);
     }
 }
+
+// Pairs of products (`pairs.rs`, `docs/pairs.md` section 13).
+
+/// Lowered with pairs, rows taken to be aligned (the policy's default).
+fn lower_paired(text: &str) -> String {
+    body(
+        text,
+        64,
+        Options {
+            aligned_rows: true,
+            pairs: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .0
+}
+
+/// A loop as Triton writes it: accumulators set to zero by copies before the loop, one A and two
+/// B loaded by `ldmatrix` in the loop, two `m16n8k16` products on the same A in place, the
+/// accumulators stored after the loop. `{between}` is put between the two products, `{after}`
+/// after the loop, before the stores; `{b2}` is the opcode of the second B load.
+fn paired_loop(between: &str, after: &str, b2: &str) -> String {
+    format!(
+        "{{
+	.reg .pred %p<4>;
+	.reg .b32 %r<64>;
+	.reg .b64 %rd<4>;
+	mov.u32 %r20, %laneid;
+	mov.b32 %r40, 0f00000000;
+	mov.b32 %r41, %r40;
+	mov.b32 %r42, %r40;
+	mov.b32 %r43, %r40;
+	mov.b32 %r44, %r40;
+	mov.b32 %r45, %r40;
+	mov.b32 %r46, %r40;
+	mov.b32 %r47, %r40;
+$L__loop:
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0, %r1, %r2, %r3}}, [%r30];
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r4, %r5, %r6, %r7}}, [%r31];
+	{b2} {{%r8, %r9, %r10, %r11}}, [%r32];
+	{K16_F32} {{%r40, %r41, %r42, %r43}}, {{%r0, %r1, %r2, %r3}}, {{%r4, %r5}}, {{%r40, %r41, %r42, %r43}};
+{between}
+	{K16_F32} {{%r44, %r45, %r46, %r47}}, {{%r0, %r1, %r2, %r3}}, {{%r8, %r9}}, {{%r44, %r45, %r46, %r47}};
+	add.s32 %r33, %r33, -1;
+	setp.ne.s32 %p1, %r33, 0;
+	@%p1 bra $L__loop;
+{after}
+	st.global.v4.b32 [%rd1], {{%r40, %r41, %r42, %r43}};
+	st.global.v4.b32 [%rd1+16], {{%r44, %r45, %r46, %r47}};
+	ret;
+}}"
+    )
+}
+
+const PLAIN_LOAD: &str = "ldmatrix.sync.aligned.m8n8.x4.shared.b16";
+
+#[test]
+fn two_products_on_one_a_take_two_volta_products_each() {
+    let text = paired_loop("", "", PLAIN_LOAD);
+    let paired = lower_paired(&text);
+    let alone = lower_aligned(&text);
+    // Four of Volta's products for the two, where each alone takes four.
+    assert_eq!(count(&alone, HALVES_F32), 8);
+    assert_eq!(count(&paired, HALVES_F32), 4);
+    // In place on the program's eight registers, x's first, without a choice of results.
+    let all = "%r40, %r41, %r42, %r43, %r44, %r45, %r46, %r47";
+    for operands in volta_operands(&paired) {
+        assert_eq!(operands[0], format!("{{{all}}}"));
+        assert_eq!(operands[3], format!("{{{all}}}"));
+    }
+    assert_eq!(count(&paired, "selp.b32 %r4"), 0);
+    // A as whole rows, B as whole rows from each of its two loads into one set of registers.
+    assert_eq!(count(&paired, "@!%vf_p16 ld.shared.v4.u32"), 2);
+    assert_eq!(count(&paired, "@%vf_p16 ld.shared.v4.u32"), 2);
+    assert!(paired.contains(", %vf_yp01, 31, -1;") && paired.contains(", %vf_yp23, 31, -1;"));
+    // Turing's layout comes back once for each register, after the loop, before the stores that
+    // read it; nothing reads them after, so they are not put back.
+    assert_eq!(count(&paired, ", %vf_yt, 31, -1;"), 8);
+    assert_eq!(count(&paired, ", %vf_yq, 31, -1;"), 0);
+    let back = paired.find("shfl.sync.idx.b32 %r40, %r40, %vf_yt, 31, -1;").unwrap();
+    assert!(back > paired.find("@%p1 bra $L__loop;").unwrap());
+    assert!(back < paired.find("st.global.v4.b32 [%rd1], {%r40").unwrap());
+    // The products are counted as before.
+    let counted = |options| body(&text, 64, options).unwrap().1.tensor;
+    let on = Options {
+        aligned_rows: true,
+        pairs: true,
+        ..Default::default()
+    };
+    assert_eq!(counted(on), counted(Options::default()));
+    assert!(undeclared(&paired).is_empty(), "{:?}", undeclared(&paired));
+}
+
+#[test]
+fn pairs_follow_the_option_and_aligned_rows() {
+    let text = paired_loop("", "", PLAIN_LOAD);
+    let without = |aligned_rows, pairs| {
+        body(
+            &text,
+            64,
+            Options {
+                aligned_rows,
+                pairs,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0
+    };
+    assert_eq!(without(true, false), lower_aligned(&text));
+    assert_eq!(without(false, true), lower(&text));
+}
+
+#[test]
+fn what_a_pair_cannot_show_is_left_as_it_was() {
+    let base = paired_loop("", "", PLAIN_LOAD);
+    let unchanged = |text: &str, why: &str| {
+        assert_eq!(lower_paired(text), lower_aligned(text), "{why}");
+        assert_eq!(count(&lower_paired(text), ", %vf_yt, 31"), 0, "{why}");
+    };
+    // B of the second product by `ldmatrix.trans`: today's lowering adds even k, then odd k.
+    let trans = paired_loop("", "", "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16");
+    assert!(lower_aligned(&trans).contains(VOLTA_F32), "the even/odd form today");
+    unchanged(&trans, "B transposed");
+    // f16 accumulators.
+    let f16 = base
+        .replace(K16_F32, "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16")
+        .replace("{%r40, %r41, %r42, %r43}", "{%r40, %r41}")
+        .replace("{%r44, %r45, %r46, %r47}", "{%r44, %r45}");
+    unchanged(&f16, "f16 accumulators");
+    // Two different A.
+    unchanged(
+        &base.replacen(
+            "{%r0, %r1, %r2, %r3}, {%r8, %r9}",
+            "{%r0, %r1, %r6, %r7}, {%r8, %r9}",
+            1,
+        ),
+        "another A",
+    );
+    // x's B loaded between the two, for the next turn: x reads what the previous turn loaded.
+    let x_load = "	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r4, %r5, %r6, %r7}, [%r31];\n";
+    let reloaded = paired_loop(x_load.trim_end(), "", PLAIN_LOAD).replacen(x_load, "", 1);
+    assert_eq!(count(&reloaded, "{%r4, %r5, %r6, %r7}"), 1);
+    unchanged(&reloaded, "x's B loaded between");
+    // Not in place.
+    unchanged(
+        &base.replacen(
+            "{%r8, %r9}, {%r44, %r45, %r46, %r47}",
+            "{%r8, %r9}, {%r48, %r49, %r50, %r51}",
+            1,
+        ),
+        "accumulator elsewhere",
+    );
+    let mutations: &[(&str, &str, &str)] = &[
+        // An accumulator written by another instruction.
+        ("", "\tadd.f32 %r40, %r40, 0f3F800000;", "written by an addition"),
+        // Read where the 32 lanes may not be together: after a branch that depends on the lane.
+        (
+            "",
+            "\tsetp.eq.u32 %p2, %r20, 0;\n\t@%p2 bra $L__skip;\n\tst.global.b32 [%rd2], %r41;\n$L__skip:",
+            "read in code some lanes skip",
+        ),
+        // Read by a call.
+        ("", "\tcall use, (%r42);", "read by a call"),
+        // x's accumulator read between the two.
+        ("\tst.global.b32 [%rd2], %r40;", "", "read between the products"),
+        // A label something jumps to between the two.
+        ("$L__in:\n\t@%p3 bra $L__in;", "", "entered between the products"),
+        // x's operands loaded again between the two (then by two statements).
+        (
+            "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r4, %r5, %r6, %r7}, [%r31];",
+            "",
+            "x's B loaded twice",
+        ),
+        // A block between the two.
+        ("\t{ .reg .b32 %t; mov.b32 %t, 0; }", "", "a block between"),
+        // Copied from a register that differs from lane to lane.
+        ("", "\tmov.b32 %r41, %r20;", "a copy of the lane"),
+        // Loaded from memory.
+        ("", "\tld.global.b32 %r43, [%rd2];", "loaded"),
+        // Under a predicate.
+        ("", "\t@%p1 mov.b32 %r44, 0;", "a guarded write"),
+    ];
+    for (between, after, why) in mutations {
+        unchanged(&paired_loop(between, after, PLAIN_LOAD), why);
+    }
+    // An accumulator declared again in a block.
+    unchanged(
+        &base.replace("\tret;", "\t{ .reg .b32 %r45; mov.b32 %r45, 1; }\n\tret;"),
+        "declared again",
+    );
+    // An indirect branch in the function.
+    unchanged(
+        &base.replace(
+            "\tret;",
+            "\t$L__t: .branchtargets $L__end;\n\tbrx.idx %r33, $L__t;\n$L__end:\n\tret;",
+        ),
+        "indirect branch",
+    );
+    // A guarded product: refused with and without pairs.
+    let guarded = base.replacen(&format!("\t{K16_F32} {{%r44"), &format!("\t@%p1 {K16_F32} {{%r44"), 1);
+    let options = |pairs| Options {
+        aligned_rows: true,
+        pairs,
+        ..Default::default()
+    };
+    assert_eq!(
+        body(&guarded, 64, options(true)).unwrap_err(),
+        body(&guarded, 64, options(false)).unwrap_err()
+    );
+}
+
+#[test]
+fn a_pair_drops_only_its_own_registers() {
+    // Two pairs on the same A; an addition to one register of the first drops the first alone.
+    let text = format!(
+        "{{
+	.reg .b32 %r<80>;
+	.reg .b64 %rd<4>;
+	mov.b32 %r40, 0;
+	mov.b32 %r41, 0; mov.b32 %r42, 0; mov.b32 %r43, 0; mov.b32 %r44, 0; mov.b32 %r45, 0; mov.b32 %r46, 0; mov.b32 %r47, 0;
+	mov.b32 %r50, 0; mov.b32 %r51, 0; mov.b32 %r52, 0; mov.b32 %r53, 0; mov.b32 %r54, 0; mov.b32 %r55, 0; mov.b32 %r56, 0; mov.b32 %r57, 0;
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0, %r1, %r2, %r3}}, [%r30];
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r4, %r5, %r6, %r7}}, [%r31];
+	{K16_F32} {{%r40, %r41, %r42, %r43}}, {{%r0, %r1, %r2, %r3}}, {{%r4, %r5}}, {{%r40, %r41, %r42, %r43}};
+	{K16_F32} {{%r44, %r45, %r46, %r47}}, {{%r0, %r1, %r2, %r3}}, {{%r6, %r7}}, {{%r44, %r45, %r46, %r47}};
+	{K16_F32} {{%r50, %r51, %r52, %r53}}, {{%r0, %r1, %r2, %r3}}, {{%r4, %r5}}, {{%r50, %r51, %r52, %r53}};
+	{K16_F32} {{%r54, %r55, %r56, %r57}}, {{%r0, %r1, %r2, %r3}}, {{%r6, %r7}}, {{%r54, %r55, %r56, %r57}};
+	add.f32 %r40, %r40, 0f3F800000;
+	st.global.v4.b32 [%rd1], {{%r40, %r41, %r42, %r43}};
+	st.global.v4.b32 [%rd1+16], {{%r50, %r51, %r52, %r53}};
+	ret;
+}}"
+    );
+    let paired = lower_paired(&text);
+    // The second pair, from one load: x's B is matrix 0, y's matrix 2, one shuffle with the row
+    // chosen by the half of the warp, one load, no predicate.
+    assert_eq!(count(&paired, HALVES_F32), 8 + 4);
+    assert!(paired.contains(", %vf_yc02, 31, -1;") && paired.contains(", %vf_yc13, 31, -1;"));
+    assert_eq!(count(&paired, "%vf_p16 ld.shared"), 0);
+    // Only the second pair's registers that are read come back.
+    assert_eq!(count(&paired, ", %vf_yt, 31, -1;"), 4);
+    assert!(paired.contains("shfl.sync.idx.b32 %r50, %r50, %vf_yt, 31, -1;"));
+    assert!(!paired.contains("shfl.sync.idx.b32 %r40, %r40, %vf_yt"));
+}
+
+#[test]
+fn a_register_read_in_the_loop_is_put_back_where_it_is_read_again() {
+    // A store of x's accumulator after the products, in the loop: in Turing's layout for the
+    // store, then back for the products of the next turn.
+    let text = paired_loop("", "", PLAIN_LOAD).replace(
+        "\tadd.s32 %r33, %r33, -1;",
+        "\tst.global.b32 [%rd2], %r41;\n\tadd.s32 %r33, %r33, -1;",
+    );
+    let paired = lower_paired(&text);
+    assert_eq!(count(&paired, HALVES_F32), 4);
+    let to = paired.find("shfl.sync.idx.b32 %r41, %r41, %vf_yt, 31, -1;").unwrap();
+    let store = paired.find("st.global.b32 [%rd2], %r41;").unwrap();
+    let back = paired.find("shfl.sync.idx.b32 %r41, %r41, %vf_yq, 31, -1;").unwrap();
+    assert!(to < store && store < back);
+    // After the loop, eight more to Turing's layout.
+    assert_eq!(count(&paired, ", %vf_yt, 31, -1;"), 9);
+    assert_eq!(count(&paired, ", %vf_yq, 31, -1;"), 1);
+}
+
+#[test]
+fn a_branch_an_aligned_instruction_depends_on_is_uniform() {
+    // A reader after a branch whose taken way reaches a product in straight-line code and whose
+    // other way can leave without it: all 32 lanes take one way.
+    let text = paired_loop(
+        "",
+        "\tsetp.eq.u32 %p2, %r33, 7;\n\t@%p2 bra $L__more;\n\tst.global.b32 [%rd2], %r41;\n\tbra.uni $L__done;\n$L__more:\n\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r12, %r13, %r14, %r15}, [%r34];\n\tst.global.b32 [%rd2], %r12;\n$L__done:",
+        PLAIN_LOAD,
+    );
+    let paired = lower_paired(&text);
+    assert_eq!(count(&paired, HALVES_F32), 4);
+    assert!(paired.contains("shfl.sync.idx.b32 %r41, %r41, %vf_yt, 31, -1;\n\tst.global.b32 [%rd2], %r41;"));
+    // Without the aligned instruction on the taken way, the branch may part the lanes.
+    let parted = text.replace(
+        "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r12, %r13, %r14, %r15}, [%r34];\n",
+        "",
+    );
+    assert_eq!(lower_paired(&parted), lower_aligned(&parted));
+    // Nor when the aligned instruction follows both ways: the lanes may part at the branch and meet
+    // again before it, and the reader on one way is run by some lanes.
+    let diamond = paired_loop(
+        "",
+        "\tsetp.eq.u32 %p2, %r20, 0;\n\t@%p2 bra $L__join;\n\tst.global.b32 [%rd2], %r41;\n$L__join:\n\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r12, %r13, %r14, %r15}, [%r34];\n\tst.global.b32 [%rd2], %r12;",
+        PLAIN_LOAD,
+    );
+    assert_eq!(lower_paired(&diamond), lower_aligned(&diamond));
+}
+
+#[test]
+fn a_loop_before_the_products_does_not_hide_that_they_depend_on_the_back_edge() {
+    // An inner loop at the head of the loop (filling shared memory) before the first `ldmatrix`:
+    // that `ldmatrix` still post-dominates the head, so the back edge is uniform and the code after
+    // the loop is run by the 32 lanes together.
+    let inner = "\tmov.u32 %r21, 0;\n$L__fill:\n\tadd.u32 %r21, %r21, 1;\n\tsetp.lt.u32 %p3, %r21, %r22;\n\t@%p3 bra $L__fill;\n";
+    let text = paired_loop("", "", PLAIN_LOAD).replace("$L__loop:\n", &format!("$L__loop:\n{inner}"));
+    let paired = lower_paired(&text);
+    assert_eq!(count(&paired, HALVES_F32), 4);
+    assert_eq!(count(&paired, ", %vf_yt, 31, -1;"), 8);
+    // A way out of the inner loop that does not pass the products: the back edge may part the lanes.
+    let out = text
+        .replace("\t@%p3 bra $L__fill;\n", "\t@%p3 bra $L__fill;\n\t@%p2 bra $L__exit;\n")
+        .replace("\tret;\n}", "$L__exit:\n\tret;\n}");
+    assert_eq!(lower_paired(&out), lower_aligned(&out));
+}
+
+#[test]
+fn copies_that_keep_the_permutation_are_allowed() {
+    // A register that holds zero in every lane, copied into the accumulators in the loop's
+    // preheader, and one accumulator copied into another: no conversion.
+    let text = paired_loop("", "", PLAIN_LOAD)
+        .replace(
+            "\tmov.b32 %r40, 0f00000000;",
+            "\tmov.b32 %r60, 0f00000000;\n\tmov.b32 %r40, %r60;",
+        )
+        .replace("\tmov.b32 %r47, %r40;", "\tmov.b32 %r47, %r46;");
+    let paired = lower_paired(&text);
+    assert_eq!(count(&paired, HALVES_F32), 4);
+    assert_eq!(count(&paired, ", %vf_yt, 31, -1;"), 8);
+}
+
+#[test]
+fn chains_and_m16n8k8_pairs() {
+    // m16n8k8 pairs: two of Volta's products for the two.
+    let text = format!(
+        "{{
+	.reg .b32 %r<64>;
+	.reg .b64 %rd<4>;
+	mov.b32 %r40, 0; mov.b32 %r41, 0; mov.b32 %r42, 0; mov.b32 %r43, 0;
+	mov.b32 %r44, 0; mov.b32 %r45, 0; mov.b32 %r46, 0; mov.b32 %r47, 0;
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0, %r1, %r2, %r3}}, [%r30];
+	ldmatrix.sync.aligned.m8n8.x2.shared.b16 {{%r4, %r5}}, [%r31];
+	{F32} {{%r40, %r41, %r42, %r43}}, {{%r2, %r3}}, {{%r4}}, {{%r40, %r41, %r42, %r43}};
+	{F32} {{%r44, %r45, %r46, %r47}}, {{%r2, %r3}}, {{%r5}}, {{%r44, %r45, %r46, %r47}};
+	st.global.v4.b32 [%rd1], {{%r40, %r41, %r42, %r43}};
+	st.global.v4.b32 [%rd1+16], {{%r44, %r45, %r46, %r47}};
+	ret;
+}}"
+    );
+    let paired = lower_paired(&text);
+    assert_eq!(count(&paired, HALVES_F32), 2);
+    assert!(paired.contains(", %vf_yp23, 31, -1;") && paired.contains(", %vf_yc01, 31, -1;"));
+    // Products of a chain (four on one accumulator in a row) keep the chain's form.
+    let product =
+        |b: &str| format!("\t{F32} {{%r40, %r41, %r42, %r43}}, {{%r2, %r3}}, {{{b}}}, {{%r40, %r41, %r42, %r43}};\n");
+    let chained = text.replace(
+        &product("%r4"),
+        &[product("%r4"), product("%r5"), product("%r4"), product("%r5")].concat(),
+    );
+    assert_eq!(lower_paired(&chained), lower_aligned(&chained));
+}
+
+/// The value of each lane register of the prologue of `lowered`, in each of the 32 lanes: the
+/// instructions the lane values are made with, interpreted.
+fn lane_values(lowered: &str) -> HashMap<String, [u32; 32]> {
+    let mut values: HashMap<String, [u32; 32]> = HashMap::new();
+    let mut started = false;
+    for line in lowered.lines() {
+        let line = line.trim().trim_end_matches(';');
+        if line.is_empty() || line == "{" || (!started && line.starts_with(".reg")) {
+            continue;
+        }
+        let Some((opcode, operands)) = line.split_once(' ') else {
+            break;
+        };
+        let operands: Vec<&str> = operands.split(',').map(str::trim).collect();
+        if !operands[0].starts_with("%vf_") {
+            break;
+        }
+        started = true;
+        let get = |values: &HashMap<String, [u32; 32]>, operand: &str, lane: usize| -> u32 {
+            values
+                .get(operand)
+                .map_or_else(|| operand.parse().unwrap(), |v| v[lane])
+        };
+        let mut result = [0u32; 32];
+        for (lane, slot) in result.iter_mut().enumerate() {
+            let at = |k: usize| get(&values, operands[k], lane);
+            *slot = match opcode {
+                "mov.u32" if operands[1] == "%laneid" => lane as u32,
+                "and.b32" => at(1) & at(2),
+                "or.b32" => at(1) | at(2),
+                "shr.u32" => at(1) >> at(2),
+                "shl.b32" => at(1) << at(2),
+                "add.u32" => at(1) + at(2),
+                "setp.ne.b32" => u32::from(at(1) != at(2)),
+                "selp.b32" => {
+                    if at(3) != 0 {
+                        at(1)
+                    } else {
+                        at(2)
+                    }
+                }
+                "bfi.b32" => {
+                    let (position, length) = (at(3), at(4));
+                    let mask = ((1u32 << length) - 1) << position;
+                    (at(2) & !mask) | ((at(1) << position) & mask)
+                }
+                _ => panic!("{line}: not interpreted"),
+            };
+        }
+        values.insert(operands[0].to_string(), result);
+    }
+    values
+}
+
+#[test]
+fn the_lanes_of_a_pair_give_turings_layout_back() {
+    // A host model of the arrangement: what lane L holds in each of the eight registers after
+    // Volta's product on the rows and columns that the lane values of the lowering choose, then
+    // after the shuffle by `%vf_yt`, is Turing's register of the accumulator of x or y. The layouts
+    // are those of the PTX manual ("Matrix Fragments for mma.m8n8k4" and "for mma.m16n8k8"),
+    // written here without the lowering's formulas.
+    let text = paired_loop("", "", PLAIN_LOAD);
+    let paired = lower_paired(&text);
+    let values = lane_values(&paired);
+    let lanes = |name: &str| values.get(name).unwrap_or_else(|| panic!("{name} not computed"));
+    // Rows of A: the lane that gives the address, in matrix 0 (rows 0..7) or 1 (rows 8..15).
+    // Columns of B: x's matrix 0 where h is clear, y's where it is set (both loads use %vf_yb*).
+    let (row_lane, col_lane, back) = (lanes("%vf_yp01"), lanes("%vf_yb0"), lanes("%vf_yt"));
+    // Row of the A operand (0..15: the address of row r of matrix m is in lane 8m + r, and A's
+    // rows 0..7 are matrix 0) and column of B (0..7, product 0 or 1) that lane L gives.
+    let a_row = |l: usize| row_lane[l] as usize;
+    let b_col = |l: usize| (col_lane[l] as usize % 8, l >> 4);
+    for l in 0..32 {
+        assert!(row_lane[l] < 16 && col_lane[l] < 8, "lane {l}");
+    }
+    // Volta's m8n8k4: octet q = lanes {4q..4q+3, 16+4q..16+4q+3}; a lane gives row
+    // (L % 4) + 4 (L >= 16) of the octet's A and that column of its B; with f32 results, register
+    // i of lane L is (row (L & 1) + (i & 2) + 4 (L >= 16), column (i & 4) + (L & 2) + (i & 1)).
+    let octet_lane = |q: usize, index: usize| {
+        if index < 4 {
+            4 * q + index
+        } else {
+            16 + 4 * q + index - 4
+        }
+    };
+    // held[L][i] = (product, row of the 16x8 result, column).
+    let mut held = [[(0usize, 0usize, 0usize); 8]; 32];
+    for (l, registers) in held.iter_mut().enumerate() {
+        let q = (l >> 2) & 3;
+        for (i, register) in registers.iter_mut().enumerate() {
+            let row = (l & 1) + (i & 2) + 4 * (l >> 4);
+            let column = (i & 4) + (l & 2) + (i & 1);
+            let (giver_a, giver_b) = (octet_lane(q, row), octet_lane(q, column));
+            let (n, product) = b_col(giver_b);
+            *register = (product, a_row(giver_a), n);
+        }
+    }
+    // Turing's m16n8k8 f32 result: register j of lane T is (row T/4 + 8 (j >= 2), column 2 (T % 4)
+    // + (j & 1)); registers 0..3 are x's, 4..7 y's.
+    for (t, &source) in back.iter().enumerate() {
+        for (i, &value) in held[source as usize].iter().enumerate() {
+            let j = i & 3;
+            let want = (i >> 2, t / 4 + 8 * (j >> 1), 2 * (t % 4) + (j & 1));
+            assert_eq!(value, want, "lane {t}, register {i}");
+        }
+    }
+    // And the index that puts them back is its inverse.
+    let forward = lane_values(&lower_paired(&paired_loop("", "", PLAIN_LOAD).replace(
+        "\tadd.s32 %r33, %r33, -1;",
+        "\tst.global.b32 [%rd2], %r41;\n\tadd.s32 %r33, %r33, -1;",
+    )));
+    let (to, from) = (forward["%vf_yq"], forward["%vf_yt"]);
+    for l in 0..32 {
+        assert_eq!(from[to[l] as usize] as usize, l);
+    }
+}
+
+#[test]
+fn the_gpu_case_of_pairs_is_paired() {
+    // `tests/gpu/run.sh`, `pairs-adversarial`: its three pairs are made (the words it checks are
+    // those of each product by itself, so the case would pass without them).
+    let module = include_str!("../../../../tests/kernels/ptx-cases/pairs-adversarial.ptx");
+    let text = module[module.find("{\n").unwrap()..].trim_end();
+    let paired = lower_paired(text);
+    assert_eq!(count(&lower_aligned(text), HALVES_F32), 20);
+    assert_eq!(count(&paired, HALVES_F32), 4 + 4 + 2);
+    assert_eq!(count(&paired, "@%vf_p16 ld.shared.v4.u32"), 2);
+    assert!(paired.contains(", %vf_yc02, 31, -1;"));
+    // The running word in the loop, and the registers read twice after it, are put back.
+    assert!(paired.contains("shfl.sync.idx.b32 dx1, dx1, %vf_yt, 31, -1;\n\txor.b32 running, running, dx1;\n\tshfl.sync.idx.b32 dx1, dx1, %vf_yq, 31, -1;"));
+}
+
+#[test]
+fn a_product_with_b_by_ldmatrix_trans_is_summed_on_even_and_odd_k() {
+    // `tests/gpu/run.sh`, `trans-order`: the same product with B by a plain `ldmatrix` (halves of
+    // k, `row.col`) and by `ldmatrix.trans` (even then odd k, `col.row`); with pairs as without.
+    let module = include_str!("../../../../tests/kernels/ptx-cases/trans-order.ptx");
+    let text = module[module.find("{\n").unwrap()..].trim_end();
+    let paired = lower_paired(text);
+    assert_eq!(paired, lower_aligned(text));
+    assert_eq!(count(&paired, HALVES_F32), 4);
+    assert_eq!(count(&paired, VOLTA_F32), 4);
+}

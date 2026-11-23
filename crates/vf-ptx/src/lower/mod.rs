@@ -66,6 +66,12 @@
 //!
 //! A register that is only used this way is not loaded in Turing layout at all.
 //!
+//! Two such products split in the halves of k, with f32 accumulators in place and the same A, are
+//! computed together where `pairs` shows that this gives the same bits (`Options::pairs`,
+//! `docs/pairs.md` section 13): two Volta instructions per `m16n8k8` for both, on the program's own
+//! accumulator registers, which then hold Turing's values permuted between lanes; one shuffle a
+//! register gives them back to any other statement that reads them.
+//!
 //! The A operand of an integer product is the row of the thread's group, 16 bytes. Kernels keep many
 //! such operands in registers through long unrolled loops, and four registers for each, gathered or
 //! loaded, is what sends the compiler to the stack (llama.cpp's q6_K kernel: twice the time). So the
@@ -115,6 +121,7 @@ mod known_bits;
 mod lane;
 mod matrix;
 mod names;
+mod pairs;
 mod parse;
 mod plain;
 mod plan;
@@ -295,6 +302,10 @@ pub struct Options {
     pub bf16_column: Bf16Column,
     /// Optimize products with one active row, after a uniform runtime check.
     pub bf16_row: Bf16Row,
+    /// Compute two FP16 products with f32 accumulators that share their A on two of Volta's
+    /// products per half of k each instead of four, where the plan proves it gives the same bits
+    /// (`pairs`, `docs/pairs.md` section 13). Needs `aligned_rows`.
+    pub pairs: bool,
 }
 
 /// The names of `text` that begin with `%`, without repetition: for the text of a module outside

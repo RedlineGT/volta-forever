@@ -185,6 +185,22 @@ that the product uses rows and columns directly instead of gathering by shuffles
 
 A register used only this way is never loaded in Turing layout.
 
+### Pairs of products
+
+Two such products (both operands from plain `ldmatrix`, f32 accumulators in place) with the same A
+are computed together where the lowering can show that it gives the same bits (`docs/pairs.md`,
+section 13; `VF_PAIRS=0` turns it off): for each `m16n8k8`, two of Volta's `mma.m8n8k4.row.col` on
+both products' eight accumulator registers instead of two for each product, half of whose results
+are dropped. **Exactness:** each result is the same sum as the product by itself computes,
+`(C + sum of k 0..3) + sum of k 4..7`, each by Volta's instruction on the same four terms in the
+same slots, so the same bits, NaN, infinities and subnormals included; only which lane holds which
+result differs, and one shuffle a register gives each reader Turing's layout. Compared on a V100
+with each product by itself (`VF_PAIRS=0`): the `pairs-adversarial` case's words for 1, 2 and 37
+turns (subnormals, infinities, NaN, the largest half, cancelling turns), and Triton's GEMMs and the
+dot and attention cases of its corpus at capability 8.0 (2026-11-23). Products whose B comes from
+`ldmatrix.trans` are not paired: there a product by itself adds the even k, then the odd k, and the
+halves of k would round otherwise.
+
 ### What it costs
 
 A single `m16n8k8` on halves with f32 accumulators: 19 instructions, after a 10-instruction

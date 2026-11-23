@@ -72,6 +72,8 @@ pub(super) struct Plan<'a> {
     pub(super) chain_a: HashSet<(&'a str, &'a str)>,
     /// B operands of products of chains, likewise.
     pub(super) chain_b: HashSet<&'a str>,
+    /// Pairs of FP16 products computed together, and what their accumulators need (`pairs`).
+    pub(super) pairs: super::pairs::Pairs<'a>,
 }
 
 impl<'a> Plan<'a> {
@@ -110,6 +112,7 @@ impl<'a> Plan<'a> {
         let mut constants16 = Vec::new();
         let mut constants32 = Vec::new();
         let mut choices = Vec::new();
+        let mut literals: Vec<&str> = Vec::new();
         let packed_fma = text.contains("fma.rn.bf16x2");
         let mut plan = Plan::default();
         let mut depth = 0usize;
@@ -150,6 +153,13 @@ impl<'a> Plan<'a> {
                 if packed_fma && let Some(bits) = super::known_bits::word_literal(value) {
                     constants32.push((name, bits));
                 }
+            }
+            if let ("mov.b32" | "mov.u32" | "mov.s32" | "mov.f32", false, [register, value]) =
+                (opcode, guarded, &scan::split_operands(operands)[..])
+                && let Some(name) = scan::register(register)
+                && super::pairs::literal(value)
+            {
+                literals.push(name);
             }
             if matches!(opcode, "mov.b16" | "mov.u16" | "mov.s16")
                 && !guarded
@@ -421,6 +431,13 @@ impl<'a> Plan<'a> {
         for c in &chains {
             plan.chain_products.extend(c.indices.iter().copied());
         }
+        // Pairs of products (`pairs`): their operands are loaded as the pairs take them, and their
+        // products are not computed by themselves.
+        if options.pairs && options.aligned_rows {
+            let clean = |name: &str| declarations.width(name) == Some(32) && !shadowed(name);
+            let uniform: HashSet<&str> = literals.into_iter().filter(|name| written_once(name)).collect();
+            plan.pairs = super::pairs::plan(text, items, &plan, &clean, &uniform);
+        }
         // How the operands of each FP16 product are loaded. Split in the halves of k (both
         // registers of A from one plain `ldmatrix`, B from a plain one): by their `ldmatrix`, in
         // the layout the product takes them in, which for a product of a chain is the one of its
@@ -429,6 +446,9 @@ impl<'a> Plan<'a> {
         // something reads it there: a product of a chain whose rows may be anywhere, a product
         // that is not split so, a statement that is not a product.
         for (index, a, b) in products {
+            if plan.pairs.first.contains(&index) || plan.pairs.second.contains_key(&index) {
+                continue;
+            }
             let chained = plan.chain_products.contains(&index);
             for (a, b) in a.chunks(2).zip(b) {
                 if !plan.in_halves(a, b) {

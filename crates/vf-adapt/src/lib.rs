@@ -42,7 +42,9 @@ pub struct Policy {
     pub told_sm: Option<u32>,
     /// When supported machine code is translated for the device.
     pub translate: Translate,
-    /// Whether pairs of products on whole rows are translated as such (`VF_PAIRS=0`: they are not).
+    /// Whether pairs of products on whole rows are translated as such in machine code
+    /// (`VF_PAIRS=0`: they are not). The same variable sets `lowering.pairs`, the pairs of the
+    /// program-text lowering.
     pub pairs: bool,
     /// Where the translation of machine code takes its registers (`VF_BORROW`; the values are
     /// those of `vf_sass::translate::Options::borrow`). The default, 7: above the program's
@@ -136,6 +138,7 @@ impl Default for Policy {
             ptx_max: (9, 0),
             lowering: vf_ptx::lower::Options {
                 aligned_rows: true,
+                pairs: true,
                 ..Default::default()
             },
             told_sm: None,
@@ -323,7 +326,8 @@ impl Policy {
     /// `VF_CAPABILITY=<major>.<minor>`: the compute capability the programs are told (`told_sm`);
     /// a value that is not one, or is below 7.0, is not used (`requested_capability`).
     /// `VF_TRANSLATE=0`: do not translate machine code; `VF_TRANSLATE=first`: translate it also
-    /// where an image has PTX (`Translate`).
+    /// where an image has PTX (`Translate`). `VF_PAIRS=0`: compute every tensor-core product by
+    /// itself, in machine code (`pairs`) and in program text (`lowering.pairs`).
     pub fn with_environment(mut self) -> Policy {
         match std::env::var("VF_TRANSLATE").as_deref() {
             Ok("0") => self.translate = Translate::Never,
@@ -361,6 +365,7 @@ impl Policy {
         }
         if let Ok(value) = std::env::var("VF_PAIRS") {
             self.pairs = value != "0";
+            self.lowering.pairs = self.pairs;
         }
         if let Ok(value) = std::env::var("VF_BORROW") {
             self.borrow = vf_sass::translate::borrow_from(Some(&value));
