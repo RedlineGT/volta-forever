@@ -81,7 +81,10 @@ have code for Volta, behind their names (`INSTALL.md`).
 before compiling that PTX for Volta. This covers standalone cubins from Triton and cubins in
 fat binaries. Calls that the executable leaves to the driver (`__assertfail`, `vprintf`,
 `malloc`, `free`) are accepted when the retained source declares them `.extern .func`. For sm_75, VF also tries retained PTX when its default machine-code translation
-refuses every kernel in the image.
+refuses every kernel in the image. The line information also tells which additions written
+without a rounding modifier ptxas fused with a multiplication: one that it did not fuse
+(`--fmad=false`, a debug build) is given the `.rn` form, so that the driver's compiler does not
+fuse it either, and a source of which that cannot be told is not used.
 
 Since 0.1.2, VF also translates a subset of stripped `sm_80` executables. VF checks each function's
 instruction forms, branches and memory addressing. Global loads and stores, including 128-bit

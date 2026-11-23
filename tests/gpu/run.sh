@@ -153,6 +153,13 @@ px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
 px cubin-embedded-ptx "$G/ptx-cases/copy-octal.sm80.cubin" 12345678 abcdef01 0 0
 px cubin-embedded-division "$G/ptx-cases/signed-division.sm80.cubin" 0 0 0 0
 px cubin-embedded-import "$G/ptx-cases/assert-import.sm80.cubin" 12345678 9abcdef0 0badf00d 00c0ffee
+# Built with CUDA 13.5 ptxas -lineinfo -arch=sm_80: the PTX compiled again rounds as the machine
+# code did. (1 + 2^-23) * (1 - 2^-23) - 1 is 0 rounded twice (--fmad=false: FMUL and FADD, with and
+# without a driver import) and -2^-46 rounded once (--fmad=true: FFMA). (Until 2026-11-23 the
+# driver's compiler contracted the first two too, and they gave a8800000.)
+px cubin-embedded-separate-product "$G/ptx-cases/product-sum.fmad-false.sm80.cubin" 00000000 3f800001 3f7ffffe bf800000
+px cubin-embedded-separate-product-import "$G/ptx-cases/product-sum-assert.fmad-false.sm80.cubin" 00000000 3f800001 3f7ffffe bf800000
+px cubin-embedded-fused-product "$G/ptx-cases/product-sum.fmad-true.sm80.cubin" a8800000 3f800001 3f7ffffe bf800000
 # CUDA 12.9 ptxas -lineinfo -arch=sm_75 predicates the HMMA; the PTX keeps its uniform branch.
 px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 41400000 41500000 41600000
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"

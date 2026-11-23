@@ -15,6 +15,7 @@
 //! - When the driver's compiler still refuses functions of an adapted image, `without_refused` makes
 //!   the image to load instead.
 
+mod contraction;
 pub mod emulation;
 
 use vf_fatbin::{self as fatbin, Entry, FatBinary, KIND_ELF, KIND_PTX, NewEntry};
@@ -291,6 +292,9 @@ fn embedded_ptx(cubin: &[u8], sm: u32) -> Option<(Vec<u8>, vf_ptx::Header)> {
             return None;
         }
     }
+    // Compiled again, the source must round as the machine code does: what ptxas did not contract
+    // stays so, and a source of which that is not known is not used (`contraction`).
+    let text = contraction::as_compiled(cubin, text)?;
     Some((text, header))
 }
 
@@ -1945,6 +1949,84 @@ mod tests {
             }
             elf.set_symbols(&symbols);
             assert!(policy.adapt_cubin(&elf.write()).image.is_none(), "edit {edit}");
+        }
+        // With an import, the source is compiled again as the machine code was: the addition that
+        // ptxas did not contract (`--fmad=false`) keeps the rounding of its own.
+        let separate = include_bytes!("../../../tests/kernels/ptx-cases/product-sum-assert.fmad-false.sm80.cubin");
+        assert_eq!(fatbin::cubin_imports(separate).unwrap(), ["__assertfail"]);
+        let text = retargeted_text(&Policy::default(), separate).unwrap();
+        assert!(
+            text.contains("\nmul.f32 %f4, %f1, %f2;\nadd.rn.f32 %f5, %f4, %f3;"),
+            "{text}"
+        );
+    }
+
+    /// The text of the image that `policy` makes of the sm_80 `cubin`, or what it found when it
+    /// retargets nothing.
+    fn retargeted_text(policy: &Policy, cubin: &[u8]) -> Result<String, Outcome> {
+        let adapted = policy.adapt_cubin(cubin);
+        match (&adapted.outcome, adapted.image) {
+            (Outcome::Retargeted { from_sm: 80, .. }, Some(image)) => Ok(String::from_utf8(image).unwrap()),
+            _ => Err(adapted.outcome),
+        }
+    }
+
+    #[test]
+    fn retained_ptx_rounds_as_its_machine_code_did() {
+        let separate = include_bytes!("../../../tests/kernels/ptx-cases/product-sum.fmad-false.sm80.cubin");
+        let fused = include_bytes!("../../../tests/kernels/ptx-cases/product-sum.fmad-true.sm80.cubin");
+        let never = Policy {
+            translate: Translate::Never,
+            ..Policy::default()
+        };
+        for policy in [Policy::default(), never] {
+            // ptxas did not contract the product and the sum: the driver's compiler must not either.
+            let text = retargeted_text(&policy, separate).unwrap();
+            assert!(
+                text.contains("\nmul.f32 %f4, %f1, %f2;\nadd.rn.f32 %f5, %f4, %f3;"),
+                "{text}"
+            );
+            assert_eq!(text.matches(".rn.").count(), 1);
+            // It did: the source is left as it is, and contracted again.
+            let text = retargeted_text(&policy, fused).unwrap();
+            assert!(
+                text.contains("\nmul.f32 %f4, %f1, %f2;\nadd.f32 %f5, %f4, %f3;"),
+                "{text}"
+            );
+            assert!(!text.contains(".rn."));
+        }
+        // The same in a fat binary.
+        let template = fatbin::parse(ELF75_PTX75).unwrap().entries[0];
+        let bytes = fatbin::build(&[NewEntry::replace(&template, separate.to_vec(), 80, (1, 7))]);
+        let image = Policy::default()
+            .adapt_fatbin(&fatbin::parse(&bytes).unwrap())
+            .unwrap()
+            .image
+            .unwrap();
+        let entry = fatbin::parse(&image).unwrap().entries[0];
+        assert!(String::from_utf8_lossy(&entry.payload().unwrap()).contains("\nadd.rn.f32 %f5, %f4, %f3;"));
+        // Without the line table, what ptxas made of the sum is not known, whichever it was: the
+        // source is not used, and the machine code is translated (or nothing is given).
+        for cubin in [&separate[..], &fused[..]] {
+            let mut unknown = cubin.to_vec();
+            let name = b".nv_debug_line_sass";
+            while let Some(at) = unknown.windows(name.len()).position(|w| w == name) {
+                unknown[at] = b'_';
+            }
+            assert!(
+                vf_sass::elf::Elf::parse(&unknown)
+                    .unwrap()
+                    .section("_nv_debug_line_sass")
+                    .is_some()
+            );
+            assert!(matches!(
+                Policy::default().adapt_cubin(&unknown).outcome,
+                Outcome::Translated { from_sm: 80, .. }
+            ));
+            assert_eq!(
+                never.adapt_cubin(&unknown).outcome,
+                Outcome::NeedsTranslation { lowest_sm: 80 }
+            );
         }
     }
 

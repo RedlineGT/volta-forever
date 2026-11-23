@@ -1,0 +1,52 @@
+.version 8.0
+.target sm_80
+.address_size 64
+// product-sum.ptx with a device assertion that never fires, as in Triton's bounds checks: the
+// module calls __assertfail, which the driver provides. Assembled with
+// `ptxas -lineinfo --fmad=false`.
+.extern .func __assertfail
+(
+    .param .b64 __assertfail_param_0,
+    .param .b64 __assertfail_param_1,
+    .param .b32 __assertfail_param_2,
+    .param .b64 __assertfail_param_3,
+    .param .b64 __assertfail_param_4
+)
+.noreturn;
+.global .align 1 .b8 message[6] = {102, 97, 108, 115, 101, 0};
+.global .align 4 .f32 inputs[3] = {0f3F800001, 0f3F7FFFFE, 0fBF800000};
+.visible .entry k(.param .u64 output) {
+    .reg .pred %never;
+    .reg .b32 %lane;
+    .reg .f32 %f<6>;
+    .reg .b64 %in, %out, %text;
+    mov.u32 %lane, %tid.x;
+    setp.ge.u32 %never, %lane, 1024;
+    @!%never bra compute;
+    mov.u64 %text, message;
+    cvta.global.u64 %text, %text;
+    {
+        .param .b64 p0;
+        .param .b64 p1;
+        .param .b32 p2;
+        .param .b64 p3;
+        .param .b64 p4;
+        st.param.b64 [p0], %text;
+        st.param.b64 [p1], %text;
+        st.param.b32 [p2], 1;
+        st.param.b64 [p3], %text;
+        st.param.b64 [p4], 1;
+        call.uni __assertfail, (p0, p1, p2, p3, p4);
+    }
+compute:
+    mov.u64 %in, inputs;
+    ld.global.f32 %f1, [%in];
+    ld.global.f32 %f2, [%in+4];
+    ld.global.f32 %f3, [%in+8];
+    mul.f32 %f4, %f1, %f2;
+    add.f32 %f5, %f4, %f3;
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.f32 [%out], {%f5, %f1, %f2, %f3};
+    ret;
+}
