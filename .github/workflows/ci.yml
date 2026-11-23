@@ -33,6 +33,7 @@ jobs:
           tests/proxy/lifecycle.sh
           python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
           python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1
+          python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
       - name: The audit library's answer to NVML, against a stand-in
         run: python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
       - name: The stack handling of the forwarding libraries, against a mock library

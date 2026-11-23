@@ -328,8 +328,27 @@ fn dump_input(data: &[u8]) {
 /// The kernels compiled so far with emulated instructions.
 static ANNOUNCER: vf_adapt::emulation::Announcer = vf_adapt::emulation::Announcer::new();
 
+/// The process in which the library was loaded.
+static LOADED_IN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn loaded() {
+    LOADED_IN.store(std::process::id(), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[used]
+#[unsafe(link_section = ".init_array")]
+static LOADED: extern "C" fn() = loaded;
+
 /// When the process ends: the totals of what was announced.
 extern "C" fn summary() {
+    // A child made by fork() comes here too when it ends with exit(). What it would report is its
+    // parent's, counted before the fork; and it has its parent's locks as they were then: one that
+    // another thread of the parent held (the announcer's, or the log's, which every line takes)
+    // stays held for ever in the child, and the summary would wait for it. The summary is that of
+    // the process that loaded the library.
+    if std::process::id() != LOADED_IN.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     if let Some(line) = ANNOUNCER.summary(emulation_warnings()) {
         log::warn(format_args!("{line}"));
     }
