@@ -36,6 +36,10 @@ sm_75 cubins named with it, and counts what validate.py finds. A control that pa
     lanes       in the sequence that stands for a matrix load or product, a value is taken from
                 another lane, or another part of the lane's number
     unwaited    in such a sequence, what reads the result of shuffles does not wait for them
+    unordered   where a store before a matrix load reads, as nothing orders it, a destination
+                that the sequence writes with arithmetic first: the lanes of the rows of a plain
+                load go into its destinations, and the arithmetic of a transposed one does not
+                wait for the shuffles before it (as until 2026-11-23: the store may store the lane)
     soon        the selections after the last step of a product come two cycles after it, with a
                 wait for its scoreboard, and not eight (on a V100 they then read registers that
                 are not written yet)
@@ -305,6 +309,35 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 Function = translate.Function
 
 
+def stored_before(f, i):
+    """The registers that a memory instruction before the instruction `i` of the original reads
+    as data (what a store stores, what a shuffle exchanges; validate.py, `data_overwritten`), in
+    straight-line code, where nothing up to `i` orders it: no barrier, no wait for a scoreboard
+    that it or a later memory instruction names, no memory instruction that writes the register,
+    and no matrix load (what stands for one waits for its shuffles, which come after)."""
+    found = set()
+    for j in range(i - 1, -1, -1):
+        dj = f.src[j]
+        if dj.kind == 'BRU' and dj.mnemonic not in ('BSSY', 'BMOV') or dj.mnemonic == 'BAR':
+            break
+        address = re.match(r'(LD|ST|ATOM|RED)', dj.mnemonic)
+        if not dj.kind.startswith('MIO') or not (address and dj.mnemonic[:2] != 'LD' or dj.mnemonic == 'SHFL'):
+            continue
+        uses = f.mc._uses[(75, dj.c.name)]
+        data = {dj.ops[o] + n for letter, o, span in uses.reads if letter == 'R' and o in dj.ops and dj.ops[o] != 255
+                and not (address and o == 'Ra') for n in range(machine.registers(span, dj.ops))}
+        boards = {(f.words[j] >> WRITE_BARRIER) & 7, (f.words[j] >> READ_BARRIER) & 7} - {7}
+        for k in range(j + 1, i + 1):
+            if ((f.words[k] >> WAIT) & 63) & sum(1 << b for b in boards) or k < i and f.src[k].c.name in ('ldsm__sImmOffset', 'ldsm__URsIR'):
+                data = set()
+                break
+            if k < i and f.src[k].kind.startswith('MIO'):
+                boards |= {(f.words[k] >> WRITE_BARRIER) & 7, (f.words[k] >> READ_BARRIER) & 7} - {7}
+                data -= {r for letter, r in f.src[k].writes if letter == 'R'}
+        found |= data
+    return found
+
+
 def patched(control):
     """{method name: replacement} for `control`."""
     stand_ins, liveness, late, schedule, return_addresses = (
@@ -438,6 +471,32 @@ def patched(control):
         for item in new:
             if item.what not in ('product',):
                 item.word &= ~(1 << (WAIT + translate.SEQUENCE))
+        return new
+
+    def unordered(self, i, d, guard, wait):
+        new = matrix_load(self, i, d, guard, wait)
+        ops, by_name = d.ops, self.mc.md70.by_name
+        count, rd, ra = 1 << ops['num'], ops['Rd'], ops['Ra']
+        if not {rd + m for m in range(1, count) if rd + m != ra} & stored_before(self, i):
+            return new
+        add, shfl = by_name['iadd3_imm__RsIR_RIR'], by_name['shfl__RRI']
+        rows = {}
+        for item in new:
+            if item.what != 'row':
+                continue
+            if ops['mode'] == 1:
+                item.word &= ~(1 << (WAIT + translate.SEQUENCE))
+            else:
+                o = self.mc.d70.operands(add, item.word)
+                m = o['Sb'] // 8
+                if rd + m != ra:
+                    rows[o['Rd']] = rd + m
+                    item.word = self.put(add, item.word, 'Rd', rd + m)
+        for item in new:
+            if item.what == 'address of the row' and ops['mode'] == 0:
+                o = self.mc.d70.operands(shfl, item.word)
+                if o['Rb'] in rows:
+                    item.word = self.put(shfl, item.word, 'Rb', rows[o['Rb']])
         return new
 
     def soon(self, *args):
@@ -592,6 +651,7 @@ def patched(control):
         'unguarded': {'matrix_load': unguarded},
         'lanes': {'matrix_load': other_lane, 'matrix_product': other_lane},
         'unwaited': {'matrix_load': unwaited, 'matrix_product': unwaited},
+        'unordered': {'matrix_load': unordered},
         'soon': {'matrix_product': soon},
         'partial': {'all_predicates': partial},
         'boardless': {'waits_for': boardless},
@@ -1046,7 +1106,7 @@ def patched(control):
     return all_controls[control]
 
 
-CONTROLS = ['as it is', 'unsaved', 'blind', 'cut', 'masks', 'nowait', 'close', 'returns', 'waitless', 'unlisted', 'swapped', 'batched', 'unmoved', 'named', 'unguarded', 'lanes', 'unwaited', 'soon', 'partial', 'boardless', 'unmasked', 'early', 'unheld', 'unwritten', 'stale', 'unkept', 'slowno', 'slowshort', 'slownowait', 'slownever', 'slowfree', 'slowsaved', 'alive_scratch']
+CONTROLS = ['as it is', 'unsaved', 'blind', 'cut', 'masks', 'nowait', 'close', 'returns', 'waitless', 'unlisted', 'swapped', 'batched', 'unmoved', 'named', 'unguarded', 'lanes', 'unwaited', 'unordered', 'soon', 'partial', 'boardless', 'unmasked', 'early', 'unheld', 'unwritten', 'stale', 'unkept', 'slowno', 'slowshort', 'slownowait', 'slownever', 'slowfree', 'slowsaved', 'alive_scratch']
 # (Those of pairs of products on whole rows: only when the translator makes them, not with VF_PAIRS=0.)
 PAIR_CONTROLS = ['rowlane', 'otherrow', 'rowwait', 'rowread', 'halfswap', 'halfk', 'inplace', 'stepfast', 'unsettled', 'unsynced', 'unpermuted', 'unconverted', 'notalso']
 CONTROLS += PAIR_CONTROLS

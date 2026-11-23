@@ -34,6 +34,16 @@ use super::{Item, Refused, SEQUENCE, with_stall};
 /// The address comes by a shuffle from the lane that holds it, into the destination itself
 /// (the one destination that is the address register is shuffled last: what is issued before
 /// has read by then), and plain loads follow.
+///
+/// A store before the load may not have read a destination yet: a store reads its registers some
+/// time after it is issued, and the compiler counts on the load, a memory instruction like the
+/// store, to write them after that (native code writes such a register with arithmetic only after
+/// a barrier or a wait for a later memory instruction). So the first instruction of the sequence
+/// that writes a destination is a shuffle, and arithmetic writes one only after waiting for the
+/// shuffles: the lanes of the rows are computed in registers of the sequence, and in a
+/// transposed load those of the first rows go into the destinations after the shuffles of the
+/// second rows are there. (Until 2026-11-23 the lanes went into the destinations first, and a
+/// store of such a register just before the load could store the lane.)
 pub(super) fn translate_matrix_load(
     ctx: &mut Ctx,
     i: usize,
@@ -129,21 +139,20 @@ pub(super) fn translate_matrix_load(
             "thread",
             false,
         );
-        // The lane of the row: group + 8m.
+        // The lane of the row: group + 8m, in a register of the sequence.
         let mut lanes: HashMap<u32, u32> = HashMap::new();
         for &m in &order {
             if m == 0 {
                 lanes.insert(m, group);
             } else {
-                let dest = if rd + m == ra { other } else { rd + m };
+                let dest = s + 4 + m;
                 lanes.insert(m, dest);
-                let mut ops = vec![
+                let ops = vec![
                     ("Rd", Int(dest)),
                     ("Ra", Int(group)),
                     ("Sb", Int(8 * m)),
                     ("Rc", Int(255)),
                 ];
-                ops.extend(guarded(dest).iter().map(|&(k, ref v)| (k, v.clone())));
                 add(
                     asm("iadd3_imm__RsIR_RIR", &ops).ok_or_else(|| Refused("cannot assemble IADD3 for LDSM".into()))?,
                     "row",
@@ -264,24 +273,6 @@ pub(super) fn translate_matrix_load(
                 "row",
                 false,
             );
-            if m == 0 {
-                first.insert(m, part);
-            } else {
-                let dest = if rd + m == ra { other } else { rd + m };
-                first.insert(m, dest);
-                let mut ops = vec![
-                    ("Rd", Int(dest)),
-                    ("Ra", Int(part)),
-                    ("Sb", Int(8 * m)),
-                    ("Rc", Int(255)),
-                ];
-                ops.extend(guarded(dest).iter().map(|&(k, ref v)| (k, v.clone())));
-                add(
-                    asm("iadd3_imm__RsIR_RIR", &ops).ok_or_else(|| Refused("cannot assemble IADD3 for LDSM".into()))?,
-                    "row",
-                    false,
-                );
-            }
         }
         for &m in &order {
             add(
@@ -301,6 +292,29 @@ pub(super) fn translate_matrix_load(
                 "address of the row",
                 false,
             );
+        }
+        // The lanes of the first rows, in the destinations once the shuffles above are there.
+        let mut waits = true;
+        for &m in &order {
+            if m == 0 {
+                first.insert(m, part);
+            } else {
+                let dest = if rd + m == ra { other } else { rd + m };
+                first.insert(m, dest);
+                let mut ops = vec![
+                    ("Rd", Int(dest)),
+                    ("Ra", Int(part)),
+                    ("Sb", Int(8 * m)),
+                    ("Rc", Int(255)),
+                ];
+                ops.extend(guarded(dest).iter().map(|&(k, ref v)| (k, v.clone())));
+                add(
+                    asm("iadd3_imm__RsIR_RIR", &ops).ok_or_else(|| Refused("cannot assemble IADD3 for LDSM".into()))?,
+                    "row",
+                    waits,
+                );
+                waits = false;
+            }
         }
         for &m in &order {
             let mut ops = vec![

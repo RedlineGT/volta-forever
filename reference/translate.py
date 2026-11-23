@@ -1549,7 +1549,18 @@ class Function:
 
         The address comes by a shuffle from the lane that holds it, into the destination itself
         (the one destination that is the address register is shuffled last: what is issued before
-        has read by then), and plain loads follow."""
+        has read by then), and plain loads follow.
+
+        A store before the load may not have read a destination yet: a store reads its registers
+        some time after it is issued, and the compiler counts on the load, a memory instruction
+        like the store, to write them after that (native code writes such a register with
+        arithmetic only after a barrier or a wait for a later memory instruction). So the first
+        instruction of the sequence that writes a destination is a shuffle, and arithmetic writes
+        one only after waiting for the shuffles: the lanes of the rows are computed in registers
+        of the sequence, and in a transposed load those of the first rows go into the
+        destinations after the shuffles of the second rows are there. (Until 2026-11-23 the lanes
+        went into the destinations first, and a store of such a register just before the load
+        could store the lane.)"""
         mc, ops, w, name = self.mc, d.ops, d.word, d.c.name
         asm = mc.assemble
         if ops['sz'] != 0 or ops['mode'] not in (0, 1) or ops['num'] not in (0, 1, 2):
@@ -1579,14 +1590,14 @@ class Function:
         guarded = lambda r: guard if rd <= r < rd + count else {}
         if not transposed:
             add(lut(Rd=part, Ra=lane, Sb=3, Rc=255, imm8=0xc0), 'thread')
-            # The lane of the row: group + 8m.
+            # The lane of the row: group + 8m, in a register of the sequence.
             lanes = {}
             for m in order:
                 if m == 0:
                     lanes[m] = group
                 else:
-                    lanes[m] = other if rd + m == ra else rd + m
-                    add(asm('iadd3_imm__RsIR_RIR', Rd=lanes[m], Ra=group, Sb=8 * m, Rc=255, **guarded(lanes[m])), 'row')
+                    lanes[m] = s + 4 + m
+                    add(asm('iadd3_imm__RsIR_RIR', Rd=lanes[m], Ra=group, Sb=8 * m, Rc=255), 'row')
             for m in order:
                 add(asm('shfl__RRI', shflmd=0, Pu=7, Rd=rd + m, Ra=ra, Rb=lanes[m], Sc=31, dst_wr_sb=SEQUENCE, **guard), 'address of the row')
             # The pair of the thread in its row: 4 * thread further (and the uniform part of the address).
@@ -1611,13 +1622,17 @@ class Function:
             for m in order:
                 second[m] = s + 4 + m
                 add(asm('iadd3_imm__RsIR_RIR', Rd=second[m], Ra=part, Sb=8 * m + 1, Rc=255), 'row')
+            for m in order:
+                add(asm('shfl__RRI', shflmd=0, Pu=7, Rd=second[m], Ra=ra, Rb=second[m], Sc=31, dst_wr_sb=SEQUENCE), 'address of the row')
+            # The lanes of the first rows, in the destinations once the shuffles above are there.
+            waits = True
+            for m in order:
                 if m == 0:
                     first[m] = part
                 else:
                     first[m] = other if rd + m == ra else rd + m
-                    add(asm('iadd3_imm__RsIR_RIR', Rd=first[m], Ra=part, Sb=8 * m, Rc=255, **guarded(first[m])), 'row')
-            for m in order:
-                add(asm('shfl__RRI', shflmd=0, Pu=7, Rd=second[m], Ra=ra, Rb=second[m], Sc=31, dst_wr_sb=SEQUENCE), 'address of the row')
+                    add(asm('iadd3_imm__RsIR_RIR', Rd=first[m], Ra=part, Sb=8 * m, Rc=255, **guarded(first[m])), 'row', waits=waits)
+                    waits = False
             for m in order:
                 add(asm('shfl__RRI', shflmd=0, Pu=7, Rd=rd + m, Ra=ra, Rb=first[m], Sc=31, dst_wr_sb=SEQUENCE, **guard), 'address of the row')
             # The half of the thread's column in each row: 2 * group further (and the uniform part).

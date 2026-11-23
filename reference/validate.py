@@ -54,7 +54,7 @@ down (rule HW). It is above the program's, and nothing else of the translation u
 taken among the registers that hold nothing: it then holds nothing of the program all along the
 held life (rule H1), and may hold another uniform predicate along other lives.
 
-Four things of the schedule are checked too, on the words of the result (nvdisasm does not print
+Five things of the schedule are checked too, on the words of the result (nvdisasm does not print
 them), with the translator's tables only for what kind an instruction is and what it reads:
 - what an instruction of the original waited for, the first instruction of what it became waits
   for (a wait holds for everything after it: the compiler may put on one instruction the wait for
@@ -68,7 +68,10 @@ them), with the translator's tables only for what kind an instruction is and wha
   schedule put some there: `waited_after`, for this rule and for the ones of the frame, of
   room and of borrowed registers that ask the next instruction to wait).
 - a predicate given back from a register of the translation (R2P) comes 9 cycles or more after
-  the instructions before it, in straight-line code, that read that predicate.
+  the instructions before it, in straight-line code, that read that predicate;
+- a register that a memory instruction reads as data (what a store stores, what a shuffle
+  exchanges) is not written by arithmetic after it, in straight-line code, before a barrier or a
+  wait for a scoreboard that it or a later memory instruction names (`data_overwritten`).
 Not checked: that an instruction comes late enough after one of the translation whose result it
 reads and that names no scoreboard (the translator's table of distances is taken on trust).
 
@@ -1400,7 +1403,10 @@ def matrix_load_expected(source):
     nvdisasm prints them, with {names} where a register of the translation goes; None when the
     text is not a load this knows. Written from the recipe (crates/vf-ptx/src/lower/,
     measured on a V100), not from the translator: the address of a row comes by a shuffle from the lane
-    that has it, into the destination itself; the destination that is the address register last."""
+    that has it, into the destination itself; the destination that is the address register last.
+    What writes a destination first is a shuffle: the lanes of the rows are computed elsewhere, and
+    those of the first rows of a transposed load after the shuffles of the second rows (what writes
+    a destination of a load right after a store of it is checked apart: `data_overwritten`)."""
     m = re.match(r'(@!?P\d )?LDSM\.16\.(M88|MT88)(?:\.([24]))? R(\d+), \[R(\d+)(?:\+(UR\d+))?([+-]0x[0-9a-f]+)?\]$', source)
     if not m:
         return None
@@ -1415,12 +1421,9 @@ def matrix_load_expected(source):
         for k in order:
             if k == 0:
                 lanes[k] = '{group}'
-            elif rd + k == ra:
-                lanes[k] = '{other}'
-                out.append('IADD3 {other}, {group}, 0x%x, RZ' % (8 * k))
             else:
-                lanes[k] = to(k)
-                out.append(guard + 'IADD3 %s, {group}, 0x%x, RZ' % (to(k), 8 * k))
+                lanes[k] = '{row%d}' % k
+                out.append('IADD3 {row%d}, {group}, 0x%x, RZ' % (k, 8 * k))
         out += [guard + 'SHFL.IDX PT, %s, R%d, %s, 0x1f' % (to(k), ra, lanes[k]) for k in order]
         if uniform:
             out.append('LEA {sum}, {part}, {%s}, 0x2' % uniform)
@@ -1431,8 +1434,9 @@ def matrix_load_expected(source):
         return out
     out += ['SHF.L.U32 {part}, {lane}, 0x1, RZ', 'LOP3.LUT {part}, {part}, 0x6, RZ, 0xc0, !PT']
     first = {}
+    out += ['IADD3 {second%d}, {part}, 0x%x, RZ' % (k, 8 * k + 1) for k in order]
+    out += ['SHFL.IDX PT, {second%d}, R%d, {second%d}, 0x1f' % (k, ra, k) for k in order]
     for k in order:
-        out.append('IADD3 {second%d}, {part}, 0x%x, RZ' % (k, 8 * k + 1))
         if k == 0:
             first[k] = '{part}'
         elif rd + k == ra:
@@ -1441,7 +1445,6 @@ def matrix_load_expected(source):
         else:
             first[k] = to(k)
             out.append(guard + 'IADD3 %s, {part}, 0x%x, RZ' % (to(k), 8 * k))
-    out += ['SHFL.IDX PT, {second%d}, R%d, {second%d}, 0x1f' % (k, ra, k) for k in order]
     out += [guard + 'SHFL.IDX PT, %s, R%d, %s, 0x1f' % (to(k), ra, first[k]) for k in order]
     if uniform:
         out.append('LEA {sum}, {group}, {%s}, 0x1' % uniform)
@@ -2043,6 +2046,60 @@ def schedule(mc, code, highest, sequences=frozenset(), borrowed=frozenset()):
                 if before.kind == 'BRU' and before.mnemonic not in ('BSSY', 'BMOV'):
                     break
     return out, late
+
+
+def data_overwritten(mc, code):
+    """What does not hold of the registers that memory instructions read as data: (offset, what) for
+    each, and how many such registers were followed.
+
+    A store, an atomic operation and a shuffle read their data (what is stored, combined or
+    exchanged) some time after they are issued, and native code counts on the memory instructions
+    after them, which go in order, to write such a register only after it has been read: it
+    writes one with a memory instruction at once (`ptxas`: a load from shared memory or a matrix
+    load 4 cycles after a store of the register), and with any other instruction only after a
+    barrier or a wait for a scoreboard that the reader itself or a later memory instruction names
+    (none otherwise among 44,052 such writes in 821 sm_75 cubins, PyTorch's 475 and 346 of
+    Triton, 2026-11-23). The address of a
+    memory access is read when it is issued (native code writes it with arithmetic 6 cycles
+    later, nothing between), and is not followed. So: from such an instruction on, in
+    straight-line code, nothing but a memory instruction writes a register that it reads as data
+    before a barrier or such a wait. (Until 2026-11-23 the sequence of a matrix load wrote the
+    lanes of its rows into its destinations first, and on a V100 a store of one of them just
+    before the load stored the lane. Not followed: past a branch, and from the end of a loop to
+    its start.)"""
+    words = [int.from_bytes(code[i:i + 16], 'little') for i in range(0, len(code) - 15, 16)]
+    decoded = [mc.decode(70, w) for w in words]
+    out, followed = [], 0
+    for k, d in enumerate(decoded):
+        if d is None or not d.kind.startswith('MIO'):
+            continue
+        address = re.match(r'(LD|ST|ATOM|RED)', d.mnemonic)
+        if not (address and d.mnemonic[:2] != 'LD' or d.mnemonic == 'SHFL'):
+            continue
+        uses = mc._uses.get((70, d.c.name))
+        if uses is None:
+            continue
+        data = set()
+        for letter, operand, span in uses.reads:
+            if letter == 'R' and operand in d.ops and d.ops[operand] != 255 and not (address and operand == 'Ra'):
+                data |= {d.ops[operand] + n for n in range(machine.registers(span, d.ops))}
+        if not data:
+            continue
+        followed += len(data)
+        boards = {(words[k] >> WRITE_BARRIER) & 7, (words[k] >> READ_BARRIER) & 7} - {7}
+        for j in range(k + 1, len(words)):
+            y = decoded[j]
+            if y is None or ((words[j] >> WAIT) & 63) & sum(1 << b for b in boards) or y.mnemonic == 'BAR':
+                break
+            written = data & {register for letter, register in y.writes if letter == 'R'}
+            if written and not y.kind.startswith('MIO'):
+                out += [(16 * j, 'writes R%d, which the memory instruction at 0x%x reads as data and may not have read yet (nothing waited since for a scoreboard that it or a later memory instruction names, and no barrier)' % (r, 16 * k)) for r in sorted(written)]
+            data -= written
+            if not data or y.kind == 'BRU' and y.mnemonic not in ('BSSY', 'BMOV'):
+                break
+            if y.kind.startswith('MIO'):
+                boards |= {(words[j] >> WRITE_BARRIER) & 7, (words[j] >> READ_BARRIER) & 7} - {7}
+    return out, followed
 
 
 # ---- level 3: validation of "everything at the instruction" (the frame) ----
@@ -3403,6 +3460,13 @@ def main():
                         per_inst_lane = m.group(1)
                         if rn_lane <= highest and rn_lane >= 2:
                             borrowed_regs.add(rn_lane)
+                            # A register of the program: declared taken at the instruction (a pool
+                            # of MAP.lives), as for what the sequence computes into. ('lane' is put
+                            # around the instruction: the check of undeclared writes below leaves
+                            # it out. Until 2026-11-23 its declaration was not looked at.)
+                            if not any(first <= rn_lane < first + width and old in offsets
+                                       for width, first, offsets in borrow_pools.get(name, [])):
+                                say(at, old, 'lane', 'D: the lane goes into a register of the program that is not declared taken at the instruction')
                     kinds['(level3) per-instruction lane reads'] += 1
                 parts = parts[1:]
             if parts and parts[0][1] == 'kept':
@@ -4715,6 +4779,10 @@ def main():
         # ---- schedule check (deferred from above: needs borrowed_regs) ----
         wrong, late = schedule(mc, result_code, highest, sequences, borrowed_regs)
         kinds['(schedule) instructions that read late a register of the translation'] += late
+        for at, what in wrong:
+            problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
+        wrong, followed = data_overwritten(mc, result_code)
+        kinds['(schedule) registers that a memory instruction reads as data, followed to what writes them next'] += followed
         for at, what in wrong:
             problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
         # ---- even-register alignment: an operand of two registers begins on an even one ----

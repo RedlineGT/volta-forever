@@ -126,7 +126,10 @@ program where they hold nothing (`docs/translator.md`, "Registers").
 **The whole truth.** Every register of the program that an added instruction writes is declared:
 as a destination of the original instruction, as the home of a uniform register, as a register
 that holds a predicate, as one taken for the time of an instruction, or as one put away for it.
-A register written and not declared is a problem.
+A register written and not declared is a problem. (The register into which a matrix sequence
+that takes everything at the instruction reads the lane too: until 2026-11-23 it was left out
+with what is put around an instruction, and `missing_pool_line` passed unnoticed in
+`k_stored.135.sm75.cubin`, where the lane goes into a register of the program.)
 
 **Free.** A declared register must hold nothing of the program where it is taken, by the
 validator's own lives of registers: dead on the way in, dead on the way out, and neither read
@@ -248,6 +251,16 @@ with the next instruction waiting, and the distances between the steps and after
 - After the last step of a product, eight cycles pass before anything but another product reads
   its result (thirteen for accumulators in halves), and the steps of a product are as far apart
   as its recipe has them.
+- A register that a memory instruction reads as data (what a store stores, an atomic operation
+  combines, a shuffle exchanges; not the address of a memory access) is not written after it, in
+  straight-line code, by anything but a memory instruction before a barrier or a wait for a
+  scoreboard that it or a later memory instruction names (`data_overwritten`). Memory
+  instructions go in order: native code writes such a register at once with one (`ptxas`, 4
+  cycles after a store, with a load from shared memory or a matrix load), and with anything else
+  only after such a barrier or wait: none otherwise among 44,052 such writes in 821 sm_75
+  cubins, PyTorch's 475 and 346 of Triton (2026-11-23). Until that day the sequence of a matrix load wrote the lanes of its rows
+  into its destinations first, the validator found nothing, and on a V100 a store of one of them
+  just before the load stored the lane.
 
 ### What the validator does not check
 
@@ -264,6 +277,9 @@ with the next instruction waiting, and the distances between the steps and after
    not read the box of uniform registers of nvdisasm's chart, which nvdisasm leaves out of
    some functions that have them). `reference/uses_check.py` compares what each instruction
    reads and writes with that chart (section 5); nothing compares the lives.
+4. **What a memory instruction reads as data, past a branch.** The rule above follows such a
+   register in straight-line code only: not past a branch, nor from the end of a loop to its
+   start.
 
 ## 3. Controls
 
@@ -277,15 +293,15 @@ one in a process of its own, in five passes: at the default; with every function
 registers (`VF_BORROW=1`); with every kernel at level 3 (`VF_BORROW=8`); with room made
 (`VF_BORROW=5`, the setting of the second translation); and with every frame addressed from
 its top, which a register is loaded with (`VF_BORROW=3`), for the two controls on that
-register. In each pass the translation as it is is validated first. On 34 cubins (the 13 test cubins of `tests/kernels`, 17 of PyTorch's and
+register. In each pass the translation as it is is validated first. On 35 cubins (the 14 test cubins of `tests/kernels`, 17 of PyTorch's and
 4 of the held-out corpus, chosen for having what the controls need):
 
-- **104 of the 107 controls are objected to**, each in every cubin whose translation it
+- **105 of the 108 controls are objected to**, each in every cubin whose translation it
   changes, but in 8 cases looked at one by one where what it changed stays right (below);
 - 2 change nothing in any of these cubins, nor in any of PyTorch's 475: nothing at hand has
   what they take away (below);
 - 1 is of another kind (`copy_after_write`, below);
-- the translation as it is: 0 problems in the 34 cubins, at each of the five settings.
+- the translation as it is: 0 problems in the 35 cubins, at each of the five settings.
 
 About an hour with 32 processes.
 
@@ -315,17 +331,18 @@ control was written for: a fault often breaks more than one rule.)
 | `cut` | The lives of a uniform predicate are cut at every instruction: what one instruction writes, the next reads in what may be another predicate | default: 23 of 23 |
 | `masks` | The P2R and R2P of the program are taken to read and write no predicate (the predicates are a mask, a number: the tables do not say which) | default: 1 of 1 |
 | `nowait` | The instruction after one that reads late a register of the translation does not wait for it | default: 27 of 27 |
-| `close` | A wait comes one cycle after the instruction that names its scoreboard | default: 31 of 31 |
+| `close` | A wait comes one cycle after the instruction that names its scoreboard | default: 32 of 32 |
 | `returns` | A number that makes a return address is off by one instruction | default: 20 of 20 |
 | `waitless` | What an instruction waited for, the first instruction of what it became does not wait for (ULDC lost its wait that way until a review found it) | default: 33 of 33 |
-| `unlisted` | The translation as it is, and a map that leaves out one instruction of each function (what the map does not have, the check did not look at) | default: 34 of 34 |
-| `swapped` | Two instructions of the result that follow each other are exchanged, and the map says so: each is what the map says, in another order | default: 34 of 34 |
+| `unlisted` | The translation as it is, and a map that leaves out one instruction of each function (what the map does not have, the check did not look at) | default: 35 of 35 |
+| `swapped` | Two instructions of the result that follow each other are exchanged, and the map says so: each is what the map says, in another order | default: 35 of 35 |
 | `batched` | An instruction with marks of register reuse that gets a stall which does not end its group keeps the marks, which then name a batch (as until 2026-11-17) | default: 1 of 1 |
 | `unmoved` | The relocations on code stay at the offsets they had, where other instructions are now (as until 2026-11-17; cuFFT has such kernels) | default: 1 of 1 |
 | `named` | The first relocation on code is made to name the function it is on, and the function is translated all the same: the place it names would have moved | default: 1 of 1 |
 | `unguarded` | The loads that stand for a matrix load under a guard have no guard | default: 6 of 6; `=8`: 3 of 3 |
-| `lanes` | In the sequence that stands for a matrix load or product, a value is taken from another lane, or another part of the lane's number | default: 11 of 11; `=8`: 7 of 7 |
-| `unwaited` | In such a sequence, what reads the result of shuffles does not wait for them | default: 11 of 11; `=8`: 7 of 7 |
+| `lanes` | In the sequence that stands for a matrix load or product, a value is taken from another lane, or another part of the lane's number | default: 12 of 12; `=8`: 8 of 8 |
+| `unwaited` | In such a sequence, what reads the result of shuffles does not wait for them | default: 12 of 12; `=8`: 8 of 8 |
+| `unordered` | Where a store before a matrix load reads, as nothing orders it, a destination that the sequence writes with arithmetic first: the lanes of the rows of a plain load go into its destinations, and the arithmetic of a transposed one does not wait for the shuffles before it (as until 2026-11-23: the store may store the lane) | default: 1 of 1; `=8`: 1 of 1 |
 | `soon` | The selections after the last step of a product come two cycles after it, with a wait for its scoreboard, and not eight (on a V100 they then read registers that are not written yet) | default: 10 of 10; `=8`: 6 of 6 |
 | `partial` | R2P is taken to read its register only, not the predicates: two predicates given back one after the other are one cycle apart (as until 2026-11-18: the second R2P writes the first's predicate back as it was before), and a predicate that an instruction just wrote is not waited for | default: 1 of 1 |
 | `boardless` | A predicate saved, or all of them for R2P, is read without waiting for the scoreboard that the instruction that wrote it announces it on | changes nothing in these cubins |
@@ -379,10 +396,10 @@ control was written for: a fault often breaks more than one rule.)
 
 | Control | What is made wrong | Objected to (cubins objected to, of those it changes) |
 |---|---|---|
-| `no_lane_l3` | The S2R that reads the lane before a matrix sequence is replaced by a NOP | default: 4 of 4; `=8`: 6 of 6 |
+| `no_lane_l3` | The S2R that reads the lane before a matrix sequence is replaced by a NOP | default: 4 of 4; `=8`: 7 of 7 |
 | `odd_pair_l3` | Two uniform registers that make a pair are loaded from the frame into registers that begin on an odd one | default: 7 of 7; `=8`: 19 of 19; `=5`: 12 of 12 |
-| `no_r1_lower` | The instruction that lowers the stack pointer by the frame is replaced by a NOP | default: 7 of 7; `=8`: 22 of 22; `=5`: 13 of 13 |
-| `wrong_r1_lower` | It lowers the stack pointer by twice the frame | default: 7 of 7; `=8`: 22 of 22; `=5`: 13 of 13 |
+| `no_r1_lower` | The instruction that lowers the stack pointer by the frame is replaced by a NOP | default: 7 of 7; `=8`: 23 of 23; `=5`: 13 of 13 |
+| `wrong_r1_lower` | It lowers the stack pointer by twice the frame | default: 7 of 7; `=8`: 23 of 23; `=5`: 13 of 13 |
 | `wrong_slot_load` | The first load from the frame takes the word after its own | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
 | `no_store_l3` | Nothing is stored to the frame | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
 | `held_busy_l3` | The register that holds a uniform predicate between the instructions that name it is one where the program holds something at one of them | default: 1 of 1; `=8`: 3 of 3; `=5`: 3 of 3 |
@@ -394,10 +411,10 @@ control was written for: a fault often breaks more than one rule.)
 | `no_load_wait` | What follows the last load from the frame does not wait for it | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
 | `store_no_read_sb` | The stores to the frame do not say when they have read | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
 | `wrong_base_const` | The base of the frame is taken from another constant | `=3`: 16 of 16 |
-| `missing_pool_line` | The last register of the program that the translator says it took at an instruction is not said | default: 7 of 7; `=8`: 26 of 26; `=5`: 17 of 17 |
-| `no_attr_raise` | The attributes of the function are the original's, not raised by the frame | default: 7 of 7; `=8`: 22 of 22; `=5`: 13 of 13 |
+| `missing_pool_line` | The last register of the program that the translator says it took at an instruction is not said | default: 7 of 7; `=8`: 27 of 27; `=5`: 17 of 17 |
+| `no_attr_raise` | The attributes of the function are the original's, not raised by the frame | default: 7 of 7; `=8`: 23 of 23; `=5`: 13 of 13 |
 | `no_borrow_wait_l3` | No instruction of a sequence that reads or writes the frame waits for the six scoreboards | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
-| `no_c3_wait` | Where the translation takes a register that the program writes late, the first instruction of the sequence does not wait for the six scoreboards | default: 6 of 6; `=8`: 18 of 18; `=5`: 14 of 14 |
+| `no_c3_wait` | Where the translation takes a register that the program writes late, the first instruction of the sequence does not wait for the six scoreboards | default: 6 of 6; `=8`: 19 of 19; `=5`: 14 of 14 |
 | `store_before_l3` | The stores to the frame come before what the instruction became, with the waits that this order asks for: they store what was there, or what the register held | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
 | `store_other_l3` | Where an instruction only writes a uniform register of the frame, the register next to the one it computed into is stored | default: 7 of 7; `=8`: 22 of 22; `=5`: 12 of 12 |
 | `stray_store_l3` | After an instruction that writes a uniform register of the frame, the same value is stored to another uniform register too, which the instruction does not write | default: 7 of 7; `=8`: 21 of 21; `=5`: 12 of 12 |
