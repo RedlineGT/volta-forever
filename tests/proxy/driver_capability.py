@@ -108,6 +108,23 @@ int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, in
 """
 
 
+# A main program that asks through the CUDA runtime it needs (libcudart.so.19, of CLIENT's code):
+#   main_rt PROXY
+MAIN_RT = """
+#include <dlfcn.h>
+#include <stdio.h>
+int both(int (*f)(int *, int *, int), int *a, int *b, int dev);
+int main(int argc, char **argv) {
+    void *proxy = dlopen(argv[1], RTLD_NOW);
+    if (!proxy) return 2;
+    int (*query)(int *, int *, int) = (int (*)(int *, int *, int))dlsym(proxy, "cuDeviceComputeCapability");
+    int major = -1, minor = -1, status = both(query, &major, &minor, 0);
+    printf("%d.%d %d\\n", major, minor, status);
+    return 0;
+}
+"""
+
+
 # A main program that asks the driver itself:   main PROXY [DIRECTORY-TO-ENTER-FIRST]
 MAIN = """
 #include <dlfcn.h>
@@ -420,6 +437,13 @@ def build(directory):
     (directory / "elsewhere").mkdir()
     subprocess.run(["cc", "-O0", "-x", "c", "-", "-o", str(directory / "main"), "-ldl"], input=MAIN, text=True,
                    check=True)
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-Wl,-soname,libcudart.so.19", "-x", "c", "-",
+                    "-o", str(runtimes / "libcudart.so.19")], input=CLIENT, text=True, check=True)
+    subprocess.run(["cc", "-O0", "-x", "c", "-", "-o", str(directory / "main_rt"), "-ldl", "-L", str(runtimes),
+                    "-Wl,--no-as-needed", "-l:libcudart.so.19", f"-Wl,-rpath,{runtimes}"], input=MAIN_RT, text=True,
+                   check=True)
+    subprocess.run(["objcopy", "--add-section", f".nv_fatbin={directory / 'turing_only.fatbin'}",
+                    directory / "main_rt", directory / "bin" / "main_rt_turing"], check=True)
     for name, fixture in (("main75", data / "elf75-ptx75-zstd.fatbin"),
                           ("main_turing_only", directory / "turing_only.fatbin")):
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", directory / "main",
@@ -564,10 +588,13 @@ def run_loader(proxy, directory):
 def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
     through PATH, before a change of directory), and without /proc when it was started by its
-    path."""
+    path; so is the CUDA runtime that it asks through (main_rt_turing; until 2026-11-23 told 8.0
+    without /proc)."""
     programs = directory / "bin"
     for name, override, told in (("main75", None, "7.5"), ("main75", "8.0", "7.5"),
-                                 ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5")):
+                                 ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5"),
+                                 ("main_rt_turing", "8.0", "7.5"), ("main_rt_turing", "12.0", "7.5"),
+                                 ("main_rt_turing", None, "7.5")):
         settings = {**env, "VOLTA_FOREVER": "test", "PATH": f"{programs}:{os.environ['PATH']}"}
         if override:
             settings["VF_CAPABILITY"] = override

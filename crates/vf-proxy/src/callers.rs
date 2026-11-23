@@ -102,9 +102,12 @@ fn unload_count() -> u64 {
 
 /// An object of the process (the main program or a shared library), as the dynamic loader lists it.
 struct Object {
-    /// The file its code can be read from: `/proc/self/exe` for the main program; `None` for
-    /// an object without a name (the kernel's vDSO has no file either, and reads as nothing).
+    /// The file its code can be read from: `/proc/self/exe` for the main program (without `/proc`,
+    /// the loader's name for it: see `objects`); `None` for an object without a name (the
+    /// kernel's vDSO has no file either, and reads as nothing).
     path: Option<CString>,
+    /// The address of its first loaded segment.
+    first: Option<usize>,
     /// Whether the address asked about is in one of its segments.
     holds: bool,
     /// Its `DT_SONAME`, and the `DT_NEEDED` names of the libraries it was loaded with.
@@ -124,7 +127,24 @@ fn objects(address: usize) -> Vec<Object> {
     }
     let mut data = (address, Vec::<Object>::new());
     unsafe { libc::dl_iterate_phdr(Some(each), (&raw mut data).cast()) };
-    data.1
+    let mut list = data.1;
+    // The main program's file is read through `/proc/self/exe`, its name for the loader being
+    // `argv[0]`, which names no file when it was started by name through PATH or once it changed
+    // directory. Without `/proc` (a sandbox, a chroot), that name is taken, as the loader gives it
+    // (`dladdr`): it names the file when it is a path. Once here, for every reader of the list:
+    // the caller's own code, and the code of the libraries it answers for.
+    if let Some(main) = list.first_mut()
+        && main.path.as_deref() == Some(c"/proc/self/exe")
+        && !readable(c"/proc/self/exe")
+    {
+        main.path = main.first.and_then(|address| {
+            let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+            // SAFETY: an address of the main program, which stays loaded.
+            let found = unsafe { libc::dladdr(address as *const c_void, &mut info) } != 0;
+            (found && !info.dli_fname.is_null()).then(|| unsafe { CStr::from_ptr(info.dli_fname) }.to_owned())
+        });
+    }
+    list
 }
 
 /// # Safety
@@ -164,6 +184,7 @@ unsafe fn object(info: &libc::dl_phdr_info, address: usize, first: bool) -> Obje
     };
     let mut found = Object {
         path,
+        first: segments.first().map(|&(start, _)| start),
         holds: mapped(address, 1),
         soname: None,
         needed: Vec::new(),
@@ -612,15 +633,11 @@ fn caller(return_address: usize) -> Decision {
     }
     // Outside the lock (see `CALLERS`).
     let objects = objects(return_address);
-    // For the main program the loader's name is `argv[0]`, which names no file when the program
-    // was started by name through PATH, or once it has changed directory: its file is read
-    // through `/proc/self/exe`, when that can be opened (without `/proc`, in a sandbox or a
-    // chroot, the loader's name is read: it names the file when it is a path).
+    // The main program's file, as `objects` resolved it.
     let main = objects
         .first()
         .filter(|object| object.holds)
-        .and_then(|object| object.path.as_deref())
-        .filter(|&path| path != c"/proc/self/exe" || readable(path));
+        .and_then(|object| object.path.as_deref());
     let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
     let caller = classify(path);
     let mut limit = None;
