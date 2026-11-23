@@ -654,6 +654,7 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuModuleUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     // What is kept for the module is forgotten before the driver unloads it: from then on, the
     // driver may give its handle to a load in another thread, whose records are not to be dropped.
@@ -1168,6 +1169,7 @@ unsafe extern "C" fn library_load_from_file(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     // Check if this is a lazy library: unload its sub-modules and stand-in.
     // (Forgotten before the driver's unload: see `cuModuleUnload`.)
     if lazy::is_lazy(library as usize) {
@@ -2887,6 +2889,7 @@ type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuCtxDestroy: ContextDestroy);
     let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
@@ -2898,6 +2901,7 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuCtxDestroy_v2: ContextDestroy);
     let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
@@ -2911,10 +2915,9 @@ pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
 /// given to others once it is destroyed: what `guard` concluded of handles is concluded again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuGreenCtxDestroy(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuGreenCtxDestroy: ContextDestroy);
-    let result = unsafe { real(context) };
-    kernels::new_generation();
-    result
+    unsafe { real(context) }
 }
 
 /// A release of the primary context of a device and the query of its state that tells whether the
@@ -2944,6 +2947,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, dev
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);
@@ -2956,6 +2960,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);
@@ -2968,6 +2973,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);
@@ -2980,6 +2986,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);

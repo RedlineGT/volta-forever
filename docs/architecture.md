@@ -332,8 +332,10 @@ until it is unloaded; only the modules that the driver gives for it in a context
 that context. A green context destroyed with `cuGreenCtxDestroy` is not seen: its modules are
 forgotten when the driver gives their handles again. An unload waits for a launch from
 the module's second translation and for a setting being given to it. What the refusal at a
-launch concluded of a handle (section 5) is concluded again after each of these, and after
-`cuGreenCtxDestroy`: the driver may then give the handle to another function.
+launch concluded of a handle (section 5) is concluded again from the moment each of these calls
+begins, and `cuGreenCtxDestroy` too, and again after it returns; what is concluded while one is
+under way is not kept: once the driver has freed the handles of its functions, it may give one to
+another function, in another thread, before the call returns.
 
 The reports at exit (`VF_STATS`, `VF_PROFILE`, the summaries of emulated instructions and
 of second translations) are printed by the process that loaded the layer: a child made by

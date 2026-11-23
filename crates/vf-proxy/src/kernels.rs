@@ -112,6 +112,37 @@ pub fn new_generation() {
     crate::guard::generation_began(generation);
 }
 
+/// The number of driver calls under way that end a module, a library or a context (`Ending`).
+static ENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// While it lives, a driver call that ends a module, a library or a context is under way: once the
+/// driver has freed the handles of its functions, another thread may be given one of them for
+/// another function before the call returns. A generation begins when it is made, before the
+/// driver's call; what `guard` concludes meanwhile is not kept (`ending`); and a generation begins
+/// again when it is dropped, after the call.
+pub struct Ending(());
+
+/// A driver call that ends a module, a library or a context begins (`Ending`).
+pub fn ending() -> Ending {
+    ENDING.fetch_add(1, SeqCst);
+    new_generation();
+    Ending(())
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        // (The generation first: a conclusion reached while the call was under way, and kept by a
+        // thread that saw no call under way any more, is of the generation that this ends.)
+        new_generation();
+        ENDING.fetch_sub(1, SeqCst);
+    }
+}
+
+/// Whether a driver call that ends a module, a library or a context is under way (`Ending`).
+pub fn ending_now() -> bool {
+    ENDING.load(SeqCst) != 0
+}
+
 /// Whether a module or library known here has a refused kernel.
 #[inline]
 pub fn refusing() -> bool {

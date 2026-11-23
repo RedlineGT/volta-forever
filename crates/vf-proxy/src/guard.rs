@@ -98,8 +98,11 @@ fn decide(handle: usize, entry: Option<u64>, call: &str, device: Option<c_int>) 
         }
         kernels::Verdict::Allowed => {
             // (Of the generation read before the records were: if it has ended since, the entry
-            // is never found.)
-            if let Some(entry) = entry {
+            // is never found. Not kept while a module, a library or a context is going: the
+            // handle may already be another function's, `kernels::Ending`.)
+            if let Some(entry) = entry
+                && !kernels::ending_now()
+            {
                 ALLOWED[slot(handle)].store(entry, SeqCst);
             }
             true
