@@ -110,7 +110,7 @@ Each measured chat processed 227 uncached tokens and generated 64. All three rep
 | NInfer with `VF_BF16_TC_GROUPS=0` | 419.40 | 117.09 |
 | Native llama.cpp, Q4_K_M GGUF | 470.60 | 99.49 |
 
-NInfer used its mixed Q4/Q5/Q6/Q8 conversion. The native reference used the same prompts with a Q4_K_M GGUF. Across the two NInfer runs, all 64 token IDs matched for Kyoto and Lyon. The first 58 matched for Lima. [Native reference and quantization details](benchmarks/ninfer-qwen35-native.json)
+NInfer used its mixed Q4/Q5/Q6/Q8 conversion. The native reference used the same prompts with a Q4_K_M GGUF. Across the two NInfer runs, all 64 token IDs matched for Kyoto and Lyon. The first 58 matched for Lima. With `VF_BF16_TC_GROUPS=1`, results are not bit-reproducible from run to run when a kernel leaves unused operands of a product uninitialised (differences of rounding size), so such a match is a sample. [Determinism of the BF16 switches](../emulations.md#4-bf16) · [Native reference and quantization details](benchmarks/ninfer-qwen35-native.json)
 
 ## 6. Additional notes
 
