@@ -311,6 +311,34 @@ def library_case(run, lazy):
     assert run.api.cuLibraryUnload(library) == 0
 
 
+LATE = (b".version 8.8\n.target sm_75\n.address_size 64\n"
+        b".visible .entry late()\n{\n .reg .b32 %r<2>;\n mov.u32 %r1, 54321;\n ret;\n}\n"
+        b".visible .entry other()\n{\n ret;\n}\n")
+
+
+def late_case(run):
+    """A kernel of a deferred library, given compiled alone, that the driver's compiler refuses when
+    the library is loaded whole: refused from then on. A kernel node made with it before is not
+    looked at again (LIMITS.md, "Kernels refused")."""
+    if os.environ.get("VF_LAZY") == "0":
+        return
+    library = run.load(LATE, library=True)
+    kernel = c.c_void_p()
+    assert run.api.cuLibraryGetKernel(c.byref(kernel), library, b"late") == 0 and kernel.value
+    node = c.c_void_p()
+    params = KernelNode(None, kernel=kernel)
+    nodes = run.count("nodes")
+    assert run.api.cuGraphAddKernelNode_v2(c.byref(node), c.c_void_p(0x600000), None, 0, c.byref(params)) == 0
+    assert run.count("nodes") == nodes + 1
+    run.allowed(kernel.value, run.kernel_calls(kernel.value), "(before the library is loaded whole)")
+    module = c.c_void_p()
+    assert run.api.cuLibraryGetModule(c.byref(module), library) == 0  # loaded whole: late is refused
+    again = c.c_void_p(0xDEADBEEF)
+    assert run.api.cuLibraryGetKernel(c.byref(again), library, b"late") == REFUSED and again.value is None
+    run.refused(kernel.value, run.kernel_calls(kernel.value), "(once the library was loaded whole)")
+    assert run.api.cuLibraryUnload(library) == 0
+
+
 def context_case(run):
     """A module that goes with its context leaves nothing refused under the handles of its functions."""
     module = run.load(PTX)
@@ -365,6 +393,7 @@ CASES = {
     "fast": fast_case,
     "library": lambda run: library_case(run, os.environ.get("VF_LAZY") != "0"),
     "contexts": context_case,
+    "late": late_case,
     "log": lambda run: log_case(run, os.environ["VF_LOG"]),
 }
 

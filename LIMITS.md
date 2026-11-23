@@ -112,8 +112,13 @@ question about it or a setting of it (`cuFuncGetAttribute`, `cuFuncGetParamInfo`
 functions and the like) and `cuKernelGetFunction` return 218, the driver is not called, and a
 line names the kernel and the reason once. What still traps: a kernel launched by another kernel
 (dynamic parallelism), a function reached from a kernel by an indirect call or through a call
-into another linker input (above), and a launch through a private interface of the driver (cuFFT
-launches through `cuLaunchKernel`; no other is known).
+into another linker input (above), a launch through a private interface of the driver (cuFFT
+launches through `cuLaunchKernel`; no other is known), and a kernel node of a graph made before
+the layer learned that its kernel is refused: a graph is not looked at when it is instantiated or
+launched. The layer learns a refusal after it gave a kernel only when the driver's compiler refuses
+a function of a deferred library loaded whole, of which the kernel was given compiled alone (the
+compiler accepted it then: that code holds no trap); from then on the kernel is refused at every
+use, and a node made with it before is launched by its graph.
 
 **PyTorch 2.14.0.** Of the 23,693 functions for sm_75 in the 475 units of machine code of its
 library, 23,664 are translated (99.9 %) and 29 are refused: 10 for a branch through a uniform

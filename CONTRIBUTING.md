@@ -32,9 +32,14 @@ dash tests/launcher/launcher.sh  # the launcher (and under bash --posix)
 program asks for it, with a reason that names what is missing, and a refused kernel that is
 launched anyway (with a handle that the program took elsewhere, as cuFFT takes its functions
 from a private table of the driver) returns an error instead of trapping: every launch function
-of the driver's interface, a kernel node of a graph and the questions about the kernel refuse
-it. A kernel launched or called from another kernel still traps (`LIMITS.md`, "Kernels
-refused"). A translation or an emulation that may be wrong is not offered.
+of the driver's interface refuses it, so does a kernel node of a graph when it is made or given
+the kernel, and so do the questions and settings that take a function or a kernel, except the
+names (`cuFuncGetName`, `cuKernelGetName`), the owners (`cuFuncGetModule`,
+`cuKernelGetLibrary`), `cuFuncIsLoaded`, and the settings of the old `cuLaunch`
+(`cuFuncSetBlockShape`, `cuFuncSetSharedSize`, `cuParamSet*`), which launch nothing. Still trapping: a kernel launched
+or called from another kernel, and a graph node made with a kernel before the layer learned that it
+is refused (`LIMITS.md`, "Kernels refused"). A translation or an emulation that may be wrong is not
+offered.
 
 **Two translators, one result.** `reference/translate.py` (with `reference/ampere.py` for
 sm_80 code) is the reference of the machine-code translator and `crates/vf-sass` its

@@ -17,6 +17,11 @@
 //
 // cuGetExportTable gives a table whose entry 1 (after its size) is a private function that gives
 // the function of the first entry of a module, as cuFFT takes its functions (`first_function`).
+//
+// Its compiler refuses a library whose PTX has the entries late() and other() and a line with 54321
+// (in late): error 218, and that line in the error log, as ptxas writes it. Alone, late() is
+// accepted: the layer learns that it is refused when a deferred library is loaded whole, after it
+// gave the kernel compiled alone.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -175,7 +180,22 @@ CUresult cuModuleLoadDataEx(void **module, const void *image, unsigned n, int *o
 }
 CUresult cuLibraryLoadData(void **library, const void *image, int *jo, void **jv, unsigned jc, int *lo, void **lv,
                            unsigned lc) {
-    (void)jo; (void)jv; (void)jc; (void)lo; (void)lv; (void)lc;
+    (void)lo; (void)lv; (void)lc;
+    const char *text = image, *hit = strstr(text, "54321");
+    if (hit && strstr(text, "late(") && strstr(text, "other(")) {
+        int line = 1;
+        for (const char *p = text; p < hit; ++p) line += *p == '\n';
+        char *buffer = 0;
+        size_t size = 0;
+        for (unsigned i = 0; i < jc; ++i) {
+            if (jo[i] == 5) buffer = jv[i];
+            if (jo[i] == 6) size = (size_t)(uintptr_t)jv[i];
+        }
+        if (buffer && size)
+            snprintf(buffer, size, "ptxas application ptx input, line %d; error   : Feature 'x' requires .target sm_80\n",
+                     line);
+        return 218;
+    }
     ++loads;
     *library = (void *)objects[new_object(LIBRARY, image)].handle;
     return 0;
