@@ -959,7 +959,9 @@ static cublasStatus_t run_skinny(const Call *c, int *reason)
 }
 
 /* The workspace of a tensor-core call, and its chunks: a static function of (m, n, k, layout),
- * never of the operands, of a capture or of what came before. */
+ * never of the operands, of a capture or of what came before. It holds the check's results for
+ * every row of op(A) and column of op(B) of the call (exponents, lists of the failed ones: the
+ * fallback runs once, over all of them), then one chunk's fp16 copies and partial sums. */
 typedef struct {
     int ns;           /* k-slices */
     long long Ls, kp; /* slice length, padded k (ns * Ls) */
@@ -971,7 +973,8 @@ typedef struct {
 
 static long long rup(long long x, long long a) { return (x + a - 1) / a * a; }
 
-static size_t plan_layout(Plan *p, long long MS, long long NS)
+/* LA rows of op(A) and LB columns of op(B) in the lists. */
+static size_t plan_layout(Plan *p, long long MS, long long NS, long long LA, long long LB)
 {
     p->MS = (int)MS;
     p->NS = (int)NS;
@@ -984,11 +987,11 @@ static size_t plan_layout(Plan *p, long long MS, long long NS)
         off += (size_t)rup((bytes), 256); \
     } while (0)
     TAKE(off_cnt, 16);
-    TAKE(off_eB, 4LL * NS);
-    TAKE(off_listB, 4LL * NS);
+    TAKE(off_eB, 4LL * LB);
+    TAKE(off_listB, 4LL * LB);
     TAKE(off_B16, 2LL * p->kp * (p->b_contig ? NS : p->r16B));
-    TAKE(off_eA, 4LL * MS);
-    TAKE(off_listA, 4LL * MS);
+    TAKE(off_eA, 4LL * LA);
+    TAKE(off_listA, 4LL * LA);
     TAKE(off_A16, 2LL * p->kp * (p->a_contig ? MS : p->r16A));
     TAKE(off_Cp, 4LL * p->ns * MS * NS);
 #undef TAKE
@@ -1020,11 +1023,11 @@ static int make_plan(const Call *c, Plan *p)
         if (NS > max_ns) continue;
         if ((n + NS - 1) / NS != nch) continue; /* the same chunks as a smaller count */
         const long long m0 = m < 8 ? m : 8;
-        if (plan_layout(p, m0, NS) > cap) continue;
+        if (plan_layout(p, m0, NS, m0, NS) > cap) continue;
         long long lo = m0, hi = m; /* the largest MS that fits (the size grows with MS) */
         while (lo < hi) {
             const long long mid = (lo + hi + 1) / 2;
-            if (plan_layout(p, mid, NS) <= cap)
+            if (plan_layout(p, mid, NS, mid, NS) <= cap)
                 lo = mid;
             else
                 hi = mid - 1;
@@ -1044,10 +1047,14 @@ static int make_plan(const Call *c, Plan *p)
         if (nch >= best) break;
     }
     if (best < 0) return -1;
-    plan_layout(p, bMS, bNS);
+    /* The chunks are chosen with lists of one chunk's rows and columns, as when the fallback ran once
+     * per chunk: so they are what they were, and so is the kernel cuBLAS chooses for each internal
+     * GEMM. The lists then take the whole call (16 bytes per row and column beyond the cap). */
+    if (plan_layout(p, bMS, bNS, bMS, bNS) > cap) return -1;
+    plan_layout(p, bMS, bNS, m, n);
     p->mch = (int)((m + bMS - 1) / bMS);
     p->nch = (int)((n + bNS - 1) / bNS);
-    return p->total <= cap ? 0 : -1;
+    return 0;
 }
 
 /* fp16 x fp16 -> fp32 partials of one chunk, one per k-slice (a strided batch over the slices), on
@@ -1187,6 +1194,9 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                       A16 = base + p.off_A16, Cp = base + p.off_Cp;
     const size_t es = c->o.dtype ? 2 : 4;
     int written = 0; /* the output may have been changed */
+    /* 0. counters, once for the call: [0] failed rows of op(A), [1] failed columns of op(B) */
+    r = CONTROL("no-reset") ? CUDA_SUCCESS : cu.MemsetD32Async(cnt, 0, 2, c->stream);
+    if (r != CUDA_SUCCESS) goto fail;
     for (int jc = 0; jc < p.nch; ++jc) {
         const int j0 = jc * p.NS;
         const int nc = (c->n - j0) < p.NS ? (c->n - j0) : p.NS;
@@ -1194,11 +1204,8 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         for (int ic = 0; ic < p.mch; ++ic) {
             const int i0 = ic * p.MS;
             const int mc = (c->m - i0) < p.MS ? (c->m - i0) : p.MS;
-            /* 0. counters: [0] failed rows of op(A) of this chunk, [1] failed columns of op(B) of this
-             * column chunk (counted again at each column chunk) */
-            r = CONTROL("no-reset") ? CUDA_SUCCESS : cu.MemsetD32Async(cnt, 0, ic == 0 ? 2 : 1, c->stream);
-            if (r != CUDA_SUCCESS) goto fail;
-            /* 1. scale + strict check (the columns once per column chunk) */
+            /* 1. scale + strict check: the columns once, at their chunk's first row chunk; the rows at
+             * every chunk (A16 holds one chunk of rows), listed at the first chunk of columns only */
             VfScaleArgs sa;
             memset(&sa, 0, sizeof sa);
             VfSeg *s0 = &sa.seg[0], *s1 = &sa.seg[1];
@@ -1208,9 +1215,11 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
             s0->dst = (unsigned short *)(uintptr_t)A16;
             s0->dvstride = p.a_contig ? p.kp : 1;
             s0->dlstride = p.a_contig ? 1 : p.r16A;
-            s0->e = (int *)(uintptr_t)eA;
+            s0->e = (int *)(uintptr_t)eA + i0;
             s0->list = (int *)(uintptr_t)listA;
-            s0->count = (int *)(uintptr_t)cnt;
+            s0->count = jc == 0 ? (int *)(uintptr_t)cnt : NULL;
+            s0->base = i0;
+            s0->lim = c->m;
             s0->R = mc;
             s0->contig = p.a_contig;
             s0->vec = p.a_contig && (uintptr_t)c->A % 16 == 0 && c->lda % 8 == 0;
@@ -1222,9 +1231,11 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                 s1->dst = (unsigned short *)(uintptr_t)B16;
                 s1->dvstride = p.b_contig ? p.kp : 1;
                 s1->dlstride = p.b_contig ? 1 : p.r16B;
-                s1->e = (int *)(uintptr_t)eB;
+                s1->e = (int *)(uintptr_t)eB + j0;
                 s1->list = (int *)(uintptr_t)listB;
                 s1->count = (int *)(uintptr_t)(cnt + 4);
+                s1->base = j0;
+                s1->lim = c->n;
                 s1->R = nc;
                 s1->contig = p.b_contig;
                 s1->vec = p.b_contig && (uintptr_t)c->B % 16 == 0 && c->ldb % 8 == 0;
@@ -1251,8 +1262,8 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
             memset(&ea, 0, sizeof ea);
             ea.cp = (const float *)(uintptr_t)Cp;
             ea.cpstride = (long long)mc * nc;
-            ea.eA = (const int *)(uintptr_t)eA;
-            ea.eB = (const int *)(uintptr_t)eB;
+            ea.eA = (const int *)(uintptr_t)eA + i0;
+            ea.eB = (const int *)(uintptr_t)eB + j0;
             ea.ns = p.ns;
             ea.mc = mc;
             ea.n = nc;
@@ -1263,42 +1274,52 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                                             &ea);
             if (r != CUDA_SUCCESS) goto fail;
             written = 1;
-            /* 4. fallback (failed rows and columns), always launched: an empty list costs one read */
-            VfFbArgs fb;
-            memset(&fb, 0, sizeof fb);
-            fb.A = s0->src;
-            fb.a_si = s0->vstride;
-            fb.a_sl = s0->lstride;
-            fb.B = Bc;
-            fb.b_sl = p.b_contig ? 1 : c->ldb;
-            fb.b_sj = p.b_contig ? c->ldb : 1;
-            fb.cntA = (const int *)(uintptr_t)cnt;
-            fb.listA = (const int *)(uintptr_t)listA;
-            fb.eA = (const int *)(uintptr_t)eA;
-            fb.cntB = (const int *)(uintptr_t)(cnt + 4);
-            fb.listB = (const int *)(uintptr_t)listB;
-            fb.eB = (const int *)(uintptr_t)eB;
-            fb.mc = mc;
-            fb.n = nc;
-            fb.k = c->k;
-            fb.o = o;
-            const int fast = p.a_contig && p.b_contig && (uintptr_t)c->A % 16 == 0 && c->lda % 8 == 0 &&
-                             (uintptr_t)c->B % 16 == 0 && c->ldb % 8 == 0 && c->k % 8 == 0;
+        }
+    }
+    /* 4. fallback, once for the call, after every chunk: all failed rows and columns (an empty list
+     * costs one read). Its elements are one FMA chain each, whatever its tiles: launched once per
+     * chunk as it was, it cost one tile's whole chain over k in every chunk with a failed row or
+     * column, more than all the tensor-core work of a call with many chunks. */
+    {
+        VfFbArgs fb;
+        memset(&fb, 0, sizeof fb);
+        fb.A = c->A;
+        fb.a_si = p.a_contig ? c->lda : 1;
+        fb.a_sl = p.a_contig ? 1 : c->lda;
+        fb.B = c->B;
+        fb.b_sl = p.b_contig ? 1 : c->ldb;
+        fb.b_sj = p.b_contig ? c->ldb : 1;
+        fb.cntA = (const int *)(uintptr_t)cnt;
+        fb.listA = (const int *)(uintptr_t)listA;
+        fb.eA = (const int *)(uintptr_t)eA;
+        fb.cntB = (const int *)(uintptr_t)(cnt + 4);
+        fb.listB = (const int *)(uintptr_t)listB;
+        fb.eB = (const int *)(uintptr_t)eB;
+        fb.mc = c->m;
+        fb.n = c->n;
+        fb.k = c->k;
+        fb.o = c->o;
+        const int fast = p.a_contig && p.b_contig && (uintptr_t)c->A % 16 == 0 && c->lda % 8 == 0 &&
+                         (uintptr_t)c->B % 16 == 0 && c->ldb % 8 == 0 && c->k % 8 == 0;
+        /* Control: the fallback launched again for every chunk, the cost it had (its elements are written
+         * again with the same values unless C is D with beta != 0). */
+        const int times = CONTROL("fb-per-chunk") ? p.mch * p.nch : 1;
+        for (int t = 0; t < times && r == CUDA_SUCCESS; ++t) {
             if (INJECT("fallback")) {
                 r = CUDA_ERROR_LAUNCH_FAILED;
             } else if (fast) {
                 r = launch(x, x->fb_tn, (unsigned)(x->sms * VF_FB_TN_CTAS_PER_SM), 1, 256, VF_BF16_FB_TN_SMEM,
                            c->stream, &fb);
             } else {
-                const int narrow = nc <= 32;
+                const int narrow = c->n <= 32;
                 const long long BM = 64, BN = narrow ? 8 : 64;
-                const long long tiles = 2 * ((nc + BN - 1) / BN) * ((mc + BM - 1) / BM);
+                const long long tiles = 2 * ((c->n + BN - 1) / BN) * ((c->m + BM - 1) / BM);
                 const long long most = (long long)x->sms * (narrow ? VF_FB_NARROW_CTAS_PER_SM : VF_FB_WIDE_CTAS_PER_SM);
                 r = launch(x, narrow ? x->fb_narrow : x->fb_wide, (unsigned)(tiles < most ? tiles : most), 1, 256, 0,
                            c->stream, &fb);
             }
-            if (r != CUDA_SUCCESS) goto fail;
         }
+        if (r != CUDA_SUCCESS) goto fail;
     }
     free_workspace(base, c->stream, capturing);
     return CUBLAS_STATUS_SUCCESS;

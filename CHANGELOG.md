@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+### Fixed
+
+- The tensor-core path of the bf16 cuBLAS variants launched its fallback (the rows and columns that do not convert exactly to fp16) once for every chunk of its workspace, and each launch costs one whole fused multiply-add chain over k, however few rows and columns failed: a call of many chunks with a few failing columns was several times slower than with none (TN 1536 x 2048 x 8960, 24 chunks, with 2 % of its columns failing: 17.1 ms against 3.9 ms, 0.32 times the speed of cuBLAS 12.9). It now launches it once per call, after the last chunk, over all of them: 4.6 ms there (1.20 times 12.9's speed), 7.9 ms instead of 21.0 with every column failing. The results are the same bits, and a call of one chunk costs what it did.
+
+### Tests
+
+- `tests/forward/bf16.sh`: a tensor-core call of several chunks resets its counters once and launches its fallback once, after its last chunk, over the whole call; the control `VF_BF16_CONTROL=fb-per-chunk` launches it again for every chunk, and the test fails. `bf16-fallback`: failing rows and columns spread over the chunks of TN 1536 x n x 8960 (n = 64, 512 and 2048; one column, 2 % of them, all, and failing rows), bit for bit against the host model and against cuBLAS 12.9.
+
 ## 0.1.5 (2026-11-24)
 
 ### Fixed

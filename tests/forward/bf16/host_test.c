@@ -110,6 +110,16 @@ static int count(const char *prefix)
     }
     return n;
 }
+/* Where the i-th line beginning with prefix starts in the events, or NULL. */
+static const char *where(const char *prefix, int i)
+{
+    for (const char *p = ev; p && *p;) {
+        if (!strncmp(p, prefix, strlen(prefix)) && i-- == 0) return p;
+        p = strchr(p, '\n');
+        if (p) ++p;
+    }
+    return NULL;
+}
 /* The i-th line beginning with prefix (static buffer), or NULL. */
 static const char *line(const char *prefix, int i)
 {
@@ -324,7 +334,8 @@ static void h1_served(void)
                *pf = strstr(ev, "launch vf_bf16_fallback"), *pr = strstr(ev, "free ");
     CHECK(pa && pm && ps && pl && pe && pf && pr && pa < pm && pm < ps && ps < pl && pl < pe && pe < pf && pf < pr,
           "tc: not in the order allocation, counters, scale, GEMM, epilogue, fallback, free");
-    /* chunks: static, at most 32 MiB each (16384 x 1024 x 4096 needs several) */
+    /* chunks: static, at most 32 MiB each of fp16 copies and partial sums (16384 x 1024 x 4096 needs several),
+     * beside the check's results for the whole call (16 bytes per row and column) */
     g = gemm(1, 0, 16384, 1024, 4096);
     g.ldc = 16384;
     take();
@@ -332,10 +343,20 @@ static void h1_served(void)
     take();
     const int chunks = count("launch vf_bf16_epilogue");
     al = line("alloc ", 0);
-    CHECK(st == 0 && count("alloc ") == 1 && atoll(field(al, "bytes=", buf, sizeof buf)) <= (32ll << 20) && chunks > 1 &&
-              count("ltmatmul ") == chunks && count("launch vf_bf16_fallback") == chunks,
+    CHECK(st == 0 && count("alloc ") == 1 &&
+              atoll(field(al, "bytes=", buf, sizeof buf)) <= (32ll << 20) + 16ll * (16384 + 1024) + 1024 && chunks > 1 &&
+              count("ltmatmul ") == chunks,
           "tc 16384 x 1024 x 4096: %d chunks, %d internal GEMMs, allocation %s", chunks, count("ltmatmul "),
           field(al, "bytes=", buf, sizeof buf));
+    /* the counters reset once, and the fallback launched once, after the last chunk, over the whole call: its
+     * cost is one pass over the failed rows and columns, not one in every chunk */
+    VfFbArgs fa;
+    launch_args(line("launch vf_bf16_fallback", 0) ? line("launch vf_bf16_fallback", 0) : "", &fa, sizeof fa);
+    const char *last_epi = where("launch vf_bf16_epilogue", chunks - 1), *fbl = where("launch vf_bf16_fallback", 0);
+    CHECK(count("memset ") == 1 && count("launch vf_bf16_fallback") == 1 && last_epi && fbl > last_epi &&
+              fa.mc == 16384 && fa.n == 1024 && fa.k == 4096,
+          "tc 16384 x 1024 x 4096 (%d chunks): counters reset %d times, %d fallback launches (not one over the call, after "
+          "the last chunk: m %d, n %d)", chunks, count("memset "), count("launch vf_bf16_fallback"), fa.mc, fa.n);
     /* the same call again: the same chunks (static) */
     char *first = strdup(ev);
     take();

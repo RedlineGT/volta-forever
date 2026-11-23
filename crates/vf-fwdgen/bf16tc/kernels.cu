@@ -104,12 +104,14 @@ static __device__ __forceinline__ int classify(unsigned mx, int &e)
     return (e < -24) | (e > 31);
 }
 
+// The call's list of failed vectors gets each one once: a segment scaled again (the rows of op(A), at each
+// chunk of columns) comes without a count.
 static __device__ __forceinline__ void finish(const VfSeg &s, int v, int bad, int e)
 {
     s.e[v] = bad ? VF_BF16_SENT : e;
-    if (bad) {
+    if (bad && s.count) {
         const int pos = atomicAdd(s.count, 1);
-        if (pos >= 0 && pos < s.R) s.list[pos] = v;
+        if (pos >= 0 && pos < s.lim) s.list[pos] = s.base + v;
     }
 }
 
@@ -341,8 +343,8 @@ extern "C" __global__ void __launch_bounds__(128, 8) vf_bf16_epilogue(VfEpiArgs 
     }
 }
 
-// Fallback: tiles over (all rows of the chunk x failed columns of op(B)) and (failed rows of
-// op(A) x columns that passed). Each element is one fp32 FMA chain over l = 0, 1, ..., k-1 of the
+// Fallback, launched once per call: tiles over (all rows x failed columns of op(B)) and (failed rows
+// of op(A) x columns that passed). Each element is one fp32 FMA chain over l = 0, 1, ..., k-1 of the
 // original bf16 operands (exact products, fp32 sums): its value does not depend on the tile
 // shape, the list order or the position in the tile. A persistent grid walks the tiles; with
 // empty lists every block exits after reading the two counts. Counts are clamped and list

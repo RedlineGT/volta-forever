@@ -718,7 +718,8 @@ when one of the three files is missing; without the launcher the variables do no
   own, host scalars and no workspace: nothing another thread changes on the caller's handle reaches
   it. A launch refused after the output was written returns `CUBLAS_STATUS_EXECUTION_FAILED`; before,
   the call is forwarded.
-- **Graph capture.** A tensor-core call allocates its workspace (at most 32 MiB) on its stream. In a
+- **Graph capture.** A tensor-core call allocates its workspace (chunks of at most 32 MiB, and 16 bytes per row and
+  column of the call) on its stream. In a
   capture that allocation would become an allocation node of the program's graph, and a graph that
   holds one cannot be instantiated twice, embedded as a child graph, instantiated for device launch,
   updated from a recapture, or instantiated at all when it was captured into a conditional node's body

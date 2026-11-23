@@ -148,6 +148,7 @@ control split-states all "a cuBLAS handle used as a cuBLASLt handle: not served"
 control caller-handle-any all "H5: the internal GEMM went" VF_CUBLAS_BF16_TC=1
 control capture-tc all "H6: a captured tensor-core call was not forwarded" VF_CUBLAS_BF16_TC=1
 control lt-drop all "H7: descriptor attribute" VF_CUBLAS_BF16_TC=1
+control fb-per-chunk all "fallback launches (not one over the call, after the last chunk" VF_CUBLAS_BF16_TC=1
 control skinny-k skinny "skinny alone, k = 16392: not one call" VF_CUBLAS_BF16_SKINNY=1
 control skinny-speed skinny "(slower than 12.9 there): not one call" VF_CUBLAS_BF16_SKINNY=1
 control seq-any skinny "skinny alone, TN with a 1 MiB workspace: not one call" VF_CUBLAS_BF16_SKINNY=1

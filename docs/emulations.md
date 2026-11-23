@@ -869,8 +869,10 @@ truncation does not act: largest 5.8, 3.2 and 1.8 units, mean 0.3, -0.1 and 0.0
 (`tests/gpu/forward/bf16-cost.c`). The GPU tests hold every tensor-core result to 32 units.
 
 The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
-tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue: they are 12.9's
-where 12.9 runs its sequential kernel. Every element has one writer; an element's value depends on
+tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue, in one launch
+after the tensor-core elements of every chunk: they are 12.9's where 12.9 runs its sequential kernel
+(also measured at TN 1536 x n x 8960 for n = 64, 512 and 2048, `tests/gpu/forward/bf16-fallback.c`).
+Every element has one writer; an element's value depends on
 its row and column of op(A) and op(B) and on the call's shape (the gates, the chunks of at most
 32 MiB of workspace, and the kernel cuBLAS chooses for a chunk's slices), never on other rows, other
 calls or what ran before. With beta = 0, C is not read. Two runs give the same bits.

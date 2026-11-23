@@ -8,10 +8,16 @@
  * or + 0, bf16 rounded to nearest even; a NaN is 0x7fffffff in fp32, 0x7fff in bf16); every other
  * element within 32 units of 2^-24 sum |a b| of fp64. Two cases have subnormal products in failing
  * columns, where a fat binary of separate multiplies and adds (VF_BF16_FATBIN=control-MULADD.fatbin)
- * gives other bits and makes the test fail. Prints "ok bf16-fallback". */
+ * gives other bits and makes the test fail.
+ * Then failing rows and columns spread over the chunks of a call (the fallback runs once, after the last
+ * chunk, over all of them): TN 1536 x n x 8960, whose workspace takes 2 chunks of rows at n = 64, 6 at
+ * n = 512 and 6 x 4 at n = 2048, with 1 failing column, 2 % of them, every column, and failing rows too;
+ * fp32 output with alpha 0.7, beta 0.3 and C in place, and bf16 output. Every fallback element must have
+ * the host model's bits (a sample of 4096 of them when there are more) and cuBLAS 12.9's bits from the
+ * same call (all of them). Prints "ok bf16-fallback". */
 #include "bf16-common.h"
 
-static cublasHandle_t hv;
+static cublasHandle_t hv, h12;
 static cudaStream_t st;
 
 static uint32_t fbits(float f)
@@ -141,15 +147,96 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
     free(tinycol);
 }
 
+/* Failing rows and columns over several chunks: TN 1536 x n x 8960. cols: the number of failing columns
+ * (spread evenly), -1 for every column. */
+static void chunk_case(int n, int cols, int nrows, int bf16_out)
+{
+    const int m = 1536, k = 8960, lda = k, ldb = k;
+    uint16_t *hA = bf16_random((size_t)m * k, 0.05), *hB = bf16_random((size_t)n * k, 1.0);
+    const int ncols = cols < 0 ? n : cols;
+    char *colbad = calloc((size_t)n, 1), *rowbad = calloc((size_t)m, 1);
+    for (int c = 0; c < ncols; ++c) {
+        const int j = (int)(((long long)c * n) / ncols); /* spread over the columns, so over their chunks */
+        colbad[j] = 1;
+        hB[(size_t)((c * 131) % k) + (size_t)j * ldb] = f2bf(1e-30f);
+    }
+    for (int r = 0; r < nrows; ++r) { /* one in each chunk of rows, at least */
+        const int i = (int)(((long long)r * m) / nrows) + 3;
+        rowbad[i] = 1;
+        hA[(size_t)((r * 977) % k) + (size_t)i * lda] = f2bf(1e-30f);
+    }
+    const float alpha = bf16_out ? 1.0f : 0.7f, beta = bf16_out ? 0.0f : 0.3f;
+    const size_t es = bf16_out ? 2 : 4, cb = (size_t)m * n * es;
+    void *hC0 = malloc(cb);
+    for (size_t i = 0; i < (size_t)m * n; ++i) {
+        if (bf16_out)
+            ((uint16_t *)hC0)[i] = f2bf(NAN); /* not read: beta = 0 */
+        else
+            ((float *)hC0)[i] = (float)gauss();
+    }
+    void *dA = to_device(hA, (size_t)m * k * 2), *dB = to_device(hB, (size_t)n * k * 2), *dC = to_device(hC0, cb),
+         *dC12 = to_device(hC0, cb);
+    const cudaDataType ct = bf16_out ? CUDA_R_16BF : CUDA_R_32F;
+    CU(cudaDeviceSynchronize());
+    const Counts c0 = counts(API_GEMMEX);
+    const cublasStatus_t s = cublasGemmEx(hv, CUBLAS_OP_T, CUBLAS_OP_N, m, n, k, &alpha, dA, CUDA_R_16BF, lda, dB,
+                                          CUDA_R_16BF, ldb, &beta, dC, ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    CU(cudaStreamSynchronize(st));
+    const Counts c1 = counts(API_GEMMEX);
+    const cublasStatus_t s12 = c129.GemmEx(h12, CUBLAS_OP_T, CUBLAS_OP_N, m, n, k, &alpha, dA, CUDA_R_16BF, lda, dB,
+                                           CUDA_R_16BF, ldb, &beta, dC12, ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    CU(cudaStreamSynchronize(st));
+    void *hC = from_device(dC, cb), *hC12 = from_device(dC12, cb);
+    size_t fb = 0, vs129 = 0, sampled = 0, vsmodel = 0;
+    for (int j = 0; j < n; ++j) /* the fallback elements, counted first, then sampled for the host model */
+        for (int i = 0; i < m; ++i)
+            fb += colbad[j] || rowbad[i];
+    const size_t step = fb > 4096 ? fb / 4096 : 1;
+    size_t seen = 0;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i) {
+            if (!(colbad[j] || rowbad[i])) continue;
+            const size_t at = (size_t)i + (size_t)j * m;
+            const int same12 = bf16_out ? ((uint16_t *)hC)[at] == ((uint16_t *)hC12)[at]
+                                        : fbits(((float *)hC)[at]) == fbits(((float *)hC12)[at]);
+            vs129 += !same12;
+            if (seen++ % step == 0) {
+                ++sampled;
+                const float want = model(hA, lda, hB, ldb, k, i, j, alpha, beta, bf16_out ? 0.0f : ((float *)hC0)[at]);
+                const int same = bf16_out ? ((uint16_t *)hC)[at] == f2bf(want) : fbits(((float *)hC)[at]) == fbits(want);
+                vsmodel += !same;
+            }
+        }
+    printf("chunks TN %d x %d x %d, %s out: %d failing columns, %d failing rows: %zu fallback elements, %zu differ from "
+           "cuBLAS 12.9's; of %zu sampled, %zu differ from the model; served %llu\n",
+           m, n, k, bf16_out ? "bf16" : "fp32", ncols, nrows, fb, vs129, sampled, vsmodel, delta(&c0, &c1, SERVED_TC));
+    CHECK(s == CUBLAS_STATUS_SUCCESS && s12 == CUBLAS_STATUS_SUCCESS, "status %d, 12.9 %d", (int)s, (int)s12);
+    CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 1, "not served by the tensor-core path");
+    CHECK(vsmodel == 0, "%zu of %zu sampled fallback elements differ from the host model", vsmodel, sampled);
+    CHECK(vs129 == 0, "%zu of %zu fallback elements differ from cuBLAS 12.9's", vs129, fb);
+    cudaFree(dA);
+    cudaFree(dB);
+    cudaFree(dC);
+    cudaFree(dC12);
+    free(hA);
+    free(hB);
+    free(hC0);
+    free(hC);
+    free(hC12);
+    free(colbad);
+    free(rowbad);
+}
+
 int main(void)
 {
     CU(cudaSetDevice(0));
     CU(cudaFree(0));
     open_129();
     CU(cudaStreamCreate(&st)); /* blocking: ordered after the uploads */
-    if (cublasCreate(&hv)) return 1;
+    if (cublasCreate(&hv) || c129.Create(&h12)) return 1;
     open_runtime();
     cublasSetStream(hv, st);
+    c129.SetStream(h12, st);
     static const int cols[] = {1, 5, 8, 9, 20, 32, 33, 100, 300};
     for (size_t c = 0; c < sizeof cols / sizeof *cols; ++c) one_case(1536, 320, 2048, cols[c], 0, 0, 0, 0);
     one_case(1536, 320, 2048, 9, 7, 0, 0, 0);
@@ -160,6 +247,15 @@ int main(void)
     one_case(896, 512, 4864, 32, 5, 0, 0, 0);
     one_case(1536, 320, 2048, 9, 0, 0, 0, 1);
     one_case(4608, 64, 2048, 5, 0, 0, 0, 1);
+    static const int ns[] = {64, 512, 2048};
+    for (int t = 0; t < 3; ++t) {
+        chunk_case(ns[t], 1, 0, 0);
+        chunk_case(ns[t], ns[t] / 50 > 1 ? ns[t] / 50 : 2, 0, 0); /* 2 % */
+        chunk_case(ns[t], -1, 0, 0);
+    }
+    chunk_case(2048, 41, 7, 0); /* failing rows in every chunk of rows, with columns in every chunk of columns */
+    chunk_case(2048, 41, 7, 1);
+    chunk_case(512, -1, 7, 1);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;
