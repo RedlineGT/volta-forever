@@ -11,7 +11,9 @@
 #     what is missing named.
 # An archive of such a tree would not do what INSTALL.md says, or would carry libraries of an
 # earlier generator under a new version. And one case with nothing wrong: forward/bf16tc with the
-# three files is packed, and the archive has them in forward/bf16tc, and nothing else there.
+# three files built by scripts/build-forwarders.sh is packed (package.sh reads them: vf-fwdgen
+# check-bf16 checks the runtime's exports and kernels), and the archive has them in forward/bf16tc,
+# and nothing else there.
 # Prints PASS or FAIL for each case; exit status 1 on a FAIL.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -34,8 +36,8 @@ copy() {  # copy NAME: the built tree as it is (dates kept)
     mkdir -p "$tmp/$1" && cp -a "$W/dist/lib" "$W/dist/bin" "$W/dist/forward" "$tmp/$1/"
 }
 # bf16 NAME FILE...: forward/bf16tc of the copy NAME holds those files of the bf16 cuBLAS variants
-# and not the others (empty stand-ins: package.sh goes by their names and does not read them; a
-# file of the built tree is set aside).
+# and not the others (empty stand-ins: package.sh refuses such a set by the names alone, before it
+# reads a file; a file of the built tree is set aside).
 bf16() {
     local name=$1 lib
     shift
@@ -73,10 +75,20 @@ copy bf16-runtime-alone
 bf16 bf16-runtime-alone libvf_cublas_bf16.so
 refused bf16-runtime-alone "bf16tc holds 1 of the 3 files of the bf16 cuBLAS variants: it lacks libcublas.so.13 libcublasLt.so.13"
 
+# The three files as built (the copy keeps forward/bf16tc of the built tree): package.sh checks the
+# runtime with vf-fwdgen check-bf16, which empty stand-ins would not pass.
 copy bf16-complete
-bf16 bf16-complete libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so
-DIST=$tmp/bf16-complete ALLOW_DIRTY=1 bash "$W/scripts/package.sh" > "$tmp/bf16-complete.log" 2>&1
-status=$?
+absent=
+for lib in libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so; do
+    [ -s "$tmp/bf16-complete/forward/bf16tc/$lib" ] || absent="$absent $lib"
+done
+if [ -z "$absent" ]; then
+    DIST=$tmp/bf16-complete ALLOW_DIRTY=1 bash "$W/scripts/package.sh" > "$tmp/bf16-complete.log" 2>&1
+    status=$?
+else
+    echo "the built tree lacks forward/bf16tc/:$absent (scripts/build-forwarders.sh builds them)" > "$tmp/bf16-complete.log"
+    status=absent
+fi
 got=$(tar -tzf "$tmp"/bf16-complete/volta-forever-*.tar.gz 2> /dev/null | sed -n 's|^[^/]*/forward/bf16tc/\(..*\)$|\1|p' | LC_ALL=C sort | tr '\n' ' ')
 if [ $status = 0 ] && [ "$got" = "libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so " ]; then
     echo "PASS  bf16-complete"

@@ -5,7 +5,8 @@
 # headers (the headers are the runtime's own declarations, crates/vf-fwdgen/bf16tc/decls.h); the
 # variants generated from them by vf-fwdgen, and checked by its verify; a test build of the runtime
 # (-DVF_BF16_TEST) beside copies of them; tests/forward/bf16/host_test.c, one mode per process. Then
-# each control (a mechanism broken on purpose) must make its test fail.
+# each control (a mechanism broken on purpose) must make its test fail. Last, when this tree's dist/ is
+# built, tests/forward/package-refusals.sh (what scripts/package.sh refuses, and the variants packed).
 #   tests/forward/bf16.sh [OUT_DIR]
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -108,4 +109,16 @@ run control-any-build "$out/test" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=12
 fails control-any-build "control any-build"
 run control-abort "$out/abort" VF_CUBLAS_BF16_TC=1 -- noruntime
 fails control-abort "control: abort when the runtime is missing"
+
+# What scripts/package.sh refuses, and the complete set of the variants packed: needs this tree's dist/
+# built (scripts/build.sh, scripts/build-forwarders.sh) after its last change; said and skipped otherwise.
+if [ -f "$root/dist/forward/bf16tc/libvf_cublas_bf16.so" ] && [ -f "$root/dist/lib/libcuda.so.1" ]; then
+    echo "packaging (tests/forward/package-refusals.sh, on dist/):"
+    bash "$root/tests/forward/package-refusals.sh" > "$out/package-refusals.log" 2>&1
+    pstatus=$?
+    sed 's/^/  /' "$out/package-refusals.log"
+    if [ "$pstatus" != 0 ]; then echo "FAIL  package-refusals.sh (status $pstatus)"; failed=1; fi
+else
+    echo "SKIP  package-refusals.sh: no built dist/ in $root"
+fi
 exit $failed
