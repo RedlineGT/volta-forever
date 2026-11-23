@@ -63,13 +63,13 @@ cases=("$@")
 # the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them.
 controls=()
 if [ -x "$T12/bin/nvcc" ]; then
-    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK; do
+    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS; do
         (cd "$rt" && "$T12/bin/nvcc" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
             -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
     done
 fi
 
-for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve bf16-lt bf16-fallback; do
+for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve bf16-lt bf16-fallback bf16-s1; do
     if want $t; then
         build $t && { run $t "$test_dir"; verdict $t; }
     fi

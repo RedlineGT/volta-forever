@@ -265,6 +265,15 @@ static __device__ __forceinline__ float rd_c(const VfOut &o, long long idx)
 
 static __device__ __forceinline__ void wr_d(const VfOut &o, long long idx, float v)
 {
+#ifdef VF_KERNEL_CONTROL_NAN_BITS  // the control writes every NaN as a negative quiet NaN, not as 12.9 does
+    if (v != v) {
+        if (o.dtype)
+            reinterpret_cast<unsigned short *>(o.D)[idx] = 0xffc0u;
+        else
+            reinterpret_cast<unsigned *>(o.D)[idx] = 0xffc00000u;
+        return;
+    }
+#endif
     if (o.dtype)
         reinterpret_cast<unsigned short *>(o.D)[idx] = f2bf(v);
     else
