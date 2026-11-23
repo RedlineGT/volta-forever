@@ -90,6 +90,7 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 static struct {
     int tc, skinny, level;
     int safe;           /* VF_SAFE=1: the layer's conservative setting; the tensor-core path serves nothing */
+    int tc_safe;        /* VF_CUBLAS_BF16_TC=1 turned off by VF_SAFE=1: its calls are counted for safe mode */
     int measured_build; /* the cuBLAS the skinny path's rule was measured on */
     int tc_min_k;       /* VF_TC_MIN_K (test builds: VF_BF16_TC_MIN_K, for the controls that move it) */
 } cfg;
@@ -307,6 +308,7 @@ enum {
     R_BUILD,   /* in the skinny path's bounds, with another cuBLAS than the one its rule was measured on */
     R_K,       /* k beyond the tensor-core path's limit */
     R_SHORT_K, /* in the tensor-core path's gate but for k, shorter than VF_TC_MIN_K */
+    R_SAFE,    /* a call the tensor-core path would serve, with VF_SAFE=1 */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
     R_MATH,    /* pedantic or unknown math mode */
@@ -324,7 +326,7 @@ static const char *const reason_name[R_N] = {
     "not bf16 with fp32 accumulation", "explicit algorithm", "batch", "64-bit size", "shape",
     "arguments left to cuBLAS", "outside the paths' domains", "12.9 would not run its sequential kernel",
     "another cuBLAS build",
-    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "unknown handle",
+    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1", "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
     "no chunking", "tensor-core call in a graph capture", "allocation failed", "launch failed"};
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
@@ -378,6 +380,7 @@ static void init(void)
     if (cfg.safe && cfg.tc) {
         say("VF_SAFE=1: the tensor-core path serves nothing, whatever VF_CUBLAS_BF16_TC says");
         cfg.tc = 0;
+        cfg.tc_safe = !CONTROL("safe-domain"); /* control: counted as outside the paths' domains, as before */
     }
     if (!cfg.tc && !cfg.skinny) return;
     if (!bind_libraries()) {
@@ -892,12 +895,16 @@ static int choose_path(const Shape *s, int *reason)
      * n = 2 to 512 agreed): giving that GEMM a zero second column is the expected remedy (not run on a
      * GPU). */
     const long long m = s->m, n = s->n, k = s->k;
-    if (cfg.tc && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
+    if ((cfg.tc || cfg.tc_safe) && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
         if (k > VF_TC_MAX_K && !CONTROL("tc-k")) {
             *reason = R_K;
             return PATH_NONE;
         }
-        if (k >= cfg.tc_min_k) return PATH_TC;
+        if (k >= cfg.tc_min_k) {
+            if (cfg.tc) return PATH_TC;
+            *reason = R_SAFE; /* VF_SAFE=1 turned the path off: the call it would serve goes to 12.9 */
+            return PATH_NONE;
+        }
         *reason = R_SHORT_K;
         return PATH_NONE;
     }

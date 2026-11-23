@@ -151,8 +151,8 @@ static void launch_args(const char *l, void *out, size_t size)
 }
 
 /* ---- counters ---- */
-enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_HANDLE, R_CONTEXT, R_MATH,
-       R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
+enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_SAFE, R_HANDLE,
+       R_CONTEXT, R_MATH, R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 typedef struct {
     unsigned long long v[4 + R_N];
@@ -899,10 +899,10 @@ int main(int argc, char **argv)
               "lazy: later calls made something again:\n%s", ev);
     } else if (!strcmp(mode, "safe")) { /* VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: the tensor-core path serves nothing */
         G g = gemm(1, 0, 1536, 128, 4096);
-        expect_forwarded("safe: a tensor-core call", &g, R_DOMAIN);
+        expect_forwarded("safe: a tensor-core call", &g, R_SAFE);
         g = gemm(1, 0, 16384, 1024, 4096);
         g.ldc = 16384;
-        expect_forwarded("safe: a large tensor-core call", &g, R_DOMAIN);
+        expect_forwarded("safe: a large tensor-core call", &g, R_SAFE);
         g = gemm(0, 1, 1536, 8, 1920);
         expect_skinny("safe: a skinny call", &g, "vf_bf16_skinny_g_8_16");
     } else if (!strcmp(mode, "notsafe")) { /* VF_SAFE set to another value than 1, VF_CUBLAS_BF16_TC=1 */
