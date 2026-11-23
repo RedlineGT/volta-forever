@@ -49,7 +49,7 @@ scripts of `tests/sass/`).
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 126 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
+  an RTX 5090 say. 165 cases at 0.1.4, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -100,12 +100,12 @@ scripts of `tests/sass/`).
   refuses and runs as the PTX kept in the cubin is `PASS-PTX`.
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
-  cubins included (at 0.1.3: 489 of 489, the 14 test cubins and PyTorch's 475).
+  cubins included (at 0.1.4: 491 of 491, the 16 test cubins and PyTorch's 475).
 - `validate-corpus.sh`: the independent validator finds 0 problems over the corpus (of sm_75
   code: the validator does not read sm_80 code, `docs/validation.md`, section 8).
 - `controls.sh`: the validator objects to translations that are made wrong on purpose (the
   controls of `reference/controls.py`, each in a process of its own), in every cubin whose
-  translation a control changes but the cases looked at one by one (at 0.1.3: 108 controls, 105
+  translation a control changes but the cases looked at one by one (at 0.1.4: 113 controls, 110
   objected to; `docs/validation.md`, section 3, says what the other three are).
 - `heldout-validate.sh`: the same, on a corpus kept apart from the one the rules were found on.
 - `fuzz.py`: on damaged cubins, the two translators agree on what they make of every mutant.
@@ -285,10 +285,10 @@ libraries against a mock library.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 422 at 0.1.3); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
+checks and the unit tests (`cargo test`, 451 at 0.1.4); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py` and `nvml_capability.py` of
-`tests/proxy/`; `tests/forward/stack.sh`; `launcher.sh` under `dash` and under `bash --posix`;
+`tests/proxy/`; `tests/forward/stack.sh` and `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
 kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py`, which
@@ -393,3 +393,20 @@ scripts/fetch-all.sh denvdis
 - `dist/`: the built layer (`dist/lib`) and forwarding libraries (`dist/forward`)
 - `crates/vf-fatbin/tests/data/`: fat binary test files used by `run.sh`
 - `tests/gpu/zml/build-zml.sh`: builds ZML for `zml.sh`
+
+## Testing an installed archive
+
+The GPU scripts test this tree: `run.sh` and `torch.sh` take the proxy from `VF_PROXY`, but the
+forwarding libraries from this tree's `dist/forward` (the forwarded-runtime cases of `run.sh`, the
+map that `torch.sh` writes), and `launcher.sh` runs this tree's `scripts/vf`, which uses `dist/`.
+So `VF_PROXY=ARCHIVE/lib` alone does not test a release archive. What 0.1.4 was tested with:
+
+- `install.sh` with `VF_INSTALL_BASE=file://DIR` (the archive and `SHA256SUMS`), `VF_PREFIX`,
+  `VF_BIN` and `VF_INSTALL_FETCH=0`; then the release's `cuda-12.9.2/lib` given the CUDA 12.9.2
+  libraries (`vf fetch`, or a link to `toolkits/cuda-12.9.2/lib`). REL below is
+  `VF_PREFIX/volta-forever-VERSION-linux-x86_64`.
+- `run.sh` with `VF_PROXY=REL/lib`, from a copy in which `$W/dist/forward` is `REL/forward` (and
+  `W` the tree, when the copy is elsewhere).
+- `torch.sh` with `VF_PROXY=REL/lib` and `VF_AUDIT_MAP_FILE` a map whose `libcublas.so.13` and
+  `libcublasLt.so.13` are those of `REL/forward` (the 12 entries as in `tests/gpu/env.sh`).
+- `launcher.sh` from a copy in which `vf` is `REL/bin/vf`; and `REL/bin/vf version`.

@@ -250,7 +250,9 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   fixed slices of k, and differ from 12.9's in the last bits (within 25 units of 2^-24 sum |a b|
   measured; sums of products of one sign come out low, by about 13 units on average when the data
   spans many binades), except when they are captured in a CUDA graph; the skinny
-  path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`.
+  path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. It is for inference: it makes
+  bf16 training slower (`LIMITS.md`, "The bf16 cuBLAS variants"; `docs/performance.md`, "bf16
+  products through cuBLAS: the opt-in variants on real programs").
 
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
 explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 for the tensor cores,

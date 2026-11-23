@@ -456,3 +456,51 @@ ordinary ones, which cost a block of occupancy; and the instructions around each
 matrix load. Products two by two on whole rows removed most of the first where the program's
 loads allow it. A program that packs its data for Volta, as 1Cat-vLLM's kernels do, does not
 go through any of this: it uses Volta's instructions, and the layer leaves its code as it is.
+
+## 7. bf16 products through cuBLAS: the opt-in variants on real programs
+
+Measured on 2026-11-23 on one Tesla V100-SXM2-32GB, driver 580.178.04, with the layer built from
+the series of the bf16 cuBLAS variants before its last four fixes (the signed zero with a bias, the
+attributes of an explicit cuBLASLt algorithm, workspaces not at 256-byte addresses, the lazy setup;
+none changes the speed of a product that a path serves). PyTorch 2.14.0+cu130 and transformers
+5.22.2, eager, in bf16: Qwen2.5-0.5B-Instruct (hidden size 896, MLP 4,864, vocabulary 151,936) for
+generation and training, BAAI/bge-base-en-v1.5 for embeddings, openai/whisper-small for speech.
+Each comparison is one GPU job in which the three settings (both switches off,
+`VF_CUBLAS_BF16_SKINNY=1`, `VF_CUBLAS_BF16_TC=1`, which turns the skinny path on too) take turns
+over two rounds, each process after 12 s of warm-up so that the card's clock has settled (1,500 to
+1,530 MHz recorded). The cases bound by the host (generation at batch 1 and 8, Whisper's
+transcription) ran pinned to the CPUs nearest the GPU and moved by up to about 30 % from one start
+of the process to the next. The rate with the switches off, then the ratios to it, and the share of the
+GPU's kernel time that bf16 cuBLAS products take with the switches off:
+
+| Workload | Switches off | Skinny | Tensor cores | bf16 products |
+|---|---:|---:|---:|---:|
+| `generate()`, batch 1 (one column: never served) | 35 tokens/s | 1.00 | 0.97-1.02 | 35 % |
+| `generate()`, batch 8 | 196 tokens/s | 1.27 | 1.35 | 82 % |
+| `generate()`, batch 32 | 635 tokens/s | 1.00 | 1.46-1.49 | 80 % |
+| Prompts of 512 to 2,048 tokens | 7.4k-10.4k tokens/s | 1.00 | 1.31-1.70 | |
+| Log-likelihood of 8 x 512 tokens | 8.8k tokens/s | 1.00 | 1.56 | |
+| The same model under `torch.compile`, at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` (one round) | 8.5k-12k tokens/s | | 1.44-1.91 | |
+| Embeddings, batches of 32 to 256 | 91-1,600 sequences/s | 1.00 | 1.51-1.74 | 82.5 % |
+| Whisper's encoder alone | 21 windows/s | 1.00 | 1.30 | 48 % (Whisper) |
+| Whisper's transcription, batch 16 | 103 audio-seconds/s | 1.04 | 1.24 | |
+| LoRA training step, 8 x 256 and 32 x 128 tokens | 1.40 and 0.81 steps/s | 1.02, 1.04 | 0.81, 0.56 | 83 % |
+| Full training step, two sizes | 1.23 and 0.70 steps/s | 1.00 | 0.66, 0.37 | 77.5 % |
+
+Training is slower with the tensor-core path because the products of its backward pass fall into
+the path's scalar fallback: the input gradients (NN, m = 896, n = the tokens, k = 4,864) ran at 0.20
+times the speed of cuBLAS 12.9, the weight gradients (NT) at 0.16 to 0.33 times and LoRA's rank-16
+products at 0.16 to 0.26 times; in the profile of full training, the fallback kernel took 31.7 % of
+the kernel time, the scaling kernel about 34 % and the fp16 products 12.5 %. With the skinny path
+alone, every output was bit for bit that with the switches off, in every workload and round, the
+losses and final weights of training included. With the tensor-core path, generation's logits
+differed from those with the switches off by 0.048 on average and 0.92 at most, with the same most
+likely token at 98.05 % of positions; from those of the same model in fp32 on the CPU, by 0.0602 on
+average with the switches off and 0.0600 with the path (same most likely token: 97.66 % and
+97.27 %); embeddings had a cosine of at least 0.999947 to those with the switches off, and their
+nearest neighbour was the CPU's in every case, with the path and without.
+
+An engine that replays its steps from CUDA graphs gains little (`LIMITS.md`, "The bf16 cuBLAS
+variants"): SGLang at its default settings computes in fp16 on this card, with no bf16 product, and
+made to use bf16 it replays prefill and decode from graphs. Not measured: other models of each
+kind, another card, engines other than those named here.

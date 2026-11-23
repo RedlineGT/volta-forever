@@ -16,7 +16,7 @@ Strata ships the CUDA runtime and cuBLAS with its engine. The host can run this 
 
 ## 2. VF
 
-Build VF 0.1.3 for the benchmark below. The build fetches its CUDA libraries into the checkout.
+Build VF 0.1.4 for the benchmark below. The build fetches its CUDA libraries into the checkout.
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3 xz-utils
@@ -60,13 +60,13 @@ Ask “What is the capital of France? Answer in one word.” in the local chat. 
 
 ### Several GPUs
 
-With the layers split over several GPUs (`--gpu 0,1`), the engine captures its first verify window inside its first request, under its watchdog of 60 s, and the kernels of that window are adapted and compiled there: the first start spends tens of seconds in that request. On two V100-SXM2-32GB with two Xeon Gold 6133 and empty caches, the first window took 33 s and 43 s in two runs with VF from main (2026-11-23), most of it on one CPU core, so a slower machine has little margin; with VF 0.1.3 it took 212 s, and the watchdog stopped the engine (issue #3). For the first start, give the watchdog more time in the environment of the launch:
+With the layers split over several GPUs (`--gpu 0,1`), the engine captures its first verify window inside its first request, under its watchdog of 60 s, and the kernels of that window are adapted and compiled there: the first start spends tens of seconds in that request. On two V100-SXM2-32GB with two Xeon Gold 6133 and empty caches, the first window took 33 s and 43 s in two runs with VF from main on 2026-11-23, before 0.1.4, which has that change, most of it on one CPU core, so a slower machine has little margin; with VF 0.1.3 it took 212 s, and the watchdog stopped the engine (issue #3). For the first start, give the watchdog more time in the environment of the launch:
 
 ```sh
 STRATA_WATCHDOG_S=900 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch ... --gpu 0,1 ...
 ```
 
-VF and the driver keep what they made in their caches (here 7 MB and 15 MB; with VF 0.1.3 the driver's took 140 MB, which `CUDA_CACHE_MAXSIZE` must allow), and the next starts need no setting: the first window then took 1.7 s and 2.9 s in two runs (31 s with VF 0.1.3).
+VF and the driver keep what they made in their caches (here 7 MB and 15 MB; with VF 0.1.3 the driver's took 140 MB, which `CUDA_CACHE_MAXSIZE` must allow), and the next starts need no setting: the first window then took 1.7 s and 2.9 s in two runs (31 s with VF 0.1.3). Another build of VF does not use the layer's cache of the one before: give the watchdog the same time at the first start after an upgrade.
 
 ## 5. Benchmarks
 

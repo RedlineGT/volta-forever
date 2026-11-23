@@ -30,7 +30,7 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-VF 0.1.3 supports the 8.0 capability profile used below (`VF_CAPABILITY_ALL=1` is new in 0.1.3). VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
+VF 0.1.3 and later support the 8.0 capability profile used below (`VF_CAPABILITY_ALL=1` is new in 0.1.3; since 0.1.4 it is told to PyTorch's CUDA runtime and not to the libraries that ask for themselves: section 6). VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils

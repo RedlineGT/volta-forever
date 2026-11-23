@@ -10,22 +10,26 @@ Run unmodified CUDA 13 applications on a Tesla V100 with a simple two-letter com
 
 > **A young project.** volta-forever runs the engines listed below and a large part of PyTorch,
 > but not every CUDA 13 program works out of the box yet: a kernel may be refused, a library may
-> need a CUDA 12 counterpart, a program may need a setting. The recommended way to get a program
+> need a CUDA 12 counterpart, a program may need a setting. Read [the limits of 0.1.4 to know
+> first](LIMITS.md#the-limits-of-014-to-know-first). The recommended way to get a program
 > running is to hand the job to your AI coding agent: point it at this repository, tell it which
 > program you want on your V100, and ask it to follow [AGENTS.md](AGENTS.md). When the layer
 > itself is what is missing, ask the agent to fix it here and to send a pull request: that is
 > how the project grows. [Reporting a wrong result](CONTRIBUTING.md#reporting-a-wrong-result)
 
-> **Triton's machine code is validated on a corpus, not kernel by kernel.** Triton generates its
-> kernels while a program runs, for that program's shapes and settings, and for a program told 7.5
-> (the default) they run from their machine code. 0.1.3 fixes a wrong-result defect found there
-> ([CHANGELOG](CHANGELOG.md)). Since then, of 3,516 configurations of 20 Triton kernels and 241
-> cases of vLLM's and SGLang's Triton kernels, every one that Triton compiles gave on a V100 what
-> Triton's interpreter computes, where it computes it, and what its own PTX gives, and the
-> independent validator found no problem in the 4,308 cubins of the first
+> **Triton: validated on a corpus, and slow at the default capability.** Triton generates its
+> kernels while a program runs, for that program's shapes and settings, and for a program told
+> 7.5 (the default) they run from their machine code. Of 3,516 configurations of 20 Triton
+> kernels and 241 cases of vLLM's and SGLang's Triton kernels, every one that Triton compiles
+> gave on a V100 what Triton's interpreter computes, where it computes it, and what its own PTX
+> gives, and the independent validator found no problem in the 4,308 cubins of the first
 > ([validation](docs/validation.md)). A kernel that a program makes with other shapes or settings
 > was checked by neither: compare results with a reference and
-> [report differences](CONTRIBUTING.md#reporting-a-wrong-result).
+> [report differences](CONTRIBUTING.md#reporting-a-wrong-result). Told 7.5, Triton 3.8 uses no
+> tensor cores for `tl.dot`: its float16 and bf16 products ran 3 to 150 times slower than told
+> 8.0 ([speed](LIMITS.md#speed)). In a program with PyTorch, only
+> `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` changes that in 0.1.4, and PyTorch's own attention is
+> then refused ([capability](LIMITS.md#the-capability-told-with-vf_capability)).
 
 ## Quick start
 

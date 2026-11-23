@@ -6,8 +6,14 @@ where it is not from the build of this release. `docs/` says how each figure was
 `docs/validation.md` for what was compared with what, `docs/performance.md` for the timings,
 `docs/emulations.md` for what is computed in place of the instructions that a V100 lacks.
 
-## The limits of 0.1.3 to know first
+## The limits of 0.1.4 to know first
 
+- **Triton's `tl.dot` uses no tensor cores at the default capability.** Told 7.5, which is what
+  Triton is told by default in a program with PyTorch, Triton 3.8 multiplies with float32 `fma`:
+  its float16 and bf16 matrix products ran 3 to 150 times slower than the same kernels told 8.0
+  ([Speed](#speed)). In a program with PyTorch, `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` is the
+  only way to the tensor cores in this release, and PyTorch's own attention is then refused
+  ([The capability told with `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
 - **Triton's machine code is validated on a corpus, not kernel by kernel.** Kernels that Triton
   makes while a program runs, and that run from their sm_75 machine code (the default for a
   program told 7.5), were run on a V100 in 3,516 configurations of 20 kernels and 241 cases of
@@ -15,12 +21,36 @@ where it is not from the build of this release. `docs/` says how each figure was
   compiles gives what Triton's interpreter computes where it computes it (bit for bit, or within
   the error the case states) and what the PTX of the same kernel gives, and the independent
   validator finds no problem in their 4,308 cubins nor in the 334 of this site's runs
-  (2026-11-23, with the changes made after 0.1.3: `CHANGELOG.md`, "Unreleased"). A translation
-  that stored wrong values in Triton's fp32 `tl.dot` kernels was fixed in 0.1.3. The kernels that
-  Triton makes for other programs, shapes and settings were not looked at (`docs/validation.md`,
+  (2026-11-23, with the translator and the rules of this release). A translation that stored
+  wrong values in Triton's fp32 `tl.dot` kernels was fixed in 0.1.3. The kernels that Triton
+  makes for other programs, shapes and settings were not looked at (`docs/validation.md`,
   sections 4, 6 and 8).
 - **The translation of sm_80 machine code is not independently validated**: the validator reads
   sm_75 code only ("Cubins for sm_80 and later", below; `docs/validation.md`, section 8).
+- **`VF_CAPABILITY_ALL=1` no longer reaches the libraries that ask for themselves.** It tells the
+  value asked for to a CUDA runtime and to the code that uses it (PyTorch's library) only; cuDNN,
+  cuFFT and cuSOLVER, which ask the driver without that runtime, are told what their own code
+  allows, 7.5 for code that runs from sm_75 machine code ([The capability told with
+  `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
+- **A refused kernel that a program obtains without a lookup can still be launched**, and then
+  traps or stops the GPU: the layer refuses a kernel when the program looks it up
+  ([Kernels refused](#kernels-refused)), and has no guard at its launch in this release. Told
+  8.0, cuFFT obtained kernels that exist only as sm_80 machine code, refused, through its own
+  runtime, and launched them: the GPU stopped. At the settings measured it no longer does, since
+  cuFFT is now told 7.5.
+- **The bf16 cuBLAS variants are opt-in, and not finished.** `VF_CUBLAS_BF16_SKINNY=1` and
+  `VF_CUBLAS_BF16_TC=1` are off by default. The tensor-core path's results are not cuBLAS 12.9's
+  bits, and it makes bf16 training slower; there is no safe mode and no gate on k yet ([The bf16
+  cuBLAS variants](#the-bf16-cublas-variants)).
+- **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
+  cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
+  NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:
+  with the layer's cache off, cuBLAS 12.9 started in 30 s (2 s without the layer), and the start
+  of PyTorch 2.14 had not ended after ten minutes; a later start, from the caches, was not
+  measured ([Kernels refused](#kernels-refused), "Eager loading").
+- **A lookup table asked for by name can be refused** (error 801), where NVIDIA's driver gives
+  it, once a kernel that the layer compiled alone holds a copy of it ([Kernels
+  refused](#kernels-refused), "A variable asked for by name can be refused too").
 - **A cubin that the layer's nvJitLink links, loaded without the layer, keeps its kernels that
   trap**: the warning that nvJitLink writes when it links them is all there is. Likewise, the
   image that the driver's linker makes, saved and loaded in another process, gives its kernels
@@ -360,8 +390,19 @@ A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ 
 ## The bf16 cuBLAS variants
 
 What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.md` and
-`docs/emulations.md` (section 11). Their limits:
+`docs/emulations.md` (section 11). Both are off by default. Their limits:
 
+- **The tensor-core path is for inference, not for training.** Its results are not cuBLAS 12.9's
+  bits: they differ in the last bits (`docs/emulations.md`, section 11). It makes bf16 training
+  slower: the products of the backward pass fall into its fallback (below, "Speed that depends on
+  the data"), and a LoRA training step ran at 0.56 to 0.81 times its speed without the switch,
+  full fine-tuning at 0.37 to 0.66 times. Eager PyTorch inference programs ran 1.3 to 1.7 times as
+  fast with it (prompts, generation at batch 8 and 32, an embedding encoder; Whisper 1.24 to 1.30,
+  generation at batch 1 unchanged), and up to 1.9 times under `torch.compile`
+  (`docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs":
+  one model of each kind, on one V100). Not in this release: a gate on k (the path takes every
+  product of its shapes up to k = 16384), and a safe mode that keeps every call at 12.9's bits
+  whatever `VF_CUBLAS_BF16_TC` says (`VF_SAFE`, which this release does not read).
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
   580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
