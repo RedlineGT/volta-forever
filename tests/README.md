@@ -49,7 +49,7 @@ scripts of `tests/sass/`).
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 125 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
+  an RTX 5090 say. 126 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
@@ -68,11 +68,13 @@ scripts of `tests/sass/`).
 - `zml.sh`: the program answers with the right word and reports a speed.
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
-  cubins included.
+  cubins included (at 0.1.3: 489 of 489, the 14 test cubins and PyTorch's 475).
 - `validate-corpus.sh`: the independent validator finds 0 problems over the corpus (of sm_75
   code: the validator does not read sm_80 code, `docs/validation.md`, section 8).
 - `controls.sh`: the validator objects to translations that are made wrong on purpose (the
-  controls of `reference/controls.py`, each in a process of its own).
+  controls of `reference/controls.py`, each in a process of its own), in every cubin whose
+  translation a control changes but the cases looked at one by one (at 0.1.3: 108 controls, 105
+  objected to; `docs/validation.md`, section 3, says what the other three are).
 - `heldout-validate.sh`: the same, on a corpus kept apart from the one the rules were found on.
 - `fuzz.py`: on damaged cubins, the two translators agree on what they make of every mutant.
 
@@ -222,7 +224,7 @@ libraries against a mock library.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
+checks and the unit tests (`cargo test`, 422 at 0.1.3); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh`; `launcher.sh` under `dash` and under `bash --posix`;

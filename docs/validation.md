@@ -284,7 +284,7 @@ with the next instruction waiting, and the distances between the steps and after
 ## 3. Controls
 
 A check that never objects proves nothing. `reference/controls.py` makes the reference translator
-wrong on purpose, one way at a time, and counts what the validator finds in the result: 107
+wrong on purpose, one way at a time, and counts what the validator finds in the result: 108
 controls, each described at the head of that file. A control that changes translations and meets
 no objection anywhere is a hole in the validator, or a control that tests nothing.
 
@@ -514,11 +514,12 @@ instruction, and not loaded after it was stored.
 
 Two corpora of sm_75 machine code are translated by the reference translator and checked by the
 validator, cubin by cubin (`tests/sass/validate-corpus.sh`). The rules of the translator were
-found on the first; the second was kept apart to test them.
+found on the first; the second was kept apart to test them. Triton's cubins at hand are checked
+the same way (below).
 
 **PyTorch.** The 475 cubins of `libtorch_cuda.so` of PyTorch 2.14.0+cu130 (the stock wheel;
-`vf extract`): 23,693 functions, of which 29 are refused. At the default (2026-11-22, with the
-rules of 0.1.3): **475 of 475 cubins at 0 problems, with no check left unmade**: 31,034,665
+`vf extract`): 23,693 functions, of which 29 are refused. At the default (2026-11-23, with the
+translator and the rules of 0.1.3): **475 of 475 cubins at 0 problems, with no check left unmade**: 31,034,665
 instructions of 23,664 functions (a quarter of an hour with 44 processes). The counts that
 follow are of 2026-11-20, when 23,663 functions were translated. Among what the validator counts as checked: 18,315 lives of uniform
 predicates against nvdisasm's chart; 2,354 borrowed registers and 70,030 first writes of them
@@ -535,7 +536,16 @@ left unmade**: 52,551,415 instructions of 60,310 functions (three quarters of an
 processes). The
 other three cubins are not read at all by either translator (a section table that points
 outside the file; two with two sections of code of one name). More functions are refused here
-than in PyTorch (`LIMITS.md`, "Kernels refused"). None of this code was run.
+than in PyTorch (`LIMITS.md`, "Kernels refused"). None of this code was run. This run was made
+before the sequence of a matrix load was changed and the rule `data_overwritten` added
+(2026-11-23, section 2); the held-out corpus has not been validated again since.
+
+**Triton.** The 346 sm_75 cubins that Triton made at run time in this site's runs, as found in
+their caches (2026-11-23, with the translator and the rules of 0.1.3): **346 of 346 at 0
+problems** (307,059 instructions of 334 functions). These are the only Triton kernels checked:
+Triton makes other kernels for other programs, shapes and settings, and those were not looked
+at. In 12 of these cubins, all variants of one `tl.dot` kernel, the rule `data_overwritten`
+objects to the translation of 0.1.2 and earlier.
 
 This corpus showed two faults that PyTorch's code could not, the first time it was translated:
 marks of register reuse that came to name a batch when the schedule was lengthened (225
@@ -910,9 +920,10 @@ environment:
 The reference translator (`reference/translate.py`) and the translator of the layer
 (`crates/vf-sass`) must give the same bytes, the same map and the same refusals for the same
 reasons on every input, and the same file of lives beside the map (`MAP.lives`, since
-2026-11-22). `tests/sass/compare.sh` checks it. On 2026-11-22, with the build of 0.1.3: the
-14 test cubins (five of them for sm_80) and PyTorch's 475, 489 of 489 the same (23,727
-functions, 30 refused), and the same at `VF_BORROW=8`. Before (2026-11-20): the same again when
+2026-11-22). `tests/sass/compare.sh` checks it. On 2026-11-23, with the translators of 0.1.3:
+the 14 test cubins (five of them for sm_80) and PyTorch's 475, 489 of 489 the same (23,727
+functions, 30 refused); on 2026-11-22, before the change of the sequence of a matrix load, the
+same at `VF_BORROW=8`. Before (2026-11-20): the same again when
 they are translated as the second translation at launch does (`VF_BORROW=5`: 42 refused); of
 the 157 distinct cubins that the PyTorch battery and the models made the layer translate, 122
 are among those 475, and the other 35 are the same at both settings; the held-out corpus, 3,108
@@ -1062,6 +1073,13 @@ on a V100 at seven block sizes (73 are refused). Of 31,207 functions of 1,193 sm
 PyTorch, cuBLAS, cuSOLVER and cuFFT, it translated 900 (2.9 %); some of its lowerings
 (`ATOM_ADD32`, `SHARED_INC`, `COPY128`, `COMMIT`, `PACK`) are reached only from code that Triton
 emits, and neither of those checks ran them.
+
+**Triton's machine code.** Triton makes its kernels while the program runs, for its shapes and
+settings; told 7.5 (the default), it gives them as sm_75 machine code, which the layer
+translates. The validator has checked the 346 Triton cubins of this site's runs (section 4), not
+the kernels that Triton makes for other programs, shapes or settings. Until 2026-11-23 the
+translation of variants of one `tl.dot` kernel stored wrong values on a V100, and the validator
+found nothing. A wider validation of Triton's code is planned for the next release.
 
 **Kernels that nothing runs.** The battery and the programs launch the kernels that their cases
 ask for; the others of the 23,664 functions translated in PyTorch's library are checked by the

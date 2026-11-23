@@ -277,7 +277,8 @@ the module's second translation and for a setting being given to it.
 The reports at exit (`VF_STATS`, `VF_PROFILE`, the summaries of emulated instructions and
 of second translations) are printed by the process that loaded the layer: a child made by
 `fork()` prints none, so that a child that ends with `exit()` cannot wait for ever on a
-lock that another thread of its parent held at the fork.
+lock that another thread of its parent held at the fork. The nvJitLink adapter
+(`libnvJitLink.so.13`) does the same with its summary of emulated instructions.
 
 Measured on one Tesla V100 (driver 580.178.04): llama.cpp's 48-token generation takes
 1.3 seconds with a warm cache and 6.9 seconds with a cold cache. For a stock PyTorch

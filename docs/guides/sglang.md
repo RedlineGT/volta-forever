@@ -30,7 +30,7 @@ export CUDA_HOME="${nvcc_path%/bin/nvcc}"
 
 ## 2. VF
 
-VF 0.1.2 supports the 8.0 capability profile used below. VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
+VF 0.1.3 supports the 8.0 capability profile used below (`VF_CAPABILITY_ALL=1` is new in 0.1.3). VF translates SGLang’s CUDA kernels and the Marlin expert reduction for the V100.
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3-venv xz-utils
@@ -110,7 +110,7 @@ SGLang selects its AWQ Marlin experts from PyTorch’s capability, which must be
 
 With `VF_CAPABILITY_ALL=1`, PyTorch chooses kernels for 8.0 that VF can only give it as translations of their `sm_75` code. Two kinds compute wrong results while the program goes on: PyTorch’s own attention leaves its output unwritten (with `--attention-backend torch_native` the server answers with HTTP 200 and wrong text from the first token), and cuDNN’s convolutions can return zeros (VF prints `kernel … cannot run on this GPU and is not given to the program`, and cuDNN reports success). Keep `--attention-backend triton`. Do not use `torch_native` or cuDNN convolutions with `VF_CAPABILITY_ALL=1`, and do not set it for other PyTorch programs.
 
-The runs in the table used VF 0.1.3 before its release (`096f93d`), SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. No kernel was refused. [Tested VF source](https://github.com/nbald/volta-forever/commit/096f93d80e399ec343b636f453580d1371c4b5eb) With VF main at `1740d8f`, on the same V100, the two SGLang rows measured 2,016.06 / 77.33 and 1,988.55 / 74.62. [Earlier phase timers](./benchmarks/sglang-default-operators.json)
+The runs in the table used VF 0.1.3, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. No kernel was refused. [VF 0.1.3](https://github.com/nbald/volta-forever/tree/v0.1.3) With VF main at `1740d8f`, on the same V100, the two SGLang rows measured 2,016.06 / 77.33 and 1,988.55 / 74.62. [Earlier phase timers](./benchmarks/sglang-default-operators.json)
 
 The launch command selects FlashInfer’s CUDA normalization on V100. To reproduce the CuTe result, unset `FLASHINFER_USE_CUDA_NORM` before starting the server. Both runs use the wheel’s default expert router.
 

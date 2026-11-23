@@ -449,7 +449,8 @@ reports to NVML (`nvmlDeviceGetCudaComputeCapability`) on a V100.
 
 It adapts PTX as the proxy does, with the same switches of the rewriting (`VF_CAPABILITY`,
 `VF_ALIGNED_ROWS`, `VF_BF16_*`), and also reads `VF_LOG`, `VF_LOG_LEVEL` and
-`VF_EMULATION_WARNINGS`.
+`VF_EMULATION_WARNINGS`. Its summary of emulated instructions at exit is printed by the process
+that loaded it, not by a child made with `fork()`.
 
 **Forwarding libraries (`forward/`):**
 
@@ -466,6 +467,7 @@ It adapts PTX as the proxy does, with the same switches of the rewriting (`VF_CA
 | `VF_QUIET` | `0` | `1`: no line when the CUDA 12.9.2 libraries are not found |
 | `VF_VENV` | unset | `0`: a Python of an environment made by `vf venv` starts as it is, not through the layer |
 | `VF_PTXAS_REAL` | `bin/ptxas` beside `VF_CUDA12`, else `/usr/local/cuda-12.9/bin/ptxas` | The CUDA 12.9 assembler that `vf ptxas` runs |
+| `VF_JIT_LINEINFO` | unset | `1`: `NVCC_APPEND_FLAGS` gains `-lineinfo` and `CUTE_DSL_LINEINFO=1` is set, so that compilers run by the program keep the PTX of what they build, for a program told 8.0 or later ("What the launcher sets", above) |
 
 ## What the first run costs
 

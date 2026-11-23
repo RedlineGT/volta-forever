@@ -6,6 +6,28 @@ where it is not from the build of this release. `docs/` says how each figure was
 `docs/validation.md` for what was compared with what, `docs/performance.md` for the timings,
 `docs/emulations.md` for what is computed in place of the instructions that a V100 lacks.
 
+## The limits of 0.1.3 to know first
+
+- **Triton's machine code is validated only on the cubins at hand.** Kernels that Triton makes
+  while a program runs, and that run from their sm_75 machine code (the default for a program
+  told 7.5), were checked by the independent validator on the 346 sm_75 Triton cubins of this
+  site's runs: 346 at 0 problems (2026-11-23), once a translation that stored wrong values in
+  Triton's fp32 `tl.dot` kernels was fixed. The kernels that Triton makes for other programs,
+  shapes and settings were not looked at (`docs/validation.md`, sections 4 and 8).
+- **The translation of sm_80 machine code is not independently validated**: the validator reads
+  sm_75 code only ("Cubins for sm_80 and later", below; `docs/validation.md`, section 8).
+- **A cubin that the layer's nvJitLink links, loaded without the layer, keeps its kernels that
+  trap**: the warning that nvJitLink writes when it links them is all there is. Likewise, the
+  image that the driver's linker makes, saved and loaded in another process, gives its kernels
+  that trap to the program ([Kernels refused](#kernels-refused)).
+- **A kernel of one linker input that calls a function of another input that cannot run still
+  traps** when it is launched: through the driver's linker and through the layer's nvJitLink,
+  what traps is decided input by input ([Kernels refused](#kernels-refused)).
+- **NVML reports the capability asked for** with `VF_CAPABILITY` to every caller, while a caller
+  whose code runs from sm_75 machine code is told 7.5 by the driver: a program that reads both
+  (vLLM does) gets two answers ([The capability told with
+  `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
+
 ## Programs tested
 
 | Program | Version | Status | Test |
