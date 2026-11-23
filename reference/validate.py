@@ -2115,6 +2115,43 @@ def check_frame_slots(slots, frame_bytes, name, problems):
                     name[:40], u, u))
 
 
+def frame_completeness(mc, old, original_code, slots, loads, stores, at, say):
+    """Rule B4, completeness. Every uniform register of the frame (`slots`) that the original
+    instruction at `old` READS is loaded (`loads`); every one it WRITES is stored (`stores`).
+    Where the original is under a guard, what it writes is loaded too: the store after it, under
+    no guard, then puts back what was there when the instruction did not run. Asked also where
+    nothing moves the frame around the instruction (until 2026-11-23 it was not: with every store
+    of a function left out, the instructions that only write its uniform registers passed, and
+    the loads after them read words that nothing stored). `at`: where to say it."""
+    d75 = mc.decode(75, int.from_bytes(original_code[old:old + 16], 'little')) if old + 16 <= len(original_code) else None
+    if d75 is not None and slots:
+        uses = mc._uses.get((75, d75.c.name))
+        if uses is not None:
+            read_urs, written_urs = set(), set()
+            for letter, operand, span in uses.reads:
+                if letter == 'U' and operand in d75.ops and d75.ops[operand] != 63:
+                    u, count = d75.ops[operand], machine.registers(span, d75.ops)
+                    for k in range(count):
+                        if u + k in slots:
+                            read_urs.add(u + k)
+            for letter, operand, span in uses.writes:
+                if letter == 'U' and operand in d75.ops and d75.ops[operand] != 63:
+                    u, count = d75.ops[operand], machine.registers(span, d75.ops)
+                    for k in range(count):
+                        if u + k in slots:
+                            written_urs.add(u + k)
+            loaded_urs = {int(re.match(r'mem: load UR(\d+)$', w).group(1)) for new, w in loads if re.match(r'mem: load UR(\d+)$', w)}
+            stored_urs = {int(re.match(r'mem: store UR(\d+)$', w).group(1)) for new, w in stores if re.match(r'mem: store UR(\d+)$', w)}
+            for ur in read_urs - loaded_urs:
+                say(at, old, 'mem: completeness', 'B4: UR%d is read by the original and not loaded from memory' % ur)
+            for ur in written_urs - stored_urs:
+                say(at, old, 'mem: completeness', 'B4: UR%d is written by the original and not stored to memory' % ur)
+            guarded = d75.ops.get('UPg', 7) != 7 or d75.ops.get('UPg@not') or d75.ops.get('Pg', 7) != 7 or d75.ops.get('Pg@not')
+            if guarded:
+                for ur in sorted(written_urs - loaded_urs):
+                    say(at, old, 'mem: completeness', 'B4: the original is under a guard, and the old value of UR%d, which it writes, is not loaded from memory' % ur)
+
+
 def check_frame_sequence(mc, name, old, parts, tb, ta, result_code, original_code,
                          slots, frame_bytes, highest, place, by_origin, listing,
                          problems, kinds, pool, borrowed_regs, borrow_pools_declared,
@@ -2274,37 +2311,8 @@ def check_frame_sequence(mc, name, old, parts, tb, ta, result_code, original_cod
             if not waited:
                 say(where, old, 'mem: store', 'B3: the next instruction does not wait for the store\'s read scoreboard %d' % rb_sb)
 
-    # B4: completeness. Every uniform register of the frame that the original READS is loaded;
-    # every one it WRITES is stored. Where the original is under a guard, what it writes is
-    # loaded too: the store after it, under no guard, then puts back what was there when the
-    # instruction did not run.
-    d75 = mc.decode(75, int.from_bytes(original_code[old:old + 16], 'little')) if old + 16 <= len(original_code) else None
-    if d75 is not None and slots:
-        uses = mc._uses.get((75, d75.c.name))
-        if uses is not None:
-            read_urs, written_urs = set(), set()
-            for letter, operand, span in uses.reads:
-                if letter == 'U' and operand in d75.ops and d75.ops[operand] != 63:
-                    u, count = d75.ops[operand], machine.registers(span, d75.ops)
-                    for k in range(count):
-                        if u + k in slots:
-                            read_urs.add(u + k)
-            for letter, operand, span in uses.writes:
-                if letter == 'U' and operand in d75.ops and d75.ops[operand] != 63:
-                    u, count = d75.ops[operand], machine.registers(span, d75.ops)
-                    for k in range(count):
-                        if u + k in slots:
-                            written_urs.add(u + k)
-            loaded_urs = {int(re.match(r'mem: load UR(\d+)$', w).group(1)) for new, w in loads if re.match(r'mem: load UR(\d+)$', w)}
-            stored_urs = {int(re.match(r'mem: store UR(\d+)$', w).group(1)) for new, w in stores if re.match(r'mem: store UR(\d+)$', w)}
-            for ur in read_urs - loaded_urs:
-                say(parts[0][0], old, 'mem: completeness', 'B4: UR%d is read by the original and not loaded from memory' % ur)
-            for ur in written_urs - stored_urs:
-                say(parts[0][0], old, 'mem: completeness', 'B4: UR%d is written by the original and not stored to memory' % ur)
-            guarded = d75.ops.get('UPg', 7) != 7 or d75.ops.get('UPg@not') or d75.ops.get('Pg', 7) != 7 or d75.ops.get('Pg@not')
-            if guarded:
-                for ur in sorted(written_urs - loaded_urs):
-                    say(parts[0][0], old, 'mem: completeness', 'B4: the original is under a guard, and the old value of UR%d, which it writes, is not loaded from memory' % ur)
+    # B4: completeness (`frame_completeness`).
+    frame_completeness(mc, old, original_code, slots, loads, stores, parts[0][0], say)
 
     # R1 lowering is handled separately.
     for new, w in r1_lower:
@@ -3545,6 +3553,10 @@ def main():
             parts = parts[first:len(parts) - last]
             # ---- level 3: validate and strip mem: instructions (rules A3, B, C) ----
             mem_standins = {}      # {uniform register number: ordinary register name} for this instruction
+            if frame_slots and parts and not any(is_mem(w) for _, w in parts):
+                # (Nothing moves the frame around the instruction: it reads and writes no uniform
+                # register of the frame, rule B4.)
+                frame_completeness(mc, old, original_code, frame_slots, [], [], parts[0][0], say)
             if any(is_mem(w) for _, w in parts):
                 result_core, mem_standins = check_frame_sequence(
                     mc, name, old, parts, tb, ta, result_code, original_code,

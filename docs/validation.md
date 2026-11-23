@@ -447,7 +447,13 @@ faults where someone thought of a control: the 106 above are the measure of what
 of. (Nine of them were written on 2026-11-20 for the rule on what the frame's moves carry,
 after a reading by someone else had shown two wrong translations that passed: section 7.
 They make the translator put its instructions in a wrong order, or take a wrong register,
-and then schedule the result itself: the order or the register is the only fault.)
+and then schedule the result itself: the order or the register is the only fault.) Asked on
+2026-11-23 to be objected to in every cubin whose translation they change, they showed one
+more: with every store to the frame left out (`no_store_l3`), two functions of PyTorch's 0150 at
+`VF_BORROW=5` passed, as their instructions that write uniform registers of the frame read
+none, and nothing moved the frame around them: the rule that every uniform register the
+original writes is stored was asked only where something did. It is asked of every instruction
+of a function with a frame since.
 
 **Rules without a control of their own.** Some things that the validator asks since
 2026-11-20 have not been made wrong on purpose: that the depth of the stack pointer be known
