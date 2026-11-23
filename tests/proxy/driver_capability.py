@@ -47,12 +47,38 @@ static int seen(const char *what, size_t length) {
     memcpy(mock_seen, line, n);
     return 0;
 }
+/* The last fat binary given to the loading functions, and its length (0: what was given was no
+   fat binary). */
+unsigned char mock_image[1 << 20];
+size_t mock_image_length;
+static void keep(const void *image) {
+    unsigned magic;
+    unsigned long long size;
+    mock_image_length = 0;
+    memcpy(&magic, image, 4);
+    if (magic != 0xBA55ED50u) return;
+    memcpy(&size, (const char *)image + 8, 8);
+    if (size > sizeof mock_image - 16) return;
+    memcpy(mock_image, image, 16 + size);
+    mock_image_length = 16 + size;
+}
 int cuCtxGetDevice(int *d) { if (mock_device < 0) return 201; *d = mock_device; return 0; }
-int cuModuleLoadData(void **m, const void *image) { *m = (void *)0x2000; return seen(image, strlen(image)); }
+int cuModuleLoadData(void **m, const void *image) {
+    *m = (void *)0x2000;
+    keep(image);
+    return seen(image, strlen(image));
+}
 int cuModuleLoadDataEx(void **m, const void *image, unsigned n, int *o, void **v) { return cuModuleLoadData(m, image); }
 int cuModuleLoad(void **m, const char *path) { *m = (void *)0x2000; return seen("file", 4); }
 int cuModuleUnload(void *m) { return 0; }
+int cuLibraryLoadData(void **l, const void *image, int *o, void **v, unsigned n, int *lo, void **lv, unsigned ln) {
+    *l = (void *)0x3000;
+    keep(image);
+    return 0;
+}
+int cuLibraryUnload(void *l) { return 0; }
 int cuLinkAddData_v2(void *s, int type, void *data, size_t size, const char *name, unsigned n, int *o, void **v) {
+    keep(data);
     return seen(data, size);
 }
 """
@@ -63,6 +89,17 @@ int query(int (*f)(int *, int, int), int *v, int attr, int dev) { return f(v, at
 int both(int (*f)(int *, int *, int), int *a, int *b, int dev) { return f(a, b, dev); }
 int binary(int (*f)(int *, int, void *), int *v) { return f(v, 6, (void *)1); }
 int kernel(int (*f)(int *, int, void *, int), int *v) { return f(v, 6, (void *)1, 0); }
+int load(int (*f)(void **, const void *), void **m, const void *image) { return f(m, image); }
+int load_ex(int (*f)(void **, const void *, unsigned, int *, void **), void **m, const void *image) {
+    return f(m, image, 0, 0, 0);
+}
+int library(int (*f)(void **, const void *, int *, void **, unsigned, int *, void **, unsigned), void **l,
+            const void *image) {
+    return f(l, image, 0, 0, 0, 0, 0, 0);
+}
+int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, int *, void **), void *image) {
+    return f(0, 2, image, 0, 0, 0, 0, 0);
+}
 """
 
 
@@ -120,15 +157,20 @@ def entries(image):
     return found
 
 
-def machine_code(header, cubin, sm):
-    """An entry of machine code for `sm`, stored as it is, with the other fields of `header`."""
-    stored = cubin + bytes(-len(cubin) % 8)
+def machine_code(header, cubin, sm, lz4=False):
+    """An entry of machine code for `sm`, stored as it is, or LZ4-compressed (in one block of
+    literals), with the other fields of `header`."""
+    packed = cubin
+    if lz4:
+        length = len(cubin) - 15
+        packed = b"\xf0" + b"\xff" * (length // 255) + bytes([length % 255]) + cubin
+    stored = packed + bytes(-len(packed) % 8)
     header = bytearray(header)
-    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<QI", header, 8, len(stored), len(packed) if lz4 else 0)
     struct.pack_into("<I", header, 0x1C, sm)
     flags = struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000  # not compressed
-    struct.pack_into("<Q", header, 0x28, flags)
-    struct.pack_into("<Q", header, 0x38, 0)
+    struct.pack_into("<Q", header, 0x28, flags | (0x2000 if lz4 else 0))
+    struct.pack_into("<Q", header, 0x38, len(cubin) if lz4 else 0)
     return bytes(header), stored
 
 
@@ -150,10 +192,42 @@ def asked():
     return sm if sm >= 70 else None
 
 
+def given_code(api, mock, client, image):
+    """What the driver is given when `client` loads the fat binary `image`, by each way to load
+    one: "sm_75 code" (an image with the translation of its sm_75 machine code) or "sm_80 PTX"
+    (one with the PTX of its sm_80 cubin, retargeted)."""
+    handle, given = c.c_void_p(), set()
+    data = c.create_string_buffer(image, len(image))
+    for load in (lambda: client.load(api.cuModuleLoadData, c.byref(handle), data),
+                 lambda: client.load_ex(api.cuModuleLoadDataEx, c.byref(handle), data),
+                 lambda: client.library(api.cuLibraryLoadData, c.byref(handle), data),
+                 lambda: client.link(api.cuLinkAddData_v2, data)):
+        c.c_size_t.in_dll(mock, "mock_image_length").value = 0
+        assert load() == 0
+        length = c.c_size_t.in_dll(mock, "mock_image_length").value
+        kinds = {struct.unpack_from("<H", header)[0] * 100 + struct.unpack_from("<I", header, 0x1C)[0]
+                 for header, _ in entries(bytes((c.c_ubyte * length).in_dll(mock, "mock_image")))}
+        given.add({frozenset((270, 280)): "sm_75 code", frozenset((275, 170)): "sm_80 PTX"}.get(frozenset(kinds), kinds))
+    assert len(given) == 1, given
+    return given.pop()
+
+
 def run(proxy, directory):
     api = c.CDLL(str(proxy))
     launched = "VOLTA_FOREVER" in os.environ
     given = asked()
+    # What a caller is told and the code it is given are of the same generation. A fat binary with
+    # machine code for sm_75 and for sm_80, which keeps its PTX (-lineinfo; here stored compressed):
+    # told 8.0, the program is given that PTX; told 7.5 because of other code of its file, the
+    # sm_75 code, which is what it chooses kernels for.
+    mock = c.CDLL(str(directory / "mock.so"))
+    for name, code_sm in (("keeps_lz4", None), ("told_by_other_code", 75)):
+        sm = limited(given, code_sm) or (given or 75)
+        client = c.CDLL(str(directory / name))
+        probe(api, client, sm, sm)
+        expected = "sm_80 PTX" if sm >= 80 else "sm_75 code"
+        assert given_code(api, mock, client, (directory / "keeps.fatbin").read_bytes()) == expected, (name, sm)
+        assert given_code(api, mock, client, (directory / "keeps_lz4.fatbin").read_bytes()) == expected, (name, sm)
     # Machine code only, as PyTorch's (from sm_75) and SGLang's kernels (from sm_80): told no later
     # generation than the code that runs, whatever VF_CAPABILITY asks.
     for name, code_sm in (("turing_only", 75), ("ampere_only", 80)):
@@ -216,9 +290,18 @@ def build(directory):
     turing, _ = entries((data / "elf75-ptx75-zstd.fatbin").read_bytes())
     (directory / "turing_only.fatbin").write_bytes(fat_binary([turing]))
     (directory / "ampere_only.fatbin").write_bytes(fat_binary([machine_code(turing[0], cubin80.read_bytes(), 80)]))
+    # Machine code for sm_75, and for sm_80 that keeps its PTX, stored as it is and compressed; in a
+    # file alone, and after machine code for sm_75 alone.
+    keeps = (Path(__file__).resolve().parents[2] / "tests/kernels/ptx-cases/copy-octal.sm80.cubin").read_bytes()
+    for name, lz4 in (("keeps", False), ("keeps_lz4", True)):
+        (directory / f"{name}.fatbin").write_bytes(fat_binary([turing, machine_code(turing[0], keeps, 80, lz4)]))
+    (directory / "told_by_other_code.fatbin").write_bytes((directory / "turing_only.fatbin").read_bytes()
+                                                          + (directory / "keeps.fatbin").read_bytes())
     for name, fixture in (("volta", data / "elf70-elf75-ptx70-lz4.fatbin"), ("turing", data / "elf75-ptx75-zstd.fatbin"),
                           ("turing_only", directory / "turing_only.fatbin"),
-                          ("ampere_only", directory / "ampere_only.fatbin")):
+                          ("ampere_only", directory / "ampere_only.fatbin"),
+                          ("keeps_lz4", directory / "keeps_lz4.fatbin"),
+                          ("told_by_other_code", directory / "told_by_other_code.fatbin")):
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", directory / "plain", directory / name],
                        check=True)
     (directory / "cudnn").mkdir()
@@ -301,7 +384,7 @@ if __name__ == "__main__":
             directory = Path(tmp)
             build(directory)
             env = {k: v for k, v in os.environ.items() if k not in ("VOLTA_FOREVER", "VF_CAPABILITY")}
-            env.update(VF_REAL_LIBCUDA=str(directory / "mock.so"), VF_LOG_LEVEL="0")
+            env.update(VF_REAL_LIBCUDA=str(directory / "mock.so"), VF_LOG_LEVEL="0", VF_PROXY_CACHE="0")
             for launched, override in ((True, None), (True, "7.0"), (True, "8.0"), (True, "12.0"), (False, None),
                                        (False, "8.0"), (True, "8"), (True, "sm_80"), (True, "6.1"), (True, "0.0"),
                                        (True, "8.0 all"), (True, "12.0 all")):
@@ -328,5 +411,6 @@ if __name__ == "__main__":
             subprocess.run([sys.executable, __file__, proxy, directory, "--mixed"],
                            env={**env, "VOLTA_FOREVER": "test", "VF_PROXY_CACHE": "0"}, check=True)
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
-              "machine code that limits what its callers are told, values of VF_CAPABILITY that are not used, "
-              "main programs however they were started, and modules loaded on a later card")
+              "machine code that limits what its callers are told, the code given for what they are told, "
+              "values of VF_CAPABILITY that are not used, main programs however they were started, and modules "
+              "loaded on a later card")

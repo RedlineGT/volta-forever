@@ -211,6 +211,54 @@ unsafe extern "C" fn kernel_attribute(
 }
 
 // ---- code loading ------------------------------------------------------------------------------------
+//
+// The code taken from an image follows what the caller of the load is told (`callers::told_sm`):
+// the exported functions pass on the address they will return to, as one more argument where a
+// register is left for it, else noted for the thread (`noting_caller`).
+
+thread_local! {
+    /// The address that the load this thread is making returns to (`noting_caller`).
+    static LOAD_CALLER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+extern "C" fn note_caller(address: usize) {
+    LOAD_CALLER.set(address);
+}
+
+/// The address that `noting_caller` noted for the load this thread is making.
+fn noted_caller() -> usize {
+    LOAD_CALLER.get()
+}
+
+/// The body of an exported function whose arguments leave no register for the address it will
+/// return to: that address is noted for the thread (`noted_caller`) by a call that keeps the
+/// arguments where they are, in their registers and on the stack, then `$body` is jumped to.
+macro_rules! noting_caller {
+    ($body:path) => {
+        core::arch::naked_asm!(
+            "push rdi",
+            "push rsi",
+            "push rdx",
+            "push rcx",
+            "push r8",
+            "push r9",
+            // The return address is above the six registers; the stack is aligned for the call.
+            "mov rdi, [rsp + 48]",
+            "sub rsp, 8",
+            "call {note}",
+            "add rsp, 8",
+            "pop r9",
+            "pop r8",
+            "pop rcx",
+            "pop rdx",
+            "pop rsi",
+            "pop rdi",
+            "jmp {body}",
+            note = sym note_caller,
+            body = sym $body,
+        )
+    };
+}
 
 type ModuleLoadEx =
     unsafe extern "C" fn(*mut *mut c_void, *const c_void, c_uint, *mut c_int, *mut *mut c_void) -> CUresult;
@@ -381,8 +429,14 @@ unsafe fn in_context(result: CUresult, module: *mut *mut c_void) -> CUresult {
     result
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *const c_void) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym module_load_data)
+}
+
+unsafe extern "C" fn module_load_data(module: *mut *mut c_void, image: *const c_void, caller: usize) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let real = real!(cuModuleLoadData: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
     let result = unsafe {
         load(
@@ -396,6 +450,7 @@ pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *cons
     unsafe { in_context(result, module) }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadDataEx(
     module: *mut *mut c_void,
@@ -404,6 +459,18 @@ pub unsafe extern "C" fn cuModuleLoadDataEx(
     options: *mut c_int,
     values: *mut *mut c_void,
 ) -> CUresult {
+    core::arch::naked_asm!("mov r9, [rsp]", "jmp {body}", body = sym module_load_data_ex)
+}
+
+unsafe extern "C" fn module_load_data_ex(
+    module: *mut *mut c_void,
+    image: *const c_void,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    caller: usize,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let real = real!(cuModuleLoadDataEx: ModuleLoadEx);
     let result = unsafe {
         load(
@@ -417,8 +484,14 @@ pub unsafe extern "C" fn cuModuleLoadDataEx(
     unsafe { in_context(result, module) }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadFatBinary(module: *mut *mut c_void, image: *const c_void) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym module_load_fat_binary)
+}
+
+unsafe extern "C" fn module_load_fat_binary(module: *mut *mut c_void, image: *const c_void, caller: usize) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let real = real!(cuModuleLoadFatBinary: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
     let result = unsafe {
         load(
@@ -432,8 +505,14 @@ pub unsafe extern "C" fn cuModuleLoadFatBinary(module: *mut *mut c_void, image: 
     unsafe { in_context(result, module) }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoad(module: *mut *mut c_void, path: *const c_char) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym module_load)
+}
+
+unsafe extern "C" fn module_load(module: *mut *mut c_void, path: *const c_char, caller: usize) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let result = unsafe { load_file(module, path) };
     unsafe { in_context(result, module) }
 }
@@ -664,6 +743,7 @@ type LibraryLoad<Source> = unsafe extern "C" fn(
     c_uint,
 ) -> CUresult;
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryLoadData(
     library: *mut *mut c_void,
@@ -675,6 +755,21 @@ pub unsafe extern "C" fn cuLibraryLoadData(
     library_values: *mut *mut c_void,
     library_count: c_uint,
 ) -> CUresult {
+    noting_caller!(library_load_data)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn library_load_data(
+    library: *mut *mut c_void,
+    code: *const c_void,
+    jit_options: *mut c_int,
+    jit_values: *mut *mut c_void,
+    jit_count: c_uint,
+    library_options: *mut c_int,
+    library_values: *mut *mut c_void,
+    library_count: c_uint,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLibraryLoadData: LibraryLoad<*const c_void>);
     let call = |code: *const c_void| unsafe {
         real(
@@ -877,6 +972,7 @@ unsafe fn load_library(
     Ok(())
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryLoadFromFile(
     library: *mut *mut c_void,
@@ -888,6 +984,21 @@ pub unsafe extern "C" fn cuLibraryLoadFromFile(
     library_values: *mut *mut c_void,
     library_count: c_uint,
 ) -> CUresult {
+    noting_caller!(library_load_from_file)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn library_load_from_file(
+    library: *mut *mut c_void,
+    path: *const c_char,
+    jit_options: *mut c_int,
+    jit_values: *mut *mut c_void,
+    jit_count: c_uint,
+    library_options: *mut c_int,
+    library_values: *mut *mut c_void,
+    library_count: c_uint,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLibraryLoadFromFile: LibraryLoad<*const c_char>);
     let from_file = || unsafe {
         real(
@@ -1417,6 +1528,7 @@ unsafe fn link_add_data(
     call(input, data, size)
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkAddData(
     state: *mut c_void,
@@ -1428,6 +1540,21 @@ pub unsafe extern "C" fn cuLinkAddData(
     options: *mut c_int,
     values: *mut *mut c_void,
 ) -> CUresult {
+    noting_caller!(link_add_data_v1)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn link_add_data_v1(
+    state: *mut c_void,
+    input: c_int,
+    data: *mut c_void,
+    size: usize,
+    name: *const c_char,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLinkAddData: LinkAddData);
     unsafe {
         link_add_data("cuLinkAddData", state, input, data, size, |input, data, size| {
@@ -1436,6 +1563,7 @@ pub unsafe extern "C" fn cuLinkAddData(
     }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkAddData_v2(
     state: *mut c_void,
@@ -1447,6 +1575,21 @@ pub unsafe extern "C" fn cuLinkAddData_v2(
     options: *mut c_int,
     values: *mut *mut c_void,
 ) -> CUresult {
+    noting_caller!(link_add_data_v2)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn link_add_data_v2(
+    state: *mut c_void,
+    input: c_int,
+    data: *mut c_void,
+    size: usize,
+    name: *const c_char,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLinkAddData_v2: LinkAddData);
     unsafe {
         link_add_data("cuLinkAddData", state, input, data, size, |input, data, size| {

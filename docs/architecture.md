@@ -274,7 +274,9 @@ in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libra
 that use a CUDA runtime), or, for cuDNN's graph library, in the library of cuDNN's
 precompiled engines beside it, runs from the translation of its sm_75 machine code,
 the caller is told 7.5 (8.0 for sm_80 code, when 9.0 or later is asked), and a line at
-the default log level says so. PyTorch is such a program: in its sm_75 code, the
+the default log level says so. The images that such a caller loads are then adapted for
+what it is told: an image that also has PTX for sm_80, or sm_80 cubins that retain theirs,
+is given its sm_75 code or its PTX for sm_75. PyTorch is such a program: in its sm_75 code, the
 kernels it chooses for 8.0 print an error and write nothing, and some of those it
 chooses for 9.0 stop the GPU. A program whose code is PTX is told what was asked and
 given its PTX for that capability. The decision is taken when a caller first asks; a

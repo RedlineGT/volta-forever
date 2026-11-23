@@ -29,6 +29,9 @@
 //! default log level that says so. `VF_CAPABILITY_ALL=1` tells such a caller what `VF_CAPABILITY`
 //! asks all the same, for a program that does not launch the kernels it would choose for it
 //! (SGLang with the settings of its guide selects its quantized experts from PyTorch's capability).
+//! The code given to a caller follows what it is told: the images it loads are adapted for the
+//! architecture it is told (`told_sm`), so that a caller told 7.5 is given the sm_75 code of an
+//! image that also has PTX for sm_80.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -331,6 +334,14 @@ fn dependents_limit(objects: &[Object], limits: &mut HashMap<CString, Option<u32
     lowest
 }
 
+/// What limits the answer matters only when the user asks for a later generation than Turing's.
+fn limits_apply() -> bool {
+    config()
+        .policy
+        .told_sm
+        .is_some_and(|sm| sm / 10 > FIRST_SM_OF_THAT_RUNTIME / 10)
+}
+
 fn caller(return_address: usize) -> Decision {
     let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
     // SAFETY: the call site is live for the duration of this driver call.
@@ -360,14 +371,9 @@ fn caller(return_address: usize) -> Decision {
         .filter(|object| object.holds)
         .and_then(|object| object.path.as_deref());
     let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
-    // What limits the answer matters only when the user asks for a later generation than Turing's.
-    let limits = config()
-        .policy
-        .told_sm
-        .is_some_and(|sm| sm / 10 > FIRST_SM_OF_THAT_RUNTIME / 10);
     let caller = classify(path);
     let mut limit = None;
-    if limits && caller != Caller::Native {
+    if limits_apply() && caller != Caller::Native {
         for file in own_files(path, caller) {
             limit = lower(limit, file_limit(&file, &mut cache.limits));
         }
@@ -426,6 +432,20 @@ fn caller(return_address: usize) -> Decision {
     }
     cache.by_base.insert(base, decision);
     decision
+}
+
+/// The architecture for which the images that the caller at `return_address` loads are adapted
+/// (`vf_adapt::Policy::told_sm`), when it is not the one `VF_CAPABILITY` asks: the one the caller
+/// is told, where the code it runs limits it (`vf_adapt::Policy::told_limit`). Told 7.5, a caller
+/// is then given the sm_75 code, or the PTX for sm_75, of every image it loads that has some, not
+/// the code for sm_80 that the image may also have. The caller that loads an image is the caller
+/// that asks what the GPU is, a CUDA runtime for the programs that use it. `None` with
+/// `VF_CAPABILITY_ALL=1`, which tells every caller what `VF_CAPABILITY` asks.
+pub fn told_sm(return_address: usize) -> Option<u32> {
+    if config().capability_all || !limits_apply() {
+        return None;
+    }
+    caller(return_address).limit
 }
 
 /// The capability reported for a physical sm_70 device.

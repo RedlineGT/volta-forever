@@ -443,6 +443,40 @@ fn report(who: &str, what: &str, outcome: &Outcome) {
 }
 
 thread_local! {
+    /// The architecture that the caller of the load this thread is making is told, where it is not
+    /// what `VF_CAPABILITY` asks (`ForCaller`).
+    static TOLD_SM: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// The policy by which this thread adapts the images of a load: `config().policy`, with the
+/// architecture that the caller of the load is told, when that caller is told less than what
+/// `VF_CAPABILITY` asks (`callers::told_sm`). The code taken from an image is then the code for
+/// what the caller is told.
+pub fn policy() -> vf_adapt::Policy {
+    let mut policy = config().policy;
+    if let Some(sm) = TOLD_SM.get() {
+        policy.told_sm = Some(sm);
+    }
+    policy
+}
+
+/// While it lives, the images that this thread adapts are adapted for a caller told `sm`
+/// (`policy`); `None`: told what `VF_CAPABILITY` asks.
+pub struct ForCaller(Option<u32>);
+
+impl ForCaller {
+    pub fn told(sm: Option<u32>) -> ForCaller {
+        ForCaller(TOLD_SM.replace(sm))
+    }
+}
+
+impl Drop for ForCaller {
+    fn drop(&mut self) {
+        TOLD_SM.set(self.0);
+    }
+}
+
+thread_local! {
     /// Profiler only: the last `adapt` of this thread found code for this GPU in the image and
     /// left it as it is. Read by `loaded_as_is`, which labels the module the driver then loads.
     static IMAGE_WAS_NATIVE: Cell<bool> = const { Cell::new(false) };
@@ -501,7 +535,7 @@ fn finish(
         // Kept only when a second translation within the budget would lower a kernel's count (the
         // translation says so, and the cache keeps it said), and then the one cubin translated,
         // as it is stored, not the fat binary around it.
-        replacement.original_image = config().policy.kept_for_second(original);
+        replacement.original_image = policy().kept_for_second(original);
     }
     if let Outcome::Retargeted { refused, emulated, .. } | Outcome::Translated { refused, emulated, .. } =
         adapted.outcome
@@ -541,7 +575,7 @@ fn adapted(who: &str, image: &[u8], adapt: impl FnOnce() -> Adapted) -> Adapted 
 fn adapt_container(who: &str, bytes: &[u8], fat: &fatbin::FatBinary<'_>) -> Result<Adapted, fatbin::Error> {
     let mut failed = None;
     let result = adapted(who, bytes, || {
-        config().policy.adapt_fatbin(fat).unwrap_or_else(|e| {
+        policy().adapt_fatbin(fat).unwrap_or_else(|e| {
             failed = Some(e);
             Adapted {
                 outcome: Outcome::Unknown,
@@ -581,7 +615,7 @@ fn adapt_fatbin(
 /// The wrapper and the null-terminated array in `extra` are supplied by the CUDA runtime.
 /// Each non-null array member is the address of a complete fat binary, not another wrapper.
 unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
-    let policy = &config().policy;
+    let policy = policy();
     let primary = unsafe { fatbin::parse_at(wrapper.data) }.ok()?;
     let linked = unsafe { std::slice::from_raw_parts(wrapper.data, primary.len) };
     let adapted = policy.adapt_fatbin(&primary).ok()?;
@@ -745,7 +779,7 @@ unsafe fn image_bytes_inner(ptr: *const c_void, len: Option<usize>) -> Option<Ve
 /// As for `adapt`.
 unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> Option<Replacement> {
     let bytes = ptr as *const u8;
-    let policy = &config().policy;
+    let policy = policy();
     // The first four bytes tell the binary formats apart. Text may be shorter than that: stop at its
     // terminating zero. (A fat binary starts with 0x50, the letter P, so text is what remains.)
     let mut head = [0u8; 4];

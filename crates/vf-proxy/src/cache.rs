@@ -522,11 +522,11 @@ pub struct CacheKey {
     pub key: u128,
 }
 
-/// Compute the cache key for the given original image bytes.
+/// Compute the cache key for the given original image bytes, adapted by the policy of the load
+/// this thread is making (`images::policy`).
 pub fn key_for(image: &[u8]) -> CacheKey {
-    let policy = &crate::config().policy;
     CacheKey {
-        key: cache_hash(image, policy),
+        key: cache_hash(image, &crate::images::policy()),
     }
 }
 

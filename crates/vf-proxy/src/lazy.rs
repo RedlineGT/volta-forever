@@ -85,6 +85,8 @@ struct LazyLibrary {
     /// The original image bytes, kept on a cache hit so that the fallback path (materialization,
     /// dependent entries) can adapt later, outside the lock.
     original_bytes: Option<Arc<Vec<u8>>>,
+    /// The policy of the load (`images::policy`), by which they are adapted then.
+    policy: vf_adapt::Policy,
 }
 
 /// Compilation state of a kernel in a lazy library.
@@ -638,6 +640,7 @@ unsafe fn setup_common(
         linked_entries,
         cache_key,
         original_bytes: original_bytes.map(Arc::new),
+        policy: crate::images::policy(),
     };
 
     let (mutex, _) = &*LAZY_LIBS;
@@ -664,11 +667,10 @@ fn build_standin_ptx(full_ptx: &[u8]) -> Vec<u8> {
     standin
 }
 
-/// When a lazy library was set up from the proxy cache, adapt the original bytes and analyse the
-/// result. Fills `lazy_lib.adapted_data` and `lazy_lib.info` so that materialization and
-/// sub-module extraction work. Must be called outside the lock.
-fn ensure_adapted(original: &[u8]) -> Option<(Vec<u8>, ModuleInfo)> {
-    let policy = &crate::config().policy;
+/// When a lazy library was set up from the proxy cache, adapt the original bytes, by the policy of
+/// its load, and analyse the result. Fills `lazy_lib.adapted_data` and `lazy_lib.info` so that
+/// materialization and sub-module extraction work. Must be called outside the lock.
+fn ensure_adapted(original: &[u8], policy: &vf_adapt::Policy) -> Option<(Vec<u8>, ModuleInfo)> {
     // The original bytes are the fat binary or PTX the program gave. Adapt them exactly as
     // `images::adapt` would.
     let adapted = if original.len() >= 4 && u32::from_le_bytes(original[..4].try_into().ok()?) == fatbin::MAGIC {
@@ -928,6 +930,7 @@ pub unsafe fn materialize(library: usize) -> Result<usize, CUresult> {
     lazy_lib.materializing = true;
     let mut adapted_data = lazy_lib.adapted_data.clone();
     let original = lazy_lib.original_bytes.clone();
+    let policy = lazy_lib.policy;
     let linked = lazy_lib
         .linked_entries
         .as_ref()
@@ -950,7 +953,7 @@ pub unsafe fn materialize(library: usize) -> Result<usize, CUresult> {
     // When set up from the proxy cache, adapted_data is empty: adapt the original now.
     if adapted_data.is_empty()
         && let Some(original) = original.as_deref()
-        && let Some((adapted, info)) = ensure_adapted(original)
+        && let Some((adapted, info)) = ensure_adapted(original, &policy)
     {
         adapted_data = adapted;
         // Store the adapted data and info back for future use.
@@ -1242,8 +1245,9 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
             // adaptation and the analysis of a whole module take from tens of milliseconds to
             // seconds. A thread that asks for this kernel meanwhile waits for it.
             lazy_lib.kernels.insert(name_str.clone(), KernelState::Compiling);
+            let policy = lazy_lib.policy;
             drop(libs);
-            let adapted = ensure_adapted(&original);
+            let adapted = ensure_adapted(&original, &policy);
             libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
             // The library may have been unloaded meanwhile, and its handle given to another.
             let Some(lazy_lib) = libs.get_mut(&library).filter(|lazy_lib| {

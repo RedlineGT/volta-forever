@@ -35,7 +35,8 @@ pub struct Policy {
     /// The architecture the programs are told the GPU has, when the user chose it
     /// (`VF_CAPABILITY`): the PTX taken from a fat binary is then the PTX for that architecture.
     /// Machine code is taken from sm_75 where a fat binary has some: a program whose code is taken
-    /// from there is told 7.5 instead (`told_limit`).
+    /// from there is told 7.5 instead (`told_limit`), and the images it loads are adapted with 7.5
+    /// here.
     /// `None`: a program is told the lowest architecture it has code for, and that code is taken.
     pub told_sm: Option<u32>,
     /// When supported machine code is translated for the device.
@@ -640,9 +641,11 @@ impl Policy {
     }
 
     /// The architecture of the machine code that `adapt_fatbin` translates for `fat`; `None` when it
-    /// takes PTX, code that runs on the device, or nothing. Read from the headers of the entries:
-    /// the PTX that cubins of a later target can retain (`translate_fatbin`) is looked for only in
-    /// cubins stored uncompressed, and where it is not looked for, the answer is the machine code.
+    /// takes PTX, code that runs on the device, or nothing. Read from the headers of the entries,
+    /// and from the cubins of a later target, compressed or not, for the PTX that they can retain
+    /// and that `translate_fatbin` then takes. (Where the translator refuses every function of the
+    /// sm_75 code, `translate_fatbin` takes the PTX that this code retains, when it has some: PTX
+    /// of the same architecture.)
     pub fn translated_from(&self, fat: &FatBinary<'_>) -> Option<u32> {
         let machine = self.machine_source(fat);
         if self.translate == Translate::Force && machine.is_some() {
@@ -660,9 +663,7 @@ impl Policy {
                 .entries
                 .iter()
                 .filter(|entry| entry.kind() == KIND_ELF && entry.sm() == sm)
-                .all(|entry| {
-                    !entry.is_compressed() && entry.payload().is_ok_and(|cubin| embedded_ptx(&cubin, sm).is_some())
-                })
+                .all(|entry| entry.payload().is_ok_and(|cubin| embedded_ptx(&cubin, sm).is_some()))
         {
             return None;
         }
@@ -679,8 +680,17 @@ impl Policy {
     /// code for the told generation is not taken in its place, because the translation of sm_80
     /// code covers fewer instructions than that of sm_75 (it does not cover PyTorch's simplest
     /// kernel). `None`: what the user chose can be told.
+    ///
+    /// A program told the limit is given, for every image it loads, the code for the limit: the
+    /// images are adapted with `told_sm` set to it (the proxy's `callers::told_sm`), which takes
+    /// the sm_75 code or the PTX for sm_75 where an image also has code for a later target. (An
+    /// image with nothing for the limit or an earlier architecture is given the nearest above, as
+    /// when the user asks for the limit.)
     pub fn told_limit(&self, fat: &FatBinary<'_>) -> Option<u32> {
         let told = self.told_sm?;
+        // `translated_from` is the machine code or nothing: what else it reads is not needed where
+        // the machine code does not limit what is told.
+        self.machine_source(fat).filter(|&sm| sm / 10 < told / 10)?;
         self.translated_from(fat).filter(|&sm| sm / 10 < told / 10)
     }
 
@@ -701,6 +711,10 @@ impl Policy {
                 continue;
             };
             lowest = self.told_limit(&fat).into_iter().chain(lowest).min();
+            if lowest == Some(TRANSLATED_FROM) {
+                // Nothing earlier is translated: no other fat binary can lower it.
+                break;
+            }
             offset = at + fat.len.max(4);
         }
         lowest
@@ -1565,6 +1579,55 @@ mod tests {
         assert_eq!(native_ampere.adapt_cubin(DEBUG_CUBIN).outcome, Outcome::Native);
     }
 
+    /// `entry` stored LZ4-compressed, as nvcc stores entries.
+    fn compressed(entry: &Entry<'_>) -> NewEntry {
+        let payload = entry.payload().unwrap();
+        let packed = lz4_flex::block::compress(&payload);
+        let mut stored = packed.clone();
+        stored.resize(stored.len().next_multiple_of(8), 0);
+        let mut header = entry.header.to_vec();
+        header[0x08..0x10].copy_from_slice(&(stored.len() as u64).to_le_bytes());
+        header[0x10..0x14].copy_from_slice(&(packed.len() as u32).to_le_bytes());
+        header[0x28..0x30].copy_from_slice(&(entry.flags() | fatbin::FLAG_LZ4).to_le_bytes());
+        header[0x38..0x40].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        NewEntry::copy_of(&Entry {
+            header: &header,
+            stored: &stored,
+        })
+    }
+
+    #[test]
+    fn what_a_program_is_told_and_given_agree_where_its_ampere_code_keeps_its_ptx() {
+        let turing = fatbin::parse(ELF75_PTX75).unwrap().entries[0];
+        let plain = fatbin::build(&[
+            NewEntry::copy_of(&turing),
+            NewEntry::replace(&turing, DEBUG_CUBIN.to_vec(), 80, (1, 7)),
+        ]);
+        let ampere = fatbin::parse(&plain).unwrap().entries[1];
+        // The same, with the sm_80 cubin stored compressed: its PTX is found all the same.
+        let packed = fatbin::build(&[NewEntry::copy_of(&turing), compressed(&ampere)]);
+        assert!(fatbin::parse(&packed).unwrap().entries[1].is_compressed());
+        let told = |told_sm| Policy {
+            told_sm,
+            ..Policy::default()
+        };
+        for image in [&plain, &packed] {
+            let fat = fatbin::parse(image).unwrap();
+            // Told 8.0, the program is given the PTX of its sm_80 cubin: it can be told 8.0.
+            assert_eq!(told(Some(80)).told_limit(&fat), None);
+            assert!(matches!(
+                told(Some(80)).adapt_fatbin(&fat).unwrap().outcome,
+                Outcome::Retargeted { from_sm: 80, .. }
+            ));
+            // A program told 7.5 (for this code or other code of its own) is given its sm_75 code.
+            assert_eq!(
+                told(Some(75)).adapt_fatbin(&fat).unwrap().outcome,
+                translated_fixture(1)
+            );
+            assert_eq!(told(None).adapt_fatbin(&fat).unwrap().outcome, translated_fixture(1));
+        }
+    }
+
     #[test]
     fn a_program_is_told_no_later_generation_than_the_machine_code_it_is_given() {
         let fixture = fatbin::parse(ELF75_PTX75).unwrap();
@@ -1578,6 +1641,16 @@ mod tests {
         // As llama.cpp: PTX.
         let with_ptx = fatbin::build(&[NewEntry::copy_of(&turing), NewEntry::copy_of(&ptx)]);
         let native = ELF70_ELF75_PTX70.to_vec();
+        // Machine code for sm_75 and for sm_80, which keeps its PTX (`-lineinfo`), stored as it is
+        // and compressed.
+        let keeps = fatbin::build(&[
+            NewEntry::copy_of(&turing),
+            NewEntry::replace(&turing, DEBUG_CUBIN.to_vec(), 80, (1, 7)),
+        ]);
+        let keeps_packed = fatbin::build(&[
+            NewEntry::copy_of(&turing),
+            compressed(&fatbin::parse(&keeps).unwrap().entries[1]),
+        ]);
         let limit = |told_sm: Option<u32>, translate: Translate, image: &[u8]| {
             let policy = Policy {
                 told_sm,
@@ -1586,16 +1659,22 @@ mod tests {
             };
             let fat = fatbin::parse(image).unwrap();
             let limit = policy.told_limit(&fat);
-            // The limit is the architecture of what is given, when it is machine code.
-            if let Some(sm) = limit {
-                assert!(matches!(policy.adapt_fatbin(&fat).unwrap().outcome,
-                    Outcome::Translated { from_sm, .. } if from_sm == sm));
+            // The limit is the architecture of what is given, when it is machine code; without a
+            // limit, what is given is no machine code of an earlier generation than what is told.
+            let outcome = policy.adapt_fatbin(&fat).unwrap().outcome;
+            match (limit, told_sm) {
+                (Some(sm), _) => assert!(matches!(outcome, Outcome::Translated { from_sm, .. } if from_sm == sm)),
+                (None, Some(told)) => assert!(
+                    !matches!(outcome, Outcome::Translated { from_sm, .. } if from_sm / 10 < told / 10),
+                    "{outcome:?}"
+                ),
+                (None, None) => {}
             }
             limit
         };
         let default = Translate::WithoutPtx;
         for told in [None, Some(70), Some(75)] {
-            for image in [&multi, &from_ampere, &with_ptx, &native] {
+            for image in [&multi, &from_ampere, &with_ptx, &native, &keeps, &keeps_packed] {
                 assert_eq!(limit(told, default, image), None);
             }
         }
@@ -1603,6 +1682,9 @@ mod tests {
             assert_eq!(limit(Some(told), default, &multi), Some(75), "{told}");
             assert_eq!(limit(Some(told), default, &with_ptx), None, "{told}");
             assert_eq!(limit(Some(told), default, &native), None, "{told}");
+            // Given the PTX of the sm_80 cubin, compressed or not.
+            assert_eq!(limit(Some(told), default, &keeps), None, "{told}");
+            assert_eq!(limit(Some(told), default, &keeps_packed), None, "{told}");
             // Machine code is not translated: nothing is given, and the driver says so.
             assert_eq!(limit(Some(told), Translate::Never, &multi), None, "{told}");
             // Machine code before PTX: what is given of this one is its sm_75 code.
@@ -1630,6 +1712,44 @@ mod tests {
         assert_eq!(policy.told_limit_in(&file), Some(75));
         assert_eq!(Policy::default().told_limit_in(&file), None);
         assert_eq!(policy.told_limit_in(b"\x7fELF no fat binary here"), None);
+        // A file with code that limits what its program is told to 7.5, and code for sm_75 and
+        // sm_80 that alone would not: the program, told 7.5, is given the sm_75 code of both.
+        let mut file = b"\x7fELF....".to_vec();
+        for image in [&keeps_packed, &multi, &keeps] {
+            file.extend_from_slice(image);
+        }
+        assert_eq!(policy.told_limit_in(&file), Some(75));
+        let limited = Policy {
+            told_sm: policy.told_limit_in(&file),
+            ..policy
+        };
+        for image in [&keeps_packed, &multi, &keeps] {
+            let fat = fatbin::parse(image).unwrap();
+            assert!(matches!(
+                limited.adapt_fatbin(&fat).unwrap().outcome,
+                Outcome::Translated { from_sm: 75, .. }
+            ));
+            assert_eq!(limited.told_limit(&fat), None);
+        }
+        // With PTX for sm_75 and for sm_80: the PTX for sm_75.
+        let both_ptx = fatbin::build(&[
+            NewEntry::copy_of(&ptx),
+            NewEntry::replace(
+                &ptx,
+                b".version 9.5\n.target sm_80\n.address_size 64\n".to_vec(),
+                80,
+                (9, 5),
+            ),
+        ]);
+        let fat = fatbin::parse(&both_ptx).unwrap();
+        assert!(matches!(
+            limited.adapt_fatbin(&fat).unwrap().outcome,
+            Outcome::Retargeted { from_sm: 75, .. }
+        ));
+        assert!(matches!(
+            policy.adapt_fatbin(&fat).unwrap().outcome,
+            Outcome::Retargeted { from_sm: 80, .. }
+        ));
     }
 
     #[test]
