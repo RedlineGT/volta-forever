@@ -239,6 +239,27 @@ own in `VF_AUDIT_MAP` gives cuBLAS another file (as `eval "$(vf env)"` without t
 there); and for a value other than `0` or `1`. `vf doctor` says whether they are installed and,
 with a switch set, which libraries a command would get.
 
+Both are off by default. What they change, for bf16 products with fp32 accumulation
+(`cublasGemmEx`, `cublasGemmEx_64` and `cublasGemmStridedBatchedEx[_64]` of one matrix, and
+`cublasLtMatmul` of one column-major matrix with the default or bias epilogue):
+
+- `VF_CUBLAS_BF16_SKINNY=1`: products of 2 to 16 columns (fewer than 32 when small) where cuBLAS
+  12.9 runs its sequential kernel are computed by one kernel of the layer, with 12.9's bits
+  (`docs/emulations.md`, section 11, says where exactly, and how that was established).
+- `VF_CUBLAS_BF16_TC=1`: larger products run on the tensor cores, with exact scaling to fp16 and
+  fixed slices of k, and differ from 12.9's in the last bits (within 25 units of 2^-24 sum |a b|
+  measured, same-sign sums slightly low), except when they are captured in a CUDA graph; the skinny
+  path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`.
+
+Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
+explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 for the tensor cores,
+tensor-core calls captured in a CUDA graph (`LIMITS.md`, "The bf16 cuBLAS variants", says why), and
+calls whose workspace cannot be allocated. An eager tensor-core
+call cost 18 to 46 microseconds of host time against about 7 for 12.9's, a skinny call about 3.5
+(measured with the runtime's prototype).
+The layer's workspace is not the program's: a framework's allocator does not see it. The variables do nothing without the
+launcher: by hand, put `forward/bf16tc` before `forward` and set the variable.
+
 **A program that wants to know.** A program built for later GPUs is told the compute
 capability that its code starts at (7.5), so that it loads that code: the driver's answers do
 not tell it that the card is a Volta with the layer in front of it. A program that has kernels

@@ -1,18 +1,13 @@
-/* The program's share of graph memory (review section 5, G4). The driver reserves address space for a
- * graph's allocation nodes in granules of 32 MiB, at most about twice the device's memory for all the
- * graphs alive in a process, the program's and the runtime's together; the runtime holds at most
- * total memory / 32 MiB of them (its cap), the rest is the program's.
- *
- * First the ceiling is measured: graphs, each holding one 20 MiB allocation of the program's own, are
- * captured until the driver refuses one. Then the program captures 1,000 graphs, each with its own
- * 20 MiB allocation alive across two tensor-core calls on two forked streams (the runtime's two
- * allocations add two granules to such a graph): with the cap, the runtime serves until it holds its
- * share and forwards the rest, and every capture of the program succeeds (1,000 + 1,014 granules
- * under the ceiling); some graphs are replayed, served and forwarded, and give the right result.
- * Without the cap (control no-cap) the runtime would take three granules a graph and the program's
- * capture fails. Prints "ok bf16-reserve". */
+/* The program's graph memory (review section 5, G4). The driver reserves address space for a graph's
+ * allocation nodes in granules of 32 MiB, at most about twice the device's memory for all the graphs
+ * alive in a process. A tensor-core call captured in a graph goes to 12.9 (it would add an allocation
+ * node), so the variants take none of it: the ceiling is measured with graphs, each holding one
+ * 20 MiB allocation of the program's own; then, with the variants, the program captures one graph
+ * fewer than the ceiling, each with its own allocation alive across two tensor-core calls on two
+ * forked streams: every capture succeeds, every captured call is forwarded, and the replays give 12.9's
+ * result. With the control capture-tc (the captured calls served, with their allocation nodes) the
+ * program's captures fail. Prints "ok bf16-reserve". */
 #include "bf16-common.h"
-#include <time.h>
 
 static const int M = 1536, N = 256, K = 1536;
 static cublasHandle_t h1, h2;
@@ -76,28 +71,34 @@ int main(void)
     int ceiling = 0;
     while (ceiling < MAXG && capture_graph(0, &gs[ceiling]) == cudaSuccess) ++ceiling;
     for (int i = 0; i < ceiling; ++i) cudaGraphDestroy(gs[i]);
-    long long cap = 0, high = 0;
-    if (rt_granules) rt_granules(0, &cap, &high);
-    printf("note  the driver held %d graphs of one 20 MiB allocation each; the runtime's cap is %lld granules\n", ceiling,
-           cap);
-    CHECK(ceiling > 1000 + cap, "the ceiling (%d graphs) leaves no room for the test", ceiling);
+    printf("note  the driver held %d graphs of one 20 MiB allocation each\n", ceiling);
+    CHECK(ceiling > 100 && ceiling < MAXG, "the ceiling was not found (%d graphs)", ceiling);
 
-    /* the program's 1,000 graphs, each with the runtime's two allocations */
+    /* one graph fewer than the ceiling, each with two tensor-core calls */
+    const int want = ceiling - 1;
     const Counts c0 = counts(API_GEMMEX);
     int made = 0;
     cudaError_t last = cudaSuccess;
-    for (; made < 1000; ++made)
+    for (; made < want; ++made)
         if ((last = capture_graph(1, &gs[made])) != cudaSuccess) break;
     const Counts c1 = counts(API_GEMMEX);
-    CHECK(made == 1000, "the program's capture %d of 1,000 failed (%s) with the runtime on", made + 1, cudaGetErrorName(last));
-    const unsigned long long served = delta(&c0, &c1, SERVED_TC), at_cap = delta(&c0, &c1, FWD(R_CAP)),
-                             alloc = delta(&c0, &c1, FWD(R_ALLOC));
-    printf("note  2,000 calls in 1,000 graphs: %llu served, %llu forwarded at the cap, %llu for a failed allocation\n",
-           served, at_cap, alloc);
-    CHECK(!rt_counters || (at_cap > 0 && served <= (unsigned long long)cap), "the runtime did not stop at its cap");
-    /* replays: the first graph (served) and the last (forwarded) */
+    CHECK(made == want, "the program's capture %d of %d failed (%s) with the variants", made + 1, want,
+          cudaGetErrorName(last));
+    printf("note  %d graphs captured; %llu captured calls forwarded, %llu served by the tensor-core path\n", made,
+           delta(&c0, &c1, FWD(R_CAPTURED)), delta(&c0, &c1, SERVED_TC));
+    CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 0, "captured tensor-core calls were served");
+    /* replays of the first and the last graph: 12.9's result */
+    cublasHandle_t h12;
+    c129.Create(&h12);
+    c129.SetStream(h12, s1);
+    void *C12;
+    CU(cudaMalloc(&C12, (size_t)M * N * 4));
+    c129.GemmEx(h12, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &one, dA, CUDA_R_16BF, K, dB, CUDA_R_16BF, K, &zero, C12,
+                CUDA_R_32F, M, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    CU(cudaStreamSynchronize(s1));
+    float *r12 = from_device(C12, (size_t)M * N * 4);
     int wrong = 0;
-    for (int i = 0; i < made; i += made - 1 > 0 ? made - 1 : 1) {
+    for (int i = 0; i < made; i += made > 1 ? made - 1 : 1) {
         cudaGraphExec_t e;
         cudaMemset(dC1, 0, (size_t)M * N * 4);
         cudaMemset(dC2, 0, (size_t)M * N * 4);
@@ -108,22 +109,14 @@ int main(void)
         cudaGraphLaunch(e, s1);
         cudaStreamSynchronize(s1);
         float *o1 = from_device(dC1, (size_t)M * N * 4), *o2 = from_device(dC2, (size_t)M * N * 4);
-        wrong += memcmp(o1, ref, (size_t)M * N * 4) != 0 || memcmp(o2, ref, (size_t)M * N * 4) != 0;
+        wrong += memcmp(o1, r12, (size_t)M * N * 4) != 0 || memcmp(o2, r12, (size_t)M * N * 4) != 0;
         free(o1);
         free(o2);
         cudaGraphExecDestroy(e);
         if (made == 1) break;
     }
-    CHECK(wrong == 0, "%d of the graphs replayed gave a wrong result", wrong);
+    CHECK(wrong == 0, "%d of the graphs replayed gave a result other than 12.9's", wrong);
     for (int i = 0; i < made; ++i) cudaGraphDestroy(gs[i]);
-    long long left = rt_granules ? rt_granules(0, NULL, NULL) : 0;
-    for (int i = 0; i < 300 && left; ++i) { /* the destructors run on a thread of the driver */
-        cudaDeviceSynchronize();
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-        left = rt_granules(0, NULL, NULL);
-    }
-    CHECK(left == 0, "%lld granules still counted after every graph was destroyed", left);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;

@@ -1,5 +1,23 @@
 # Changes
 
+## 0.1.4 (unreleased)
+
+### Added
+
+- Opt-in bf16 cuBLAS variants (`forward/bf16tc/`): with `VF_CUBLAS_BF16_SKINNY=1`, bf16 products of
+  2 to 16 columns (fewer than 32 when small) with fp32 accumulation are computed by a kernel of the
+  layer, with cuBLAS 12.9's bits, where 12.9 runs its sequential kernel (a rule of the shape, the
+  layout, the alignment and the workspace, measured over 266,195 configurations; elsewhere the call
+  goes to 12.9); with `VF_CUBLAS_BF16_TC=1`, larger bf16 products that are not captured in a CUDA
+  graph also run on Volta's fp16 tensor cores, with exact scaling to fp16, fixed slices of k of 256 and a fallback for the rows and columns
+  that do not convert exactly, differing from 12.9's in the last bits. Both are off by default, and
+  the default forwarding libraries are 0.1.3's bytes. `cublasGemmEx[_64]`,
+  `cublasGemmStridedBatchedEx[_64]` of one matrix and `cublasLtMatmul` are served; everything else
+  goes to cuBLAS 12.9 as it is. The launcher maps both cuBLAS names to the variants or neither, and
+  refuses to run when they are not all installed; `vf doctor` reports them. The kernels are compiled
+  from the project's source into a checked-in sm_70 fat binary (`scripts/build-bf16-kernels.sh`).
+  `docs/emulations.md` (section 11) states the arithmetic, `LIMITS.md` the limits.
+
 ## 0.1.3 (2026-11-23)
 
 ### Fixed

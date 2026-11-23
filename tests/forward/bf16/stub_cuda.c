@@ -73,7 +73,6 @@ typedef struct {
 static Ctx ctxs[8] = {{101, 0}, {102, 1}, {103, 0}, {104, 0}, {105, 0}, {106, 0}, {107, 0}, {108, 0}};
 static __thread int current = 0; /* index + 1; 0: the first context */
 static int cc_major[2] = {7, 7}, cc_minor[2] = {0, 0};
-static size_t total_mem = (size_t)32 << 30;
 static int module_loads;
 
 EXPORT void stub_set_context(int index) { current = index + 1; }
@@ -82,7 +81,6 @@ EXPORT void stub_set_device(int device, int major, int minor)
     cc_major[device] = major;
     cc_minor[device] = minor;
 }
-EXPORT void stub_set_total_mem(size_t bytes) { total_mem = bytes; }
 EXPORT int stub_module_loads(void) { return module_loads; }
 static Ctx *cur(void) { return &ctxs[current ? current - 1 : 0]; }
 
@@ -110,11 +108,6 @@ EXPORT CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute a, CUdevice d)
     case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK: *pi = 48 * 1024; break;
     default: return CUDA_ERROR_INVALID_VALUE;
     }
-    return CUDA_SUCCESS;
-}
-EXPORT CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice d)
-{
-    *bytes = total_mem;
     return CUDA_SUCCESS;
 }
 
@@ -254,50 +247,6 @@ EXPORT CUresult cuMemsetD32Async(CUdeviceptr d, unsigned v, size_t n, CUstream s
     return failing("cuMemsetD32Async") ? CUDA_ERROR_LAUNCH_FAILED : CUDA_SUCCESS;
 }
 
-/* ---- user objects and graphs ---- */
-typedef struct {
-    void *ptr;
-    CUhostFn destroy;
-    int refs;
-    CUgraph graph; /* the graph that holds it (moved) */
-} UserObject;
-static UserObject objects[4096];
-static int nobjects;
-EXPORT CUresult cuUserObjectCreate(CUuserObject *o, void *ptr, CUhostFn destroy, unsigned refs, unsigned flags)
-{
-    if (failing("cuUserObjectCreate") || nobjects >= 4096) return CUDA_ERROR_OUT_OF_MEMORY;
-    objects[nobjects] = (UserObject){ptr, destroy, (int)refs, NULL};
-    *o = (CUuserObject)&objects[nobjects++];
-    return CUDA_SUCCESS;
-}
-EXPORT CUresult cuUserObjectRelease(CUuserObject o, unsigned count)
-{
-    UserObject *u = (UserObject *)o;
-    u->refs -= (int)count;
-    if (u->refs == 0) u->destroy(u->ptr);
-    return CUDA_SUCCESS;
-}
-EXPORT CUresult cuGraphRetainUserObject(CUgraph g, CUuserObject o, unsigned count, unsigned flags)
-{
-    if (failing("cuGraphRetainUserObject")) return CUDA_ERROR_INVALID_VALUE;
-    UserObject *u = (UserObject *)o;
-    u->graph = g; /* CU_GRAPH_USER_OBJECT_MOVE: the caller's references are now the graph's */
-    stub_event("retain graph=%p", (void *)g);
-    return CUDA_SUCCESS;
-}
-/* The test destroys a graph (and its executable graphs): the destructors of what it holds run. */
-EXPORT int stub_destroy_graph(CUgraph g)
-{
-    int n = 0;
-    for (int i = 0; i < nobjects; ++i)
-        if (objects[i].graph == g && objects[i].refs > 0) {
-            objects[i].refs = 0;
-            objects[i].graph = NULL;
-            objects[i].destroy(objects[i].ptr);
-            ++n;
-        }
-    return n;
-}
 EXPORT CUresult cuGetErrorName(CUresult e, const char **s)
 {
     *s = "CUDA_ERROR_STUB";

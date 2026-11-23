@@ -324,8 +324,6 @@ const ENUMS: &[(&str, &str, bool)] = &[
     ("CUmemAllocationType", "cuda.h", false),
     ("CUmemAllocationHandleType", "cuda.h", false),
     ("CUmemLocationType", "cuda.h", false),
-    ("CUuserObject_flags", "cuda.h", false),
-    ("CUuserObjectRetain_flags", "cuda.h", false),
     ("cudaDataType", "library_types.h", false),
     ("libraryPropertyType", "library_types.h", false),
     ("cublasStatus_t", "cublas_v2.h", false),

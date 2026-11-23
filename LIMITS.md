@@ -317,6 +317,37 @@ What that does not cover:
 
 A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ server used CUDA graphs for both prefill and decode. A graph can report error 701 when it is instantiated or replayed if the translated kernel needs too many registers for the recorded block size. For translated machine code, `VF_BORROW=9 vf …` can preserve a source block size that would otherwise be lost. Shared-memory limits still apply. [SGLang measurements](docs/guides/benchmarks/sglang-default-operators.json) · [GPU validation](docs/validation.md#cuda-graph-replay)
 
+## The bf16 cuBLAS variants
+
+What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.md` and
+`docs/emulations.md` (section 11). Their limits:
+
+- **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
+  workspace would be an allocation node of the program's graph, and with one, measured on driver
+  580.178.04 (`tests/gpu/forward/bf16-graphs.c`), a second instantiation of the graph is refused, it
+  cannot be embedded as a child graph or instantiated for device launch, `cudaGraphExecUpdate` from a
+  recapture is refused, and a graph captured into a conditional node's body cannot be instantiated
+  at all, while the same graph without the node works; the layer cannot tell any of these apart when
+  it is called. In a program that runs its decode steps from graphs (vLLM), the tensor-core path
+  therefore speeds up only what runs outside them (prefill above the captured sizes, eager programs);
+  the skinny path serves captured calls (one kernel node, nothing allocated).
+- **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
+  explicit algorithms, pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with
+  any attribute outside the supported set, and every call of a context that is not a V100's.
+- **Speed that depends on the data.** A row of op(A) or a column of op(B) that does not convert
+  exactly to fp16 is computed by the fallback, which is slower: with every column failing at
+  n = 480, a tensor-core call took 25 to 47 % longer than cuBLAS 12.9's (measured with the runtime's
+  prototype on the MoE model's shapes).
+- **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
+  layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
+  the pool of the context keeps up to 64 MiB between eager calls.
+- **cuBLAS's workspace contract is unchanged.** A forwarded call uses the handle's workspace as 12.9
+  does: threads that share a handle and its workspace on different streams race in cuBLAS itself, as
+  they do without the layer (`tests/gpu/forward/bf16-threads.c` gives each calling thread a context
+  of its own; calls the layer serves use workspace of their own).
+- **The skinny path's rule** was measured with CUDA 12.9.2's cuBLAS (12.9.2.10) on one V100 and one
+  driver; with another cuBLAS the skinny path serves nothing.
+
 ## Several GPUs and NCCL
 
 Any use of several GPUs from PyTorch goes through NCCL: `torch.distributed` (a process for each GPU), `torch.nn.DataParallel` (one process with several GPUs) and SGLang's tensor parallelism (below). The NCCL of the CUDA 13 wheel cannot run its collectives on a V100: the layer refuses its kernels, whose indirect calls can reach multicast instructions with no Volta translation. NCCL's CUDA 12 build has code for Volta: fetch it with `vf fetch --only libnccl` and start the program through `vf`, which gives it that build in place of the wheel's. Without it, on two V100s, `init_process_group` succeeds and the first collective fails after a minute and a half (`Cuda failure 'a PTX JIT compilation failed'`), and `DataParallel` stops when it copies the model to the other GPUs (`NCCL Error 1: unhandled cuda error`); with its first refusal of an NCCL kernel the layer says that the CUDA 12 build is missing.

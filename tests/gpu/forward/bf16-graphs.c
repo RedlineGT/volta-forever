@@ -310,8 +310,8 @@ int main(void)
         physical_backing(v3);
     }
     const Counts c = counts(API_GEMMEX);
-    printf("served by the tensor-core path: %llu calls; forwarded at the graph-memory cap or allocation: %llu %llu\n",
-           c.v[SERVED_TC], c.v[FWD(R_CAP)], c.v[FWD(R_ALLOC)]);
+    printf("served by the tensor-core path: %llu calls; forwarded as captured: %llu; for a failed allocation: %llu\n",
+           c.v[SERVED_TC], c.v[FWD(R_CAPTURED)], c.v[FWD(R_ALLOC)]);
     if (broken) {
         printf("FAIL  a case broke the program's capture or result with the variant (above)\n");
         return 1;

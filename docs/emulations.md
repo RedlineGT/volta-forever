@@ -754,3 +754,92 @@ with `IMMA` or `MOVM` is refused.
 
 The mechanism of the translator (register allocation, timing rules, what is refused, the
 two implementations) is described in `docs/translator.md`.
+
+## 11. cuBLAS bf16 paths (opt-in)
+
+cuBLAS 12.9 computes a bf16 product with fp32 accumulation (`cublasGemmEx`,
+`cublasGemmStridedBatchedEx`, `cublasLtMatmul` with `CUBLAS_COMPUTE_32F`) on a V100 with scalar
+kernels. Two opt-in paths compute some of these calls otherwise (`INSTALL.md`, "The bf16 cuBLAS
+variants"; `docs/architecture.md`, section 6). Every other call, and every call they decline, goes to
+cuBLAS 12.9 with its arguments as given. The runtime is `crates/vf-fwdgen/bf16tc/runtime.c`, its
+kernels `crates/vf-fwdgen/bf16tc/kernels.cu`.
+
+### The skinny path (`VF_CUBLAS_BF16_SKINNY=1`)
+
+For a product with few columns (2 <= n <= 16, or n < 32 when m k < 2^20), one kernel computes every
+element as one fp32 fused multiply-add chain over l = 0, 1, ..., k-1, from +0:
+
+- each product of two bf16 values is exact inside the fused multiply-add (also when it lies below
+  2^-126 or above the largest fp32: `fma(2^64, 2^64, -2^104)` gives the largest fp32, not inf); one
+  rounding to nearest per step; no flush of subnormals;
+- then `alpha * acc`, rounded; then `beta * C` added by one fused multiply-add when beta is not zero;
+  when beta is zero, C is not read and +0 is added, so a -0 becomes +0, also for beta = -0; then the
+  bias of a cuBLASLt bias epilogue, added and rounded;
+- a NaN in fp32 output is the GPU's own (0x7fffffff); in bf16 output every NaN is 0x7fff; bf16 output
+  is rounded to nearest even.
+
+This is what cuBLAS 12.9's sequential kernel on this GPU (`magma_sgemmEx_kernel`) computes, bit for
+bit, on every input that `tests/gpu/forward/bf16-arith.c` puts to both: subnormal products, a product
+brought back from overflow, beta 0.3 and 1/3 with alpha 0.7, the bias with alpha 0.7 and beta 0.3,
+device-mode alpha = 0 with NaN, rows of -0 products, NaN payloads. But 12.9 does not always run that
+kernel: on some shapes it runs `gemmSN_TN_kernel` or `gemmSN_NN_kernel`, which sum in another order,
+and its choice depends on the shape, the layout, the alignment of the operands and the workspace of
+the handle. The skinny path therefore serves only where 12.9 was seen to run its sequential kernel
+(`tests/gpu/forward/bf16-skinny.c` reads the names of the kernels of 12.9's captured calls, over
+266,195 configurations):
+
+| op(A) op(B) | served when |
+|---|---|
+| NT, TT | always (m >= 2): 12.9 ran its sequential kernel in all 130,096 such configurations, whatever the alignment, the workspace or the interface |
+| TN | A, B, C at 16-byte addresses, lda, ldb, ldc, m, k multiples of 8, a workspace of cuBLAS's default or at least 4 MiB, 448 <= m <= 16384, 256 <= k <= 4096 |
+| NN | the same conditions, with 8 <= m <= 9728, 896 <= k <= 16384 |
+
+(A workspace of none, 4 KiB, 64 KiB, 256 KiB, 1 MiB or 2 MiB changed 12.9's choice on 202, 202,
+100, 100, 158 and 158 of 1,120 configurations; 4, 8 and 32 MiB on none. cuBLAS gives a handle its
+default workspace when it is made and at every `cublasSetStream`; with `CUBLAS_WORKSPACE_CONFIG`
+set, the default does not count.) Within these regions the rule served 123,964 configurations of the
+grid and 18,961 random ones not on it, all where 12.9 ran its sequential kernel; it forwards every
+configuration where 12.9 ran `gemmSN` and some where it did not. 1,578 of them, executed, gave 12.9's
+bits in every element. Where 12.9 runs `gemmSN`, that kernel is the more accurate one (at m = 777,
+TN, k = 1536: 0.35-0.45 units of 2^-24 sum |a b| against 1.45-2.38 for the chain), and the skinny
+path does not serve. The rule rests on samples of one GPU and one driver: it is not a property that
+cuBLAS documents.
+
+The path also has bounds of its own, a rule of performance and not of correctness (inside them and
+outside, the bits are 12.9's where the rule above serves), from the time it takes against 12.9's (G1,
+the same tool, timing both on each shape the rule serves): k at most 16384; with op(B) transposed, where it reads op(B) by
+elements, either 256 <= k and m <= 4608, or 64 <= k and 128 <= m <= 1536 (outside, at large m or very
+short k, it was slower than 12.9, down to 0.16 times); with NN, m >= 128. In the region kept it was
+1.13 to 8.5 times as fast as 12.9 (median 1.8 for NT, 2.2 for TT, 4.8 for NN, 6.3 for TN, the layout
+of a framework's linear layers), including the small m and long k where 12.9's sequential kernel is
+slow too (m = 2 to 512, k = 256 to 2^20: 3 to 8.5 times).
+
+### The tensor-core path (`VF_CUBLAS_BF16_TC=1`)
+
+For the other products (m k >= 2^20 or n >= 32, k <= 16384), when the call is not captured in a
+graph, each row of op(A) and each column of
+op(B) is scaled by a power of two, 2^(15 - e) for e the exponent of its largest magnitude, and
+converted to fp16; a row or column is kept only when every element converts exactly (the exponent of
+its maximum in [-24, 31], no infinity, NaN or subnormal maximum, no element that would round or become
+zero). cuBLAS 12.9's fp16 GEMM with fp32 output then computes the product over fixed slices of k of
+256 (a strided batch, on a cuBLASLt handle of the runtime's own, without workspace), and the
+epilogue sums the slices' partials in fp32 in slice order from +0, multiplies by 2^(e_i + f_j - 30)
+(exact), and applies alpha, beta and the bias as the skinny path does. The products are exact; the
+tensor cores add with truncation (section 1), so long sums of one sign come out low: over 21 shapes
+the worst error against fp64 was 24.6 units of 2^-24 sum |a b| for k <= 16384, with a mean bias of
+-13 units, whatever kernel cuBLAS chose for a slice; the same arithmetic reached 32.8 units at
+k = 65536, so longer products are forwarded. An RTX 5090's own bf16 product gave 37.9 to 42.1 units
+on the same same-sign data at k = 1024.
+
+The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
+tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue: they are 12.9's
+where 12.9 runs its sequential kernel. Every element has one writer; an element's value depends on
+its row and column of op(A) and op(B) and on the call's shape (the gates, the chunks of at most
+32 MiB of workspace, and the kernel cuBLAS chooses for a chunk's slices), never on other rows, other
+calls or what ran before. With beta = 0, C is not read. Two runs give the same bits; a graph replays
+the eager call's bits.
+
+A tensor-core call captured in a graph goes to cuBLAS 12.9 (its workspace would be a node of the
+program's graph: `LIMITS.md`, "The bf16 cuBLAS variants"), and so does one whose workspace cannot be
+allocated. The variants do not change cuBLAS's workspace contract: a forwarded call uses the
+handle's workspace as 12.9 does, with the same rules for threads and streams.

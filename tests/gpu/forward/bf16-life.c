@@ -58,7 +58,18 @@ int main(void)
     const cudaError_t sync = cudaStreamSynchronize(s);
     CHECK(sync == cudaSuccess, "replay after the handle's destruction: %s", cudaGetErrorName(sync));
     float *replayed = from_device(C, (size_t)M * N * 4);
-    CHECK(!memcmp(replayed, before, (size_t)M * N * 4), "replay after the handle's destruction: a different result");
+    /* (a captured tensor-core call is computed by 12.9: compare with 12.9's own result) */
+    cublasHandle_t h12;
+    c129.Create(&h12);
+    c129.SetStream(h12, s);
+    void *C12;
+    CU(cudaMalloc(&C12, (size_t)M * N * 4));
+    c129.GemmEx(h12, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &one, dA, CUDA_R_16BF, K, dB, CUDA_R_16BF, K, &zero, C12,
+                CUDA_R_32F, M, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    CU(cudaStreamSynchronize(s));
+    float *r12 = from_device(C12, (size_t)M * N * 4);
+    CHECK(!memcmp(replayed, r12, (size_t)M * N * 4), "replay after the handle's destruction: not 12.9's result");
+    cudaFree(C12);
     cudaGraphExecDestroy(e);
     cudaGraphDestroy(g);
     cudaFree(dA);

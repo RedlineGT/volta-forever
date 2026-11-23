@@ -146,7 +146,7 @@ static void launch_args(const char *l, void *out, size_t size)
 
 /* ---- counters ---- */
 enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_HANDLE, R_CONTEXT, R_MATH,
-       R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAP, R_ALLOC, R_LAUNCH, R_N };
+       R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 typedef struct {
     unsigned long long v[4 + R_N];
@@ -396,53 +396,26 @@ static void h5_internal_gemm(void)
     CHECK(count("chaos ") == 1 && bad == 0, "H5: %d launches did not use the stream read once", bad);
 }
 
-/* ---- H6: the graph-memory cap ---- */
-static void h6_cap(void)
+/* ---- H6: captured calls: the tensor-core path forwards them before making anything; the skinny
+ * path serves them (one kernel, nothing allocated) ---- */
+static void h6_captured(void)
 {
-    /* stub_set_total_mem(3 * 32 MiB) was set before the first handle: the cap is 3 granules */
-    CUgraph G1 = (CUgraph)0x6001, G2 = (CUgraph)0x6002;
-    CUstream s[4] = {(CUstream)0x6101, (CUstream)0x6102, (CUstream)0x6103, (CUstream)0x6104};
-    for (int i = 0; i < 4; ++i) stub_set_stream(s[i], 0, 77, G1);
-    stub_set_stream((CUstream)0x6201, 0, 78, G2);
+    CUstream s = (CUstream)0x6101;
+    stub_set_stream(s, 0, 77, (CUgraph)0x6001);
+    v.SetStream(H, s);
     G g = gemm(1, 0, 1536, 512, 1536);
-    int served[6];
-    for (int i = 0; i < 4; ++i) {
-        v.SetStream(H, s[i]);
-        take();
-        call(&g);
-        take();
-        served[i] = count("alloc ") == 1 && count("gemmex ") == 0;
-        CHECK(served[i] || (count("alloc ") == 0 && count("launch") == 0 && count("retain") == 0 && count("gemmex ") == 1),
-              "H6: a call forwarded at the cap created something first");
-    }
-    CHECK(served[0] && served[1] && served[2] && !served[3],
-          "H6: one capture on four streams with a cap of 3 granules: served %d %d %d %d (want 1 1 1 0)", served[0],
-          served[1], served[2], served[3]);
-    /* the same stream again: no new granule */
-    v.SetStream(H, s[1]);
+    const Counts c0 = counts(API_GEMMEX);
     take();
     call(&g);
     take();
-    CHECK(count("alloc ") == 1, "H6: a second call on a stream already counted was forwarded");
-    /* another capture: forwarded at the cap, served once the first graph is destroyed */
-    v.SetStream(H, (CUstream)0x6201);
-    take();
-    call(&g);
-    take();
-    served[4] = count("alloc ") == 1;
-    CHECK(stub_destroy_graph(G1) == 1, "H6: the first graph held not exactly one user object");
-    take();
-    call(&g);
-    take();
-    served[5] = count("alloc ") == 1;
-    CHECK(!served[4] && served[5], "H6: another capture: served %d before and %d after the first graph's destruction",
-          served[4], served[5]);
-    /* eager calls are not counted */
+    const Counts c1 = counts(API_GEMMEX);
+    CHECK(count("gemmex ") == 1 && count("alloc") == 0 && count("launch") == 0 && count("memset") == 0 &&
+              count("ltmatmul") == 0,
+          "H6: a captured tensor-core call was not forwarded before anything was made:\n%s", ev);
+    CHECK(c1.v[4 + R_CAPTURED] - c0.v[4 + R_CAPTURED] == 1, "H6: not counted as a captured call");
+    G k = gemm(0, 1, 1536, 8, 1920);
+    expect_skinny("H6: a captured skinny call", &k, "vf_bf16_skinny_g_8_16");
     v.SetStream(H, S1);
-    take();
-    call(&g);
-    take();
-    CHECK(count("alloc ") == 1, "H6: an eager call was forwarded");
 }
 
 /* ---- H7: cuBLASLt attributes, each outside the supported set ---- */
@@ -535,7 +508,6 @@ int main(int argc, char **argv)
         return 2;
     }
     const char *mode = argv[2];
-    stub_set_total_mem(3ull * (32u << 20)); /* a cap of 3 granules (H6) */
     /* inject STEP: the stand-in fails the function of that step (the runtime's error handling, as with
      * a driver that refuses) */
     static const char *const steps[][2] = {{"module", "cuModuleLoadData"}, {"alloc", "cuMemAllocFromPoolAsync"},
@@ -556,7 +528,7 @@ int main(int argc, char **argv)
         h1_forwarded();
         h1_served();
         h4_one_runtime();
-        h6_cap();
+        h6_captured();
         h7_lt_allowlist();
         h5_internal_gemm();
     } else if (!strcmp(mode, "skinny")) {

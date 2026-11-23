@@ -19,7 +19,7 @@
 /* The runtime's reasons to forward (crates/vf-fwdgen/bf16tc/runtime.c, the same order). */
 enum {
     R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_HANDLE, R_CONTEXT, R_MATH,
-    R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAP, R_ALLOC, R_LAUNCH, R_N
+    R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N
 };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 
@@ -55,7 +55,6 @@ static struct {
 
 /* The runtime's counters (test builds only; NULL with a release runtime). */
 static int (*rt_counters)(int, unsigned long long *, int);
-static long long (*rt_granules)(int, long long *, long long *);
 
 static void open_129(void)
 {
@@ -80,7 +79,6 @@ static void open_runtime(void)
     void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
     if (rt) {
         *(void **)&rt_counters = dlsym(rt, "vf_bf16_test_counters");
-        *(void **)&rt_granules = dlsym(rt, "vf_bf16_test_granules");
     }
     if (!rt_counters) printf("note  a release runtime: which path served each call is not checked\n");
 }

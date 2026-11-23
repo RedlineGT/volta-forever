@@ -37,9 +37,7 @@ typedef struct CUstream_st *CUstream;
 typedef struct CUgraph_st *CUgraph;
 typedef struct CUgraphNode_st *CUgraphNode;
 typedef struct CUmemPoolHandle_st *CUmemoryPool;
-typedef struct CUuserObject_st *CUuserObject;
 typedef struct CUgraphEdgeData_st CUgraphEdgeData;
-typedef void (*CUhostFn)(void *userData);
 
 #define CU_STREAM_LEGACY ((CUstream)0x1)
 #define CU_STREAM_PER_THREAD ((CUstream)0x2)
@@ -85,14 +83,6 @@ typedef enum CUmemLocationType_enum {
     CU_MEM_LOCATION_TYPE_DEVICE = 1
 } CUmemLocationType;
 
-typedef enum CUuserObject_flags_enum {
-    CU_USER_OBJECT_NO_DESTRUCTOR_SYNC = 1
-} CUuserObject_flags;
-
-typedef enum CUuserObjectRetain_flags_enum {
-    CU_GRAPH_USER_OBJECT_MOVE = 1
-} CUuserObjectRetain_flags;
-
 typedef struct CUmemLocation_st {
     CUmemLocationType type;
     int id;
@@ -114,7 +104,6 @@ CUresult cuCtxGetCurrent(CUcontext *pctx);
 CUresult cuCtxGetId(CUcontext ctx, unsigned long long *ctxId);
 CUresult cuCtxGetDevice(CUdevice *device);
 CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev);
-CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev);
 CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx);
 CUresult cuStreamGetCaptureInfo_v3(CUstream hStream, CUstreamCaptureStatus *captureStatus_out, cuuint64_t *id_out,
                                    CUgraph *graph_out, const CUgraphNode **dependencies_out,
@@ -132,10 +121,6 @@ CUresult cuMemPoolSetAttribute(CUmemoryPool pool, CUmemPool_attribute attr, void
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream);
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
 CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream);
-CUresult cuUserObjectCreate(CUuserObject *object_out, void *ptr, CUhostFn destroy, unsigned int initialRefcount,
-                            unsigned int flags);
-CUresult cuUserObjectRelease(CUuserObject object, unsigned int count);
-CUresult cuGraphRetainUserObject(CUgraph graph, CUuserObject object, unsigned int count, unsigned int flags);
 CUresult cuGetErrorName(CUresult error, const char **pStr);
 
 /* ---- library types (library_types.h) ----------------------------------------------------- */

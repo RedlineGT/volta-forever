@@ -125,8 +125,9 @@ static void skinny_cases(void)
             }
 }
 
-/* The tensor-core path: served, within 32 units of fp64 (2^-24 sum |a b|), deterministic, the same
- * eager and replayed from a graph. */
+/* The tensor-core path: served, within 32 units of fp64 (2^-24 sum |a b|), deterministic; the same
+ * call captured in a graph goes to 12.9 (its workspace would be a node of the graph): the replay has
+ * 12.9's bits. */
 static void tc_cases(void)
 {
     const int layouts[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
@@ -148,8 +149,9 @@ static void tc_cases(void)
             const double e = err_units(s.ta, s.tb, s.m, s.n, s.k, 1.0f, d.hA, s.lda, d.hB, s.ldb, 0.0f, d.hC0, f, s.ldc);
             /* fp32 output: the arithmetic's own bound; bf16 output adds half an ulp of bf16 (2^-9 relative). */
             CHECK(e <= (ct ? 32.0 + 32768.0 : 32.0), "tc %s %s: error %.2f units", layout_name(&s), ct ? "bf16" : "fp32", e);
-            /* eager = replay */
+            /* captured: 12.9's */
             void *Cg = to_device(d.hCraw, d.cbytes);
+            const Counts k0 = counts(API_GEMMEX);
             cudaGraph_t g;
             cudaGraphExec_t ge;
             const float one = 1.0f, zero = 0.0f;
@@ -158,11 +160,14 @@ static void tc_cases(void)
                          d.dA, CUDA_R_16BF, (int)s.lda, d.dB, CUDA_R_16BF, (int)s.ldb, &zero, Cg, s.ctype, (int)s.ldc,
                          CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
             CU(cudaStreamEndCapture(stream, &g));
+            const Counts k1 = counts(API_GEMMEX);
+            CHECK(!rt_counters || delta(&k0, &k1, FWD(R_CAPTURED)) == 1, "tc %s: a captured call not forwarded",
+                  layout_name(&s));
             CU(cudaGraphInstantiate(&ge, g, 0));
             for (int r = 0; r < 3; ++r) CU(cudaGraphLaunch(ge, stream));
             CU(cudaStreamSynchronize(stream));
             void *og = from_device(Cg, d.cbytes);
-            CHECK(ndiff(ov, og, d.cbytes, es) == 0, "tc %s: the graph replay differs from the eager call", layout_name(&s));
+            CHECK(ndiff(o12, og, d.cbytes, es) == 0, "tc %s: the replay of the captured call is not 12.9's", layout_name(&s));
             cudaGraphExecDestroy(ge);
             cudaGraphDestroy(g);
             cudaFree(Cg);

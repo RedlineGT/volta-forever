@@ -17,10 +17,8 @@ void stub_fail(const char *name, int count);
 int stub_failing(const char *name);
 void stub_set_context(int index);
 void stub_set_device(int device, int major, int minor);
-void stub_set_total_mem(size_t bytes);
 int stub_module_loads(void);
 void stub_set_stream(CUstream s, int ctx_index, unsigned long long capture, CUgraph graph);
-int stub_destroy_graph(CUgraph g);
 /* libcublas.so.12 stand-in: right after the next pointer-mode query of handle h, another "thread" sets
  * its stream to s and its pointer mode to device. */
 void stub_chaos(cublasHandle_t h, cudaStream_t s);

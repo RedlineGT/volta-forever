@@ -11,10 +11,13 @@
 // paths; any other call is forwarded to CUDA 12.9 with its arguments unchanged.
 // - The skinny path (VF_CUBLAS_BF16_SKINNY=1, or with VF_CUBLAS_BF16_TC=1 unless SKINNY=0): one
 //   kernel, one fp32 fused multiply-add chain per element in increasing k from +0, no workspace.
-// - The tensor-core path (VF_CUBLAS_BF16_TC=1): rows of op(A) and columns of op(B) scaled by exact
-//   powers of two and converted to fp16 when every element converts exactly; CUDA 12.9's fp16 GEMM
-//   over fixed k-slices of 256, on a cuBLASLt handle of this runtime's own; an exact rescale; the
-//   rows and columns that do not convert by a fused multiply-add chain like the skinny path's.
+// - The tensor-core path (VF_CUBLAS_BF16_TC=1), for calls that are not captured in a graph: rows of
+//   op(A) and columns of op(B) scaled by exact powers of two and converted to fp16 when every element
+//   converts exactly; CUDA 12.9's fp16 GEMM over fixed k-slices of 256, on a cuBLASLt handle of this
+//   runtime's own; an exact rescale; the rows and columns that do not convert by a fused multiply-add
+//   chain like the skinny path's. Its workspace is allocated on the call's stream; in a capture that
+//   would be an allocation node in the program's graph, which changes what the program can do with
+//   the graph (tests/gpu/forward/bf16-graphs.c), so a captured call goes to 12.9 instead.
 // docs/emulations.md ("cuBLAS bf16 paths") states the arithmetic; docs/architecture.md the design.
 //
 // Built against decls.h (this project's declarations of the CUDA, cuBLAS and cuBLASLt it uses), so
@@ -50,8 +53,7 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_TC_GATE_MK (1LL << 20)    /* tensor-core path: m * k at least this, or n >= VF_TC_GATE_N */
 #define VF_TC_GATE_N 32
 #define VF_MIN_K 16                  /* shorter products are forwarded */
-#define VF_CHUNK_BYTES (32u << 20)   /* the workspace of one call: at most one 32 MiB granule */
-#define VF_GRANULE (32ull << 20)     /* the driver's unit of graph memory */
+#define VF_CHUNK_BYTES (32u << 20)   /* the workspace of one call, chunked statically to fit */
 #define VF_POOL_KEEP (64ull << 20)   /* memory kept by the pool of a context between eager calls */
 #define VF_SKINNY_MAX_N 16           /* skinny path: n <= 16, or n < 32 when m * k < 2^20 */
 #define VF_SKINNY_SMALL_MK (1LL << 20)
@@ -171,7 +173,6 @@ static struct {
     FN(cuCtxGetId) CtxGetId;
     FN(cuCtxGetDevice) CtxGetDevice;
     FN(cuDeviceGetAttribute) DeviceGetAttribute;
-    FN(cuDeviceTotalMem_v2) DeviceTotalMem;
     FN(cuStreamGetCtx) StreamGetCtx;
     FN(cuStreamGetCaptureInfo_v3) StreamGetCaptureInfo;
     FN(cuThreadExchangeStreamCaptureMode) ThreadExchangeStreamCaptureMode;
@@ -185,9 +186,6 @@ static struct {
     FN(cuMemAllocFromPoolAsync) MemAllocFromPoolAsync;
     FN(cuMemFreeAsync) MemFreeAsync;
     FN(cuMemsetD32Async) MemsetD32Async;
-    FN(cuUserObjectCreate) UserObjectCreate;
-    FN(cuUserObjectRelease) UserObjectRelease;
-    FN(cuGraphRetainUserObject) GraphRetainUserObject;
     FN(cuGetErrorName) GetErrorName;
 } cu;
 #undef FN
@@ -247,7 +245,7 @@ static void bind_driver(void)
     }
     g_cuda_ok = BIND(d, cu.CtxGetCurrent, "cuCtxGetCurrent") && BIND(d, cu.CtxGetId, "cuCtxGetId") &&
                 BIND(d, cu.CtxGetDevice, "cuCtxGetDevice") && BIND(d, cu.DeviceGetAttribute, "cuDeviceGetAttribute") &&
-                BIND(d, cu.DeviceTotalMem, "cuDeviceTotalMem_v2") && BIND(d, cu.StreamGetCtx, "cuStreamGetCtx") &&
+                BIND(d, cu.StreamGetCtx, "cuStreamGetCtx") &&
                 BIND(d, cu.StreamGetCaptureInfo, "cuStreamGetCaptureInfo_v3") &&
                 BIND(d, cu.ThreadExchangeStreamCaptureMode, "cuThreadExchangeStreamCaptureMode") &&
                 BIND(d, cu.ModuleLoadData, "cuModuleLoadData") &&
@@ -257,9 +255,6 @@ static void bind_driver(void)
                 BIND(d, cu.MemPoolSetAttribute, "cuMemPoolSetAttribute") &&
                 BIND(d, cu.MemAllocFromPoolAsync, "cuMemAllocFromPoolAsync") &&
                 BIND(d, cu.MemFreeAsync, "cuMemFreeAsync") && BIND(d, cu.MemsetD32Async, "cuMemsetD32Async") &&
-                BIND(d, cu.UserObjectCreate, "cuUserObjectCreate") &&
-                BIND(d, cu.UserObjectRelease, "cuUserObjectRelease") &&
-                BIND(d, cu.GraphRetainUserObject, "cuGraphRetainUserObject") &&
                 BIND(d, cu.GetErrorName, "cuGetErrorName");
     if (!g_cuda_ok) say("a function is missing from libcuda.so.1; every call is forwarded");
 }
@@ -296,7 +291,7 @@ enum {
     R_ALIAS,   /* the output overlaps an input */
     R_LTATTR,  /* a cuBLASLt attribute outside the supported set */
     R_PLAN,    /* no chunking fits the workspace limit */
-    R_CAP,     /* the graph-memory cap of the tensor-core path */
+    R_CAPTURED, /* a tensor-core call in a graph capture (its allocation would be a node of the graph) */
     R_ALLOC,   /* the workspace allocation failed */
     R_LAUNCH,  /* a launch or the internal GEMM failed before the output was written */
     R_N
@@ -307,7 +302,7 @@ static const char *const reason_name[R_N] = {
     "another cuBLAS build",
     "k > 16384", "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
-    "no chunking", "graph-memory cap", "allocation failed", "launch failed"};
+    "no chunking", "tensor-core call in a graph capture", "allocation failed", "launch failed"};
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
 static atomic_ullong st_fwd[API_N][R_N];
 static atomic_ullong st_tc_captured[API_N];
@@ -374,15 +369,6 @@ EXPORT int vf_bf16_init(void)
 
 /* ---- contexts --------------------------------------------------------------------------- */
 
-/* One per device ordinal: the graph-memory granules that live graphs hold for this runtime's
- * allocation nodes, and the cap. */
-typedef struct Dev {
-    struct Dev *next;
-    int ordinal;
-    long long cap;
-    atomic_llong held, high;
-} Dev;
-
 enum { SK_8_16, SK_8_32, SK_16_8, SK_16_16, SK_32_4, SK_32_8, SK_N };
 static const int sk_ncp[SK_N] = {8, 8, 16, 16, 32, 32}, sk_rb[SK_N] = {16, 32, 8, 16, 4, 8};
 static const char *const sk_name[SK_N] = {"8_16", "8_32", "16_8", "16_16", "32_4", "32_8"};
@@ -395,7 +381,6 @@ typedef struct Ctx {
     CUcontext ctx;
     int ok; /* the kernels, the pool and the internal handle are there, on a V100 */
     int ordinal, sms;
-    Dev *dev;
     CUmodule mod;
     CUfunction scale, epilogue, fb_wide, fb_narrow, fb_tn, skinny[2][SK_N]; /* skinny[fast][shape] */
     CUmemoryPool pool;
@@ -404,23 +389,7 @@ typedef struct Ctx {
 
 static Ctx g_no_ctx;         /* a handle whose context has no state: every call forwarded */
 static Ctx *g_ctxs;          /* list, appended under g_ctx_mu */
-static Dev *g_devs;
 static pthread_mutex_t g_ctx_mu = PTHREAD_MUTEX_INITIALIZER;
-
-static Dev *device_record(int ordinal, size_t total)
-{
-    for (Dev *d = g_devs; d; d = d->next)
-        if (d->ordinal == ordinal) return d;
-    Dev *d = calloc(1, sizeof *d);
-    if (!d) return NULL;
-    d->ordinal = ordinal;
-    /* Half of what the driver allows (2,031 granules of 32 MiB on a 32 GB V100, about twice the
-     * memory): the other half is the program's. */
-    d->cap = (long long)(total / VF_GRANULE);
-    d->next = g_devs;
-    g_devs = d;
-    return d;
-}
 
 static int load_function(Ctx *x, CUfunction *f, const char *name, int threads, int dynamic_smem, int max_smem)
 {
@@ -448,13 +417,11 @@ static void setup_context(Ctx *x)
 {
     CUdevice d;
     int major = 0, minor = 0, max_smem = 0;
-    size_t total = 0;
     if (cu.CtxGetDevice(&d) != CUDA_SUCCESS ||
         cu.DeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, d) != CUDA_SUCCESS ||
         cu.DeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, d) != CUDA_SUCCESS ||
         cu.DeviceGetAttribute(&x->sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, d) != CUDA_SUCCESS ||
-        cu.DeviceGetAttribute(&max_smem, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, d) != CUDA_SUCCESS ||
-        cu.DeviceTotalMem(&total, d) != CUDA_SUCCESS)
+        cu.DeviceGetAttribute(&max_smem, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, d) != CUDA_SUCCESS)
         return;
     x->ordinal = (int)d;
     if (major != 7 || minor != 0) {
@@ -527,13 +494,11 @@ static void setup_context(Ctx *x)
         SAY(1, "device %d: cublasLtCreate returned %d; every call in this context is forwarded", x->ordinal, (int)s);
         return;
     }
-    x->dev = device_record(x->ordinal, total);
-    if (!x->dev) return;
     x->ok = 1;
     static atomic_int said;
     if (!atomic_exchange(&said, 1))
-        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (device %d: %lld granules "
-               "of graph memory at most)", cfg.skinny ? "on" : "off", cfg.tc ? "on" : "off", x->ordinal, x->dev->cap);
+        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (outside graph captures)",
+            cfg.skinny ? "on" : "off", cfg.tc ? "on" : "off");
 }
 
 /* The state of the current context, made if it is new. */
@@ -741,138 +706,6 @@ EXPORT cublasStatus_t vf_bf16_cublasLtDestroy(cublasLtHandle_t handle)
 {
     handle_remove(handle);
     return cb.LtDestroy(handle);
-}
-
-/* ---- the graph-memory cap -------------------------------------------------------------- */
-
-/* A captured tensor-core call allocates its workspace on its stream: the allocation becomes a node
- * of the graph, and the driver reserves address space for a graph's allocation nodes in granules
- * of 32 MiB, shared with the program's own, as long as the graph or an executable graph made from
- * it lives. This runtime counts what it holds: one granule for each stream of a capture on which it
- * allocated (one call's workspace is at most one granule; calls on one stream follow each other and
- * share it; calls on two streams may overlap), returned when the graph and its executable graphs
- * are destroyed (a user object that the graph owns). At the cap, a captured tensor-core call is
- * forwarded before anything is added to the graph. */
-typedef struct Grant {
-    struct Grant *next;
-    unsigned long long capture;
-    Dev *dev;
-    atomic_int charged;
-    atomic_int released;
-    int nstreams, cap;
-    CUstream *streams;
-} Grant;
-static Grant *g_grants;
-static pthread_mutex_t g_grant_mu = PTHREAD_MUTEX_INITIALIZER;
-
-/* The user object's destructor: on a thread of the driver, when the graph and every executable
- * graph made from it are gone. No CUDA call, no lock; the record is freed later, under the lock. */
-static void grant_release(void *p)
-{
-    Grant *g = p;
-    const int n = atomic_exchange(&g->charged, 0);
-    atomic_fetch_sub(&g->dev->held, n);
-    atomic_store_explicit(&g->released, 1, memory_order_release);
-}
-
-static void sweep_grants(void)
-{
-    for (Grant **pp = &g_grants; *pp;) {
-        Grant *g = *pp;
-        if (atomic_load_explicit(&g->released, memory_order_acquire)) {
-            *pp = g->next;
-            free(g->streams);
-            free(g);
-        } else {
-            pp = &g->next;
-        }
-    }
-}
-
-static int take_granule(Dev *d)
-{
-    long long held = atomic_load(&d->held);
-    do {
-        if (held + 1 > d->cap && !CONTROL("no-cap")) return 0;
-    } while (!atomic_compare_exchange_weak(&d->held, &held, held + 1));
-    long long high = atomic_load(&d->high);
-    while (held + 1 > high && !atomic_compare_exchange_weak(&d->high, &high, held + 1)) {
-    }
-    return 1;
-}
-
-/* 1 when the call may allocate in its capture (counted), 0 when it must be forwarded. */
-static int charge_capture(Ctx *x, CUstream stream, unsigned long long capture, CUgraph graph)
-{
-    pthread_mutex_lock(&g_grant_mu);
-    sweep_grants();
-    Grant *g = g_grants;
-    while (g && g->capture != capture) g = g->next;
-    if (g) {
-        int ok = CONTROL("per-capture");
-        for (int i = 0; i < g->nstreams && !ok; ++i) ok = g->streams[i] == stream;
-        if (!ok && g->nstreams == g->cap) {
-            CUstream *s = realloc(g->streams, sizeof *s * (size_t)g->cap * 2);
-            if (s) {
-                g->streams = s;
-                g->cap *= 2;
-            }
-        }
-        if (!ok && g->nstreams < g->cap && take_granule(x->dev)) {
-            g->streams[g->nstreams++] = stream;
-            atomic_fetch_add(&g->charged, 1);
-            ok = 1;
-        }
-        pthread_mutex_unlock(&g_grant_mu);
-        return ok;
-    }
-    if (!take_granule(x->dev)) {
-        pthread_mutex_unlock(&g_grant_mu);
-        return 0;
-    }
-    g = calloc(1, sizeof *g);
-    CUstream *s = malloc(sizeof *s * 4);
-    CUuserObject obj = NULL;
-    if (!g || !s) goto fail;
-    g->capture = capture;
-    g->dev = x->dev;
-    g->cap = 4;
-    g->streams = s;
-    g->streams[0] = stream;
-    g->nstreams = 1;
-    atomic_store(&g->charged, 1);
-    if (cu.UserObjectCreate(&obj, g, grant_release, 1, CU_USER_OBJECT_NO_DESTRUCTOR_SYNC) != CUDA_SUCCESS) goto fail;
-    if (cu.GraphRetainUserObject(graph, obj, 1, CU_GRAPH_USER_OBJECT_MOVE) != CUDA_SUCCESS) {
-        cu.UserObjectRelease(obj, 1); /* runs grant_release: the granule is returned there */
-        g->next = g_grants;
-        g_grants = g; /* freed by the next sweep */
-        pthread_mutex_unlock(&g_grant_mu);
-        return 0;
-    }
-    g->next = g_grants;
-    g_grants = g;
-    pthread_mutex_unlock(&g_grant_mu);
-    return 1;
-fail:
-    atomic_fetch_sub(&x->dev->held, 1);
-    free(g);
-    free(s);
-    pthread_mutex_unlock(&g_grant_mu);
-    return 0;
-}
-
-/* A charge that the call did not use (its allocation failed): returned at once. Only the stream
- * just added can be taken back; an older charge of the capture stays (a call before used it). */
-static void uncharge_capture(Ctx *x, CUstream stream, unsigned long long capture)
-{
-    pthread_mutex_lock(&g_grant_mu);
-    for (Grant *g = g_grants; g; g = g->next)
-        if (g->capture == capture && g->nstreams > 1 && g->streams[g->nstreams - 1] == stream) {
-            --g->nstreams;
-            if (atomic_fetch_sub(&g->charged, 1) > 0) atomic_fetch_sub(&x->dev->held, 1);
-            break;
-        }
-    pthread_mutex_unlock(&g_grant_mu);
 }
 
 /* ---- one product ------------------------------------------------------------------------ */
@@ -1174,9 +1007,12 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         *reason = R_ARGS;
         return FWD;
     }
-    /* Every decision that can forward the call is taken before the first node (review 3.6). */
-    if (capturing && !charge_capture(x, c->stream, capture, graph)) {
-        *reason = R_CAP;
+    /* A captured call: its workspace would be an allocation node in the program's graph, which the
+     * program could then not instantiate twice, embed as a child graph, launch from the device, update,
+     * or instantiate at all from a conditional node's body (tests/gpu/forward/bf16-graphs.c). 12.9
+     * computes it; the skinny path, which allocates nothing, still serves captured calls. */
+    if (capturing && !CONTROL("capture-tc")) {
+        *reason = R_CAPTURED;
         return FWD;
     }
     CUdeviceptr base = 0;
@@ -1190,7 +1026,6 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
     CUresult r = INJECT("alloc") ? CUDA_ERROR_OUT_OF_MEMORY : cu.MemAllocFromPoolAsync(&base, p.total, x->pool, alloc_stream);
     if (!capturing && !CONTROL("no-relaxed")) cu.ThreadExchangeStreamCaptureMode(&mode);
     if (r != CUDA_SUCCESS || !base) {
-        if (capturing) uncharge_capture(x, c->stream, capture);
         static atomic_int said;
         if (!atomic_exchange(&said, 1))
             SAY(1, "a workspace of %zu bytes could not be allocated (%s)%s: such calls are forwarded", p.total,
@@ -1777,7 +1612,7 @@ forward:
 
 #ifdef VF_BF16_TEST
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded
- * by reason), and the granules held on a device. Returns the number of values written. */
+ * by reason). Returns the number of values written. */
 EXPORT int vf_bf16_test_counters(int api, unsigned long long *out, int n)
 {
     if (api < 0 || api >= API_N || n < 4 + R_N) return 0;
@@ -1787,18 +1622,5 @@ EXPORT int vf_bf16_test_counters(int api, unsigned long long *out, int n)
     out[3] = atomic_load(&st_failed[api]);
     for (int r = 0; r < R_N; ++r) out[4 + r] = atomic_load(&st_fwd[api][r]);
     return 4 + R_N;
-}
-EXPORT long long vf_bf16_test_granules(int ordinal, long long *cap, long long *high)
-{
-    pthread_mutex_lock(&g_ctx_mu);
-    long long held = -1;
-    for (Dev *d = g_devs; d; d = d->next)
-        if (d->ordinal == ordinal) {
-            held = atomic_load(&d->held);
-            if (cap) *cap = d->cap;
-            if (high) *high = atomic_load(&d->high);
-        }
-    pthread_mutex_unlock(&g_ctx_mu);
-    return held;
 }
 #endif

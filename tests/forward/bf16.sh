@@ -76,7 +76,7 @@ fails() {  # fails NAME WHAT : PASS when the program failed (a control)
 }
 
 run all "$out/test" VF_CUBLAS_BF16_TC=1 -- all
-pass all "H1-H7: forwarding with the same arguments, call sequences and chunks, explicit algorithms, bounds, one runtime, the internal GEMM, the graph-memory cap, the cuBLASLt allowlist"
+pass all "H1-H7: forwarding with the same arguments, call sequences and chunks, explicit algorithms, bounds, one runtime, the internal GEMM, captured calls, the cuBLASLt allowlist"
 run skinny "$out/test" VF_CUBLAS_BF16_SKINNY=1 -- skinny
 pass skinny "H3: the skinny path's bounds and its rule for 12.9's sequential kernel"
 run otherbuild "$out/test" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901 -- otherbuild
@@ -96,7 +96,7 @@ else
 fi
 
 echo "controls (each must make its test fail):"
-for c in algo tc-k split-states caller-handle-any no-cap per-capture lt-drop; do
+for c in algo tc-k split-states caller-handle-any capture-tc lt-drop; do
     run control-$c "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_CONTROL=$c -- all
     fails control-$c "control $c"
 done
