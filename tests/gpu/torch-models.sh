@@ -21,6 +21,7 @@ export VF_OUT=$out
 if [ "${VF_NATIVE:-0}" = 1 ]; then
     site=${VF_TORCH_NATIVE:-$VF_TEST_ROOT/torch-cu126/site}
     [ -d "$site/torch" ] || { echo "missing: PyTorch in $site (the head of tests/gpu/torch-bench.sh says how to put it there)"; exit 2; }
+    PYTHONPATH=$site python3 "$W/tests/gpu/torch-models.py" --comparison || exit 1
     PYTHONPATH=$site python3 "$W/tests/gpu/torch-models.py" "$@"
     exit
 fi
@@ -28,5 +29,6 @@ site=${VF_TORCH:-$VF_TEST_ROOT/torch-cu130/site}
 [ -d "$site/torch" ] || { echo "missing: PyTorch in $site (the head of tests/gpu/torch.sh says how to put it there)"; exit 2; }
 proxy=${VF_PROXY:-$W/dist/lib}
 map=$(vf_torch_map "$out")
+PYTHONPATH=$site python3 "$W/tests/gpu/torch-models.py" --comparison || exit 1
 vf_layer "$proxy" "$map"
 PYTHONPATH=$site python3 "$W/tests/gpu/torch-models.py" "$@"
