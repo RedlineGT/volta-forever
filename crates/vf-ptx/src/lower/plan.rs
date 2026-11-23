@@ -52,6 +52,11 @@ pub(super) struct Plan<'a> {
     pub(super) targets: HashSet<&'a str>,
     /// Unshadowed 16-bit registers with one unconditional constant definition.
     pub(super) constants16: HashMap<&'a str, u32>,
+    /// 32-bit registers that hold one of two numbers wherever they are read: the only statement of
+    /// the function that writes them is an unguarded `selp` of two integers, and the body declares
+    /// them once. Triton says so how much of the source of a `cp.async` is read
+    /// (`selp.b32 %r47, 16, 0, %p2;`).
+    pub(super) choices: HashMap<&'a str, [u32; 2]>,
     /// Products of packed BF16 FMAs whose sums are exactly representable.
     pub(super) exact_bf16_sums: HashMap<usize, super::known_bits::ExactSum<'a>>,
     /// Registers written by `movmatrix`: their layout is transposed, not suitable for the chain
@@ -104,6 +109,7 @@ impl<'a> Plan<'a> {
         let mut set_to_ones: Vec<&str> = Vec::new();
         let mut constants16 = Vec::new();
         let mut constants32 = Vec::new();
+        let mut choices = Vec::new();
         let packed_fma = text.contains("fma.rn.bf16x2");
         let mut plan = Plan::default();
         let mut depth = 0usize;
@@ -153,6 +159,13 @@ impl<'a> Plan<'a> {
                 && u16::try_from(value).is_ok()
             {
                 constants16.push((name, value));
+            }
+            if let ("selp.b32" | "selp.u32" | "selp.s32", false, [register, first, second, _]) =
+                (opcode, guarded, &scan::split_operands(operands)[..])
+                && let Some(name) = scan::register(register)
+                && let (Some(first), Some(second)) = (integer(first), integer(second))
+            {
+                choices.push((name, [first, second]));
             }
             if guarded || !is_tensor(opcode) {
                 continue;
@@ -214,6 +227,10 @@ impl<'a> Plan<'a> {
         plan.constants16 = constants16
             .into_iter()
             .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(16))
+            .collect();
+        plan.choices = choices
+            .into_iter()
+            .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(32))
             .collect();
         if packed_fma {
             // Only unshadowed registers with one unconditional write retain constants across labels.

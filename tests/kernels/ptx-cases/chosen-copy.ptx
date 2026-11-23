@@ -1,0 +1,60 @@
+.version 8.4
+.target sm_80
+.address_size 64
+// The amount of each asynchronous copy is chosen once, between nothing and the whole size, as
+// Triton chooses it for its pipelined loads (selp.b32 %r, 16, 0, %p): every lane checks what it
+// copied against what it expects and stores zeros when it is right.
+.global .align 16 .u32 source[4] = {0x12345678, 0x9abcdef0, 0x0fedcba9, 0x87654321};
+.visible .entry k(.param .u64 output) .reqntid 32,1,1 {
+    .reg .b32 lane, bit, dst, all16, all8, a, b, c, d, e, f, g, h, expected;
+    .reg .b64 src, out;
+    .reg .pred odd, low;
+    .shared .align 16 .b8 rows[1024];
+    mov.u32 lane, %laneid;
+    mov.u32 dst, rows;
+    mad.lo.u32 dst, lane, 32, dst;
+    mov.u32 a, 0xdeadbeef;
+    st.shared.v4.u32 [dst], {a,a,a,a};
+    st.shared.v4.u32 [dst+16], {a,a,a,a};
+    and.b32 bit, lane, 1;
+    setp.ne.u32 odd, bit, 0;
+    setp.lt.u32 low, lane, 16;
+    mov.u64 src, source;
+    // All of the source in the odd lanes for the 16-byte copy, in the even ones for the 8-byte copies.
+    selp.b32 all16, 16, 0, odd;
+    selp.b32 all8, 0, 8, odd;
+    cp.async.cg.shared.global [dst], [src], 16, all16;
+    cp.async.ca.shared.global [dst+16], [src+8], 8, all8;
+    // Under a predicate: lanes 16..31 leave their destination as it was.
+    @low cp.async.ca.shared.global [dst+24], [src], 8, all8;
+    cp.async.commit_group;
+    cp.async.wait_group 0;
+    ld.shared.v4.u32 {a,b,c,d}, [dst];
+    ld.shared.v4.u32 {e,f,g,h}, [dst+16];
+    selp.b32 expected, 0x12345678, 0, odd;
+    xor.b32 a, a, expected;
+    selp.b32 expected, 0x9abcdef0, 0, odd;
+    xor.b32 b, b, expected;
+    selp.b32 expected, 0x0fedcba9, 0, odd;
+    xor.b32 c, c, expected;
+    selp.b32 expected, 0x87654321, 0, odd;
+    xor.b32 d, d, expected;
+    selp.b32 expected, 0, 0x0fedcba9, odd;
+    xor.b32 e, e, expected;
+    selp.b32 expected, 0, 0x87654321, odd;
+    xor.b32 f, f, expected;
+    selp.b32 expected, 0, 0x12345678, odd;
+    selp.b32 expected, expected, 0xdeadbeef, low;
+    xor.b32 g, g, expected;
+    selp.b32 expected, 0, 0x9abcdef0, odd;
+    selp.b32 expected, expected, 0xdeadbeef, low;
+    xor.b32 h, h, expected;
+    or.b32 a, a, e;
+    or.b32 b, b, f;
+    or.b32 c, c, g;
+    or.b32 d, d, h;
+    ld.param.u64 out, [output];
+    mad.wide.u32 out, lane, 16, out;
+    st.global.v4.b32 [out], {a,b,c,d};
+    ret;
+}

@@ -1260,6 +1260,75 @@ fn an_asynchronous_copy_is_made_where_it_starts() {
 }
 
 #[test]
+fn an_amount_chosen_between_nothing_and_all_takes_no_byte_loop() {
+    // Triton's pipelined loads: the amount is chosen once, between the whole size and nothing.
+    let function = |declared: &str, before: &str, copy: &str| {
+        format!(
+            "{{\n\t.reg .b32 %r<8>;\n\t.reg .b64 %rd<2>;\n\t.reg .pred %p<3>;\n{declared}\
+             \tsetp.ne.b32 %p1, %r3, 0;\n{before}\t{copy}\n\tcp.async.wait_all;\n\tret;\n}}"
+        )
+    };
+    let chosen = "\tselp.b32 %r2, 16, 0, %p1;\n";
+    let copy = "cp.async.cg.shared.global [ %r1 + 0 ], [ %rd1 + 0 ], 0x10, %r2;";
+    let lowered = lower(&function("", chosen, copy));
+    assert!(
+        lowered.contains(
+            "\tsetp.eq.u32 %vf_n, %r2, 16;\n\t@%vf_n ld.global.v4.u32 {%vf_r0, %vf_r1, %vf_r2, %vf_r3}, [%rd1+0];\n\
+             \tst.shared.v4.u32 [%r1+0], {%vf_r0, %vf_r1, %vf_r2, %vf_r3};\n"
+        ),
+        "{lowered}"
+    );
+    // The zeros the destination gets when nothing is read.
+    assert_eq!(count(&lowered, "mov.b32 %vf_r"), 4, "{lowered}");
+    assert_eq!(count(&lowered, ".u8 "), 0, "{lowered}");
+    assert_eq!(count(&lowered, "$vf_c"), 0, "{lowered}");
+    assert!(lowered.contains(".reg .pred %vf_n;"));
+    assert_eq!(undeclared(&lowered), Vec::<String>::new());
+    // The other order, other spellings of the two numbers, and an 8-byte copy.
+    for (choice, statement) in [
+        ("\tselp.u32 %r2, 0, 16, %p1;\n", copy),
+        ("\tselp.s32 %r2, 0x10, 00, %p1;\n", copy),
+        (
+            "\tselp.b32 %r2, 8, 0, %p1;\n",
+            "cp.async.ca.shared.global [%r1], [%rd1], 8, %r2;",
+        ),
+    ] {
+        let lowered = lower(&function("", choice, statement));
+        assert_eq!(count(&lowered, ".u8 "), 0, "{choice}: {lowered}");
+        assert_eq!(count(&lowered, "@%vf_n ld.global.v"), 1, "{choice}: {lowered}");
+    }
+    // Under a predicate: the load under both, the store under the predicate, the zeros always.
+    let guarded = lower(&function("", chosen, &format!("@!%p2 {copy}")));
+    assert!(
+        guarded.contains("\tmov.pred %vf_n, 0;\n\t@!%p2 setp.eq.u32 %vf_n, %r2, 16;\n\t@%vf_n ld.global.v4.u32 {"),
+        "{guarded}"
+    );
+    assert!(guarded.contains("\t@!%p2 st.shared.v4.u32 [%r1+0], {"), "{guarded}");
+    assert_eq!(count(&guarded, ".u8 "), 0, "{guarded}");
+    // A part of the source may be read, or the register may hold something else: the byte loop.
+    for (declared, before, why) in [
+        ("", "\tselp.b32 %r2, 8, 0, %p1;\n", "8 of 16 bytes"),
+        ("", "\tselp.b32 %r2, 16, %r4, %p1;\n", "a register"),
+        ("", "\t@%p2 selp.b32 %r2, 16, 0, %p1;\n", "a guarded choice"),
+        (
+            "",
+            "\tselp.b32 %r2, 16, 0, %p1;\n\tadd.u32 %r2, %r2, 1;\n",
+            "written twice",
+        ),
+        ("", "\tmov.u32 %r2, 16;\n", "written otherwise"),
+        (
+            "\t{\n\t.reg .b32 %r2;\n\tmov.u32 %r2, 3;\n\t}\n",
+            chosen,
+            "declared again in a block",
+        ),
+    ] {
+        let lowered = lower(&function(declared, before, copy));
+        assert_eq!(count(&lowered, "@%vf_n ld.global.u8 "), 15, "{why}: {lowered}");
+        assert!(lowered.contains("@!%vf_n bra $vf_c0;"), "{why}: {lowered}");
+    }
+}
+
+#[test]
 fn packed_conversions_and_nan_bounds_use_what_volta_has() {
     let text = "{\n\t.reg .b32 %r<2>;\n\t.reg .f32 %f<4>;\n\tcvt.rn.f16x2.f32 %r1, %f1, %f2;\n\
             \tmax.NaN.f32 %f3, %f1, %f2;\n\tmin.ftz.NaN.f32 %f3, %f3, 0f3F800000;\n\tret;\n}";

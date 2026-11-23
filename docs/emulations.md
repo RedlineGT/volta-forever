@@ -670,7 +670,7 @@ The reference vectors are in `tests/kernels/blackwell/ref_scaled/`.
 | Instruction | On Volta |
 |---|---|
 | `mbarrier.init.shared.b64`, `mbarrier.arrive.shared.b64`, `mbarrier.test_wait.parity.shared.b64`, `cp.async.mbarrier.arrive.noinc.shared.b64` | A fixed arrival count and a wrapping, CTA-scoped atomic counter in the original 8-byte shared object. An acquire load checks the phase. Each synchronous copy finishes before its arrival. `.shared::cta` is also accepted. |
-| `cp.async.ca.shared.global [dst], [src], size` (4, 8 or 16 bytes), `cp.async.cg` (16 bytes) | A plain load from global memory and a store to shared memory, under the guard of the copy. An operand that says how much of the source is read (the rest is zeros), or a predicate that says to ignore it, is followed. A prefetch size (`.L2::64B` to `.L2::256B`) is dropped. `cp.async.commit_group`, `cp.async.wait_group` and `cp.async.wait_all` become no-ops (the copies are synchronous). |
+| `cp.async.ca.shared.global [dst], [src], size` (4, 8 or 16 bytes), `cp.async.cg` (16 bytes) | A plain load from global memory and a store to shared memory, under the guard of the copy. An operand that says how much of the source is read (the rest is zeros), or a predicate that says to ignore it, is followed: nothing or all takes one predicated load, and so does an amount in a register that the function writes only once, with a choice between two numbers that are each nothing or all (`selp.b32 %r, 16, 0, %p`, as Triton writes its pipelined loads); another amount known only when the kernel runs takes a byte loop behind a branch. A prefetch size (`.L2::64B` to `.L2::256B`) is dropped. `cp.async.commit_group`, `cp.async.wait_group` and `cp.async.wait_all` become no-ops (the copies are synchronous). |
 | `ld.global.v8.b32` (256-bit load, and the others: `.v8` of 32-bit types, `.v4` of 64-bit types) | Two `ld.global.v4.b32` (128-bit loads). The second half is loaded first when the base register is a destination of the first half. |
 | `st.global.v4.b64` (256-bit store, and the others) | Two `st.global.v2.b64` (128-bit stores). |
 | `cvt.{rn,rz}.f16x2.f32` (pack two f32 to f16x2) | `cvt.rn.f16.f32` (or `.rz`) for each, then a shift and an `or` to pack, the first operand in the upper half. |
@@ -710,8 +710,8 @@ collected is replaced by a trap, and its kernels are refused at the lookup
 (`crates/vf-ptx/src/refused.rs`). The other kernels of the module work.
 
 **Test cases.** `tests/gpu/run.sh`: `later` (3 kernels, 0 wrong) and the PTX cases
-`cta-mbarrier`, `ptx-reduction-exited`, `ptx-reduction-exited-f32` and `guarded-copy` for the
-table above; `refuse-library`, `refuse-module` (through both driver
+`cta-mbarrier`, `ptx-reduction-exited`, `ptx-reduction-exited-f32`, `guarded-copy` and
+`chosen-copy` for the table above; `refuse-library`, `refuse-module` (through both driver
 interfaces: a refused kernel is refused at the lookup, the others run; an emulated kernel
 is announced). Half bounds: `f16-bounds` and `signed-zero-bounds`.
 
