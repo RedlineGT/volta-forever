@@ -142,6 +142,9 @@ pub fn destroyed(modules: Modules) {
         crate::images::dropped(module);
         crate::lazy::forget_module(module);
     }
+    // The modules that the driver made for libraries in the context went too, which the layer may
+    // not know of: the handles of their functions may be given to others.
+    crate::kernels::new_generation();
 }
 
 /// The driver gave `context` as the primary context of `device`.

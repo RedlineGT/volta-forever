@@ -10,10 +10,14 @@
 //! - the runtime resolves driver functions with `cuGetProcAddress`, not `dlsym`, so lookups of hooked
 //!   functions are answered with this library's entry points. Lookups of every other function return
 //!   NVIDIA's own pointer: copies and the rest of the hot path do not pass through this library at
-//!   all. (A kernel launch does, unless `VF_FIT=0`: its entry here calls NVIDIA's and looks at the
-//!   answer only when it is a refusal for registers, `fit`.);
-//! - the private tables behind `cuGetExportTable` are integrity-checked by the runtime, so they are
-//!   forwarded untouched. Code is loaded through public functions (`cuLibraryLoadData`).
+//!   all. (A kernel launch does, unless `VF_ADAPT=0` and `VF_FIT=0`: its entry here refuses a
+//!   kernel that the layer refused, `guard`, calls NVIDIA's and looks at the answer only when it is
+//!   a refusal for registers, `fit`.);
+//! - the private tables behind `cuGetExportTable` are integrity-checked by the runtime (two of
+//!   them: a modified copy of either makes it fail with error 103), so they are forwarded
+//!   untouched. Code is loaded through public functions (`cuLibraryLoadData`); a library may take
+//!   a function of a module it loaded from an entry of such a table (cuFFT does), which `guard`
+//!   answers for where the function is used.
 //!
 //! Environment:
 //! - `VF_REAL_LIBCUDA`: path of NVIDIA's library (default: the `libcuda.so.<version>` of the loaded
@@ -55,6 +59,7 @@ mod cache;
 mod callers;
 mod contexts;
 pub mod fit;
+mod guard;
 mod hooks;
 mod images;
 mod kernels;
@@ -138,8 +143,9 @@ pub fn own_entry(real: usize) -> Option<usize> {
     OWN_ENTRY.get()?.get(&real).copied()
 }
 
-/// Hooks that only observe: lookups lead to them only when `VF_TRACE_LAUNCH` or the fit
-/// mechanism asks for it (the launch hooks are always needed when fit is on).
+/// The launch entries: lookups lead to them when the layer adapts code (a launch of a kernel it
+/// refused is refused there, `guard`), or when the fit mechanism, `VF_TRACE_LAUNCH`, statistics or
+/// the profile ask for them.
 const TRACE_ONLY: [usize; 4] = [
     idx::cuLaunchKernel,
     idx::cuLaunchKernelEx,
@@ -256,7 +262,7 @@ extern "C" fn init() {
     for hooked in [false, true] {
         let wanted = |i: usize| {
             if TRACE_ONLY.contains(&i) {
-                config.trace_launch || config.stats || config.profile || config.fit
+                config.adapt || config.trace_launch || config.stats || config.profile || config.fit
             } else {
                 hooked || config.stats
             }
