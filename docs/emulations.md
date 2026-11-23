@@ -153,7 +153,8 @@ that variable there, and `mov.u32 %d1, %d00;` its address), a label, a parameter
 two declarations the assembler follows depends on the blocks, on their order and on where the
 name is written; the rewriting does not guess. The registers and labels that the rewriting
 adds have names that begin with `%vf_` and `$vf_`: a function that has such a name
-already is refused too.
+already is refused too. (The BF16 switches of section 4 add names that begin with
+`%bfgroup_` and `$bfgroup_`; a function that has such a name already keeps the scalar sequence.)
 
 The statements of a body are read as text, and a comment is not code: the comments of a body
 that is rewritten are written over with spaces before anything reads it (a body in which
@@ -164,7 +165,7 @@ Measured on products whose operands are held in registers (what `vf adapt` makes
 `tests/kernels/ptx-cases/padded-chain-read.ptx`, and of the same with fewer products):
 alone, a product is two Volta products, five shuffles and 17 statements in all; in a chain,
 one Volta product, six shuffles and 9 statements. The chain itself costs 8 statements to
-begin from zero (44, with 16 shuffles, to begin from values that the program computed) and
+begin from zero (42, with 16 shuffles, to begin from values that the program computed) and
 28, with 12 shuffles, to end. Timings are in `docs/performance.md` ("Flash attention").
 
 ### Operands loaded from shared memory
@@ -203,7 +204,8 @@ per thread, into four registers. It is a warp-cooperative load. Volta lacks it.
 obtained by a shuffle from the lane that holds it, the offset of the thread's pair of
 elements is added, and 4 bytes are loaded from shared memory. For the transposed form
 (`ldmatrix.trans`), each matrix needs two rows fetched by shuffles and two 2-byte loads,
-the two halves assembled.
+the two halves assembled. Other shapes and element types (`m16n16`, `m8n16`, `.b8`) are
+refused.
 
 A 16-byte load from shared memory faults on a V100 when its address is not a multiple of
 16. The PTX manual requires every address to be aligned
@@ -214,8 +216,9 @@ test the addresses at runtime: if a row is not at a multiple of 16 the same byte
 loaded word by word. The test costs 17 % to a factor of two on a program's emulated
 tensor-core kernels; every program tested keeps its rows aligned.
 
-**Instruction counts.** Plain `ldmatrix` of 4 matrices: 17 instructions (2 for the
-preamble, 3 or 4 per matrix). Transposed: 38 (3 + 9 per matrix).
+**Instruction counts.** Plain `ldmatrix` of 4 matrices: 14 instructions (2 for the
+address, one more when it has an offset, and 3 per matrix), besides the lane values of the
+preamble. Transposed: 38 (2 + 9 per matrix).
 
 **movmatrix.** `movmatrix.sync.aligned.m8n8.trans.b16` transposes a matrix fragment across
 lanes. It becomes two warp shuffles.
@@ -225,7 +228,8 @@ lanes. It becomes two warp shuffles.
 **Test cases.** `tests/gpu/run.sh`: the `tensor-core` and `ampere` cases load every
 operand with `ldmatrix` and check every register of every thread against the host model.
 The `tensor-core-tested` case runs the same kernels with `VF_ALIGNED_ROWS=0`, including
-those whose rows are deliberately elsewhere: 42 kernels, 0 wrong.
+those whose rows are deliberately elsewhere: 42 kernels, 0 wrong. The `stmatrix-x1`,
+`stmatrix-multi` and `stmatrix-transposed` cases check `stmatrix`.
 
 ## 4. bf16
 
@@ -235,13 +239,23 @@ comparisons, conversions and atomic additions.
 
 ### Products
 
-bf16 tensor-core products (`mma.sync.aligned.m16n8k16` and `m16n8k8` on bf16;
+By default, bf16 tensor-core products (`mma.sync.aligned.m16n8k16` and `m16n8k8` on bf16;
 `m16n8k8` and `m16n8k4` on tf32; `m8n8k4` on f64) get no help from Volta's tensor cores: a
 half does not hold the exponent range of a bf16 or an f64. Each thread gathers its rows of
 A and its columns of B from the other lanes (shuffles, as for the integer products) and
 computes its sums with `fma.rn.f32`, one term after the other in the order of k. A bf16 is
 made an f32 by a shift of 16 (exact). All sums are complete before a result is written, so
 that the instruction's atomicity is preserved.
+
+Four switches, off by default, change this for `m16n8k16` on bf16 (`lower/bf16_groups/`;
+`INSTALL.md`, "Environment variables"). With `VF_BF16_TC_GROUPS=1`, a group of consecutive
+products, and with `VF_BF16_TC_TILES=1`, a two-by-two tile of them, runs on Volta's FP16
+tensor cores when a warp vote finds that every multiplicand converts exactly to a normal half
+or a signed zero; otherwise the warp takes the scalar sequence. On the tensor cores the f32
+sums can round differently from the scalar sequence (section 2). `VF_BF16_COLUMN` and `VF_BF16_ROW` (`ordered` or `tree`) specialize
+products where, as a test finds when the code runs, only column 0 of B, or only the first
+row of A, contributes: `ordered` keeps the scalar order of the sums, `tree` adds partial
+sums and can round differently.
 
 **Instruction counts.** One `m16n8k16` on bf16: 199 instructions (64 `fma`, 32 shuffles).
 One `m16n8k8` on bf16: 116. One `m16n8k8` on tf32: 103 (plus operand truncation, below).
@@ -273,18 +287,20 @@ bf16 x bf16 has at most 14 significant bits, well within f32).
 
 | Instruction | On Volta |
 |---|---|
-| `neg.bf16`, `abs.bf16` | Flip or clear the sign bit |
+| `neg.bf16`, `abs.bf16`, `abs.bf16x2` | Flip or clear the sign bit (of each half) |
+| `cvt.f32.bf16` | Exact: the bf16 as the upper half of the f32 (a shift) |
 | `add{.rn}.bf16`, `add{.rn}.bf16x2` | Operands as f32 (a shift), `add.rn.f32`, rounded to bf16 |
 | `sub{.rn}.bf16`, `sub{.rn}.bf16x2` | Subtract widened operands and round each result to bf16 |
 | `mul{.rn}.bf16`, `mul{.rn}.bf16x2` | Multiply widened operands and round each result to bf16 |
 | `add.rn.f32.bf16`, `sub.rn.f32.bf16` | Widen the first operand and add or subtract in f32 |
 | `min.NaN.bf16`, `max.NaN.bf16` | Compare the widened inputs, propagating a NaN from either operand |
+| `{min,max}.bf16x2`, `{min,max}.NaN.bf16x2` | Each half widened and compared on its own; with `.NaN`, a NaN in either operand gives a NaN in that half |
 | `cvt.rn.bf16.f16` | Widen exactly to f32, then round to bf16 |
-| `fma.rn.bf16`, `fma.rn.bf16x2` | Rounded to odd in f32 first (from `fma.rm.f32` and `fma.rp.f32`), then to bf16. Packed lanes with proven exact cancellation use a single f32 add per lane |
+| `fma.rn.bf16`, `fma.rn.bf16x2` | Rounded to odd in f32 first (from `fma.rm.f32` and `fma.rp.f32`), then to bf16. Packed lanes with proven exact cancellation use a single f32 add per lane. A scalar `fma` whose addend is a register set to -0 (`mov.b16` of `0x8000`) in the same block is the `mul` above |
 | `cvt.rn.bf16.f64` | f32 rounded to odd (from `cvt.rm.f32.f64` and `cvt.rp.f32.f64`), then to bf16 |
 | `cvt.rn.f16.bf16` | Widen exactly to f32, then round to f16 |
 | `cvt.rn.bf16x2.e4m3x2`, `cvt.rn.bf16x2.e5m2x2` | Decode each FP8 byte through an exact f16 intermediate, then pack both bf16 values |
-| `setp.<cmp>.bf16` | Comparison of the two f32 |
+| `setp.<cmp>{.and,.or,.xor}.bf16` | Comparison of the two f32, ordered or unordered, with the same Boolean operation |
 | `set.<cmp>.bf16x2.bf16x2` | Two comparisons, 1.0 or 0.0 as bf16 in each half |
 
 For a packed FMA, VF tracks the bits set by moves, masks and bitwise OR. When both multiplicands
@@ -319,7 +335,8 @@ of which 852,096 are not exact as f32, and the two ways of rounding agree in all
 reads the word, adds as above, and gives both the old and new values to `atom.cas`, which
 writes the sum only if the word still holds the original value. If another thread
 intervened, the loop retries with the new value. The `.sem` and `.scope` qualifiers of the
-original instruction are placed on the `atom.cas`.
+original instruction are placed on the `atom.cas` (`.cluster`, which Volta does not have,
+becomes `.gpu`). The form without a result, `red.add.noftz.bf16{x2}`, is refused.
 
 Under a predicate the entire loop is skipped: a thread whose predicate is false does not
 touch memory. The bf16x2 form uses `atom.cas.b32` on the whole word. `atom.cas.b16` is
@@ -327,7 +344,10 @@ available from sm_70.
 
 **Test cases.** `tests/gpu/run.sh`: `bf16` (15 kernels, 0 wrong). The arithmetic tests
 use operands at and near bf16 halfway points, subnormals, NaN and infinity. The atomic
-tests run 64 threads adding to the same address.
+tests run 64 threads adding to the same address. The PTX cases `packed-bf16-*`,
+`bf16-product` and `xla-sort-bounds` check more forms of the table, and the `bf16-mma-*`
+cases run the products under each switch above (groups and tiles off and on, column and row
+`ordered` and `tree`).
 
 ## 5. Integer products
 
@@ -338,14 +358,15 @@ dot product of the thread's 16-byte row of A with two 16-byte columns of B. Volt
 integer tensor-core instruction.
 
 **On Volta.** Each thread's row of A (one register, four bytes) and its columns of B are
-gathered from other lanes with shuffles. The B columns (eight registers total) come from
-eight lanes, four shuffles each. Each sum is four `dp4a.s32.s32` instructions, one for each
-group of 4 consecutive k-elements. The two sums are interleaved: three steps of the first,
+gathered from other lanes with shuffles. The B columns (eight registers, four for each of
+the two columns) come from eight lanes, one shuffle each. Each sum is four `dp4a.s32.s32`
+instructions, one for each group of 4 consecutive k-elements. The two sums are interleaved: three steps of the first,
 three of the second, then the last step of each (which writes the destination register).
 The accumulator is passed through.
 
 Signed, unsigned and mixed forms are all supported (`dp4a.s32.s32` for signed, `.u32.u32`
-for unsigned, mixed by inserting conversions).
+for unsigned, `.u32.s32` or `.s32.u32` for mixed). Products on 4-bit integers (`.s4`, `.u4`)
+and on bits (`.b1`) are refused.
 
 **Example.** Before:
 ```
@@ -397,6 +418,8 @@ the layer keeps only the address of the row and loads the 16 bytes at each produ
 This frees the four gathered registers and eliminates stack spills: the integer kernels of
 llama.cpp's q6_K format dropped from 3.95 times the native `dp4a` kernel's time to 1.88
 (measured 2026-11-16 with llama.cpp's `test-backend-ops perf`, `tests/gpu/llamacpp-ops.sh`).
+It takes `VF_ALIGNED_ROWS` on (the default, section 3); with `VF_ALIGNED_ROWS=0` the row is
+gathered by shuffles.
 
 **Test cases.** `tests/gpu/run.sh`: `tensor-core` (integer kernels among the 37),
 `ampere` (31 kernels, 0 wrong).
@@ -426,10 +449,15 @@ byte would round twice and be wrong at the halfway points; the layer rounds once
 
 | Form | Instructions |
 |---|---|
-| `cvt.rn.satfinite.e4m3x2.f32` | 48 (for two values) |
-| `cvt.rn.satfinite.e5m2x2.f32` | 48 |
+| `cvt.rn.satfinite.e4m3x2.f32` | 47 (for two values) |
+| `cvt.rn.satfinite.e5m2x2.f32` | 45 |
 | `cvt.rn.satfinite.e4m3x2.f16x2` | (the same technique on the f16 input) |
 | `cvt.rn.satfinite.e5m2x2.f16x2` | |
+| `cvt.rn.satfinite.e4m3x2.bf16x2` | (the same on the two bf16, widened to f32) |
+| `cvt.rn.satfinite.e5m2x2.bf16x2` | |
+
+The `.relu` forms of the FP8 conversions, and encodings with another rounding (`.rz`), are
+refused.
 
 ### Products
 
@@ -440,7 +468,8 @@ row (eight of Volta's `mma.m8n8k4`). No lane is asked for anything to decode, an
 halves of an operand used by several products are made once.
 
 **Instruction count.** 225 to 353 instructions per product (the range is across the three
-type combinations: e4m3xe4m3, e4m3xe5m2, e5m2xe5m2).
+type combinations of the test kernels: e4m3xe4m3, e4m3xe5m2, e5m2xe4m3). An e5m2 operand
+costs less to decode: e5m2xe5m2 takes 64 instructions fewer than e5m2xe4m3.
 
 **Exactness.** The conversion to halves is exact, and the products are FP16 products on
 Volta's tensor cores, with what section 2 says of them: on the inputs of the test suite,
@@ -468,6 +497,9 @@ nearest, ties to even. NaN becomes +6 (the format has no NaN); values beyond +-6
 
 An 8-bit format representing powers of two: 2^(e - 127) for bytes 1 to 254. Byte 0 is
 2^(-127) (not zero). Byte 0xFF is NaN.
+
+**Decode.** `cvt.rn.bf16x2.ue8m0x2`: exact. A byte e from 1 to 254 becomes the bf16 whose
+exponent field is e, with no mantissa; bytes 0 and 0xFF become what the hardware gives.
 
 **What the hardware does with byte 0 and 0xFF** (measured on an RTX 5090, 2026-11-17,
 `tests/kernels/blackwell/ref/decode_ue8m0.bin`):
@@ -502,14 +534,14 @@ reference files, the same byte for byte).
 ## 8. Block-scaled products
 
 Blackwell (sm_120) introduces block-scaled tensor-core products: `mma.sync.aligned` with
-`.block_scale`, where the operands are E2M1 or E4M3 and each block of k-elements has its
-own scale factor. The layer emulates three forms:
+`.block_scale`, where the operands are E2M1, E4M3 or E5M2 and each block of k-elements has
+its own scale factor. The layer emulates three forms:
 
 | Kind | Operands | Scale type | Scale_vec | K |
 |---|---|---|---|---|
 | `kind::mxf4` (MXFP4) | E2M1 | UE8M0 | 2X | 64 |
 | `kind::mxf4nvf4` (NVFP4) | E2M1 | UE4M3 | 4X | 64 |
-| `kind::mxf8f6f4` (MXF8F6F4) | E4M3 | UE8M0 | 1X | 32 |
+| `kind::mxf8f6f4` (MXF8F6F4) | E4M3, E5M2 | UE8M0 | 1X | 32 |
 
 The formula: D[r][c] = C[r][c] + sum over blocks b of (scale_A[r][b] * scale_B[c][b] *
 sum over k in block b of A[r][k] * B[k][c]).
@@ -518,11 +550,13 @@ sum over k in block b of A[r][k] * B[k][c]).
 
 For each block:
 
-1. E2M1 nibbles are decoded to exact halves (every E2M1 value is an f16). For E4M3 (the
-   MXF8F6F4 form), bytes are decoded to halves as in section 6.
-2. The block's k-values are shuffled to all four threads of the group and fed to Volta's
-   `mma.m8n8k4` products. The f32 block sum is exact for E2M1 (at most 16 * 36 = 576,
-   which is 10 bits).
+1. E2M1 nibbles are decoded to exact halves (every E2M1 value is an f16). For E4M3 and
+   E5M2 (the MXF8F6F4 form), bytes are decoded to halves as in section 6.
+2. The block is computed by FP16 products on Volta's `mma.m8n8k4` (section 2), into an f32
+   sum that starts from zero. For `scale_vec::4X` (NVFP4), where one pair of threads of the
+   group holds a block of 16, the block's k-values are first shuffled to all four threads of
+   the group. The f32 block sum is exact for E2M1 (at most 16 * 36 = 576 for NVFP4, 1,152 for
+   the blocks of 32 of MXFP4).
 3. The block sum is multiplied by the product of the two scales, and the scaled sums of the
    blocks are added in f64. (For NVFP4 the scales are combined and applied in f32, where
    every such product is exact: a UE4M3 scale has few significant bits and the block sum is a
@@ -553,8 +587,10 @@ NaN in scale_B makes every result of its column `0x7fffffff`.
 The layer implements `thread_id_a` 0 and 1, `thread_id_b` 0 and 1, `byte_id` 0 and 2
 (the two values the assembler accepts for `scale_vec::2X`). `thread_id_b` 2 and 3, and
 `byte_id` 1 or 3 with a single scale, are lowered but have no reference vectors.
-Selectors the instruction does not have (a byte 4, a pair of threads beyond 3, `byte_id`
-1 with two scales) are refused when the program is read. `kind::mxf4nvf4` with UE8M0
+Selectors the instruction does not have (a `byte_id` above 3, a `thread_id_a` above 1, a
+`thread_id_b` above 3, `byte_id` 1 or 3 with two scales, a `byte_id` other than 0 with
+four) are refused when the program is read. So are the other operand types of
+`kind::mxf8f6f4` (E3M2, E2M3, E2M1). `kind::mxf4nvf4` with UE8M0
 scales is refused (not verified against the hardware).
 
 ### Agreement with the RTX 5090
@@ -610,18 +646,19 @@ The reference vectors are in `tests/kernels/blackwell/ref_scaled/`.
 | Instruction | On Volta |
 |---|---|
 | `mbarrier.init.shared.b64`, `mbarrier.arrive.shared.b64`, `mbarrier.test_wait.parity.shared.b64`, `cp.async.mbarrier.arrive.noinc.shared.b64` | A fixed arrival count and a wrapping, CTA-scoped atomic counter in the original 8-byte shared object. An acquire load checks the phase. Each synchronous copy finishes before its arrival. `.shared::cta` is also accepted. |
-| `cp.async.ca.shared.global [dst], [src], size` | A plain load from global memory and a store to shared memory. `cp.async.commit_group` and `cp.async.wait_group` become no-ops (the copies are synchronous). |
-| `ld.global.v8.b32` (256-bit load) | Two `ld.global.v4.b32` (128-bit loads). The second half is loaded first when the base register is a destination of the first half. |
-| `st.global.v4.b64` (256-bit store) | Two `st.global.v2.b64` (128-bit stores). |
-| `cvt.rn.f16x2.f32` (pack two f32 to f16x2) | `cvt.rn.f16.f32` for each, then `mov.b32` to pack. |
-| `cvt.rn.bf16x2.f32` | The same with bf16 (a shift to f32, `cvt.rn.f16.f32` of that, shifts to assemble). |
+| `cp.async.ca.shared.global [dst], [src], size` (4, 8 or 16 bytes), `cp.async.cg` (16 bytes) | A plain load from global memory and a store to shared memory, under the guard of the copy. An operand that says how much of the source is read (the rest is zeros), or a predicate that says to ignore it, is followed. A prefetch size (`.L2::64B` to `.L2::256B`) is dropped. `cp.async.commit_group`, `cp.async.wait_group` and `cp.async.wait_all` become no-ops (the copies are synchronous). |
+| `ld.global.v8.b32` (256-bit load, and the others: `.v8` of 32-bit types, `.v4` of 64-bit types) | Two `ld.global.v4.b32` (128-bit loads). The second half is loaded first when the base register is a destination of the first half. |
+| `st.global.v4.b64` (256-bit store, and the others) | Two `st.global.v2.b64` (128-bit stores). |
+| `cvt.{rn,rz}.f16x2.f32` (pack two f32 to f16x2) | `cvt.rn.f16.f32` (or `.rz`) for each, then a shift and an `or` to pack, the first operand in the upper half. |
+| `cvt.{rn,rz}.bf16.f32`, `cvt.{rn,rz}.bf16x2.f32` | Integer arithmetic on the bits: the upper half of the f32, rounded to nearest even on the lower half for `.rn`, cut for `.rz`; a NaN gives `0x7fff`. For bf16x2, the first operand in the upper half. |
 | `cvt.rn.tf32.f32` | The 10-bit mantissa (zero the low 13 bits), ties to even: 9 instructions. |
-| `redux.sync.{add,min,max}.{s32,u32}` | A ballot identifies the participating lanes. A full warp uses five butterfly shuffles. A partial warp gathers the input of each participating lane once, from the highest lane down: in the same order in every lane. |
-| `redux.sync.{min,max}.NaN.f32` | Reduce the active lanes and use a warp vote to propagate a NaN from any participating lane. |
-| `{min,max}.NaN.f32` | Compare two or three operands and propagate a NaN from any operand. |
-| `{min,max,add,mul,...}.relu.{s32,f32,...}` | The operation followed by a clamp to zero. |
-| `fma.rn.f32x2`, `add.rn.f32x2`, ... | Arithmetic on pairs of f32, packed in a 64-bit register. Each is two scalar operations. |
-| `ld.global.L2::cache_hint` | The cache hint is dropped; the load is otherwise unchanged. |
+| `redux.sync.add.{s32,u32}`, `redux.sync.{min,max}.{s32,u32,f32}`, `redux.sync.{and,or,xor}.b32` | Unguarded, with a member mask of the whole warp (a constant, or a register set to all ones). A ballot identifies the lanes that have not exited. A full warp uses five butterfly shuffles. A partial warp gathers the input of each participating lane once, from the highest lane down: in the same order in every lane. Other forms are refused: a type the PTX ISA does not give the operation (`redux.sync.add.f32`, `redux.sync.and.u32`), `.abs`, a guard, another member mask. |
+| `redux.sync.{min,max}.NaN.f32` | The same reduction, and a warp vote to propagate a NaN from any participating lane. |
+| `{min,max}{.ftz}.NaN.f32` | Compare two or three operands and propagate a NaN from any operand. |
+| `{min,max}{.ftz}.f32` with three operands | Two of the instruction with two operands. |
+| `{min,max}.relu.s32` | The operation, then `max.s32` with 0. Other `.relu` forms are refused, except those of the E2M1 conversions (section 7). |
+| `{add,sub,mul,fma}{.rnd}{.ftz}.f32x2` | Arithmetic on pairs of f32, packed in a 64-bit register. Each is two scalar operations. Other `.f32x2` operations are refused. |
+| `ld` and `st` with `.L2::cache_hint`, `.L2::evict_*` or a prefetch size; `createpolicy` | The hints and the cache-policy operand are dropped; the access is otherwise unchanged. `createpolicy` writes 0. `.volatile` on `.local` memory, which Volta's compiler refuses, is dropped too. |
 | `griddepcontrol` | Dropped (a Hopper/Blackwell instruction for grid-level dependencies, which Volta's driver does not support). |
 
 ### What is refused
@@ -631,22 +668,33 @@ that function are refused when the program asks for them. The refusal names the 
 the reason (on the console and in the error returned to the program, error 218).
 
 **Instructions without a sequence** (from the PTX census of NVIDIA's libraries): clusters
-of blocks (`barrier.cluster`, `mapa`, `getctarank`), barrier operations with transactions or changing counts (`mbarrier.expect_tx`, `mbarrier.arrive_drop`),
-tensor maps (`tensormap`), multicast memory (`multimem`), and other `stmatrix` shapes and layouts. These forms are refused on Volta.
+of blocks (`barrier.cluster`, `mapa`, `getctarank`, `clusterlaunchcontrol`, memory of
+`::cluster`, the registers `%cluster_*`, and a kernel whose directives ask for a cluster:
+`.explicitcluster`, `.reqnctapercluster`, `.maxclusterrank`), the `mbarrier` forms the table
+above does not list (`mbarrier.try_wait`, `mbarrier.expect_tx`, `mbarrier.arrive_drop`, ...),
+bulk copies (`cp.async.bulk`) and proxy fences (`fence.proxy.async`, `fence.proxy.tensormap`,
+`fence.mbarrier_init`), tensor maps (`tensormap`), multicast memory (`multimem`), `wmma` on
+integers, bf16, tf32 or f64, `cvt.pack`, and other `stmatrix` shapes and layouts. A form on a
+type of later targets (bf16, tf32, FP8, E2M1, UE8M0, UE4M3) that the sections above do not
+list is refused too (`neg.bf16x2`, `min.bf16` without `.NaN`, `cvt.rna.tf32.f32`). These
+forms are refused on Volta.
 
 **What the driver's compiler refuses.** The lowering rewrites or traps the instructions it
 knows. The driver may still refuse what remains: a function whose compiler error is
 collected is replaced by a trap, and its kernels are refused at the lookup
 (`crates/vf-ptx/src/refused.rs`). The other kernels of the module work.
 
-**Test cases.** `tests/gpu/run.sh`: `refuse-library`, `refuse-module` (through both driver
+**Test cases.** `tests/gpu/run.sh`: `later` (3 kernels, 0 wrong) and the PTX cases
+`cta-mbarrier`, `ptx-reduction-exited`, `ptx-reduction-exited-f32` and `guarded-copy` for the
+table above; `refuse-library`, `refuse-module` (through both driver
 interfaces: a refused kernel is refused at the lookup, the others run; an emulated kernel
 is announced).
 
 ## 10. The same emulations in machine code
 
-The machine-code translator (`crates/vf-sass/src/translate/`) rewrites sm_75 cubins to
-sm_70, function by function. The tensor-core instructions it replaces are those of Turing:
+The machine-code translator (`crates/vf-sass/src/translate/`) rewrites sm_75 cubins, and a
+subset of sm_80 ones (`docs/translator.md`), to sm_70, function by function. The tensor-core
+instructions it replaces are those of Turing:
 
 | sm_75 instruction | Replaced by | Notes |
 |---|---|---|
@@ -669,11 +717,15 @@ Differences from the PTX path:
   program).
 - The lane is read once at the function's entry.
 
-**What is not in machine code.** Integer products (emulated with `dp4a` in PTX only), FP8
-products, block-scaled products, bf16 and tf32 products, bf16 arithmetic, conversions of
-FP8/E2M1/UE8M0, and all other instructions of section 9: these appear only in PTX and are
-handled by the PTX lowering. The machine-code translator handles what sm_75 machine code
-has: Turing's matrix load and product on halves.
+**What is not in machine code.** Integer products (`IMMA`; emulated with `dp4a` in PTX
+only), the transposition of a fragment (`MOVM`, movmatrix), FP8 products, block-scaled
+products, bf16 and tf32 products, bf16 arithmetic, conversions of FP8/E2M1/UE8M0, and the
+other instructions of section 9: these appear only in PTX and are handled by the PTX
+lowering. Two exceptions come with sm_80 machine code: the 16-byte asynchronous copy from
+global to shared memory becomes a load and a store under its predicate, and the conversion
+of two f32 to f16x2 becomes conversions and a permutation. Of the tensor-core instructions,
+the machine-code translator handles Turing's matrix load and product on halves; a function
+with `IMMA` or `MOVM` is refused.
 
 The mechanism of the translator (register allocation, timing rules, what is refused, the
 two implementations) is described in `docs/translator.md`.
