@@ -10,7 +10,12 @@
 //! `OUT/`, with a report. `verify` checks the built libraries on the host, without a GPU. `list`
 //! prints the names of the libraries that a run without `--only` builds, one a line
 //! (`scripts/package.sh` takes nothing less for an archive).
+//!
+//! For cuBLAS and cuBLASLt, `generate` also builds the opt-in bf16 variants and their runtime into
+//! `OUT/bf16tc/` (bf16.rs), after checking the runtime's declarations against both toolkits'
+//! headers; `verify` checks them too.
 
+mod bf16;
 mod elf;
 mod emit;
 mod libs;
@@ -176,6 +181,7 @@ fn generate(args: &Args) -> Result<(), String> {
     std::fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
     let mut cache = ProtoCache { cache: BTreeMap::new() };
     let mut results = Vec::new();
+    let mut variants = 0;
     for spec in selected(args)? {
         let new = elf::read(&args.new.join(spec.new_name))?;
         let old = elf::read(&args.old.join(spec.old_name))?;
@@ -223,6 +229,35 @@ fn generate(args: &Args) -> Result<(), String> {
         report::write_manifest(&dir, &entries)?;
         emit::build(spec, &entries, &dir, &include_dir(&args.new), &args.out)?;
         eprintln!("built {} ({} exports, {slots} jumps)", spec.new_name, entries.len());
+        if let Some(variant) = bf16::variant_of(spec.key) {
+            if variants == 0 {
+                let mut problems = bf16::check_declarations(args, &headers_dir)?;
+                problems.extend(bf16::check_kernels());
+                if !problems.is_empty() {
+                    return Err(format!(
+                        "the bf16 runtime does not match the toolkits or its kernels:\n  {}",
+                        problems.join("\n  ")
+                    ));
+                }
+            }
+            let vdir = gen_dir.join(bf16::DIR).join(spec.new_name);
+            let n = bf16::write_variant_sources(spec, variant, &entries, &target, &renumbering, &vdir)?;
+            emit::write_status_source(spec, &vdir)?;
+            report::write_manifest(&vdir, &entries)?;
+            emit::build(
+                spec,
+                &entries,
+                &vdir,
+                &include_dir(&args.new),
+                &args.out.join(bf16::DIR),
+            )?;
+            eprintln!(
+                "built {}/{} ({n} functions for the bf16 runtime)",
+                bf16::DIR,
+                spec.new_name
+            );
+            variants += 1;
+        }
         results.push(report::LibResult {
             spec,
             target,
@@ -231,6 +266,10 @@ fn generate(args: &Args) -> Result<(), String> {
             new,
             old,
         });
+    }
+    if variants > 0 {
+        let rt = bf16::build_runtime(&gen_dir, &args.out)?;
+        eprintln!("built {}", rt.display());
     }
     let text = report::render(&results);
     std::fs::write(args.out.join("REPORT.txt"), &text).map_err(|e| e.to_string())?;
