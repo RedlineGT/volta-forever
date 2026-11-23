@@ -6,6 +6,10 @@
 //!   refused). Launched, such a kernel ends the CUDA context of the program; refused at the lookup, it
 //!   is an error the program can report.
 //! - Kernels that run emulated instructions: announced on the console when the program takes them.
+//!
+//! Each is said once. A kernel is its name and the image it comes from (`Kernels::image`): two
+//! kernels of one name in two images, two specializations of one kernel, are each said, the second
+//! with the digest of its image, within `VF_EMULATION_WARNINGS`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -38,12 +42,14 @@ struct Kernels {
     library: Option<usize>,
     /// How the code of this module reached the device.
     origin: Option<Origin>,
+    /// The digest of the image that the program gave for it (`images::xxh64`; 0: not known).
+    image: u64,
 }
 
 static KNOWN: LazyLock<Mutex<HashMap<usize, Kernels>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static ANNOUNCER: Announcer = Announcer::new();
 /// Refused kernels the program already asked for: the refusal is explained once.
-static EXPLAINED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static EXPLAINED: LazyLock<Mutex<Explained>> = LazyLock::new(|| Mutex::new(Explained::default()));
 /// Whether the remedy for NCCL's kernels was given (`nccl_remedy`).
 static NCCL_REMEDY_GIVEN: AtomicBool = AtomicBool::new(false);
 
@@ -81,6 +87,49 @@ fn nccl_remedy(name: &str) -> Option<String> {
     ))
 }
 
+/// The refused kernels that were explained, by name and digest of their image.
+#[derive(Default)]
+struct Explained {
+    said: HashSet<(String, u64)>,
+    names: HashSet<String>,
+    /// How many refused kernels had a name explained before.
+    again: usize,
+}
+
+/// What to say of a refused kernel that the program asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum Explain {
+    /// Nothing: it was explained, or too many of its kind were.
+    Nothing,
+    /// Its refusal: the first kernel of its name.
+    First,
+    /// Its refusal, as another kernel of a name explained before.
+    Again,
+    /// That further kernels of names explained before are not listed.
+    Further,
+}
+
+impl Explained {
+    /// Kernel `name` of an image of digest `image` is refused: what to say. The first kernel of each
+    /// name is explained; another of the same name, from another image, while no more than `limit`
+    /// have been (all of them with `all`; none with a limit of zero).
+    fn refused(&mut self, name: &str, image: u64, limit: usize, all: bool) -> Explain {
+        if !self.said.insert((name.to_string(), image)) {
+            return Explain::Nothing;
+        }
+        if self.names.insert(name.to_string()) {
+            return Explain::First;
+        }
+        self.again += 1;
+        match limit {
+            0 => Explain::Nothing,
+            _ if self.again <= limit || all => Explain::Again,
+            _ if self.again == limit + 1 => Explain::Further,
+            _ => Explain::Nothing,
+        }
+    }
+}
+
 fn known() -> std::sync::MutexGuard<'static, HashMap<usize, Kernels>> {
     KNOWN.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -95,13 +144,17 @@ fn metadata(known: &HashMap<usize, Kernels>, handle: usize) -> Option<&Kernels> 
     }
 }
 
-/// Record what the adaptation found about the kernels of the image loaded as `handle`.
-pub fn describe(handle: usize, refused: Vec<Refused>, emulated: Vec<Emulated>) {
+/// Record what the adaptation found about the kernels of the image loaded as `handle`, whose digest
+/// is `image` (0: not known; a handle described before keeps the digest it had).
+pub fn describe(handle: usize, image: u64, refused: Vec<Refused>, emulated: Vec<Emulated>) {
     if refused.is_empty() && emulated.is_empty() {
         return;
     }
     let mut known = known();
     let kernels = known.entry(handle).or_default();
+    if kernels.image == 0 {
+        kernels.image = image;
+    }
     for kernel in refused {
         kernels
             .refused
@@ -209,25 +262,48 @@ pub fn first_refused(handle: usize) -> Option<(usize, String, String)> {
 /// it, the reason is printed.
 pub fn refused(handle: usize, name: &str) -> bool {
     let known = known();
-    let Some((function, reason)) = metadata(&known, handle).and_then(|kernels| kernels.refused.get(name)) else {
+    let Some(kernels) = metadata(&known, handle) else {
         return false;
     };
-    if EXPLAINED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(name.to_string())
-    {
-        let through = if function == name {
-            String::new()
-        } else {
-            format!(" (in {function}, which it calls)")
-        };
-        log::warn(format_args!(
-            "kernel {name} cannot run on this GPU and is not given to the program: {reason}{through}"
-        ));
-        if let Some(remedy) = nccl_remedy(name) {
-            log::warn(format_args!("{remedy}"));
+    let Some((function, reason)) = kernels.refused.get(name) else {
+        return false;
+    };
+    let image = kernels.image;
+    let explain = EXPLAINED.lock().unwrap_or_else(|e| e.into_inner()).refused(
+        name,
+        image,
+        config().emulation_warnings,
+        log::at_level(2),
+    );
+    let through = if function == name {
+        String::new()
+    } else {
+        format!(" (in {function}, which it calls)")
+    };
+    match explain {
+        Explain::Nothing => {}
+        Explain::First => {
+            log::warn(format_args!(
+                "kernel {name} cannot run on this GPU and is not given to the program: {reason}{through}"
+            ));
+            if let Some(remedy) = nccl_remedy(name) {
+                log::warn(format_args!("{remedy}"));
+            }
         }
+        Explain::Again => {
+            let which = match image {
+                0 => String::new(),
+                image => format!(", image XXH64 {image:016x}"),
+            };
+            log::warn(format_args!(
+                "kernel {name} cannot run on this GPU and is not given to the program: {reason}{through} (another \
+                 kernel of this name{which})"
+            ));
+        }
+        Explain::Further => log::warn(format_args!(
+            "kernels refused under a name already said are not said any more (VF_LOG_LEVEL=2 says them all, \
+             VF_EMULATION_WARNINGS=N says N)"
+        )),
     }
     true
 }
@@ -235,15 +311,15 @@ pub fn refused(handle: usize, name: &str) -> bool {
 /// Kernel `name` of `handle` is given to the program: announce it if it runs emulated instructions.
 /// When the profiler is on, also record the code origin and emulated counts for the kernel.
 pub fn given(handle: usize, name: &str) {
-    let (counts, origin_val) = {
+    let (counts, origin_val, image) = {
         let k = known();
         let kernels = metadata(&k, handle);
         let counts = kernels.and_then(|k| k.emulated.get(name)).cloned();
         let origin_val = kernels.and_then(|k| k.origin);
-        (counts, origin_val)
+        (counts, origin_val, kernels.map_or(0, |k| k.image))
     };
     if let Some(ref counts) = counts {
-        for line in ANNOUNCER.given(name, counts, config().emulation_warnings, log::at_level(2)) {
+        for line in ANNOUNCER.given(name, image, counts, config().emulation_warnings, log::at_level(2)) {
             log::warn(format_args!("{line}"));
         }
     }
@@ -318,6 +394,27 @@ mod tests {
         ] {
             assert!(!nccl_kernel(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_refused_kernel_is_its_name_and_its_image() {
+        let mut explained = Explained::default();
+        assert_eq!(explained.refused("k", 1, 2, false), Explain::First);
+        assert_eq!(explained.refused("k", 1, 2, false), Explain::Nothing);
+        assert_eq!(explained.refused("other", 1, 2, false), Explain::First);
+        // Kernels of the name from other images, up to the limit, then once that more are not said.
+        assert_eq!(explained.refused("k", 2, 2, false), Explain::Again);
+        assert_eq!(explained.refused("other", 3, 2, false), Explain::Again);
+        assert_eq!(explained.refused("k", 4, 2, false), Explain::Further);
+        assert_eq!(explained.refused("k", 5, 2, false), Explain::Nothing);
+        assert_eq!(explained.refused("k", 2, 2, false), Explain::Nothing);
+        // All of them at level 2; the first of a name always.
+        assert_eq!(explained.refused("k", 6, 2, true), Explain::Again);
+        assert_eq!(explained.refused("new", 6, 2, false), Explain::First);
+        // With a limit of zero, the first of each name only.
+        let mut silent = Explained::default();
+        assert_eq!(silent.refused("k", 1, 0, true), Explain::First);
+        assert_eq!(silent.refused("k", 2, 0, true), Explain::Nothing);
     }
 
     #[test]

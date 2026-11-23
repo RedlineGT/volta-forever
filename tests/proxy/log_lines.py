@@ -1,10 +1,17 @@
-"""CPU regression for what the layer's lines say of the images it loads.
+"""CPU regression for what the layer's lines say of the images it loads and of their kernels.
 
 From VF_LOG_LEVEL=2, a line about an image that a program loads names it: by the file's name for
 a load from a file (cuModuleLoad), by its size and XXH64 digest for a load from memory
 (cuModuleLoadData, cuLibraryLoadData), so that two images loaded for kernels of one name, two
 specializations of a kernel, can be told apart. At the default level these lines are not
-printed. A stand-in driver (link_mock_driver.c) loads the modules.
+printed.
+
+At the default level, "emulated in NAME" and "kernel NAME cannot run" are said once for each
+kernel, a kernel being its name and its image: a second kernel of a name, from another image, is
+said too, with its image's digest; the same image loaded again is not said again. Past
+VF_EMULATION_WARNINGS kernels with emulated instructions, and as many refusals of a name said
+before, a line says that the next are not listed. A stand-in driver (link_mock_driver.c) loads
+the modules.
 
 Run with python3 tests/proxy/log_lines.py path/to/libcuda.so.1.
 """
@@ -61,6 +68,30 @@ def xxh64(data, seed=0):
     return h ^ (h >> 32)
 
 
+def entry(name, body):
+    return HEADER + b".visible .entry " + name + b"()\n{\n .reg .f32 %f<3>;\n" + body + b" ret;\n}\n"
+
+
+# A kernel with an emulated instruction (tanh.approx.f32 has no Volta instruction), and one that is
+# refused (barrier.cluster has no Volta sequence), each in four images of different code.
+EMULATED = [entry(b"k", b" tanh.approx.f32 %f1, %f2;\n" + b" add.f32 %f1, %f1, %f2;\n" * i) for i in range(4)]
+REFUSED = [entry(b"r", b" barrier.cluster.arrive;\n" + b" add.f32 %f1, %f1, %f2;\n" * i) for i in range(4)]
+
+
+def kernels(proxy):
+    api = c.CDLL(proxy)
+    module, function = c.c_void_p(), c.c_void_p()
+    sys.stderr.flush()
+    # The first image twice (two modules of the same code), then the others.
+    for image in [EMULATED[0]] + EMULATED:
+        assert api.cuModuleLoadData(c.byref(module), image) == 0
+        assert api.cuModuleGetFunction(c.byref(function), module, b"k") == 0
+        assert api.cuModuleGetFunction(c.byref(function), module, b"k") == 0
+    for image in [REFUSED[0]] + REFUSED:
+        assert api.cuModuleLoadData(c.byref(module), image) == 0
+        assert api.cuModuleGetFunction(c.byref(function), module, b"r") == 218
+
+
 def loads(proxy, path):
     api = c.CDLL(proxy)
     module, library = c.c_void_p(), c.c_void_p()
@@ -73,7 +104,7 @@ def loads(proxy, path):
 
 if __name__ == "__main__":
     if len(sys.argv) == 4:
-        loads(sys.argv[1], sys.argv[3])
+        loads(sys.argv[1], sys.argv[3]) if sys.argv[3] != "kernels" else kernels(sys.argv[1])
         sys.exit(0)
     assert xxh64(b"") == 0xEF46DB3751D8E999 and xxh64(b"abc") == 0x44BC2CF5AD770999
     assert xxh64(b"Nobody inspects the spammish repetition") == 0xFBCEA83C8A378BF1
@@ -102,3 +133,30 @@ if __name__ == "__main__":
         print("PASS each image named at level 2: the file, or its size and digest")
         assert said["1"] == [], "\n".join(said["1"])
         print("PASS nothing of it at the default level")
+
+        def kernel_lines(limit):
+            run = subprocess.run([sys.executable, __file__, sys.argv[1], mock, "kernels"],
+                                 env=dict(env, **({"VF_EMULATION_WARNINGS": limit} if limit else {})),
+                                 check=True, stderr=subprocess.PIPE, text=True)
+            return [line.split("] ", 1)[1] for line in run.stderr.splitlines()
+                    if "emulated in " in line or "kernel r " in line or "further kernels" in line
+                    or "not said any more" in line]
+        image = lambda data: f"image XXH64 {xxh64(data):016x}"
+        why = "barrier.cluster.arrive"
+        lines = kernel_lines(None)
+        assert len(lines) == 8, "\n".join(lines)
+        assert lines[0] == "  emulated in k: 1 tanh", lines[0]
+        for i in (1, 2, 3):
+            assert lines[i] == f"  emulated in k (another kernel of this name, {image(EMULATED[i])}): 1 tanh", lines[i]
+        assert lines[4].startswith("kernel r cannot run on this GPU and is not given to the program: ") and \
+            why in lines[4] and "another" not in lines[4], lines[4]
+        for i, line in zip((1, 2, 3), lines[5:], strict=True):
+            assert line.startswith("kernel r cannot run") and why in line and \
+                line.endswith(f"(another kernel of this name, {image(REFUSED[i])})"), line
+        print("PASS each kernel of a name said once, by its name and its image")
+        lines = kernel_lines("1")
+        assert len(lines) == 5, "\n".join(lines)
+        assert lines[0] == "  emulated in k: 1 tanh" and "counted, not listed" in lines[1], "\n".join(lines)
+        assert "another" not in lines[2] and lines[3].endswith(f"another kernel of this name, {image(REFUSED[1])})"), "\n".join(lines)
+        assert lines[4].startswith("kernels refused under a name already said are not said any more"), lines[4]
+        print("PASS within VF_EMULATION_WARNINGS")

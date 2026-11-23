@@ -56,6 +56,9 @@ pub struct Replacement {
     /// For a second translation at launch (`fit`): the cubin that this is the translation of, when
     /// a kernel of the translation takes more registers than its budget.
     pub original_image: Option<Vec<u8>>,
+    /// The digest of the image that the program gave (`xxh64`), when it has kernels to refuse or to
+    /// announce (`kernels::describe`); 0 otherwise.
+    pub source: u64,
 }
 
 // SAFETY: the wrapper points at owned, immutable data. Its fourth word is either the program
@@ -84,6 +87,7 @@ impl Replacement {
             emulated: Vec::new(),
             origin: None,
             original_image: None,
+            source: 0,
         }
     }
 
@@ -115,6 +119,7 @@ impl Replacement {
         next.emulated = self.emulated.clone();
         next.origin = self.origin;
         next.original_image = self.original_image.clone();
+        next.source = self.source;
         Some((next, retry.functions))
     }
 
@@ -210,6 +215,7 @@ impl Replacement {
         loaded.emulated = self.emulated;
         loaded.origin = self.origin;
         loaded.original_image = self.original_image;
+        loaded.source = self.source;
         loaded
     }
 
@@ -253,6 +259,7 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
     }
     kernels::describe(
         handle,
+        replacement.source,
         std::mem::take(&mut replacement.refused),
         std::mem::take(&mut replacement.emulated),
     );
@@ -1208,11 +1215,15 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
     if !config().adapt || ptr.is_null() {
         return None;
     }
-    let named = log::at_level(2)
-        .then(|| unsafe { image_extent(ptr, len) })
-        .flatten()
-        .map(|image| format!("{who} of {} bytes, XXH64 {:016x}", image.len(), xxh64(image)));
-    unsafe { adapt_as(named.as_deref().unwrap_or(who), ptr, len) }
+    let digest = || unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
+    let identity = log::at_level(2).then(digest).flatten();
+    let named = identity.map(|(size, digest)| format!("{who} of {size} bytes, XXH64 {digest:016x}"));
+    let mut replacement = unsafe { adapt_as(named.as_deref().unwrap_or(who), ptr, len) }?;
+    if !replacement.refused.is_empty() || !replacement.emulated.is_empty() {
+        // What is said of its kernels is said once for each kernel of each image.
+        replacement.source = identity.or_else(digest).map_or(0, |(_, digest)| digest);
+    }
+    Some(replacement)
 }
 
 /// `adapt`, its lines said as `who`.
@@ -1242,6 +1253,7 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     let who = named.as_deref().unwrap_or(who);
     // A path is bytes, in whatever encoding: it is read as the driver would read it.
     let mut contents = std::fs::read(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
+    let source = xxh64(&contents);
     if contents.len() < 4 {
         return None;
     }
@@ -1259,7 +1271,9 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
         contents.push(0); // text
     }
     // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
-    unsafe { adapt_as(who, contents.as_ptr().cast(), None) }
+    let mut replacement = unsafe { adapt_as(who, contents.as_ptr().cast(), None) }?;
+    replacement.source = source;
+    Some(replacement)
 }
 
 #[cfg(test)]

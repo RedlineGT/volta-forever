@@ -283,7 +283,10 @@ process of its own, a second time from the proxy cache; it needs a C compiler. T
 with the stand-in of the fourth, that from `VF_LOG_LEVEL=2` the lines about an image name it (by
 the file of `cuModuleLoad`, by the size and XXH64 digest of an image that `cuModuleLoadData` or
 `cuLibraryLoadData` is given), so that two kernels of one name in two images are told apart, and
-that the default level prints none of them; it needs a C compiler.
+that the default level prints none of them; and that the lines of a kernel with emulated
+instructions and of a refused kernel are said once for each kernel, a kernel being its name and
+its image (a second kernel of a name, from another image, said with that image's digest; the same
+image loaded again not said again), within `VF_EMULATION_WARNINGS`; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 

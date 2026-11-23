@@ -475,7 +475,13 @@ fn refuses_compilation(
         }
     }
     for kernel in emulated {
-        for line in ANNOUNCER.given(&kernel.kernel, &kernel.counts, emulation_warnings(), log::at_level(2)) {
+        for line in ANNOUNCER.given(
+            &kernel.kernel,
+            0,
+            &kernel.counts,
+            emulation_warnings(),
+            log::at_level(2),
+        ) {
             log::warn(format_args!("{line}"));
         }
     }

@@ -30,7 +30,8 @@
 //!   loaded as it is, and the driver refuses it); `VF_TRANSLATE=first`: translate it also where
 //!   the image has PTX that would otherwise be rewritten;
 //! - `VF_EMULATION_WARNINGS=N`: list the first N kernels given to the program with emulated
-//!   instructions (default 20; 0: none);
+//!   instructions, and say again N refused kernels of names said before (default 20; 0: none; a
+//!   kernel is its name and its image, `kernels`);
 //! - `VF_CAPABILITY=8.0`: compute capability reported to the callers that have no code for this GPU
 //!   (default: the architecture their code starts at when it can be adapted, else the real one; see
 //!   `callers`). The PTX taken from a program is then the PTX it has for that capability; a caller
@@ -96,7 +97,8 @@ pub struct Config {
     /// Retry oversized dynamic shared-memory opt-ins at the physical V100 limit.
     pub fit_shared: bool,
     /// How many kernels with emulated instructions are listed on the console before the following
-    /// are only counted (0: none, and no summary).
+    /// are only counted (0: none, and no summary), and how many refused kernels of names said before
+    /// are said (`kernels`).
     pub emulation_warnings: usize,
     /// Print per-module and per-kernel timing breakdown (`VF_TIMING=1`).
     pub timing: bool,
