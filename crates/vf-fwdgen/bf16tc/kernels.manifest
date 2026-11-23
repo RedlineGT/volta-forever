@@ -2,6 +2,6 @@
 # vf-fwdgen's unit tests and verify, and by scripts/package.sh (vf-fwdgen check-bf16).
 compiler Build cuda_12.9.r12.9/compiler.36037853_0
 flags -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false --compress-mode=none -frandom-seed=vf-bf16 -std=c++17
-source kernels.cu 356b46c5994ede4d9093d7f158131d18cc95eff07bdaa0881881da90596f6413
+source kernels.cu 573a32862fac990dfbe1fd63766a0e18c358b6506d114d1d6adf9de7f05f278b
 source abi.h 19edbba4aee4f0b2c3c2ad768fc9805985f6d4cde10953c2bb02541d5fc5117e
-fatbin kernels.fatbin 291c6abd95d92f45a1871e6f447b73330a08f8b6b90fdc07b03439bcaf78f337
+fatbin kernels.fatbin 48850a71e52f65f54d90b6bfcba91e0825f48bf0417375709b45741a174d0f3e

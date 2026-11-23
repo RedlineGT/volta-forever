@@ -365,7 +365,10 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 - **Contexts and processes.** A CUDA context gets the runtime's module at the first call either path
   serves in it, and a memory pool and a cuBLASLt handle at the first call the tensor-core path serves
   there; none is destroyed: a program that makes and destroys many contexts keeps one of each per
-  context where they were made (the pool up to 64 MiB). A handle used from another context than its own is forwarded (by
+  context where they were made (the pool up to 64 MiB). That first call can come late, when device
+  memory is nearly full: a module that fails to load then is not loaded again, and that context forwards
+  every call for the rest of the process, with one line at level 1 (a pool or cuBLASLt handle that
+  cannot be made: its tensor-core calls). A handle used from another context than its own is forwarded (by
   the code; not tested on a GPU). Two V100s in one process, and a V100 beside another GPU, were not
   run on real hardware: the host test, with a stand-in driver whose two devices have different compute
   capabilities, shows the decision taken per context's device at each call, every call of the other
