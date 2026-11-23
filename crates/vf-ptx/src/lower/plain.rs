@@ -598,7 +598,13 @@ impl<'a> Body<'a> {
             let _ = write!(self.out, "\n$vf_reduced{n}:");
             self.shuffles = 0;
             self.written(d);
-            if qualifiers.is_empty() {
+            if qualifiers.is_empty() && kind == "f32" {
+                // Without .NaN, the result is the canonical NaN when every input is a NaN (PTX ISA,
+                // redux.sync), and so when there is one input: that of one lane alone is not
+                // reduced with any other, and its NaN would be given as it is.
+                emit!(self, "setp.nan.f32 %vf_n, {value}, {value};");
+                emit!(self, "selp.f32 {d}, 0f7FFFFFFF, {value}, %vf_n;");
+            } else if qualifiers.is_empty() {
                 emit!(self, "mov.b32 {d}, {value};");
             } else {
                 // The reduction above ignores NaNs. The .NaN form propagates a NaN from any live lane.

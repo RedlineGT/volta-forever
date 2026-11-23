@@ -139,6 +139,11 @@ px ptx-reduction-exited "$G/ptx-cases/reduction-exited.ptx" 5 1 4 5
 # every surviving lane. (Each lane reduces in the same order since 2026-11-22; Volta's minimum
 # and maximum give the same for both orders of their operands, so this passed before too.)
 px ptx-reduction-exited-f32 "$G/ptx-cases/reduction-exited-f32.ptx" 80000000 00000000 7fffffff 7fffffff
+# One lane alone: without .NaN, the least and the greatest of one NaN are the canonical NaN, as of
+# several (until 2026-11-23 the NaN of the lane was given as it was, 7fc00001 and ff800001); the
+# least of -0 alone and the greatest of -1 alone are what they are. (Not run on later hardware:
+# redux.f32 is of sm_100a and sm_103a, not of the RTX 5090, whose sm_120 ptxas refuses it.)
+px ptx-reduction-one-lane-f32 "$G/ptx-cases/reduction-one-lane-f32.ptx" 7fffffff 7fffffff 80000000 bf800000
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
 px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
 # Built from the same source with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
