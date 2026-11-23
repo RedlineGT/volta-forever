@@ -35,9 +35,9 @@
 #   VF_AUDIT_MAP, VF_AUDIT_MAP_FILE
 #                  substitutions of your own: the first stay before the launcher's, the
 #                  file is read after them (--map gives a file priority)
-#   VF_JIT_LINEINFO=1|0
-#                  1: run-time CUDA compilers keep the PTX of what they build (setup_jit); 0: never.
-#                  By default only when VF_CAPABILITY is 8.0 or later
+#   VF_JIT_LINEINFO=1
+#                  run-time CUDA compilers keep the PTX of what they build (setup_jit): for a
+#                  program told 8.0 or later (VF_CAPABILITY) that compiles kernels while it runs
 # A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 set -eu
 
@@ -503,16 +503,14 @@ setup_runfiles() {
 # compiles again for sm_70. The machine code itself is unchanged; the cubins gain line tables.
 # nvcc reads NVCC_APPEND_FLAGS at every invocation, whoever starts it. NVIDIA's CuTe DSL (CUTLASS
 # Python kernels) compiles without nvcc; CUTE_DSL_LINEINFO=1 makes it keep the PTX the same way.
-# The cubins grow (60-120 %), so by default only for programs told Ampere or later, whose run-time
-# builds are then machine code for sm_80 and later; never next to -G, which overrides line
-# information and fails with it under -Werror all-warnings. _jit_nvcc/_jit_cute: what was set here.
+# Only with VF_JIT_LINEINFO=1 (vf doctor suggests it to a program told 8.0 or later, whose
+# run-time builds are machine code for sm_80 and later): the launcher cannot see the command
+# line of a compiler, and -lineinfo next to a -G there fails under -Werror all-warnings; the
+# cubins grow too (60-120 %). Never next to a -G of NVCC_APPEND_FLAGS. _jit_nvcc/_jit_cute: what
+# was set here.
 setup_jit() {
     _jit_nvcc=0 _jit_cute=0
-    case ${VF_JIT_LINEINFO:-auto} in
-        0) return 0 ;;
-        1) ;;
-        *) case ${VF_CAPABILITY:-} in [89].* | [1-9][0-9].*) ;; *) return 0 ;; esac ;;
-    esac
+    [ "${VF_JIT_LINEINFO:-}" = 1 ] || return 0
     if [ -z "${CUTE_DSL_LINEINFO+set}" ]; then
         CUTE_DSL_LINEINFO=1 _jit_cute=1
     fi
@@ -728,6 +726,15 @@ cmd_doctor() {
     fi
     venv_release
     [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
+    # (Told 8.0 or later, a program that compiles CUDA while it runs builds machine code for
+    # sm_80 or later, of which the layer can translate little.)
+    case ${VF_CAPABILITY:-} in
+        [89].* | [1-9][0-9].*)
+            if [ "${VF_JIT_LINEINFO:-}" != 1 ]; then
+                echo "NOTICE VF_CAPABILITY is $VF_CAPABILITY: a program that compiles CUDA while it runs (PyTorch extensions, FlashInfer, TileLang, CuTe DSL) builds machine code for that capability, of which the layer can translate little"
+                echo "       VF_JIT_LINEINFO=1 makes those compilers keep the PTX of what they build, which the layer compiles for the V100 (not for a build with -G: INSTALL.md)"
+            fi ;;
+    esac
 
     if [ "$_ok" = 0 ]; then
         exit 1
@@ -888,10 +895,11 @@ Environment:
   VF_AUDIT_MAP, VF_AUDIT_MAP_FILE
                  substitutions of your own: the first stay before the launcher's, the
                  file is read after them (--map gives a file priority)
-  VF_JIT_LINEINFO=1|0
-                 1: run-time CUDA compilers keep the PTX of what they build (nvcc gets
-                 -lineinfo, CuTe DSL CUTE_DSL_LINEINFO=1); 0: never; by default only when
-                 VF_CAPABILITY is 8.0 or later. Not with -G (see INSTALL.md)
+  VF_JIT_LINEINFO=1
+                 run-time CUDA compilers keep the PTX of what they build (nvcc gets
+                 -lineinfo, CuTe DSL CUTE_DSL_LINEINFO=1), which the layer compiles for
+                 the V100: for a program told 8.0 or later (VF_CAPABILITY) that compiles
+                 kernels while it runs. Not for a build with -G (see INSTALL.md)
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }

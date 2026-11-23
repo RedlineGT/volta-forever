@@ -1154,9 +1154,10 @@ else
     fail "$name" "exit $_st; left: $(ls -A "$tmp/half-empty" 2>/dev/null | tr '\n' ' ')"
 fi
 
-# Run-time compilers keep the PTX of what they build (setup_jit): by default only for a program told
-# 8.0 or later, after flags of the user's, once, never next to -G; always with VF_JIT_LINEINFO=1,
-# never with 0. env prints the variables only when it sets them.
+# Run-time compilers keep the PTX of what they build (setup_jit): with VF_JIT_LINEINFO=1 only, after
+# flags of the user's, once, never next to -G; not by default, whatever the capability (the launcher
+# cannot see a -G on a compiler's command line: until 2026-11-23 a program told 8.0 had -lineinfo by
+# default, and nvcc -G -Werror all-warnings failed). env prints the variables only when it sets them.
 name="jit-lineinfo"
 vf=$arch/bin/vf
 # nv VAR [ENV...]: VAR as a command run through the launcher sees it (unset: "unset"), the
@@ -1169,26 +1170,43 @@ nv() {
 _default=$(nv NVCC_APPEND_FLAGS)
 _told=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0)
 _told12=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=12.0)
-_told75=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=7.5)
 _forced=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1)
+_forced80=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 VF_JIT_LINEINFO=1)
 _off=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 VF_JIT_LINEINFO=0)
-_kept=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80')
-_once=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-O3 -lineinfo')
-_debug=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-G -O0')
-_cute=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0)
-_cute_default=$(nv CUTE_DSL_LINEINFO)
-_cute_kept=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 CUTE_DSL_LINEINFO=0)
-_env=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 "$vf" env | grep -E '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' | tr '\n' ' ' || true)
-_env_none=$(env -u CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-lineinfo' CUTE_DSL_LINEINFO=1 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
-if [ "$_default" = unset ] && [ "$_told" = "-lineinfo" ] && [ "$_told12" = "-lineinfo" ] \
-    && [ "$_told75" = unset ] && [ "$_forced" = "-lineinfo" ] && [ "$_off" = unset ] \
+_kept=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80')
+_once=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-O3 -lineinfo')
+_debug=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-G -O0')
+_cute=$(nv CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1)
+_cute_default=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0)
+_cute_kept=$(nv CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1 CUTE_DSL_LINEINFO=0)
+_env=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1 "$vf" env | grep -E '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' | tr '\n' ' ' || true)
+_env_told=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO -u VF_JIT_LINEINFO VF_CAPABILITY=8.0 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
+_env_none=$(env -u CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-lineinfo' CUTE_DSL_LINEINFO=1 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
+if [ "$_default" = unset ] && [ "$_told" = unset ] && [ "$_told12" = unset ] \
+    && [ "$_forced" = "-lineinfo" ] && [ "$_forced80" = "-lineinfo" ] && [ "$_off" = unset ] \
     && [ "$_kept" = "-gencode=arch=compute_80,code=compute_80 -lineinfo" ] && [ "$_once" = "-O3 -lineinfo" ] \
     && [ "$_debug" = "-G -O0" ] && [ "$_cute" = 1 ] && [ "$_cute_default" = unset ] && [ "$_cute_kept" = 0 ] \
-    && [ "$_env" = "export NVCC_APPEND_FLAGS='-lineinfo' export CUTE_DSL_LINEINFO='1' " ] && [ "$_env_none" = 0 ]; then
+    && [ "$_env" = "export NVCC_APPEND_FLAGS='-lineinfo' export CUTE_DSL_LINEINFO='1' " ] && [ "$_env_told" = 0 ] \
+    && [ "$_env_none" = 0 ]; then
     pass "$name"
 else
-    fail "$name" "default '$_default' told '$_told' '$_told12' '$_told75' forced '$_forced' off '$_off' kept '$_kept' once '$_once' debug '$_debug' cute '$_cute' '$_cute_default' '$_cute_kept' env '$_env' none '$_env_none'"
+    fail "$name" "default '$_default' told '$_told' '$_told12' forced '$_forced' '$_forced80' off '$_off' kept '$_kept' once '$_once' debug '$_debug' cute '$_cute' '$_cute_default' '$_cute_kept' env '$_env' '$_env_told' none '$_env_none'"
 fi
+
+# vf doctor suggests VF_JIT_LINEINFO=1 to a program told 8.0 or later, and only then.
+name="doctor-jit-lineinfo"
+_d80=$(env -u VF_JIT_LINEINFO VF_CAPABILITY=8.0 "$vf" doctor 2>&1 || true)
+_d120=$(env -u VF_JIT_LINEINFO VF_CAPABILITY=12.0 "$vf" doctor 2>&1 || true)
+_d75=$(env -u VF_JIT_LINEINFO VF_CAPABILITY=7.5 "$vf" doctor 2>&1 || true)
+_dset=$(VF_JIT_LINEINFO=1 VF_CAPABILITY=8.0 "$vf" doctor 2>&1 || true)
+case $_d80$_d120 in
+    *"VF_JIT_LINEINFO=1 makes"*"VF_JIT_LINEINFO=1 makes"*)
+        case $_d75$_dset in
+            *VF_JIT_LINEINFO*) fail "$name" "said without reason: $_d75 $_dset" ;;
+            *) pass "$name" ;;
+        esac ;;
+    *) fail "$name" "8.0: $_d80" ;;
+esac
 
 # --- done -----------------------------------------------------------------------
 
