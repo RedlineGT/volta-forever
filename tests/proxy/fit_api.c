@@ -20,7 +20,13 @@
 //   - an unload of the module while the second translation is given the kernel's settings at a
 //     refused launch waits for the launch: the second translation is not unloaded under the
 //     setting (its handle could be given to another function), and the launch is made; nor while
-//     the launch from it is being made, nor while a setting that the program makes is given to it.
+//     the launch from it is being made, nor while a setting that the program makes is given to it,
+//     nor while its kernel is being looked up there at the first refused launch;
+//   - a second translation made for a module that the program unloads meanwhile, and whose
+//     handle the driver gives to the next module loaded, is not that module's: it is unloaded,
+//     and that module's refused launch makes one of its own;
+//   - a second translation made for a module whose context is destroyed meanwhile went with the
+//     context: it is not unloaded (its handle may be another module's by then).
 //
 // usage: fit_api PROXY MOCK CUBIN
 // PROXY is the layer's libcuda.so.1, MOCK the stand-in, CUBIN an sm_75 cubin with the kernel
@@ -67,6 +73,7 @@ static void reset_counters(void) {
     *(_Atomic int*)dlsym(mock, "fit_mock_second_held") = 0;
     *(_Atomic int*)dlsym(mock, "fit_mock_second_release") = 0;
     *(int*)dlsym(mock, "fit_mock_unloads_during_call") = 0;
+    *(uintptr_t*)dlsym(mock, "fit_mock_next_module") = 0;
 }
 static int mock_loads(void) { return *(int*)dlsym(mock, "fit_mock_loads"); }
 static int mock_unloads(void) { return *(int*)dlsym(mock, "fit_mock_unloads"); }
@@ -95,6 +102,7 @@ SYM(CUresult, cuGetProcAddress, const char*, void**, int, unsigned long long);
 SYM(CUresult, cuKernelSetAttribute, int, int, void*, int);
 SYM(CUresult, cuFuncSetAttribute, void*, int, int);
 SYM(CUresult, cuLibraryGetKernelCount, unsigned*, void*);
+SYM(CUresult, cuCtxDestroy_v2, void*);
 
 #define LOAD(name) *(void**)&name = sym(#name)
 
@@ -242,7 +250,7 @@ int main(int argc, char **argv) {
     LOAD(cuLaunchKernelEx); LOAD(cuLaunchKernelEx_ptsz);
     LOAD(cuGetProcAddress);
     LOAD(cuKernelSetAttribute); LOAD(cuFuncSetAttribute);
-    LOAD(cuLibraryGetKernelCount);
+    LOAD(cuLibraryGetKernelCount); LOAD(cuCtxDestroy_v2);
 
     FILE *f = fopen(cubin_path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", cubin_path); return 2; }
@@ -671,6 +679,92 @@ int main(int argc, char **argv) {
         if (!ok) wrong++;
         printf("%s  %-50s unloads during the setting=%d (want 0), setting=%d (want 0)\n",
                ok ? "ok   " : "WRONG", "unload_during_own_setting_waits", during, a.result);
+    }
+
+    // The same while the kernel is looked up in the second translation, just made at the first
+    // refused launch.
+    reset_counters();
+    r = cuModuleLoadData(&module, image); if (r) return 1;
+    r = cuModuleGetFunction(&function, module, "k_fit_regs"); if (r) return 1;
+    *(_Atomic int*)dlsym(mock, "fit_mock_hold_second") = 3;
+    {
+        CUresult launched = -1;
+        struct launch_args a = { function, &launched };
+        struct unload_args b = { .module = module };
+        pthread_t ta, tb;
+        pthread_create(&ta, NULL, launch_thread_fn, &a);
+        _Atomic int *held = dlsym(mock, "fit_mock_second_held");
+        for (int i = 0; i < 10000 && !*held; i++) usleep(1000);
+        if (!*held) { fprintf(stderr, "unload_during_lookup: the lookup was not held\n"); return 2; }
+        pthread_create(&tb, NULL, unload_thread_fn, &b);
+        int observed = 0;
+        for (int i = 0; i < 10000 && !observed; i++) {
+            observed = b.done || waiting_on_setter(b.tid);
+            if (!observed) usleep(1000);
+        }
+        *(_Atomic int*)dlsym(mock, "fit_mock_second_release") = 1;
+        pthread_join(ta, NULL);
+        pthread_join(tb, NULL);
+        if (!observed) { fprintf(stderr, "unload_during_lookup: could not observe the unload\n"); return 2; }
+        int during = *(int*)dlsym(mock, "fit_mock_unloads_during_call");
+        checks++;
+        int ok = during == 0 && launched == 0;
+        if (!ok) wrong++;
+        printf("%s  %-50s unloads during the lookup=%d (want 0), launch=%d (want 0)\n",
+               ok ? "ok   " : "WRONG", "unload_during_lookup_waits", during, launched);
+        check_unloads("unload_during_lookup_unloaded", 2);
+    }
+
+    // ---- the module goes while its second translation is being made ----
+
+    // Thread A: the first launch is refused, and the load of the second translation is paused.
+    // The program unloads the module, and the driver gives its handle to the next module loaded,
+    // whose function has the same handle as the first. A's translation is not that module's: it
+    // is unloaded, and A gets the first answer. The new module's refused launch is made from a
+    // second translation of its own (before: from A's, which was taken for it).
+    reset_counters();
+    *(_Atomic int*)dlsym(mock, "fit_mock_pause") = 1;
+    r = cuModuleLoadData(&module, image); if (r) return 1;
+    r = cuModuleGetFunction(&function, module, "k_fit_regs"); if (r) return 1;
+    {
+        CUresult launched = -1;
+        struct launch_args a = { function, &launched };
+        pthread_t ta;
+        pthread_create(&ta, NULL, launch_thread_fn, &a);
+        for (int i = 0; i < 10000 && !*(_Atomic int*)dlsym(mock, "fit_mock_started"); i++) usleep(1000);
+        if (!*(_Atomic int*)dlsym(mock, "fit_mock_started")) { fprintf(stderr, "handle_again: the load was not paused\n"); return 2; }
+        cuModuleUnload(module);
+        void *again, *again_function;
+        *(uintptr_t*)dlsym(mock, "fit_mock_next_module") = (uintptr_t)module;
+        r = cuModuleLoadData(&again, image); if (r || again != module) { fprintf(stderr, "handle_again: load %d %p\n", r, again); return 2; }
+        r = cuModuleGetFunction(&again_function, again, "k_fit_regs"); if (r) return 1;
+        *(_Atomic int*)dlsym(mock, "fit_mock_release") = 1;
+        pthread_join(ta, NULL);
+        check("handle_again_first_launch", launched, 701, 3, 1);
+        check_unloads("handle_again_translation_unloaded", 2);
+        r = cuLaunchKernel(again_function, 1,1,1, 1024,1,1, 0, NULL, NULL, NULL);
+        check("handle_again_own_translation", r, 0, 4, 3);
+        cuModuleUnload(again);
+    }
+
+    // Thread A as above; the context of the module is destroyed meanwhile, and the module with it.
+    // The translation, loaded in that context, went with it: it is not unloaded.
+    reset_counters();
+    *(_Atomic int*)dlsym(mock, "fit_mock_pause") = 1;
+    r = cuModuleLoadData(&module, image); if (r) return 1;
+    r = cuModuleGetFunction(&function, module, "k_fit_regs"); if (r) return 1;
+    {
+        CUresult launched = -1;
+        struct launch_args a = { function, &launched };
+        pthread_t ta;
+        pthread_create(&ta, NULL, launch_thread_fn, &a);
+        for (int i = 0; i < 10000 && !*(_Atomic int*)dlsym(mock, "fit_mock_started"); i++) usleep(1000);
+        if (!*(_Atomic int*)dlsym(mock, "fit_mock_started")) { fprintf(stderr, "context_destroyed: the load was not paused\n"); return 2; }
+        cuCtxDestroy_v2((void *)0x7000);
+        *(_Atomic int*)dlsym(mock, "fit_mock_release") = 1;
+        pthread_join(ta, NULL);
+        check("context_destroyed_first_launch", launched, 701, 2, 1);
+        check_unloads("context_destroyed_translation_left", 0);
     }
 
     printf("\n%d checks, %d wrong\n", checks, wrong);

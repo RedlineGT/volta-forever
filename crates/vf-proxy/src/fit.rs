@@ -57,10 +57,10 @@
 //!
 //! `VF_FIT=0` turns all of it off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, RwLock};
 
 use crate::{REALS, idx, log};
@@ -128,7 +128,13 @@ struct Module {
     /// The library that this is the driver's module of (`cuLibraryGetModule`): the same image
     /// under another handle, held once.
     library: Option<usize>,
+    /// Which record this is: the driver can give the handle to another module once this one is
+    /// gone, while a second translation is being made for this one (`second_module`).
+    id: u64,
 }
+
+/// The number of the next record of a module (`Module::id`).
+static MODULE_IDS: AtomicU64 = AtomicU64::new(0);
 
 impl Module {
     /// The entry is gone: what it held of the counts. (The module of a library holds the
@@ -145,6 +151,10 @@ impl Module {
 struct State {
     kernels: HashMap<usize, Kernel>,
     modules: HashMap<usize, Module>,
+    /// The modules whose second translation was being made when they went without an unload by
+    /// the program (with their context, or their handle given again: `forget`): the second
+    /// translation went with them, and its handle is not to be unloaded.
+    abandoned: HashSet<u64>,
 }
 
 impl Attribute {
@@ -236,7 +246,7 @@ static STATE: LazyLock<(Mutex<State>, Condvar)> = LazyLock::new(|| (Mutex::new(S
 /// Commit point for second-image launches vs. data exclusion and unloads. `retry` takes this shared
 /// around the [settle the attributes + re-check + launch] step; `asked_for_data` takes it exclusive
 /// around its update, `unload` around its forgetting and the unload of the second image. The slow
-/// part (second_kernel: translation + load) stays outside all. Lock order: COMMIT, then
+/// part (second_module: translation + load) stays outside all. Lock order: COMMIT, then
 /// ATTR_ORDER, then STATE's mutex.
 static COMMIT: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 
@@ -286,6 +296,7 @@ pub fn register_module(handle: usize, original: Vec<u8>) {
             making: false,
             failed: false,
             library: None,
+            id: MODULE_IDS.fetch_add(1, Relaxed),
         },
     );
 }
@@ -300,6 +311,9 @@ pub fn forget(handle: usize) {
     let mut state = state();
     for (_, module) in state.remove(handle) {
         module.released();
+        if module.making {
+            state.abandoned.insert(module.id);
+        }
     }
 }
 
@@ -358,10 +372,14 @@ pub fn share_module(module: usize, library: usize) {
         making: false,
         failed: false,
         library: Some(library),
+        id: MODULE_IDS.fetch_add(1, Relaxed),
     };
     // (Whatever else was known under that handle is of a module that is gone: `forget`.)
     for (_, gone) in state.remove(module) {
         gone.released();
+        if gone.making {
+            state.abandoned.insert(gone.id);
+        }
     }
     state.modules.insert(module, shared);
 }
@@ -602,20 +620,42 @@ pub unsafe fn retry(
         return None;
     }
     let handle = function as usize;
-    let (module, name, library, known) = {
+    let (module, name, library, known, id) = {
         let state = state();
         let kernel = state.kernels.get(&handle)?;
         if kernel.unavailable {
             return None;
         }
-        (kernel.module, kernel.name.clone(), kernel.library, kernel.second)
+        let id = state.modules.get(&kernel.module).map(|module| module.id);
+        (kernel.module, kernel.name.clone(), kernel.library, kernel.second, id)
     };
+    // (Outside every lock: a tenth of a second a megabyte, and the driver's time to load.)
+    let made = known
+        .is_none()
+        .then(|| second_module(module, id?, &name, library))
+        .flatten();
+    // The commit point: `asked_for_data` and `unload` take this lock alone, so that neither
+    // returns while a second translation is being looked in, given settings or launched from, and
+    // none of that starts after them: the second translation is not unloaded meanwhile.
+    let _commit = COMMIT.read().unwrap_or_else(|e| e.into_inner());
     let second = match known {
         Some(second) => second,
         None => {
-            // (Outside every lock: a tenth of a second a megabyte, and the driver's time to load.)
-            let taken = second_kernel(module, &name, library);
+            // Still the second translation of the same load of the module (not unloaded since,
+            // nor the module's handle given to another).
+            let current = made.filter(|&second| {
+                state()
+                    .modules
+                    .get(&module)
+                    .is_some_and(|known| Some(known.id) == id && known.second == Some((second, library)))
+            });
+            let taken = current.and_then(|second| kernel_of(second, &name, library));
             let mut state = state();
+            if state.modules.get(&module).map(|known| known.id) != id {
+                // The module went meanwhile: what is known under the kernel's handle now, if
+                // anything, is of another load, and is left as it is.
+                return None;
+            }
             let kernel = state.kernels.get_mut(&handle)?;
             let Some(second) = taken else {
                 kernel.unavailable = true;
@@ -631,10 +671,6 @@ pub unsafe fn retry(
             second
         }
     };
-    // The commit point: `asked_for_data` and `unload` take this lock alone, so that neither
-    // returns while a second translation is being given settings or launched from, and none of
-    // that starts after them.
-    let _commit = COMMIT.read().unwrap_or_else(|e| e.into_inner());
     if !settle_attributes(handle, second, library, &name) {
         return None;
     }
@@ -730,15 +766,16 @@ fn current_device() -> Option<c_int> {
     (unsafe { get(&mut device) } == CUDA_SUCCESS).then_some(device)
 }
 
-/// The kernel `name` in the second translation of `module`, which is made and loaded if it was
-/// not yet (by one thread: others wait for it). None when the kernel may not be launched from
-/// there or cannot be had there, with a line in the log.
-fn second_kernel(module: usize, name: &str, library: bool) -> Option<usize> {
+/// The second translation of `module`, of the load whose record is `id` (`Module::id`), for its
+/// kernel `name`, which is made and loaded if it was not yet (by one thread: others wait for
+/// it). None when the kernel may not be launched from there or is refused there, with a line in
+/// the log, or when that load is gone (unloaded, or its handle given to another load).
+fn second_module(module: usize, id: u64, name: &str, library: bool) -> Option<usize> {
     let (mutex, made) = &*STATE;
     // The kernel itself first: whatever the module has, this one may be excluded.
     let original = {
         let state = mutex.lock().unwrap_or_else(|e| e.into_inner());
-        let known = state.modules.get(&module)?;
+        let known = state.modules.get(&module).filter(|known| known.id == id)?;
         if known.asked_for_data {
             log::info(format_args!(
                 "fit: {name} is not launched from a second translation: the program asked for data of its module by name"
@@ -757,10 +794,11 @@ fn second_kernel(module: usize, name: &str, library: bool) -> Option<usize> {
         ));
         return None;
     }
-    // The module's second translation: there, being made, or to make.
+    // The module's second translation: there, being made, or to make. (The same load all along:
+    // the cubin read above is its.)
     let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        let known = state.modules.get_mut(&module)?;
+        let known = state.modules.get_mut(&module).filter(|known| known.id == id)?;
         if known.failed {
             return None;
         }
@@ -771,8 +809,7 @@ fn second_kernel(module: usize, name: &str, library: bool) -> Option<usize> {
                 ));
                 return None;
             }
-            drop(state);
-            return kernel_of(second, name, library);
+            return Some(second);
         }
         if !known.making {
             // (Under the lock that saw it false: no other thread makes it too.)
@@ -789,7 +826,7 @@ fn second_kernel(module: usize, name: &str, library: bool) -> Option<usize> {
     };
     let is_refused = refused.iter().any(|refused| refused == name);
     let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
-    match state.modules.get_mut(&module) {
+    match state.modules.get_mut(&module).filter(|known| known.id == id) {
         Some(known) => {
             known.making = false;
             known.second = second.map(|second| (second, library));
@@ -799,10 +836,13 @@ fn second_kernel(module: usize, name: &str, library: bool) -> Option<usize> {
                 MADE.fetch_add(1, Relaxed);
             }
         }
-        // The program unloaded the module meanwhile.
+        // The module went meanwhile (and its handle may be another's now). Unloaded by the
+        // program: its second translation is unloaded here. Gone with its context, or without a
+        // word (`forget`): its second translation went with it, and its handle may be another's.
         None => {
+            let abandoned = state.abandoned.remove(&id);
             drop(state);
-            if let Some(second) = second {
+            if let Some(second) = second.filter(|_| !abandoned) {
                 unload_second(second, library);
             }
             made.notify_all();
@@ -817,7 +857,7 @@ fn second_kernel(module: usize, name: &str, library: bool) -> Option<usize> {
         ));
         return None;
     }
-    kernel_of(second?, name, library)
+    second
 }
 
 /// The cubin translated within each kernel's budget, and the kernels refused that way. (Not kept
@@ -961,7 +1001,7 @@ mod tests {
     fn made_once() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicUsize;
-        // The same steps as `second_kernel`, on a state of the test's own (the real one needs a driver).
+        // The same steps as `second_module`, on a state of the test's own (the real one needs a driver).
         let state = Arc::new((Mutex::new((false, None::<usize>)), Condvar::new())); // (making, second)
         let makers = Arc::new(AtomicUsize::new(0));
         let start = Arc::new(std::sync::Barrier::new(16));
