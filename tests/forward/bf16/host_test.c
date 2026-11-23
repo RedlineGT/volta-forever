@@ -415,23 +415,39 @@ static void lt_left_to_129(void)
     v.LayoutCreate(&lb, CUDA_R_16BF, 8, 1920, 8);
     v.LayoutCreate(&lc, CUDA_R_32F, 1536, 8, 1536);
     const float one = 1.0f, zero = 0.0f;
+    /* attr: a configuration attribute set to value on top of what cublasLtMatmulAlgoInit leaves (-1: none) */
     static const struct {
         const char *what;
-        int32_t id, splitk; /* -1: no algorithm */
+        int32_t id; /* -1: no algorithm */
+        int attr;
+        uint32_t value;
         int null_c, null_ws, served;
     } cases[] = {
-        {"no algorithm", -1, 0, 0, 0, 1},
-        {"algorithm id 16, one split of k (12.9's heuristic)", 16, 1, 0, 0, 1},
-        {"algorithm id 11", 11, 1, 0, 0, 0},
-        {"algorithm id 16, 4 splits of k", 16, 4, 0, 0, 0},
-        {"no C descriptor", -1, 0, 1, 0, 0},
-        {"no workspace, with a size of 32 MiB", -1, 0, 0, 1, 0},
+        {"no algorithm", -1, -1, 0, 0, 0, 1},
+        {"algorithm id 16 as cublasLtMatmulAlgoInit leaves it (12.9's heuristic)", 16, -1, 0, 0, 0, 1},
+        {"algorithm id 11", 11, -1, 0, 0, 0, 0},
+        {"algorithm id 16, 4 splits of k", 16, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, 4, 0, 0, 0},
+        {"algorithm id 16, split-K count 0", 16, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, 0, 0, 0, 0},
+        {"algorithm id 16, tile 5", 16, CUBLASLT_ALGO_CONFIG_TILE_ID, 5, 0, 0, 0},
+        {"algorithm id 16, reduction scheme 1", 16, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, 1, 0, 0, 0},
+        {"algorithm id 16, CTA swizzling 1", 16, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, 1, 0, 0, 0},
+        {"algorithm id 16, custom option 1", 16, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, 1, 0, 0, 0},
+        {"algorithm id 16, stages id 3", 16, CUBLASLT_ALGO_CONFIG_STAGES_ID, 3, 0, 0, 0},
+        {"algorithm id 16, inner shape id 1", 16, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, 1, 0, 0, 0},
+        {"algorithm id 16, cluster shape id 1", 16, CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID, 1, 0, 0, 0},
+        {"no C descriptor", -1, -1, 0, 1, 0, 0},
+        {"no workspace, with a size of 32 MiB", -1, -1, 0, 0, 1, 0},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
         cublasLtMatmulAlgo_t algo;
         memset(&algo, 0, sizeof algo);
-        algo.data[0] = (uint64_t)cases[i].id;
-        algo.data[1] = (uint64_t)cases[i].splitk;
+        if (cases[i].id >= 0)
+            cublasLtMatmulAlgoInit(lt, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F, CUDA_R_32F,
+                                   cases[i].id, &algo);
+        if (cases[i].attr == CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID)
+            algo.data[7] |= (uint64_t)cases[i].value << 32;
+        else if (cases[i].attr >= 0)
+            algo.data[cases[i].attr] = cases[i].value;
         take();
         v.LtMatmul(lt, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), cases[i].null_c ? NULL : lc, DEV(3), lc,
                    cases[i].id < 0 ? NULL : &algo, NULL, cases[i].null_ws ? (size_t)32 << 20 : 0, S1);

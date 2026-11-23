@@ -158,6 +158,7 @@ static struct {
     FN(cublasLtDestroy) LtDestroy;
     FN(cublasLtMatmul) LtMatmul;
     FN(cublasLtMatmulAlgoConfigGetAttribute) LtAlgoConfigGet;
+    FN(cublasLtMatmulAlgoInit) LtAlgoInit;
     FN(cublasLtMatmulDescInit_internal) LtDescInit;
     FN(cublasLtMatmulDescCreate) LtDescCreate;
     FN(cublasLtMatmulDescDestroy) LtDescDestroy;
@@ -218,6 +219,7 @@ static int bind_libraries(void)
              BIND(b, cb.GemmSB64, "cublasGemmStridedBatchedEx_64") && BIND(l, cb.LtCreate, "cublasLtCreate") &&
              BIND(l, cb.LtDestroy, "cublasLtDestroy") && BIND(l, cb.LtMatmul, "cublasLtMatmul") &&
              BIND(l, cb.LtAlgoConfigGet, "cublasLtMatmulAlgoConfigGetAttribute") &&
+             BIND(l, cb.LtAlgoInit, "cublasLtMatmulAlgoInit") &&
              BIND(l, cb.LtDescInit, "cublasLtMatmulDescInit_internal") &&
              BIND(l, cb.LtDescCreate, "cublasLtMatmulDescCreate") &&
              BIND(l, cb.LtDescDestroy, "cublasLtMatmulDescDestroy") &&
@@ -1493,16 +1495,39 @@ static int read_layout(cublasLtMatrixLayout_t l, Layout *o)
     return 1;
 }
 
-/* The algorithm 12.9's heuristic gives on the skinny path's shapes: id 16, one split of k (0 is read
- * as one). */
-static int lt_algo_is_sequential(const cublasLtMatmulAlgo_t *algo)
+/* Every configuration attribute of an algorithm (decls.h holds CUDA 12.9's complete list, which
+ * vf-fwdgen checks against the header). */
+static const int algo_attrs[] = {CUBLASLT_ALGO_CONFIG_ID,          CUBLASLT_ALGO_CONFIG_TILE_ID,
+                                 CUBLASLT_ALGO_CONFIG_SPLITK_NUM,  CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
+                                 CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION,
+                                 CUBLASLT_ALGO_CONFIG_STAGES_ID,   CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID,
+                                 CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID};
+
+/* The algorithm 12.9's heuristic gives on the skinny path's shapes, the only one with which 12.9 computes
+ * the sequential kernel's chain: id 16 with every configuration attribute as cublasLtMatmulAlgoInit leaves
+ * it, and k in one split. Any other configuration of id 16 is 12.9's to run or to refuse (a split-K count
+ * of 0, another tile, reduction scheme, custom option or stages id: 12.9 refuses them). */
+static int lt_algo_is_sequential(cublasLtHandle_t handle, int32_t dtype, const cublasLtMatmulAlgo_t *algo)
 {
-    int32_t id = -1, splitk = -1; /* both int32_t in cublasLt.h */
-    size_t w = 0;
-    if (cb.LtAlgoConfigGet(algo, CUBLASLT_ALGO_CONFIG_ID, &id, sizeof id, &w) != CUBLAS_STATUS_SUCCESS ||
-        cb.LtAlgoConfigGet(algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitk, sizeof splitk, &w) != CUBLAS_STATUS_SUCCESS)
+    cublasLtMatmulAlgo_t ref;
+    memset(&ref, 0, sizeof ref);
+    if (cb.LtAlgoInit(handle, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, (cudaDataType_t)dtype,
+                      (cudaDataType_t)dtype, 16, &ref) != CUBLAS_STATUS_SUCCESS)
         return 0;
-    return id == 16 && (splitk == 0 || splitk == 1);
+    for (size_t i = 0; i < sizeof algo_attrs / sizeof algo_attrs[0]; ++i) {
+        const cublasLtMatmulAlgoConfigAttributes_t a = (cublasLtMatmulAlgoConfigAttributes_t)algo_attrs[i];
+        uint64_t mine = 0, theirs = 0;
+        size_t w = 0, wr = 0;
+        if (cb.LtAlgoConfigGet(algo, a, NULL, 0, &w) != CUBLAS_STATUS_SUCCESS || w == 0 || w > sizeof mine ||
+            cb.LtAlgoConfigGet(algo, a, &mine, w, &w) != CUBLAS_STATUS_SUCCESS ||
+            cb.LtAlgoConfigGet(&ref, a, &theirs, w, &wr) != CUBLAS_STATUS_SUCCESS || wr != w || mine != theirs)
+            return 0;
+    }
+    int32_t splitk = -1; /* int32_t in cublasLt.h */
+    size_t w = 0;
+    return cb.LtAlgoConfigGet(algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitk, sizeof splitk, &w) ==
+               CUBLAS_STATUS_SUCCESS &&
+           splitk == 1;
 }
 
 EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMatmulDesc_t desc, const void *alpha,
@@ -1583,11 +1608,11 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
                          workspaceSizeInBytes >= VF_SEQ_MIN_WORKSPACE};
     path = choose_path(&shape, &reason);
     if (path == PATH_NONE) goto forward;
-    /* An explicit algorithm: 12.9 runs it, and only the one its heuristic picks on these shapes (id 16,
-     * without split-K) computes the sequential kernel's chain; any other goes to 12.9. The tensor-core
-     * path does not follow a cuBLASLt algorithm (docs/emulations.md, section 11). */
+    /* An explicit algorithm: 12.9 runs it, and only the one its heuristic picks on these shapes (id 16 as
+     * cublasLtMatmulAlgoInit leaves it, k not split) computes the sequential kernel's chain; any other goes
+     * to 12.9. The tensor-core path does not follow a cuBLASLt algorithm (docs/emulations.md, section 11). */
     reason = R_ALGO;
-    if (algo && path == PATH_SKINNY && !CONTROL("algo") && !lt_algo_is_sequential(algo)) goto forward;
+    if (algo && path == PATH_SKINNY && !CONTROL("algo") && !lt_algo_is_sequential(handle, ld.type, algo)) goto forward;
     Ctx *x = NULL;
     reason = context_check(handle, (CUstream)stream, api, &x);
     if (reason) goto forward;

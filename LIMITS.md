@@ -338,7 +338,8 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   that compares a graph's replay with an eager run of the same step sees it.
 - **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
   explicit algorithms of `cublasGemmEx` and `cublasGemmStridedBatchedEx`, a `cublasLtMatmul`
-  algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16, k not split),
+  algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
+  configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
   pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with any attribute outside
   the supported set, a `cublasLtMatmul` without a C descriptor or with a workspace size and no
   workspace, and every call of a context that is not a V100's. The tensor-core path does not follow

@@ -51,7 +51,7 @@ cp "$out/forward/bf16tc/libcublas.so.13" "$out/forward/bf16tc/libcublasLt.so.13"
 "${cc[@]}" -shared -fvisibility=hidden -DVF_BF16_TEST -Wa,-I"$rt" -Wl,-soname,libvf_cublas_bf16.so \
     -o "$out/test/libvf_cublas_bf16.so" "$rt/runtime.c" "$rt/kernels.S" -Wl,-z,defs -ldl -lpthread || exit 1
 "${cc[@]}" -o "$out/host_test" "$src/host_test.c" -L"$out/old/lib" -Wl,-rpath,"$out/old/lib" -l:libcuda.so.1 \
-    -l:libcublas.so.12 -ldl || exit 1
+    -l:libcublas.so.12 -l:libcublasLt.so.12 -ldl || exit 1
 # The variant built as the generator builds it, with the control that aborts when the runtime is missing.
 g=$out/forward/gen/bf16tc/libcublas.so.13
 gcc -shared -fPIC -O2 -fvisibility=hidden -DVF_BF16_CONTROL_ABORT -I"$out/new/include" -o "$out/abort/libcublas.so.13" \

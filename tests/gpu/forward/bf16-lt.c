@@ -1,9 +1,12 @@
 /* cuBLASLt calls on the skinny path's shapes that must keep cuBLAS 12.9's behaviour (review F1, F2):
  * without an algorithm, and with the algorithm 12.9's heuristic gives (id 16), the variant serves them
  * with 12.9's bits; with an algorithm 12.9 computes otherwise (id 11) the call is forwarded, and the
- * result is 12.9's with that algorithm; a workspace size without a workspace gets 12.9's status.
- * 12.9's own results come from the same descriptors given to libcublasLt.so.12 directly.
- * VF_BF16_CONTROL=algo (explicit algorithms served) makes it fail. Prints "ok bf16-lt". */
+ * result is 12.9's with that algorithm; so is id 16 with any configuration attribute other than
+ * cublasLtMatmulAlgoInit leaves it (a split-K count of 0, tile 5, reduction scheme 1, custom option 1,
+ * stages id 3, CTA swizzling 1: 12.9 refuses all but the last, delta review F1b), with 12.9's status;
+ * a workspace size without a workspace gets 12.9's status. 12.9's own results come from the same
+ * descriptors given to libcublasLt.so.12 directly. VF_BF16_CONTROL=algo (explicit algorithms served)
+ * makes it fail. Prints "ok bf16-lt". */
 #include "bf16-common.h"
 
 static cublasLtHandle_t ltv, lt12;
@@ -90,10 +93,40 @@ int main(void)
             cublasLtMatrixLayoutDestroy(lc);
             cublasLtMatmulDescDestroy(d);
         }
-        static const char *const names[] = {"no algorithm", "the heuristic's algorithm", "algorithm id 11"};
-        const cublasLtMatmulAlgo_t *algos[] = {NULL, &ah, &a11};
-        const int want_served[] = {1, 1, 0};
-        for (int a = 0; a < 3; ++a) {
+        /* id 16 as cublasLtMatmulAlgoInit leaves it, and with one configuration attribute changed */
+        static const struct {
+            int attr;
+            uint32_t value;
+            const char *what;
+        } variants[] = {{-1, 0, "id 16 from AlgoInit"},
+                        {CUBLASLT_ALGO_CONFIG_SPLITK_NUM, 0, "id 16, split-K count 0"},
+                        {CUBLASLT_ALGO_CONFIG_TILE_ID, 5, "id 16, tile 5"},
+                        {CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, 1, "id 16, reduction scheme 1"},
+                        {CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, 1, "id 16, custom option 1"},
+                        {CUBLASLT_ALGO_CONFIG_STAGES_ID, 3, "id 16, stages id 3"},
+                        {CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, 1, "id 16, CTA swizzling 1"}};
+        enum { NV = sizeof variants / sizeof variants[0] };
+        cublasLtMatmulAlgo_t a16[NV];
+        for (int v = 0; v < NV; ++v) {
+            cublasLtMatmulAlgoInit(ltv, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F, CUDA_R_32F,
+                                   16, &a16[v]);
+            if (variants[v].attr >= 0) {
+                const cublasStatus_t ss = cublasLtMatmulAlgoConfigSetAttribute(
+                    &a16[v], (cublasLtMatmulAlgoConfigAttributes_t)variants[v].attr, &variants[v].value,
+                    sizeof variants[v].value);
+                CHECK(ss == CUBLAS_STATUS_SUCCESS, "shape %zu: %s: cublasLtMatmulAlgoConfigSetAttribute returned %d", i,
+                      variants[v].what, (int)ss);
+            }
+        }
+        const char *names[3 + NV] = {"no algorithm", "the heuristic's algorithm", "algorithm id 11"};
+        const cublasLtMatmulAlgo_t *algos[3 + NV] = {NULL, &ah, &a11};
+        int want_served[3 + NV] = {1, 1, 0};
+        for (int v = 0; v < NV; ++v) {
+            names[3 + v] = variants[v].what;
+            algos[3 + v] = &a16[v];
+            want_served[3 + v] = variants[v].attr < 0;
+        }
+        for (int a = 0; a < 3 + NV; ++a) {
             cublasStatus_t s1, s2;
             cudaMemset(c1, 0, cb);
             cudaMemset(c2, 0xff, cb);
@@ -108,8 +141,9 @@ int main(void)
             printf("     %-28s status %d / 12.9 %d; %s; %zu elements differ from 12.9's\n", names[a], (int)s1, (int)s2,
                    served ? "served by the skinny path" : fwd ? "forwarded (explicit algorithm)" : "forwarded",
                    diff);
-            CHECK(s1 == s2 && diff == 0, "shape %zu, %s: not 12.9's result (%zu elements differ, status %d / %d)", i,
-                  names[a], diff, (int)s1, (int)s2);
+            CHECK(s1 == s2 && (s1 != CUBLAS_STATUS_SUCCESS || diff == 0),
+                  "shape %zu, %s: not 12.9's result (%zu elements differ, status %d / %d)", i, names[a], diff, (int)s1,
+                  (int)s2);
             CHECK(!rt_counters || (want_served[a] ? served : fwd), "shape %zu, %s: %s", i, names[a],
                   want_served[a] ? "not served by the skinny path" : "not forwarded for its algorithm");
             free(r1);

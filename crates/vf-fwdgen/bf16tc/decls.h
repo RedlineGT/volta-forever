@@ -299,7 +299,12 @@ typedef enum {
     CUBLASLT_ALGO_CONFIG_ID = 0,
     CUBLASLT_ALGO_CONFIG_TILE_ID = 1,
     CUBLASLT_ALGO_CONFIG_SPLITK_NUM = 2,
-    CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME = 3
+    CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME = 3,
+    CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING = 4,
+    CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION = 5,
+    CUBLASLT_ALGO_CONFIG_STAGES_ID = 6,
+    CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID = 7,
+    CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID = 8
 } cublasLtMatmulAlgoConfigAttributes_t;
 
 size_t cublasLtGetVersion(void);
@@ -314,6 +319,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle, cublasLtMatmulDesc_t
 cublasStatus_t cublasLtMatmulAlgoConfigGetAttribute(const cublasLtMatmulAlgo_t *algo,
                                                    cublasLtMatmulAlgoConfigAttributes_t attr, void *buf,
                                                    size_t sizeInBytes, size_t *sizeWritten);
+cublasStatus_t cublasLtMatmulAlgoInit(cublasLtHandle_t lightHandle, cublasComputeType_t computeType,
+                                      cudaDataType_t scaleType, cudaDataType_t Atype, cudaDataType_t Btype,
+                                      cudaDataType_t Ctype, cudaDataType_t Dtype, int algoId, cublasLtMatmulAlgo_t *algo);
 cublasStatus_t cublasLtMatmulDescInit_internal(cublasLtMatmulDesc_t matmulDesc, size_t size,
                                                cublasComputeType_t computeType, cudaDataType_t scaleType);
 cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t *matmulDesc, cublasComputeType_t computeType,

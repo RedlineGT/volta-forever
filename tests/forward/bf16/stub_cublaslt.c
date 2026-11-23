@@ -177,21 +177,35 @@ static void layout_text(char *out, size_t n, cublasLtMatrixLayout_t l)
              (long long)get(o, 3), (long long)get(o, 4), (long long)get(o, 5), (long long)get(o, 6));
 }
 
-/* An algorithm of the stand-in: data[0] its id, data[1] its number of splits of k (host tests build them). */
+/* An algorithm of the stand-in: the value of configuration attribute a in data[a] (a = 0..7) and the
+ * cluster shape (attribute 8) in data[7]'s upper half; the sizes are 12.9's (the inner and cluster shape
+ * ids are 16-bit). Host tests build them, or cublasLtMatmulAlgoInit does: the id, one split of k, and
+ * zeros elsewhere. */
+static const int algo_size[9] = {4, 4, 4, 4, 4, 4, 4, 2, 2};
+EXPORT cublasStatus_t cublasLtMatmulAlgoInit(cublasLtHandle_t h, cublasComputeType_t c, cudaDataType_t s,
+                                             cudaDataType_t at, cudaDataType_t bt, cudaDataType_t ct,
+                                             cudaDataType_t dt, int id, cublasLtMatmulAlgo_t *algo)
+{
+    if (!algo) return CUBLAS_STATUS_INVALID_VALUE;
+    memset(algo, 0, sizeof *algo);
+    algo->data[CUBLASLT_ALGO_CONFIG_ID] = (uint64_t)id;
+    algo->data[CUBLASLT_ALGO_CONFIG_SPLITK_NUM] = 1;
+    return CUBLAS_STATUS_SUCCESS;
+}
 EXPORT cublasStatus_t cublasLtMatmulAlgoConfigGetAttribute(const cublasLtMatmulAlgo_t *algo,
                                                           cublasLtMatmulAlgoConfigAttributes_t attr, void *buf,
                                                           size_t size, size_t *written)
 {
-    if (!algo || !buf || size != 4) return CUBLAS_STATUS_INVALID_VALUE;
-    int32_t v;
-    if (attr == CUBLASLT_ALGO_CONFIG_ID)
-        v = (int32_t)algo->data[0];
-    else if (attr == CUBLASLT_ALGO_CONFIG_SPLITK_NUM)
-        v = (int32_t)algo->data[1];
-    else
-        return CUBLAS_STATUS_INVALID_VALUE;
-    memcpy(buf, &v, 4);
-    if (written) *written = 4;
+    if (!algo || (int)attr < 0 || (int)attr > 8) return CUBLAS_STATUS_INVALID_VALUE;
+    const size_t n = (size_t)algo_size[attr];
+    if (size == 0 && written) {
+        *written = n;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    if (!buf || size != n) return CUBLAS_STATUS_INVALID_VALUE;
+    const uint64_t v = attr == CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID ? algo->data[7] >> 32 : algo->data[attr] & 0xffffffffu;
+    memcpy(buf, &v, n); /* little endian: the low bytes */
+    if (written) *written = n;
     return CUBLAS_STATUS_SUCCESS;
 }
 
