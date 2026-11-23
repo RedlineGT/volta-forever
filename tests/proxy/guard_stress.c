@@ -18,6 +18,9 @@
  *             functions to the next thread. green: the same, destroyed with cuGreenCtxDestroy.
  *   samename  a module that the layer keeps nothing of, with a function named as the refused kernel
  *             of a library, and another library whose kernel of that name runs: all three run.
+ *   greenstale a module with a refused kernel `bad`, loaded in a green context that is destroyed; the
+ *             driver gives the module's handle to the module that it makes for another library in a
+ *             new context, whose kernel `bad` runs: it is launched and asked about.
  *   nocontext the function of a library's refused kernel in context A, taken from the driver, asked
  *             about while no context is current, then while another is; then, in A, asked about and
  *             launched: refused there, whatever was concluded in the other contexts.
@@ -228,6 +231,28 @@ int main(int argc, char **argv) {
                  "its function -> %d, a question -> %d; %lu of 3 launches reached the driver",
                  r1, r2, r3, r4, *launched - before);
         check(line, !r1 && !r2 && !r3 && !r4 && *launched - before == 3);
+    } else if (!strcmp(scenario, "greenstale")) {
+        static const char LIB_RUNS[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
+                                       ".visible .entry bad()\n{\n ret;\n}\n";
+        void *green_context, *b, *m, *library, *k, *h, *module_of_h;
+        int value;
+        CUresult (*d_func_module)(void **, void *) = D("cuFuncGetModule");
+        if (l_lib_load(&library, LIB_RUNS, NULL, NULL, 0, NULL, NULL, 0)) return 2;
+        d_lib_kernel(&k, library, "bad");
+        l_ctx_create(&green_context, 0, 0);
+        l_load(&m, PTX);
+        l_green_destroy(green_context);
+        l_ctx_create(&b, 0, 0);
+        d_kernel_function(&h, k);
+        d_func_module(&module_of_h, h);
+        unsigned long before = *launched;
+        CUresult r = go(h), q = l_attribute(&value, 0, h);
+        char line[300];
+        snprintf(line, sizeof line,
+                 "greenstale: the library's module in the new context has the handle of the module that went: %s; "
+                 "its kernel `bad`, which runs: launched -> %d (%lu reached the driver), asked about -> %d",
+                 module_of_h == m ? "yes" : "no", r, *launched - before, q);
+        check(line, module_of_h == m && r == 0 && q == 0 && *launched - before == 1);
     } else if (!strcmp(scenario, "nocontext")) {
         void *a, *b, *library, *bad;
         int value;

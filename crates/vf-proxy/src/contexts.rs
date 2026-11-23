@@ -4,9 +4,9 @@
 //! the layer kept for them is dropped here, as at an unload. A library is in every context and
 //! stays; the module that the driver gives for it in a context goes with that context.
 //!
-//! The context of a module is the one current when the driver gave the module. A context that
-//! goes without one of these calls (a green context) leaves what the layer kept for its modules
-//! until the driver gives their handles again (`images::keep`).
+//! The context of a module is the one current when the driver gave the module. A green context is
+//! used through the context that `cuCtxFromGreenCtx` gives for it, and its modules go at
+//! `cuGreenCtxDestroy`.
 //!
 //! What is known of the modules of a context is taken before the driver is asked to destroy it
 //! (`of`), and dropped after (`destroyed`): once the driver destroyed it, another thread can be

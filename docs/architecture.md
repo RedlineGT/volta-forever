@@ -331,8 +331,8 @@ program unloads it (`cuModuleUnload`, `cuLibraryUnload`), and when its context g
 both names of each (`crates/vf-proxy/src/contexts.rs`). Nothing is unloaded in the driver
 then: it dropped them itself. A library (`cuLibraryLoadData`) is in every context and stays
 until it is unloaded; only the modules that the driver gives for it in a context go with
-that context. A green context destroyed with `cuGreenCtxDestroy` is not seen: its modules are
-forgotten when the driver gives their handles again. An unload waits for a launch from
+that context. A green context is used through the context that `cuCtxFromGreenCtx` gives for
+it, and its modules go at `cuGreenCtxDestroy`. An unload waits for a launch from
 the module's second translation and for a setting being given to it. What the refusal at a
 launch concluded of a handle (section 5) is concluded again from the moment each of these calls
 begins, and `cuGreenCtxDestroy` too, and again after it returns; what is concluded while one is

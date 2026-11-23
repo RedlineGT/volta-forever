@@ -194,6 +194,8 @@ static CUresult destroy(void *context) {
 CUresult cuCtxDestroy_v2(void *context) { return destroy(context); }
 CUresult cuCtxDestroy(void *context) { return destroy(context); }
 CUresult cuGreenCtxDestroy(void *context) { return destroy(context); }
+// (A green context is its own context here: what is loaded through the one given for it is its.)
+CUresult cuCtxFromGreenCtx(void **context, void *green) { *context = green; return 0; }
 // (The last detach of a context made with cuCtxCreate destroys it.)
 CUresult cuCtxDetach(void *context) { return destroy(context); }
 CUresult cuCtxGetCurrent(void **context) { *context = (void *)current; return 0; }

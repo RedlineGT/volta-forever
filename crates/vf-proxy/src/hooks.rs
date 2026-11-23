@@ -2911,13 +2911,22 @@ pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     result
 }
 
-/// A green context is not followed (`contexts`), but the handles of its modules' functions may be
-/// given to others once it is destroyed: what `guard` concluded of handles is concluded again.
+/// Modules are loaded in a green context through the context that `cuCtxFromGreenCtx` gives for
+/// it, and go with it, as at `cuCtxDestroy`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cuGreenCtxDestroy(context: *mut c_void) -> CUresult {
+pub unsafe extern "C" fn cuGreenCtxDestroy(green: *mut c_void) -> CUresult {
     let _ending = kernels::ending();
+    let from_green = real!(cuCtxFromGreenCtx: unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult);
+    let mut context = std::ptr::null_mut();
+    // (No context: no module loaded in it.)
+    let known = unsafe { from_green(&mut context, green) } == CUDA_SUCCESS && !context.is_null();
+    let modules = contexts::of(if known { context as usize } else { 0 });
     let real = real!(cuGreenCtxDestroy: ContextDestroy);
-    unsafe { real(context) }
+    let result = unsafe { real(green) };
+    if result == CUDA_SUCCESS {
+        contexts::destroyed(modules);
+    }
+    result
 }
 
 /// A release of the primary context of a device and the query of its state that tells whether the
