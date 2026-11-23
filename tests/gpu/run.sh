@@ -447,6 +447,27 @@ VF_STATS=1 rt stats rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "half gemm check: 0 w
 VF_ADAPT=0 rt adapt-off rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "cudaGetLastError\(\) +-> 209"
 VF_LAZY=0 rt lazy-off rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "own kernel: 0/65536 wrong" "lazy off,"
 
+# A fat binary of the program with a kernel that the layer refuses beside two that it runs, under
+# the runtimes of CUDA 13.5 and 12.9 and both loading modes. The CUDA 13 runtime takes each kernel
+# by itself (cuLibraryGetKernel) and goes on without the refused one; so does the CUDA 12 runtime
+# under lazy loading, which takes them from the module of the library. Under eager loading
+# (CUDA_MODULE_LOADING=EAGER) the CUDA 12 runtime takes every kernel of every image at its start
+# and gives up at the first lookup that fails: it is given no module for an image with a refused
+# kernel, as NVIDIA's driver gives none for an image without code for the GPU, and starts without
+# that image's kernels (until 2026-11-23 it did not start: cudaMalloc -> cudaErrorInvalidPtx).
+for v in 12.9.2:129 13.5.0:135; do
+    program=$out/bin/rt_refuse.${v#*:}.ptx90
+    [ -x "$program" ] && [ "$program" -nt "$G/rt_refuse.cu" ] || "$T/cuda-${v%%:*}/bin/nvcc" -O2 \
+        -gencode arch=compute_90,code=compute_90 "$G/rt_refuse.cu" -o "$program" || exit 2
+done
+ran=("good kernels -> cudaSuccess, value 43" "bad launch -> cudaErrorInvalidPtx" "good after bad -> cudaSuccess, value 42")
+CUDA_MODULE_LOADING=LAZY rt rt-refuse-13.5-lazy rt_refuse.135.ptx90 "$T/cuda-13.5.0/lib" "${ran[@]}"
+CUDA_MODULE_LOADING=EAGER rt rt-refuse-13.5-eager rt_refuse.135.ptx90 "$T/cuda-13.5.0/lib" "${ran[@]}"
+CUDA_MODULE_LOADING=LAZY rt rt-refuse-12.9-lazy rt_refuse.129.ptx90 "$T/cuda-12.9.2/lib" "${ran[@]}"
+CUDA_MODULE_LOADING=EAGER rt rt-refuse-12.9-eager rt_refuse.129.ptx90 "$T/cuda-12.9.2/lib" "cudaMalloc -> cudaSuccess" \
+    "cuLibraryGetModule: 1 kernel of this library cannot run on this GPU .* no module is given for it" \
+    "bad launch -> cudaError[A-Za-z]+$"
+
 # Kernels that cannot run on the GPU are refused when the program asks for them and the others of
 # their module work, through both interfaces; a kernel with emulated instructions is announced. At
 # the default log level: this is what the user sees.

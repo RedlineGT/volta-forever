@@ -196,6 +196,15 @@ pub fn has_refused(handle: usize) -> bool {
     metadata(&known(), handle).is_some_and(|k| !k.refused.is_empty())
 }
 
+/// How many kernels of `handle` must not be given to the program, the first of them by name and
+/// why; `None` when there is none.
+pub fn first_refused(handle: usize) -> Option<(usize, String, String)> {
+    let known = known();
+    let refused = &metadata(&known, handle)?.refused;
+    let (kernel, (_, reason)) = refused.iter().min_by(|a, b| a.0.cmp(b.0))?;
+    Some((refused.len(), kernel.clone(), reason.clone()))
+}
+
 /// Kernel `name` of `handle` must not be given to the program. The first time the program asks for
 /// it, the reason is printed.
 pub fn refused(handle: usize, name: &str) -> bool {

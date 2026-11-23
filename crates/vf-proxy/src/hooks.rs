@@ -16,6 +16,9 @@ const CUDA_SUCCESS: CUresult = 0;
 /// What the layer answers for a variable that it does not give to the program (`may_name_global`):
 /// not `CUDA_ERROR_NOT_FOUND`, which says that the module has no such name.
 const CUDA_ERROR_NOT_SUPPORTED: CUresult = 801;
+/// What NVIDIA's driver answers for the module of an image that has no code for the GPU
+/// (`no_whole_module`).
+const CUDA_ERROR_NO_BINARY_FOR_GPU: CUresult = 209;
 /// `CUjit_option` values of the buffer for the compiler's error messages and of its size.
 const JIT_ERROR_LOG_BUFFER: c_int = 5;
 const JIT_ERROR_LOG_BUFFER_SIZE: c_int = 6;
@@ -1396,14 +1399,74 @@ pub unsafe extern "C" fn cuModuleEnumerateFunctions(
     unsafe { Enumeration::module(module).write_entries(functions, count) }
 }
 
+/// `CUmoduleLoadingMode` value of eager loading (`CUDA_MODULE_LOADING=EAGER`).
+const MODULE_EAGER_LOADING: c_int = 1;
+
+/// Whether the driver loads modules eagerly in this process (`cuModuleGetLoadingMode`, which says
+/// what it made of `CUDA_MODULE_LOADING`): the CUDA runtime then takes every kernel of its fat
+/// binaries at its start.
+fn eager_loading() -> bool {
+    let mode_of = real!(cuModuleGetLoadingMode: unsafe extern "C" fn(*mut c_int) -> CUresult);
+    let mut mode = 0;
+    let result = unsafe { mode_of(&mut mode) };
+    result == CUDA_SUCCESS && mode == MODULE_EAGER_LOADING
+}
+
+/// Whether the current context is given no module for `library` (`cuLibraryGetModule`), because
+/// the layer cannot give every kernel of its image there and modules are loaded eagerly. When so,
+/// says why (at level 2) and leaves NULL in `module`.
+///
+/// The CUDA 12 runtime takes the kernels of a fat binary that it registered from the module of its
+/// library: it asks for that module, then for each kernel of the image by name in it
+/// (`cuModuleGetFunction`). Under eager loading it does so for every image at its start, and a
+/// lookup that fails there ends its initialization: the program's next CUDA call fails (cuBLAS
+/// 12.9: `cublasCreate`). A module that the driver does not give, it does without: NVIDIA's driver
+/// gives none for an image without code for the GPU (`CUDA_ERROR_NO_BINARY_FOR_GPU`), and the
+/// runtime goes on without that image's kernels. Under eager loading the layer answers so for an
+/// image of which it cannot give every kernel; its other kernels are still given by
+/// `cuLibraryGetKernel`. Under lazy loading the runtime asks for the module at the first launch of
+/// a kernel of the image, takes the kernels that it is given and leaves the others: the module is
+/// given. (On a later card the library's own entries are taken, and run: the module is given.)
+///
+/// # Safety
+/// `module` must be null or writable.
+unsafe fn no_whole_module(module: *mut *mut c_void, library: usize) -> bool {
+    if !eager_loading() {
+        return false;
+    }
+    let Some((count, kernel, reason)) = kernels::first_refused(library) else {
+        return false;
+    };
+    if !context_needs_adapting() {
+        return false;
+    }
+    if !module.is_null() {
+        unsafe { *module = std::ptr::null_mut() };
+    }
+    log::info(format_args!(
+        "cuLibraryGetModule: {count} {} of this library cannot run on this GPU (the first is {kernel}: {reason}); \
+         under eager loading no module is given for it (error {CUDA_ERROR_NO_BINARY_FOR_GPU}, as NVIDIA's driver \
+         answers for an image without code for the GPU), and its other kernels are given by cuLibraryGetKernel",
+        if count == 1 { "kernel" } else { "kernels" }
+    ));
+    true
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *mut c_void) -> CUresult {
     COUNTS[idx::cuLibraryGetModule].fetch_add(1, Relaxed);
     let handle = library as usize;
+    if unsafe { no_whole_module(module, handle) } {
+        return CUDA_ERROR_NO_BINARY_FOR_GPU;
+    }
     if lazy::is_lazy(handle) {
         // The stand-in has only the header; materialize the full module.
         match unsafe { lazy::materialize(handle) } {
             Ok(mat) => {
+                // The driver's compiler may have refused functions of the whole module.
+                if unsafe { no_whole_module(module, handle) } {
+                    return CUDA_ERROR_NO_BINARY_FOR_GPU;
+                }
                 let real: unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetModule].load(Relaxed)) };
                 let result = unsafe { real(module, mat.handle as *mut c_void) };

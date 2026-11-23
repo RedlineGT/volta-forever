@@ -44,7 +44,17 @@ def check(proxy, mock):
     alias_entries = (c.c_void_p * 2)(None, 12345)
     assert api.cuModuleEnumerateFunctions(alias_entries, 2, alias) == 0
     assert alias_entries[0] % 16 == 2 and alias_entries[1] == 12345
-    module = c.c_void_p()
+    # Under eager loading no module is given for a library of which a kernel is refused: NVIDIA's
+    # driver gives none for an image without code for the GPU (209), and the CUDA 12 runtime, which
+    # then takes every kernel of every image from its module at its start and gives up at a lookup
+    # that fails, does without the image (until 2026-11-23 the module was given, and cuBLAS 12.9 did
+    # not start under CUDA_MODULE_LOADING=EAGER). Under lazy loading it is given.
+    mode = c.c_int.in_dll(backend, "loading_mode")
+    module = c.c_void_p(0xDEADBEEF)
+    mode.value = 1  # CU_MODULE_EAGER_LOADING
+    assert api.cuLibraryGetModule(c.byref(module), library) == 209
+    assert module.value is None, hex(module.value)
+    mode.value = 2  # CU_MODULE_LAZY_LOADING
     assert api.cuLibraryGetModule(c.byref(module), library) == 0
     direct = c.c_void_p()
     assert api.cuModuleLoadData(c.byref(direct), ptx) == 0
@@ -130,6 +140,19 @@ def check(proxy, mock):
     c.c_uint.in_dll(backend, "refusal_delay").value = 0
     assert answers == [(218, None), (218, None)], answers
     assert api.cuLibraryUnload(library) == 0
+    # Nor, under eager loading, for a library whose kernel only the driver's compiler refuses, which a
+    # deferred library learns when it compiles the whole module for the module asked for; a library
+    # of which every kernel runs is given its module.
+    mode.value = 1
+    for image, error in ((refused, 209), (native, 0)):
+        assert api.cuLibraryLoadData(c.byref(library), image, None, None, 0, None, None, 0) == 0
+        module = c.c_void_p(0xDEADBEEF)
+        assert api.cuLibraryGetModule(c.byref(module), library) == error
+        assert (module.value is None) == (error != 0), hex(module.value)
+        kernel = c.c_void_p()
+        assert api.cuLibraryGetKernel(c.byref(kernel), library, b"good") == 0 and kernel.value
+        assert api.cuLibraryUnload(library) == 0
+    mode.value = 2
     if os.environ.get("VF_LAZY") != "0":
         # A deferred library is unloaded while one of its kernels is being compiled, and the
         # driver gives its handle to another one: what was compiled for the first is not given

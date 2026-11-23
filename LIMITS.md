@@ -65,6 +65,20 @@ kernels of its module load and run. The same holds for the image that the driver
 another input of the link that cannot run is not refused, and traps when it is launched; and
 inputs given with `cuLinkAddFile` are not adapted at all.
 
+**Eager loading (`CUDA_MODULE_LOADING=EAGER`).** The CUDA 13 runtime asks for each kernel by
+itself, and goes on without one that is refused, under eager loading as under lazy loading. The
+CUDA 12 runtime, which the CUDA 12.9 libraries that the layer forwards to carry inside them,
+takes the kernels of each of its fat binaries from the module of its library
+(`cuLibraryGetModule`, then `cuModuleGetFunction` for each); under eager loading it does so for
+every fat binary at its start, and gives up altogether at the first lookup that fails. NVIDIA's
+driver gives no module for an image without code for the GPU (209,
+`CUDA_ERROR_NO_BINARY_FOR_GPU`), and the runtime then does without that image. Under eager
+loading the layer gives no module either for an image with a kernel that it refuses (the
+others stay given by `cuLibraryGetKernel`): the runtime starts without that image's kernels
+(until 2026-11-23 it did not start). A program of the CUDA 12 runtime whose own fat binary has
+a refused kernel thus starts without the kernels of that fat binary; under lazy loading it is
+given the others.
+
 **PyTorch 2.14.0.** Of the 23,693 functions for sm_75 in the 475 units of machine code of its
 library, 23,664 are translated (99.9 %) and 29 are refused: 10 for a branch through a uniform
 register, 6 for the instruction `I2IP`, 4 for a call whose return address is not given the
