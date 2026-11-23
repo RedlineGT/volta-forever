@@ -1239,6 +1239,12 @@ HOLDS_NOTHING = ('the instruction left out of the declared life is one where, by
 FREE_TOO = 'the next register, where every home is moved, is free too'
 NOTHING_IN_FLIGHT = ('no load of the program in flight writes the borrowed register: the wait for the six '
                      'scoreboards that the control takes away is not needed there')
+ROUTINE_ONLY = ('the registers taken (R231 at the default, R229 to R231 with VF_BORROW=8: the 64-bit addresses '
+                'that two IMAD.WIDE write in R228 and R230 and two loads read, all before the first call) are '
+                'busy by the translator\'s lives only at the three instructions of the routine that the kernel '
+                'calls (WARPSYNC, MOV, RET.REL), where it takes every register of the function to be alive at the '
+                'return; by the validator\'s own lives, which follow each of the four calls, they hold nothing '
+                'there, nor anywhere along the lives of the predicates held in them')
 RIGHT_THERE = {
     ('default', 'short_home', '0161.sm_75.cubin'): HOLDS_NOTHING,
     ('1', 'short_home', '0142.sm_75.cubin'): HOLDS_NOTHING,
@@ -1250,6 +1256,8 @@ RIGHT_THERE = {
     ('1', 'written_pair', '0086.sm_75.cubin'): ('the translator gives level 2 up for the pair (a borrowed register '
                                                 'receives a result that nothing announces) and translates the four '
                                                 'functions at level 1, with pairs that their instructions do not write'),
+    ('default', 'held_busy_l3', '0854.sm_75.cubin'): ROUTINE_ONLY,
+    ('8', 'held_busy_l3', '0854.sm_75.cubin'): ROUTINE_ONLY,
 }
 
 
