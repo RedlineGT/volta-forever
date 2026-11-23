@@ -5,9 +5,14 @@
 # scripts/build-forwarders.sh), in a temporary directory, with one thing wrong:
 #   - a forwarding library is missing (libcublasLt.so.13): refused, and named;
 #   - a forwarding library is older than the sources: refused, and named;
-#   - the report is that of a run for one library only: refused.
+#   - the report is that of a run for one library only: refused;
+#   - forward/bf16tc holds some but not all of the three files of the bf16 cuBLAS variants (a
+#     variant missing, the runtime library missing, the runtime library alone): refused, and
+#     what is missing named.
 # An archive of such a tree would not do what INSTALL.md says, or would carry libraries of an
-# earlier generator under a new version. Prints PASS or FAIL for each case; exit status 1 on a FAIL.
+# earlier generator under a new version. And one case with nothing wrong: forward/bf16tc with the
+# three files is packed, and the archive has them in forward/bf16tc, and nothing else there.
+# Prints PASS or FAIL for each case; exit status 1 on a FAIL.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 [ -f "$W/dist/forward/libcublasLt.so.13" ] && [ -f "$W/dist/lib/libcuda.so.1" ] || { echo "missing: a built dist/ (scripts/build.sh, scripts/build-forwarders.sh)"; exit 2; }
@@ -28,6 +33,20 @@ refused() {
 copy() {  # copy NAME: the built tree as it is (dates kept)
     mkdir -p "$tmp/$1" && cp -a "$W/dist/lib" "$W/dist/bin" "$W/dist/forward" "$tmp/$1/"
 }
+# bf16 NAME FILE...: forward/bf16tc of the copy NAME holds those files of the bf16 cuBLAS variants
+# and not the others (empty stand-ins: package.sh goes by their names and does not read them; a
+# file of the built tree is set aside).
+bf16() {
+    local name=$1 lib
+    shift
+    mkdir -p "$tmp/$name/forward/bf16tc"
+    for lib in libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so; do
+        if [ -e "$tmp/$name/forward/bf16tc/$lib" ]; then
+            mv "$tmp/$name/forward/bf16tc/$lib" "$tmp/$name/forward/bf16tc/$lib.aside"
+        fi
+    done
+    for lib do : > "$tmp/$name/forward/bf16tc/$lib"; done
+}
 
 copy missing-library
 mv "$tmp/missing-library/forward/libcublasLt.so.13" "$tmp/missing-library/forward/libcublasLt.so.13.aside"
@@ -41,5 +60,28 @@ copy partial-report
 grep -v "^libcusolver.so.12 " "$W/dist/forward/REPORT.txt" > "$tmp/partial-report/forward/REPORT.txt"
 touch -r "$W/dist/forward/REPORT.txt" "$tmp/partial-report/forward/REPORT.txt"
 refused partial-report "lacks 1 of the .* forwarding libraries.*libcusolver.so.12"
+
+copy bf16-variant-missing
+bf16 bf16-variant-missing libcublas.so.13 libvf_cublas_bf16.so
+refused bf16-variant-missing "bf16tc holds 2 of the 3 files of the bf16 cuBLAS variants: it lacks libcublasLt.so.13"
+
+copy bf16-runtime-missing
+bf16 bf16-runtime-missing libcublas.so.13 libcublasLt.so.13
+refused bf16-runtime-missing "bf16tc holds 2 of the 3 files of the bf16 cuBLAS variants: it lacks libvf_cublas_bf16.so"
+
+copy bf16-runtime-alone
+bf16 bf16-runtime-alone libvf_cublas_bf16.so
+refused bf16-runtime-alone "bf16tc holds 1 of the 3 files of the bf16 cuBLAS variants: it lacks libcublas.so.13 libcublasLt.so.13"
+
+copy bf16-complete
+bf16 bf16-complete libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so
+DIST=$tmp/bf16-complete ALLOW_DIRTY=1 bash "$W/scripts/package.sh" > "$tmp/bf16-complete.log" 2>&1
+status=$?
+got=$(tar -tzf "$tmp"/bf16-complete/volta-forever-*.tar.gz 2> /dev/null | sed -n 's|^[^/]*/forward/bf16tc/\(..*\)$|\1|p' | LC_ALL=C sort | tr '\n' ' ')
+if [ $status = 0 ] && [ "$got" = "libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so " ]; then
+    echo "PASS  bf16-complete"
+else
+    echo "FAIL  bf16-complete (status $status, forward/bf16tc of the archive: $got)"; sed 's/^/    /' "$tmp/bf16-complete.log" | tail -5; failed=1
+fi
 
 exit $failed

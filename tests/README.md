@@ -258,7 +258,7 @@ libraries against a mock library.
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
 | `stack.sh` | stack-word copying correctness | seconds | Cargo (`vf-fwdgen` crate) |
-| `package-refusals.sh` | what `scripts/package.sh` refuses to pack: a built tree with a forwarding library missing, with one older than the sources, with the report of a run for one library only | seconds | a built `dist/` (`scripts/build.sh`, `scripts/build-forwarders.sh`) |
+| `package-refusals.sh` | what `scripts/package.sh` refuses to pack: a built tree with a forwarding library missing, with one older than the sources, with the report of a run for one library only, with some but not all of the three files of the bf16 cuBLAS variants (`forward/bf16tc`); and that it packs the three in `forward/bf16tc` when they are all there | seconds | a built `dist/` (`scripts/build.sh`, `scripts/build-forwarders.sh`) |
 
 ### What the CI runs
 
