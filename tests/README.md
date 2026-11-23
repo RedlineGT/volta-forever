@@ -64,12 +64,19 @@ scripts of `tests/sass/`).
   apart (`bf16-arith.c`); the tensor-core path within 32 units of 2^-24 sum |a b| of fp64,
   deterministic; every forwarded call with 12.9's bits; what a program's graphs, capture modes,
   threads and contexts see (`bf16-graphs.c`, `bf16-threads.c`, `bf16-life.c`, `bf16-reserve.c`;
-  a graph captured through the variant behaves step for step as with 12.9 alone, and replays 12.9's
-  bits);
-  the runtime told the real capability under the layer's settings; with `VF_BF16_SANITIZE` set,
-  under compute-sanitizer. `bf16-skinny.c` is the measurement behind the skinny path's rule and
-  bounds (12.9's kernel per configuration; path, bits over the m rows of each column, writes outside
-  them, error and time per shape), run by hand.
+  a graph captured through the variant behaves step for step as with 12.9 alone and replays 12.9's
+  bits, with tensor-core-sized calls, forwarded, and with skinny ones, `bf16-graphs-skinny`, served
+  by kernel nodes of the runtime's module, which replay after every handle is destroyed);
+  cuBLASLt calls that keep 12.9's behaviour: an explicit algorithm other than 12.9's heuristic one,
+  and a workspace size without a workspace (`bf16-lt.c`); the tensor-core path's fallback in the TN
+  layout of linear layers, bit for bit against a host model (`bf16-fallback.c`); the runtime told
+  the real capability under the layer's settings (with `CUDA_MODULE_LOADING=EAGER` expected to fail
+  for a reason outside the variants: the layer refuses one of cuBLAS 12.9's sm_80 kernels there);
+  the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); with
+  `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
+  skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
+  column, writes outside them, error and time per shape), and `bf16-cost.c` the one behind the
+  documented host times, fallback cost and same-sign error; both run by hand.
 - `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
   the design review), each control making its test fail.

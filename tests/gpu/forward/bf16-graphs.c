@@ -1,18 +1,21 @@
 /* Graph captures (review 3.2, G3). The runtime gives every tensor-core call made during a capture to
- * cuBLAS 12.9 (no allocation, so no memory node in the program's graph), so with the variant a
- * program's graph must behave as with 12.9 alone. Each case runs twice in one process, once with the
+ * cuBLAS 12.9 (no allocation, so no memory node in the program's graph), and the skinny path serves
+ * captured calls with one kernel node of its own module (VF_BF16_GRAPHS_N=8): either way, with the
+ * variant a program's graph must behave as with 12.9 alone. Each case runs twice in one process, once with the
  * call through the variant and once with the same call given to 12.9 directly, and prints what every
  * step returned. It fails when the variant's line differs from 12.9's (a step's status, a memory node,
  * or a replay's bits against 12.9's eager result), when the same call made eagerly is not served by
- * the tensor-core path (so the shape is one it serves), or when a captured call is not forwarded as
- * captured. VF_BF16_CONTROL=capture-tc (captured calls served, with allocation nodes) makes it fail.
+ * the path of its size, or when a captured call is not forwarded as captured (tensor-core size) or
+ * not served by the skinny path (n = 8). VF_BF16_CONTROL=capture-tc (captured tensor-core calls served,
+ * with allocation nodes) makes the first fail.
  * Prints "ok bf16-graphs". */
 #include "bf16-common.h"
 
 static cublasHandle_t hv, h12;
 static cudaStream_t st;
-static const int M = 1536, N = 512, K = 1536;
-static const size_t CB = (size_t)1536 * 512 * 4;
+static const int M = 1536, K = 1536;
+static int N = 512; /* VF_BF16_GRAPHS_N: 512 (tensor-core size, forwarded in captures) or 8 (skinny, served) */
+static size_t CB;
 static void *dA, *dB, *dC, *dRef;
 
 static void gemm(int v3)
@@ -252,6 +255,10 @@ static void physical_backing(int v3, Line *w)
 
 int main(void)
 {
+    const char *nv = getenv("VF_BF16_GRAPHS_N");
+    if (nv && atoi(nv) > 0) N = atoi(nv);
+    CB = (size_t)M * N * 4;
+    const int skinny = N <= 16;
     CU(cudaSetDevice(0));
     CU(cudaFree(0));
     open_129();
@@ -270,13 +277,14 @@ int main(void)
     gemm(0);
     CU(cudaStreamSynchronize(st));
     CU(cudaMemcpy(dRef, dC, CB, cudaMemcpyDeviceToDevice));
-    /* The same call made eagerly through the variant: served by the tensor-core path. */
+    /* The same call made eagerly through the variant: served by the path of its size. */
     const Counts k0 = counts(API_GEMMEX);
     gemm(1);
     CU(cudaStreamSynchronize(st));
     const Counts k1 = counts(API_GEMMEX);
-    if (rt_counters && delta(&k0, &k1, SERVED_TC) != 1) {
-        printf("FAIL  the call made eagerly through the variant is not served by the tensor-core path\n");
+    if (rt_counters && delta(&k0, &k1, skinny ? SERVED_SKINNY : SERVED_TC) != 1) {
+        printf("FAIL  the call made eagerly through the variant is not served by the %s path\n",
+               skinny ? "skinny" : "tensor-core");
         broken = 1;
     }
     static const struct {
@@ -306,11 +314,16 @@ int main(void)
     }
     const Counts k2 = counts(API_GEMMEX);
     const unsigned long long calls = delta(&k1, &k2, 0), fwd = delta(&k1, &k2, FWD(R_CAPTURED)),
-                             tc = delta(&k1, &k2, SERVED_TC);
-    printf("captured calls through the variant: %llu; forwarded as captured: %llu; served by the tensor-core path: %llu\n",
-           calls, fwd, tc);
-    if (rt_counters && (calls == 0 || fwd != calls || tc != 0)) {
+                             tc = delta(&k1, &k2, SERVED_TC), sk = delta(&k1, &k2, SERVED_SKINNY);
+    printf("n = %d: captured calls through the variant: %llu; forwarded as captured: %llu; served by the tensor-core "
+           "path: %llu, by the skinny path: %llu\n",
+           N, calls, fwd, tc, sk);
+    if (rt_counters && !skinny && (calls == 0 || fwd != calls || tc != 0)) {
         printf("FAIL  a captured call through the variant was not forwarded as captured\n");
+        broken = 1;
+    }
+    if (rt_counters && skinny && (calls == 0 || sk != calls)) {
+        printf("FAIL  a captured skinny-sized call through the variant was not served by the skinny path\n");
         broken = 1;
     }
     if (broken) {

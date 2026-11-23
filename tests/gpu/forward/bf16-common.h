@@ -142,6 +142,9 @@ static void *to_device(const void *h, size_t bytes)
     void *d;
     CU(cudaMalloc(&d, bytes ? bytes : 1));
     CU(cudaMemcpy(d, h, bytes, cudaMemcpyHostToDevice));
+    /* A pageable copy goes through the legacy stream: finished before any call on a non-blocking
+     * stream can read it. */
+    CU(cudaDeviceSynchronize());
     return d;
 }
 static void *from_device(const void *d, size_t bytes)

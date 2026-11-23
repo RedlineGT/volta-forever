@@ -1,7 +1,9 @@
-/* Lifetimes (review section 5, G6): a graph replayed after the handle that captured it is destroyed
- * (the module lives as long as its context); cudaDeviceReset with live handles, then a new handle and
- * a call served in the new context, with the bits it had before. Two V100s in one process and a V100
- * beside another GPU need devices this test is not given (it says so). Prints "ok bf16-life". */
+/* Lifetimes (review section 5, G6): a graph replayed after the handle that captured it is destroyed:
+ * a captured tensor-core call (computed by 12.9), and a captured skinny call, a kernel node of the
+ * runtime's module, replayed after every handle of the variants is destroyed (the module lives as long
+ * as its context); cudaDeviceReset with live handles, then a new handle and a call served in the new
+ * context, with the bits it had before. Two V100s in one process and a V100 beside another GPU need
+ * devices this test is not given (it says so). Prints "ok bf16-life". */
 #include "bf16-common.h"
 
 static const int M = 1536, N = 256, K = 1536;
@@ -75,6 +77,44 @@ int main(void)
     cudaFree(dA);
     cudaFree(dB);
     cudaFree(C);
+
+    /* a captured skinny call (the runtime's kernel), replayed after every handle is destroyed */
+    {
+        const int NS = 8;
+        cublasHandle_t hs;
+        if (cublasCreate(&hs)) return 1;
+        cublasSetStream(hs, s);
+        void *sA = to_device(hA, (size_t)M * K * 2), *sB = to_device(hB, (size_t)NS * K * 2), *sC, *sC12;
+        CU(cudaMalloc(&sC, (size_t)M * NS * 4));
+        CU(cudaMalloc(&sC12, (size_t)M * NS * 4));
+        cudaGraph_t gs;
+        cudaGraphExec_t es;
+        const Counts c0 = counts(API_GEMMEX);
+        CU(cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal));
+        cublasGemmEx(hs, CUBLAS_OP_T, CUBLAS_OP_N, M, NS, K, &one, sA, CUDA_R_16BF, K, sB, CUDA_R_16BF, K, &zero, sC,
+                     CUDA_R_32F, M, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        CU(cudaStreamEndCapture(s, &gs));
+        const Counts c1 = counts(API_GEMMEX);
+        CHECK(!rt_counters || delta(&c0, &c1, SERVED_SKINNY) == 1, "the captured skinny-sized call is not served");
+        CU(cudaGraphInstantiate(&es, gs, 0));
+        cublasDestroy(hs); /* no handle of the variants left */
+        CU(cudaGraphLaunch(es, s));
+        const cudaError_t ss = cudaStreamSynchronize(s);
+        CHECK(ss == cudaSuccess, "skinny replay after every handle's destruction: %s", cudaGetErrorName(ss));
+        c129.GemmEx(h12, CUBLAS_OP_T, CUBLAS_OP_N, M, NS, K, &one, sA, CUDA_R_16BF, K, sB, CUDA_R_16BF, K, &zero, sC12,
+                    CUDA_R_32F, M, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        CU(cudaStreamSynchronize(s));
+        float *rs = from_device(sC, (size_t)M * NS * 4), *rs12 = from_device(sC12, (size_t)M * NS * 4);
+        CHECK(!memcmp(rs, rs12, (size_t)M * NS * 4), "skinny replay after every handle's destruction: not 12.9's bits");
+        free(rs);
+        free(rs12);
+        cudaGraphExecDestroy(es);
+        cudaGraphDestroy(gs);
+        cudaFree(sA);
+        cudaFree(sB);
+        cudaFree(sC);
+        cudaFree(sC12);
+    }
 
     /* cudaDeviceReset with a live handle, then a new handle in the new context */
     cublasHandle_t live;
