@@ -181,6 +181,18 @@ eval "$(vf env)"
   in `VF_AUDIT_MAP` stay first.
 - `VOLTA_FOREVER` (the version) and `VOLTA_FOREVER_HOME` (the archive's directory): how a
   script can tell that it runs through the launcher.
+- With `VF_CAPABILITY` at 8.0 or later (or `VF_JIT_LINEINFO=1`), `NVCC_APPEND_FLAGS` gains
+  `-lineinfo` (after what it already holds; not twice) and `CUTE_DSL_LINEINFO=1` is set unless it
+  is set already. Programs that compile CUDA while they run (PyTorch extensions, FlashInfer,
+  TileLang through nvcc; NVIDIA's CuTe DSL, CUTLASS kernels written in Python, without it) target
+  the capability they are told and keep machine code only, of which the layer can translate little
+  when it is for sm_80 or later. With line information they also keep each cubin's PTX, which the
+  layer compiles again for sm_70. The machine code is the same; the cubins grow by 60 to 120 %.
+  NVRTC (PyTorch's jiterator, CuPy) reads neither. Caches keyed without the environment
+  (PyTorch extensions, FlashInfer, TileLang, ccache) keep what they built before: clear them once.
+  It is left out when `NVCC_APPEND_FLAGS` holds `-G`; a `-G` on the command line itself then warns
+  twice, and fails under `-Werror all-warnings`: use `VF_JIT_LINEINFO=0` for such debug builds.
+  `vf env` prints the two variables only when it sets them.
 
 A Bazel program that ships a CUDA toolkit in its runfiles can invoke an external assembler through an absolute path. When you start it with `vf`, the launcher prepares a private runfiles directory with the VF assembler and links to the program's other resources. It uses the local temporary directory when the user's cache cannot store private links. Install NVIDIA's `cuda-nvcc-12-9` package for this path. VF looks for `bin/ptxas` beside the selected CUDA 12.9 libraries and under `/usr/local/cuda-12.9`. Set `VF_PTXAS_REAL` to the absolute path of the CUDA 12.9 assembler to select another installation. For a file on disk, run `vf ptxas -arch=sm_80 kernel.ptx -o kernel.cubin` to produce code for sm_70.
 

@@ -35,6 +35,9 @@
 #   VF_AUDIT_MAP, VF_AUDIT_MAP_FILE
 #                  substitutions of your own: the first stay before the launcher's, the
 #                  file is read after them (--map gives a file priority)
+#   VF_JIT_LINEINFO=1|0
+#                  1: run-time CUDA compilers keep the PTX of what they build (setup_jit); 0: never.
+#                  By default only when VF_CAPABILITY is 8.0 or later
 # A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 set -eu
 
@@ -437,6 +440,9 @@ cmd_env() {
     fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
     printf 'export VOLTA_FOREVER_HOME=%s\n' "$(quoted "$home")"
+    setup_jit
+    [ "$_jit_nvcc" = 0 ] || printf 'export NVCC_APPEND_FLAGS=%s\n' "$(quoted "$NVCC_APPEND_FLAGS")"
+    [ "$_jit_cute" = 0 ] || printf 'export CUTE_DSL_LINEINFO=%s\n' "$(quoted "$CUTE_DSL_LINEINFO")"
 }
 
 # Bazel applications can select their own CUDA toolkit after startup. Give them a
@@ -467,10 +473,39 @@ setup_runfiles() {
     export RUNFILES_DIR
 }
 
+# Programs that compile CUDA at run time with nvcc (PyTorch extensions, FlashInfer, TileLang)
+# target the capability they are told, often sm_80 or later, and keep only machine code: ptxas
+# writes no PTX into a cubin, and the layer can translate little of that machine code. With
+# -lineinfo, ptxas keeps the PTX of each cubin it makes (.nv_debug_ptx_txt), which the layer
+# compiles again for sm_70. The machine code itself is unchanged; the cubins gain line tables.
+# nvcc reads NVCC_APPEND_FLAGS at every invocation, whoever starts it. NVIDIA's CuTe DSL (CUTLASS
+# Python kernels) compiles without nvcc; CUTE_DSL_LINEINFO=1 makes it keep the PTX the same way.
+# The cubins grow (60-120 %), so by default only for programs told Ampere or later, whose run-time
+# builds are then machine code for sm_80 and later; never next to -G, which overrides line
+# information and fails with it under -Werror all-warnings. _jit_nvcc/_jit_cute: what was set here.
+setup_jit() {
+    _jit_nvcc=0 _jit_cute=0
+    case ${VF_JIT_LINEINFO:-auto} in
+        0) return 0 ;;
+        1) ;;
+        *) case ${VF_CAPABILITY:-} in [89].* | [1-9][0-9].*) ;; *) return 0 ;; esac ;;
+    esac
+    if [ -z "${CUTE_DSL_LINEINFO+set}" ]; then
+        CUTE_DSL_LINEINFO=1 _jit_cute=1
+    fi
+    case " ${NVCC_APPEND_FLAGS:-} " in
+        *" -lineinfo "* | *" --generate-line-info "* | *" -G "* | *" --device-debug "*) return 0 ;;
+    esac
+    NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:+$NVCC_APPEND_FLAGS }-lineinfo"
+    _jit_nvcc=1
+}
+
 # --- subcommand: run (prefix form) ---------------------------------------------
 
 cmd_run() {
     setup_env
+    setup_jit
+    export NVCC_APPEND_FLAGS CUTE_DSL_LINEINFO
     setup_runfiles "$1"
     [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
     export LD_LIBRARY_PATH="$_ldpath"
@@ -828,6 +863,10 @@ Environment:
   VF_AUDIT_MAP, VF_AUDIT_MAP_FILE
                  substitutions of your own: the first stay before the launcher's, the
                  file is read after them (--map gives a file priority)
+  VF_JIT_LINEINFO=1|0
+                 1: run-time CUDA compilers keep the PTX of what they build (nvcc gets
+                 -lineinfo, CuTe DSL CUTE_DSL_LINEINFO=1); 0: never; by default only when
+                 VF_CAPABILITY is 8.0 or later. Not with -G (see INSTALL.md)
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }
