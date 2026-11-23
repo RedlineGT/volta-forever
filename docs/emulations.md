@@ -678,7 +678,7 @@ bulk copies (`cp.async.bulk`) and proxy fences (`fence.proxy.async`, `fence.prox
 `fence.mbarrier_init`), tensor maps (`tensormap`), multicast memory (`multimem`), `wmma` on
 integers, bf16, tf32 or f64, `cvt.pack`, and other `stmatrix` shapes and layouts. A form on a
 type of later targets (bf16, tf32, FP8, E2M1, UE8M0, UE4M3) that the sections above do not
-list is refused too (`neg.bf16x2`, `min.bf16` without `.NaN`, `cvt.rna.tf32.f32`). These
+list is refused too (`neg.bf16x2`, `cvt.rna.tf32.f32`). These
 forms are refused on Volta.
 
 **What the driver's compiler refuses.** The lowering rewrites or traps the instructions it
