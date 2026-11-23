@@ -552,9 +552,28 @@ such instruction. Each matrix is replaced by:
 - For a transposed load of one matrix: two rows by two shuffles, two loads of 2
   bytes, the two halves assembled. 3 + 9 instructions per matrix (38 for four).
 
-The destination registers are used as scratch during the sequence: the original
+The shuffles bring the addresses into the destination registers: the original
 code often has the address in one of them (`LDSM.16.M88.4 R36, [R36]`), and
 that one is shuffled last.
+
+The lanes the shuffles read from are computed in registers of the translation,
+not in the destinations. A store just before the load may not have read a
+destination yet: a store reads its registers some time after it is issued,
+and the compiler counts on the load, a memory instruction like the store, to
+write them only after that. Native code writes such a register at once with a
+memory instruction (`ptxas` does it 4 cycles after a store, with a load from
+shared memory or a matrix load), and with arithmetic only after a barrier or a
+wait for a scoreboard of a later memory instruction (none otherwise among
+44,052 such writes in 821 sm_75 cubins: PyTorch's 475 and 346 of Triton). So
+arithmetic writes a destination only
+after waiting for the shuffles; in a transposed load, the lanes of the first
+rows go into the destinations once the shuffles of the second rows are there.
+Until 2026-11-23 the lanes went into the destinations first, and a store of
+one of them just before the load could store the lane: a Triton kernel whose
+epilogue stores registers and then reloads them with `ldmatrix` gave wrong,
+changing results on a V100, and the test kernel `k_stored.cu` gave 616,576 and
+325,152 wrong words of 62,914,560, plain and transposed (`tests/gpu/run.sh`,
+`stored-machine-code`; 0 since).
 
 
 ### HMMA.1688 (the product of m16n8k8)

@@ -48,7 +48,7 @@ mkdir -p "$out"
 if [ -z "${SUMMARY_ONLY:-}" ]; then
 if [ $# -eq 0 ]; then
     set -- "$W"/tests/kernels/translate/*.sm75.cubin "$W/tests/kernels/translate/triton_add.sm_75.cubin" \
-        "$W"/tests/kernels/k_{tensor,pairs,groups,kept}.135.sm75.cubin
+        "$W"/tests/kernels/k_{tensor,pairs,groups,kept,stored}.135.sm75.cubin
     for n in 0097 0142 0150 0158 0161 0175 0176 0255 0382 0433 0434 0439 0442 0445 0448 0467 0469; do
         [ -f "$TORCH/$n.sm_75.cubin" ] && set -- "$@" "$TORCH/$n.sm_75.cubin"
     done
@@ -66,7 +66,7 @@ sys.path.insert(0, sys.argv[1])
 import controls as c
 passes = [('default', [x for x in c.CONTROLS if x != 'as it is']),
           ('1', c.BORROW_CONTROLS),
-          ('8', c.FRAME_CONTROLS + c.PRODUCT_L3_CONTROLS + ['unguarded', 'lanes', 'unwaited', 'soon']),
+          ('8', c.FRAME_CONTROLS + c.PRODUCT_L3_CONTROLS + ['unguarded', 'lanes', 'unwaited', 'unordered', 'soon']),
           ('5', c.ROOM_CONTROLS + c.FRAME_CONTROLS),
           ('3', c.BASE_CONTROLS)]
 for name, controls in passes:

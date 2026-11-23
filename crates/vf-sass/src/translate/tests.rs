@@ -1186,3 +1186,62 @@ fn graph_policy_preserves_a_relocation_on_the_stack_setup() {
     assert_eq!(normal.1, 66);
     assert_eq!(layout(9), normal);
 }
+
+/// The sequence that stands for a matrix load writes a destination with arithmetic only after
+/// waiting for shuffles of the sequence: a store just before the load may not have read that
+/// register yet, and it is a memory instruction like the load that the compiler counts on to
+/// write it after the store has read it, or a wait for one. k_stored.cu has, in a loop, four stores of the
+/// destinations of a load just before it, plain and transposed. (Until 2026-11-23 the lanes of the
+/// rows went into the destinations first: on a V100 the stores then stored lanes.)
+#[test]
+fn a_matrix_load_writes_its_destinations_first_by_shuffles() {
+    let original = include_bytes!("../../../../tests/kernels/k_stored.135.sm75.cubin");
+    let result = translate_with_options(original, true, &Options::default()).unwrap();
+    assert!(result.report.iter().all(|function| function.refused.is_none()));
+    let map = result.map.unwrap();
+    let source = crate::elf::Elf::parse(original).unwrap();
+    let out = crate::elf::Elf::parse(&result.bytes).unwrap();
+    let (mut d75, mut d70) = (Decoder::new(75), Decoder::new(70));
+    let mut loads = 0;
+    for name in ["t_stored_plain", "t_stored_trans"] {
+        let old = &source.sections[source.section(&format!(".text.{name}")).unwrap()].data;
+        let new = &out.sections[out.section(&format!(".text.{name}")).unwrap()].data;
+        let word = |code: &[u8], at: usize| u128::from_le_bytes(code[at..at + 16].try_into().unwrap());
+        for at in (0..old.len()).step_by(16) {
+            let d = d75.decode(word(old, at)).unwrap();
+            if d.mnemonic != "LDSM" {
+                continue;
+            }
+            loads += 1;
+            let rd = d.op_or_name("Rd", 255);
+            let destinations = rd..rd + (1 << d.op_or_name("num", 0));
+            let mut sequence: Vec<u64> = map
+                .iter()
+                .filter(|(function, _, from, _)| function == name && *from == at as u64)
+                .map(|(_, to, _, _)| *to)
+                .collect();
+            sequence.sort_unstable();
+            let (mut shuffled, mut waited) = (false, false);
+            for to in sequence {
+                let w = word(new, to as usize);
+                let d = d70.decode(w).unwrap();
+                if shuffled && (w >> (WAIT + SEQUENCE)) & 1 == 1 {
+                    waited = true;
+                }
+                let writes = d
+                    .writes
+                    .iter()
+                    .any(|&(l, r)| l == LETTER_R && destinations.contains(&r));
+                if writes && !matches!(d.mnemonic, "SHFL" | "LDS") {
+                    assert!(
+                        waited,
+                        "{name}: at 0x{to:x}, {} writes a destination of the load at 0x{at:x} before a wait for the shuffles",
+                        d.mnemonic
+                    );
+                }
+                shuffled |= d.mnemonic == "SHFL";
+            }
+        }
+    }
+    assert_eq!(loads, 4);
+}

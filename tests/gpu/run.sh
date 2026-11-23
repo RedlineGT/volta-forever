@@ -270,6 +270,15 @@ tc pairs "$G/k_pairs.135.sm75.ptx" "PTX for sm_75 retargeted" "37 kernels, 0 wro
 VF_PAIRS=0 tc pairs-machine-code-unpaired "$G/k_pairs.135.sm75.cubin" "machine code for sm_75 translated \(12 functions\)" "1 of these functions is not translated" \
     "emulated in p_basic: 234 instructions added in translated machine code" "34 kernels, 0 wrong"
 VF_PAIRS=0 tc groups-machine-code-unpaired "$G/k_groups.135.sm75.cubin" "machine code for sm_75 translated \(11 functions\)" "2 of these functions are not translated" "22 kernels, 0 wrong"
+# Matrix loads into registers that stores just before them still read (k_stored.cu, plain and
+# transposed), on 640 blocks that keep the memory pipeline full: what stands for a load writes a
+# destination with arithmetic only after waiting for its shuffles. Until 2026-11-23 it wrote the
+# lanes of its rows there first, and the stores stored lanes (on a V100, in two runs: 625,408 and
+# 616,576 words wrong of 62,914,560 in t_stored_plain, 335,584 and 325,152 in t_stored_trans).
+[ -x "$out/bin/ldsmrun" ] && [ "$out/bin/ldsmrun" -nt "$G/ldsmrun.c" ] || gcc -O2 -Wall -o "$out/bin/ldsmrun" "$G/ldsmrun.c" -ldl || exit 2
+log=$out/logs/stored-machine-code.log
+DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ldsmrun" "$G/k_stored.135.sm75.cubin" >"$log" 2>&1
+check stored-machine-code "machine code for sm_75 translated \(2 functions\)" "^t_stored_plain: .* 0 wrong$" "^t_stored_trans: .* 0 wrong$" "^2 kernels, 0 wrong$"
 # Machine code alone: translated when it is loaded. Its seven kernels run; two have instructions added.
 translated=("machine code for sm_75 translated \(7 functions\)" "${all7[@]}"
     "emulated in warp_sum: 1 instructions added in translated machine code"
