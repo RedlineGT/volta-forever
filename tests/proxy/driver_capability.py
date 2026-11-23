@@ -32,11 +32,13 @@ int cuDeviceComputeCapability(int *major, int *minor, int d) {
     *minor = sm[d] % 10;
     return 0;
 }
-int cuFuncGetAttribute(int *v, int a, void *f) { *v = a == 6 ? 70 : 42; return 0; }
-int cuKernelGetAttribute(int *v, int a, void *k, int d) { return cuFuncGetAttribute(v, a, k); }
 /* The device of the current context (-1: no context), and the .target line of the last PTX given
    to the loading functions ("file" for cuModuleLoad). */
 int mock_device = -1;
+/* A function's code is for the device of the current context (sm_70 without one), a kernel's for
+   the device asked about. */
+int cuFuncGetAttribute(int *v, int a, void *f) { *v = a == 6 ? (mock_device < 0 ? 70 : sm[mock_device]) : 42; return 0; }
+int cuKernelGetAttribute(int *v, int a, void *k, int d) { *v = a == 6 ? sm[d] : 42; return 0; }
 char mock_seen[64];
 static int seen(const char *what, size_t length) {
     const char *line = memmem(what, length, ".target", 7);
@@ -89,6 +91,7 @@ int query(int (*f)(int *, int, int), int *v, int attr, int dev) { return f(v, at
 int both(int (*f)(int *, int *, int), int *a, int *b, int dev) { return f(a, b, dev); }
 int binary(int (*f)(int *, int, void *), int *v) { return f(v, 6, (void *)1); }
 int kernel(int (*f)(int *, int, void *, int), int *v) { return f(v, 6, (void *)1, 0); }
+int kernel_on(int (*f)(int *, int, void *, int), int *v, int dev) { return f(v, 6, (void *)1, dev); }
 int load(int (*f)(void **, const void *), void **m, const void *image) { return f(m, image); }
 int load_ex(int (*f)(void **, const void *, unsigned, int *, void **), void **m, const void *image) {
     return f(m, image, 0, 0, 0);
@@ -354,6 +357,24 @@ def run_mixed(proxy, directory):
             assert seen == expected, (name, ordinal, seen)
 
 
+def run_binary(proxy, directory):
+    """The architecture of a kernel's machine code is answered as the capability that its caller is
+    told only on the V100: on a later card the program's code runs, whose architecture the driver
+    tells."""
+    api = c.CDLL(str(proxy))
+    mock = c.CDLL(str(directory / "mock.so"))
+    client = c.CDLL(str(directory / "libcudart.so.13"))
+    val = c.c_int()
+    for device, expected in ((0, 90), (1, 75), (2, 80), (3, 86)):
+        assert client.kernel_on(api.cuKernelGetAttribute, c.byref(val), device) == 0
+        assert val.value == expected, ("kernel", device, val.value)
+        c.c_int.in_dll(mock, "mock_device").value = device
+        assert client.binary(api.cuFuncGetAttribute, c.byref(val)) == 0
+        assert val.value == expected, ("function", device, val.value)
+    c.c_int.in_dll(mock, "mock_device").value = -1
+    assert client.binary(api.cuFuncGetAttribute, c.byref(val)) == 0 and val.value == 90
+
+
 def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
     through PATH, before a change of directory)."""
@@ -377,6 +398,8 @@ if __name__ == "__main__":
         run_runtimes(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 4 and sys.argv[3] == "--mixed":
         run_mixed(proxy, Path(sys.argv[2]))
+    elif len(sys.argv) == 4 and sys.argv[3] == "--binary":
+        run_binary(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 3:
         run(proxy, Path(sys.argv[2]))
     else:
@@ -410,7 +433,9 @@ if __name__ == "__main__":
             run_main(proxy, directory, env)
             subprocess.run([sys.executable, __file__, proxy, directory, "--mixed"],
                            env={**env, "VOLTA_FOREVER": "test", "VF_PROXY_CACHE": "0"}, check=True)
+            subprocess.run([sys.executable, __file__, proxy, directory, "--binary"],
+                           env={**env, "VOLTA_FOREVER": "test", "VF_CAPABILITY": "9.0"}, check=True)
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
               "machine code that limits what its callers are told, the code given for what they are told, "
-              "values of VF_CAPABILITY that are not used, main programs however they were started, and modules "
-              "loaded on a later card")
+              "values of VF_CAPABILITY that are not used, main programs however they were started, modules "
+              "loaded on a later card, and the architecture of kernels on a later card")

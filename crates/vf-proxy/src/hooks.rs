@@ -158,9 +158,17 @@ unsafe extern "C" fn device_capability(major: *mut c_int, minor: *mut c_int, dev
 const FUNCTION_BINARY_VERSION: c_int = 6;
 
 /// After NVIDIA's answer `result` to a question about a function: the architecture of its machine
-/// code may need to match the variant selected by the caller.
-unsafe fn binary_version(value: *mut c_int, attribute: c_int, result: CUresult, caller: usize) {
-    if result != CUDA_SUCCESS || value.is_null() || attribute != FUNCTION_BINARY_VERSION {
+/// code may need to match the variant selected by the caller, when the code is on this GPU
+/// (`on_this_gpu`): a later card in the same machine runs the program's own code, of which the
+/// driver tells the truth.
+unsafe fn binary_version(
+    value: *mut c_int,
+    attribute: c_int,
+    result: CUresult,
+    caller: usize,
+    on_this_gpu: impl FnOnce() -> bool,
+) {
+    if result != CUDA_SUCCESS || value.is_null() || attribute != FUNCTION_BINARY_VERSION || !on_this_gpu() {
         return;
     }
     if let Some((major, minor)) = callers::binary_capability(caller) {
@@ -185,7 +193,8 @@ unsafe extern "C" fn function_attribute(
 ) -> CUresult {
     let real = real!(cuFuncGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void) -> CUresult);
     let result = unsafe { real(value, attribute, function) };
-    unsafe { binary_version(value, attribute, result, caller) };
+    // (A function is asked about in its context, as a function is launched there.)
+    unsafe { binary_version(value, attribute, result, caller, context_needs_adapting) };
     result
 }
 
@@ -209,7 +218,7 @@ unsafe extern "C" fn kernel_attribute(
 ) -> CUresult {
     let real = real!(cuKernelGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void, c_int) -> CUresult);
     let result = unsafe { real(value, attribute, kernel, device) };
-    unsafe { binary_version(value, attribute, result, caller) };
+    unsafe { binary_version(value, attribute, result, caller, || device_needs_adapting(device)) };
     result
 }
 
@@ -380,10 +389,17 @@ unsafe fn load_adapted(
 /// the entries of the other cards.)
 fn context_needs_adapting() -> bool {
     let device = real!(cuCtxGetDevice: unsafe extern "C" fn(*mut c_int) -> CUresult);
+    let mut ordinal = -1;
+    let known = unsafe { device(&mut ordinal) } == CUDA_SUCCESS;
+    !known || device_needs_adapting(ordinal)
+}
+
+/// Whether `device` is of the architecture this library adapts code for, or the driver does not
+/// say what it is.
+fn device_needs_adapting(device: c_int) -> bool {
     let capability = real!(cuDeviceComputeCapability: unsafe extern "C" fn(*mut c_int, *mut c_int, c_int) -> CUresult);
-    let (mut ordinal, mut major, mut minor) = (-1, -1, -1);
-    let known =
-        unsafe { device(&mut ordinal) == CUDA_SUCCESS && capability(&mut major, &mut minor, ordinal) == CUDA_SUCCESS };
+    let (mut major, mut minor) = (-1, -1);
+    let known = unsafe { capability(&mut major, &mut minor, device) } == CUDA_SUCCESS;
     !known || (major * 10 + minor) as u32 == config().policy.device_sm
 }
 
