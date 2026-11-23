@@ -529,6 +529,7 @@ static Ctx *current_context(void)
 typedef struct {
     Ctx *ctx;
     atomic_int workspace_ok;
+    int lt; /* made by cublasLtCreate (else cublasCreate: usable as a cuBLASLt handle too) */
 } HState;
 
 /* Handle -> state, for handles of both APIs. A sorted array read without a lock under a sequence
@@ -598,7 +599,7 @@ static int default_workspace_ok(void)
     return !v || !*v;
 }
 
-static void handle_add(const void *h, Ctx *ctx)
+static void handle_add(const void *h, Ctx *ctx, int lt)
 {
     HState *x = malloc(sizeof *x);
     if (!x) {
@@ -606,6 +607,7 @@ static void handle_add(const void *h, Ctx *ctx)
         return;
     }
     x->ctx = ctx;
+    x->lt = lt;
     atomic_init(&x->workspace_ok, default_workspace_ok());
     pthread_mutex_lock(&g_h_mu);
     HTab *t = g_ht;
@@ -666,7 +668,7 @@ static void handle_remove(const void *h)
 EXPORT cublasStatus_t vf_bf16_cublasCreate_v2(cublasHandle_t *handle)
 {
     const cublasStatus_t s = cb.Create(handle);
-    if (s == CUBLAS_STATUS_SUCCESS && handle && *handle) handle_add(*handle, current_context());
+    if (s == CUBLAS_STATUS_SUCCESS && handle && *handle) handle_add(*handle, current_context(), 0);
     return s;
 }
 
@@ -695,7 +697,7 @@ EXPORT cublasStatus_t vf_bf16_cublasSetWorkspace_v2(cublasHandle_t handle, void 
 EXPORT cublasStatus_t vf_bf16_cublasLtCreate(cublasLtHandle_t *handle)
 {
     const cublasStatus_t s = cb.LtCreate(handle);
-    if (s == CUBLAS_STATUS_SUCCESS && handle && *handle) handle_add(*handle, current_context());
+    if (s == CUBLAS_STATUS_SUCCESS && handle && *handle) handle_add(*handle, current_context(), 1);
     return s;
 }
 
@@ -1054,14 +1056,16 @@ static cublasStatus_t gemm16(const Call *c, const Plan *p, CUdeviceptr A16, CUde
     const long long ldb16 = p->b_contig ? p->kp : p->r16B;
     const long long sb = p->b_contig ? p->Ls : p->Ls * p->r16B;
 #ifdef VF_BF16_TEST
-    /* The control does what the review found unsafe (3.5): the internal GEMM through the caller's
-     * handle, which follows whatever another thread sets on it. Only while that handle says host
-     * pointer mode: in device mode 12.9 would read the host's 1.0 as a device address (that fault,
-     * Xid 31, was seen once with this control on 2026-11-23). */
+    /* The controls do what the review found unsafe (3.5): the internal GEMM through the caller's
+     * handle, which follows whatever another thread sets on it. "caller-handle" (GPU tests) only while
+     * that handle says host pointer mode: in device mode 12.9 would read the host's 1.0 as a device
+     * address (that fault, Xid 31, was seen once on 2026-11-23). "caller-handle-any" always: for the
+     * host tests' stand-ins only. */
     cublasPointerMode_t caller_mode = CUBLAS_POINTER_MODE_DEVICE;
-    if (CONTROL("caller-handle") && c->api != API_LT &&
-        cb.GetPointerMode((cublasHandle_t)c->handle, &caller_mode) == CUBLAS_STATUS_SUCCESS &&
-        caller_mode == CUBLAS_POINTER_MODE_HOST)
+    if (c->api != API_LT &&
+        (CONTROL("caller-handle-any") ||
+         (CONTROL("caller-handle") && cb.GetPointerMode((cublasHandle_t)c->handle, &caller_mode) == 0 &&
+          caller_mode == CUBLAS_POINTER_MODE_HOST)))
         return cb.GemmSB((cublasHandle_t)c->handle, (cublasOperation_t)oa, (cublasOperation_t)ob, mc, nc, (int)p->Ls,
                          &one, (const void *)(uintptr_t)A16, CUDA_R_16F, (int)lda16, sa, (const void *)(uintptr_t)B16,
                          CUDA_R_16F, (int)ldb16, sb, &zero, (void *)(uintptr_t)Cp, CUDA_R_32F, mc, (long long)mc * nc,
@@ -1296,10 +1300,11 @@ static void mat_range(const void *p, long long rows, long long cols, long long l
 static int overlap(uintptr_t a0, uintptr_t a1, uintptr_t b0, uintptr_t b1) { return a0 < b1 && b0 < a1; }
 
 /* The handle's context, if it has the kernels and is the current one, and owns the stream. */
-static int context_check(const void *handle, CUstream stream, Ctx **out)
+static int context_check(const void *handle, CUstream stream, int api, Ctx **out)
 {
     HState *h = handle_state(handle);
     if (!h) return R_HANDLE;
+    if (api == API_LT && !h->lt && CONTROL("split-states")) return R_HANDLE; /* as two runtimes would */
     Ctx *x = h->ctx;
     if (!x->ok) return R_CONTEXT;
     CUcontext cur = NULL, sctx = NULL;
@@ -1357,7 +1362,7 @@ static cublasStatus_t legacy(int api, cublasHandle_t handle, cublasOperation_t t
     Ctx *x = hs->ctx;
     reason = R_CONTEXT;
     if (!x->ok || cb.GetStream(handle, &stream) != CUBLAS_STATUS_SUCCESS) goto forward;
-    reason = context_check(handle, (CUstream)stream, &x);
+    reason = context_check(handle, (CUstream)stream, api, &x);
     if (reason) goto forward;
     reason = R_MATH;
     cublasMath_t mm;
@@ -1669,7 +1674,7 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     path = choose_path(&shape, &reason);
     if (path == PATH_NONE) goto forward;
     Ctx *x = NULL;
-    reason = context_check(handle, (CUstream)stream, &x);
+    reason = context_check(handle, (CUstream)stream, api, &x);
     if (reason) goto forward;
     Call c;
     memset(&c, 0, sizeof c);
