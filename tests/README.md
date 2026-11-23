@@ -161,13 +161,15 @@ source-tree layouts): environment variables, path order, map entries, user prior
 what is done when only some of the CUDA 12.9.2 libraries are there (a forwarding library with
 nothing to forward to is not used), argument passing, exit status, symlinks, its long name,
 `doctor`, `fetch` command line, the
-subcommands of the offline tool, help and error cases; and `vf venv` with the Python of the
+subcommands of the offline tool, help and error cases, the bf16 cuBLAS variants that
+`VF_CUBLAS_BF16_TC` and `VF_CUBLAS_BF16_SKINNY` select (both names mapped or none, what is
+refused, what `doctor` says); and `vf venv` with the Python of the
 machine: an environment whose Python runs through the launcher with no prefix (arguments,
 exit status, standard input, a child process), what it refuses, how it is turned off.
 
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
-| `launcher.sh` | 98 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
+| `launcher.sh` | 108 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
 | `install.py` | `install.sh` on local releases: an upgrade that keeps the CUDA 12.9.2 libraries and the `vf venv` environments of the release before, installs stopped half-way, two at once, what killed ones left, plain HTTP refused, redirections from HTTPS (through curl and through wget); under `dash`, or `bash --posix` with `VF_TEST_SHELL=bash` | seconds | dash, flock, python3 3.10 or later with `venv`; openssl for the redirections (skipped without it) |
 | `fetch-redist.py` | `scripts/fetch-redist.py` on local archives: retries after an interruption, concurrent fetches, runtime-only installs, the NCCL wheel, a failure or a signal half-way, a component killed while it is moved into place (the journal, which the next fetch completes), what an interrupted fetch left, a manifest over plain HTTP | seconds | python3, tar |
 

@@ -228,6 +228,17 @@ calls one of those stops there).
 When no CUDA 12.9.2 library is found at all the command still runs, with one line on standard
 error (`VF_QUIET=1` leaves it out).
 
+**The bf16 cuBLAS variants.** `VF_CUBLAS_BF16_TC=1` or `VF_CUBLAS_BF16_SKINNY=1` selects the
+bf16 cuBLAS variants of the forwarding libraries: `libcublas.so.13` and `libcublasLt.so.13` in
+`forward/bf16tc`, with their runtime library `libvf_cublas_bf16.so`. The launcher then gives
+both names to the variants, never one alone, in its table and on the library path
+(`forward/bf16tc` before `forward`), and passes both variables on as they are (`vf env` prints
+them). It refuses to run, with a line that names what is missing, when the variants are not all
+installed or the CUDA 12.9.2 cuBLAS that they forward to is not found; when an entry before its
+own in `VF_AUDIT_MAP` gives cuBLAS another file (as `eval "$(vf env)"` without the switch leaves
+there); and for a value other than `0` or `1`. `vf doctor` says whether they are installed and,
+with a switch set, which libraries a command would get.
+
 **A program that wants to know.** A program built for later GPUs is told the compute
 capability that its code starts at (7.5), so that it loads that code: the driver's answers do
 not tell it that the card is a Volta with the layer in front of it. A program that has kernels
@@ -472,6 +483,8 @@ that loaded it, not by a child made with `fork()`.
 | `VF_VENV` | unset | `0`: a Python of an environment made by `vf venv` starts as it is, not through the layer |
 | `VF_PTXAS_REAL` | `bin/ptxas` beside `VF_CUDA12`, else `/usr/local/cuda-12.9/bin/ptxas` | The CUDA 12.9 assembler that `vf ptxas` runs |
 | `VF_JIT_LINEINFO` | unset | `1`: `NVCC_APPEND_FLAGS` gains `-lineinfo` and `CUTE_DSL_LINEINFO=1` is set, so that compilers run by the program keep the PTX of what they build, for a program told 8.0 or later ("What the launcher sets", above) |
+| `VF_CUBLAS_BF16_TC` | `0` | `1`: `libcublas.so.13` and `libcublasLt.so.13` are the bf16 cuBLAS variants of `forward/bf16tc`, whose runtime library reads the variable. The launcher refuses to run when they are not installed ("The bf16 cuBLAS variants", above). `0` or `1` |
+| `VF_CUBLAS_BF16_SKINNY` | `0` | `1`: selects the same variants, whose runtime library reads this variable too; the same refusals. `0` or `1` |
 
 ## What the first run costs
 
