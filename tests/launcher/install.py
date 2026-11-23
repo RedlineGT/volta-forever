@@ -130,6 +130,10 @@ sys.exit(rc)
                 if redirect:
                     self.send_response(302)
                     self.send_header("Location", redirect + self.path)
+                    # A complete answer: without a length, the end of the connection is the end
+                    # of the body, and an OpenSSL that wants a close notification first makes
+                    # curl fail on the read before it looks at where it is redirected.
+                    self.send_header("Content-Length", "0")
                     self.end_headers()
                 else:
                     super().do_GET()
