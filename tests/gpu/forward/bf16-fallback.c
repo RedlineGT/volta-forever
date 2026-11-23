@@ -6,8 +6,9 @@
  * Every element of a failing row or column must have the bits of a host model of the stated arithmetic
  * (one fp32 fused multiply-add chain from +0 over l = 0 .. k-1, alpha * acc rounded, then fma(beta, C, .)
  * or + 0, bf16 rounded to nearest even; a NaN is 0x7fffffff in fp32, 0x7fff in bf16); every other
- * element within 32 units of 2^-24 sum |a b| of fp64. A fat binary of separate multiplies and adds
- * (VF_BF16_FATBIN=control-MULADD.fatbin) makes it fail. Prints "ok bf16-fallback". */
+ * element within 32 units of 2^-24 sum |a b| of fp64. Two cases have subnormal products in failing
+ * columns, where a fat binary of separate multiplies and adds (VF_BF16_FATBIN=control-MULADD.fatbin)
+ * gives other bits and makes the test fail. Prints "ok bf16-fallback". */
 #include "bf16-common.h"
 
 static cublasHandle_t hv;
@@ -31,10 +32,25 @@ static float model(const uint16_t *A, int lda, const uint16_t *B, int ldb, int k
     return out;
 }
 
-static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, int bf16_out)
+static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, int bf16_out, int tiny)
 {
     const int lda = k, ldb = k;
     uint16_t *hA = bf16_random((size_t)m * k, 0.05), *hB = bf16_random((size_t)n * k, 1.0);
+    /* tiny: rows of op(A) near 2^-80 and columns of op(B) near 2^-60 (one element of 2^-100 makes each
+     * column fail the check), so that their products, near 2^-140, are fp32 subnormals that a
+     * separate multiply would round: a chain of fused multiply-adds and one of multiplies and adds
+     * then differ in those elements. */
+    const int tiny_rows[] = {5, 600, 1200}, tiny_cols[] = {7, 100, 250};
+    char *tinyrow = calloc((size_t)m, 1), *tinycol = calloc((size_t)n, 1);
+    for (int t = 0; tiny && t < 3; ++t) {
+        const int i = tiny_rows[t] % m, j = tiny_cols[t] % n;
+        tinyrow[i] = tinycol[j] = 1;
+        for (int l = 0; l < k; ++l) {
+            hA[(size_t)l + (size_t)i * lda] = f2bf(ldexpf(1.0f + (float)(rnd() & 127) / 128.0f, -80));
+            hB[(size_t)l + (size_t)j * ldb] = f2bf(ldexpf(1.0f + (float)(rnd() & 127) / 128.0f, -60));
+        }
+        hB[(size_t)(k / 2) + (size_t)j * ldb] = f2bf(ldexpf(1.0f, -100));
+    }
     const float bad = bad_kind == 0 ? 1e-30f : bad_kind == 1 ? INFINITY : NAN;
     char *colbad = calloc((size_t)n, 1), *rowbad = calloc((size_t)m, 1);
     for (int c = 0; c < ncols; ++c) {
@@ -70,7 +86,7 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
         for (int i = 0; i < m; ++i) {
             const size_t at = (size_t)i + (size_t)j * m;
             const float c_in = bf16_out ? 0.0f : ((float *)hC0)[at];
-            if (colbad[j] || rowbad[i]) {
+            if (colbad[j] || rowbad[i] || tinycol[j]) {
                 ++fb;
                 const float want = model(hA, lda, hB, ldb, k, i, j, alpha, beta, c_in);
                 int same;
@@ -92,15 +108,17 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
                 mag = fabs(alpha) * mag + fabs((double)beta * c_in);
                 const double got = bf16_out ? bf2f(((uint16_t *)hC)[at]) : ((float *)hC)[at];
                 const double units = fabs(got - sum) / (mag > 0 ? mag * 0x1p-24 : 1.0);
-                const double bound = bf16_out ? 32.0 + 0.5 * fabs(sum) / (mag * 0x1p-24) * 0x1p-8 : 32.0;
+                /* bf16 output: the rounding to 8 significant bits adds up to 2^-8 of the value */
+                const double bound = bf16_out ? 32.0 + (fabs(sum) + 32.0 * mag * 0x1p-24) * 0x1p-8 / (mag * 0x1p-24) : 32.0;
                 if (units > worst_tc) worst_tc = units;
                 if (!(units <= bound)) ++tc_bad;
             }
         }
     static const char *const kinds[] = {"1e-30", "inf", "NaN"};
-    printf("case TN %d x %d x %d, %s out: %d failing columns, %d failing rows (%s): %zu fallback elements, %zu differ "
+    printf("case TN %d x %d x %d, %s out%s: %d failing columns, %d failing rows (%s): %zu fallback elements, %zu differ "
            "from the model; tensor-core sample worst %.1f units, %zu beyond the bound; served %llu\n",
-           m, n, k, bf16_out ? "bf16" : "fp32", ncols, nrows, kinds[bad_kind], fb, fb_bad, worst_tc, tc_bad,
+           m, n, k, bf16_out ? "bf16" : "fp32", tiny ? ", subnormal products" : "", ncols, nrows, kinds[bad_kind], fb,
+           fb_bad, worst_tc, tc_bad,
            delta(&c0, &c1, SERVED_TC));
     CHECK(s == CUBLAS_STATUS_SUCCESS, "status %d", (int)s);
     CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 1, "not served by the tensor-core path");
@@ -115,6 +133,8 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
     free(hC);
     free(colbad);
     free(rowbad);
+    free(tinyrow);
+    free(tinycol);
 }
 
 int main(void)
@@ -127,13 +147,15 @@ int main(void)
     open_runtime();
     cublasSetStream(hv, st);
     static const int cols[] = {1, 5, 8, 9, 20, 32, 33, 100, 300};
-    for (size_t c = 0; c < sizeof cols / sizeof *cols; ++c) one_case(1536, 320, 1536, cols[c], 0, 0, 0);
-    one_case(1536, 320, 1536, 9, 7, 0, 0);
-    one_case(1536, 320, 1536, 33, 33, 1, 0);
-    one_case(1536, 320, 1536, 5, 3, 2, 0);
-    one_case(1536, 320, 1536, 20, 9, 0, 1);
-    one_case(4608, 64, 1536, 8, 16, 0, 1);
-    one_case(896, 512, 4864, 32, 5, 0, 0);
+    for (size_t c = 0; c < sizeof cols / sizeof *cols; ++c) one_case(1536, 320, 1536, cols[c], 0, 0, 0, 0);
+    one_case(1536, 320, 1536, 9, 7, 0, 0, 0);
+    one_case(1536, 320, 1536, 33, 33, 1, 0, 0);
+    one_case(1536, 320, 1536, 5, 3, 2, 0, 0);
+    one_case(1536, 320, 1536, 20, 9, 0, 1, 0);
+    one_case(4608, 64, 1536, 8, 16, 0, 1, 0);
+    one_case(896, 512, 4864, 32, 5, 0, 0, 0);
+    one_case(1536, 320, 1536, 9, 0, 0, 0, 1);
+    one_case(1536, 320, 1536, 9, 0, 0, 1, 1);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;

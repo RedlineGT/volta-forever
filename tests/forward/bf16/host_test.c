@@ -369,6 +369,38 @@ static void h4_one_runtime(void)
     v.DescDestroy(d);
 }
 
+/* ---- two devices of different compute capability in one process: decided per context's device ---- */
+static void mixed_devices(void)
+{
+    stub_set_device(1, 8, 0); /* the stand-in's context 1 is on device 1, now an sm_80 card */
+    stub_set_context(1);
+    cublasHandle_t h1;
+    v.Create(&h1);
+    v.SetStream(h1, S2);
+    stub_set_stream(S2, 1, 0, NULL);
+    const float one = 1.0f, zero = 0.0f;
+    for (int round = 0; round < 2; ++round) { /* the same thread, alternating, at every call */
+        stub_set_context(1);
+        take();
+        const Counts c0 = counts(API_GEMMEX);
+        v.GemmEx(h1, CUBLAS_OP_N, CUBLAS_OP_T, 1536, 8, 1920, &one, DEV(1), CUDA_R_16BF, 1536, DEV(2), CUDA_R_16BF, 8, &zero,
+                 DEV(3), CUDA_R_32F, 1536, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        take();
+        const Counts c1 = counts(API_GEMMEX);
+        CHECK(count("launch ") == 0 && count("gemmex ") == 1 && (!rt_counters || c1.v[4 + R_CONTEXT] - c0.v[4 + R_CONTEXT] == 1),
+              "mixed devices, round %d: a call in the sm_80 device's context is not forwarded", round);
+        stub_set_context(0);
+        G g = gemm(0, 1, 1536, 8, 1920);
+        expect_skinny("mixed devices: a call in the V100's context, between calls in the other's", &g,
+                      "vf_bf16_skinny_g_8_16");
+    }
+    stub_set_context(1);
+    G g = gemm(0, 1, 1536, 8, 1920); /* the V100's handle while the other device's context is current */
+    expect_forwarded("mixed devices: the V100's handle with the sm_80 device's context current", &g, R_CONTEXT);
+    stub_set_context(0);
+    stub_set_device(1, 7, 0);
+}
+
 /* ---- cuBLASLt arguments that the skinny path must leave to 12.9 (review F1, F2) ---- */
 static void lt_left_to_129(void)
 {
@@ -576,6 +608,7 @@ int main(int argc, char **argv)
         h1_served();
         h4_one_runtime();
         lt_left_to_129();
+        mixed_devices();
         h6_captured();
         h7_lt_allowlist();
         h5_internal_gemm();
