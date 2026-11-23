@@ -350,6 +350,61 @@ fn emulation_warnings() -> usize {
     })
 }
 
+/// The kernels (`.entry`) of PTX text.
+fn ptx_kernels(text: &[u8]) -> Vec<String> {
+    vf_ptx::functions(text)
+        .into_iter()
+        .filter(|function| function.entry)
+        .map(|function| String::from_utf8_lossy(&text[function.name]).into_owned())
+        .collect()
+}
+
+/// What is compiled here comes back to the program as machine code, whose kernels the driver
+/// hands out: a kernel that cannot run can only be refused here, by refusing the compilation, and
+/// that only when it would lose nothing else. `kernels` are the kernels of what is compiled (the
+/// PTX given, or the entries of a fat binary that the linker takes), `refused` those of them that
+/// trap, `what` what they are of. True: the compilation is refused (every kernel traps). Otherwise
+/// each refused kernel is said, and the kernels that run emulated instructions are announced.
+fn refuses_compilation(
+    kernels: &[String],
+    refused: &[vf_adapt::Refused],
+    emulated: &[vf_adapt::Emulated],
+    what: &str,
+) -> bool {
+    if let Some(first) = refused.first() {
+        if kernels.iter().all(|kernel| refused.iter().any(|r| r.kernel == *kernel)) {
+            log::error(format_args!(
+                "compilation refused: {} cannot run on this GPU ({}: {})",
+                if kernels.len() == 1 {
+                    format!("kernel {}", first.kernel)
+                } else {
+                    format!(
+                        "none of the {} kernels of this {what}, of which {}",
+                        kernels.len(),
+                        first.kernel
+                    )
+                },
+                first.function,
+                first.reason
+            ));
+            return true;
+        }
+        for kernel in refused {
+            log::warn(format_args!(
+                "kernel {} cannot run on this GPU ({}: {}); it is compiled as a trap with the others of its \
+                 {what}, and launching it ends the CUDA context of the program",
+                kernel.kernel, kernel.function, kernel.reason
+            ));
+        }
+    }
+    for kernel in emulated {
+        for line in ANNOUNCER.given(&kernel.kernel, &kernel.counts, emulation_warnings(), log::at_level(2)) {
+            log::warn(format_args!("{line}"));
+        }
+    }
+    false
+}
+
 /// Adapt PTX data using the jitlink policy (ptx_max 8.8, sm 70).
 /// Returns Ok(adapted_bytes) on success, Err(error_code) if the PTX cannot be used on sm_70.
 fn adapt_ptx_data(data: &[u8]) -> Result<Vec<u8>, c_int> {
@@ -370,36 +425,8 @@ fn adapt_ptx_data(data: &[u8]) -> Result<Vec<u8>, c_int> {
                 "PTX adapted: sm_{from_sm} -> sm_70 (tensor: {tensor_rewritten}, tanh: {tanh_expanded}, trapped: {})",
                 trapped.len()
             ));
-            if let Some(first) = refused.first() {
-                // What is compiled here comes back to the program as machine code, whose kernels the
-                // driver hands out: a kernel that cannot run can only be refused here, by refusing
-                // the compilation, and that only when it would lose nothing else.
-                let kernels = vf_ptx::functions(data).iter().filter(|function| function.entry).count();
-                if refused.len() >= kernels {
-                    log::error(format_args!(
-                        "compilation refused: {} cannot run on this GPU ({}: {})",
-                        if kernels == 1 {
-                            format!("kernel {}", first.kernel)
-                        } else {
-                            format!("none of the {kernels} kernels of this PTX, of which {}", first.kernel)
-                        },
-                        first.function,
-                        first.reason
-                    ));
-                    return Err(NVJITLINK_ERROR_PTX_COMPILE);
-                }
-                for kernel in refused {
-                    log::warn(format_args!(
-                        "kernel {} cannot run on this GPU ({}: {}); it is compiled as a trap with the others of its \
-                         PTX, and launching it ends the CUDA context of the program",
-                        kernel.kernel, kernel.function, kernel.reason
-                    ));
-                }
-            }
-            for kernel in emulated {
-                for line in ANNOUNCER.given(&kernel.kernel, &kernel.counts, emulation_warnings(), log::at_level(2)) {
-                    log::warn(format_args!("{line}"));
-                }
+            if refuses_compilation(&ptx_kernels(data), refused, emulated, "PTX") {
+                return Err(NVJITLINK_ERROR_PTX_COMPILE);
             }
         }
         vf_adapt::Outcome::Native => {
@@ -426,21 +453,54 @@ fn adapt_ptx_data(data: &[u8]) -> Result<Vec<u8>, c_int> {
     }
 }
 
+/// The kernels of the entries of `image`, a fat binary the policy made, that are of `kind` for `sm`:
+/// those that the linker takes for sm_70.
+fn fatbin_kernels(image: &[u8], kind: u16, sm: u32) -> Vec<String> {
+    let mut kernels = Vec::new();
+    let Ok(fat) = vf_fatbin::parse(image) else {
+        return kernels;
+    };
+    for entry in fat
+        .entries
+        .iter()
+        .filter(|entry| entry.kind() == kind && entry.sm() == sm)
+    {
+        let Ok(payload) = entry.payload() else {
+            continue;
+        };
+        if kind == vf_fatbin::KIND_PTX {
+            kernels.extend(ptx_kernels(&payload));
+        } else if let Some(names) = vf_fatbin::cubin_entries(&payload) {
+            kernels.extend(names.into_iter().map(str::to_string));
+        }
+    }
+    kernels
+}
+
 /// Try to adapt a fat binary for sm_70.
 fn check_fatbin_data(data: &[u8]) -> Result<Option<Vec<u8>>, c_int> {
     let policy = jitlink_policy();
     if let Ok(fat) = vf_fatbin::parse(data) {
         match policy.adapt_fatbin(&fat) {
             Ok(adapted) => {
+                let image = adapted.image.as_deref().unwrap_or_default();
                 match &adapted.outcome {
                     vf_adapt::Outcome::Retargeted {
                         from_sm,
                         tensor_rewritten,
+                        refused,
+                        emulated,
                         ..
                     } => {
                         log::info(format_args!(
                             "fatbin adapted: from sm_{from_sm}, {tensor_rewritten} tensor rewrites"
                         ));
+                        // The same decision as for PTX given as text: the rewritten entries are
+                        // the PTX for sm_70 (for a lower target, that target) of the image.
+                        let kernels = fatbin_kernels(image, vf_fatbin::KIND_PTX, policy.device_sm.min(*from_sm));
+                        if refuses_compilation(&kernels, refused, emulated, "fat binary's PTX") {
+                            return Err(NVJITLINK_ERROR_PTX_COMPILE);
+                        }
                     }
                     vf_adapt::Outcome::Translated {
                         from_sm,
@@ -453,21 +513,10 @@ fn check_fatbin_data(data: &[u8]) -> Result<Option<Vec<u8>>, c_int> {
                             "fatbin adapted: machine code for sm_{from_sm} translated ({functions} functions, {} not)",
                             refused.len()
                         ));
-                        // What is linked here comes back to the program as machine code, whose
-                        // kernels the driver hands out: nothing refuses them at the lookup.
-                        for kernel in refused {
-                            log::warn(format_args!(
-                                "kernel {} cannot run on this GPU ({}); it is linked as a trap with the others, \
-                                 and launching it ends the CUDA context of the program",
-                                kernel.kernel, kernel.reason
-                            ));
-                        }
-                        for kernel in emulated {
-                            for line in
-                                ANNOUNCER.given(&kernel.kernel, &kernel.counts, emulation_warnings(), log::at_level(2))
-                            {
-                                log::warn(format_args!("{line}"));
-                            }
+                        // The translated entries are the machine code for sm_70 of the image.
+                        let kernels = fatbin_kernels(image, vf_fatbin::KIND_ELF, policy.device_sm);
+                        if refuses_compilation(&kernels, refused, emulated, "fat binary's machine code") {
+                            return Err(NVJITLINK_ERROR_UNRECOGNIZED_INPUT);
                         }
                     }
                     vf_adapt::Outcome::NotTranslated { from_sm, reason } => {
@@ -1155,6 +1204,57 @@ mod tests {
             adapted.image.unwrap(),
             b".version 8.8\n.target sm_70\n.address_size 64\n"
         );
+    }
+
+    /// A fat binary with one uncompressed PTX entry for `sm`, as fatbinary writes it.
+    fn ptx_fatbin(text: &[u8], sm: u32) -> Vec<u8> {
+        let mut payload = text.to_vec();
+        payload.push(0);
+        payload.resize(payload.len().next_multiple_of(8), 0);
+        let mut header = [0u8; 80];
+        header[0..2].copy_from_slice(&vf_fatbin::KIND_PTX.to_le_bytes());
+        header[2..4].copy_from_slice(&0x0101u16.to_le_bytes());
+        header[4..8].copy_from_slice(&80u32.to_le_bytes());
+        header[8..16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        header[0x18..0x1a].copy_from_slice(&8u16.to_le_bytes());
+        header[0x1a..0x1c].copy_from_slice(&8u16.to_le_bytes());
+        header[0x1c..0x20].copy_from_slice(&sm.to_le_bytes());
+        header[0x28..0x30].copy_from_slice(&0x11u64.to_le_bytes());
+        let mut fat = vf_fatbin::MAGIC.to_le_bytes().to_vec();
+        fat.extend_from_slice(&1u16.to_le_bytes());
+        fat.extend_from_slice(&16u16.to_le_bytes());
+        fat.extend_from_slice(&((header.len() + payload.len()) as u64).to_le_bytes());
+        fat.extend_from_slice(&header);
+        fat.extend_from_slice(&payload);
+        fat
+    }
+
+    const BAD: &str = ".visible .entry bad()\n{\n barrier.cluster.arrive;\n ret;\n}\n";
+    const BAD2: &str = ".visible .entry bad2()\n{\n barrier.cluster.wait;\n ret;\n}\n";
+    const GOOD: &str = ".visible .entry good()\n{\n ret;\n}\n";
+
+    #[test]
+    fn ptx_whose_kernels_all_trap_is_refused_as_text_and_in_a_fat_binary() {
+        // (Until 2026-11-23 the fat binary was linked, into machine code that only traps.)
+        for sm in [75, 90] {
+            let only_bad = format!(".version 8.8\n.target sm_{sm}\n.address_size 64\n{BAD}{BAD2}");
+            assert_eq!(
+                adapt_ptx_data(only_bad.as_bytes()).unwrap_err(),
+                NVJITLINK_ERROR_PTX_COMPILE
+            );
+            let fat = ptx_fatbin(only_bad.as_bytes(), sm);
+            assert_eq!(
+                check_fatbin_data(&fat).unwrap_err(),
+                NVJITLINK_ERROR_PTX_COMPILE,
+                "sm_{sm}"
+            );
+
+            // One kernel that runs: both compile, the other kernel as a trap.
+            let half = format!(".version 8.8\n.target sm_{sm}\n.address_size 64\n{BAD}{GOOD}");
+            assert!(adapt_ptx_data(half.as_bytes()).is_ok());
+            let adapted = check_fatbin_data(&ptx_fatbin(half.as_bytes(), sm)).unwrap().unwrap();
+            assert_eq!(fatbin_kernels(&adapted, vf_fatbin::KIND_PTX, 70), ["bad", "good"]);
+        }
     }
 
     #[test]

@@ -1,5 +1,7 @@
-"""CPU nvJitLink regression for native CUDA host objects and static libraries, and for null
-arguments and empty inputs.
+"""CPU nvJitLink regression for native CUDA host objects and static libraries, for null
+arguments and empty inputs, and for kernels that cannot run on Volta: PTX or machine code in which
+every kernel traps is refused, as PTX text and in a fat binary alike; with one kernel that runs, both
+are linked.
 
 Usage: python3 tests/proxy/jitlink_objects.py adapter.so cuda-12.9.2-directory
 """
@@ -56,12 +58,90 @@ def null_arguments(lib):
         assert lib.nvJitLinkDestroy(c.byref(h)) == 0
 
 
+# A kernel that uses an instruction with no Volta sequence (clusters of blocks), and one that runs.
+BAD = 'extern "C" __global__ void bad() { asm volatile("barrier.cluster.arrive;"); }\n'
+GOOD = 'extern "C" __global__ void good(int *p) { *p = 1; }\n'
+# A kernel whose Turing machine code the translator refuses (no translation of IMMA).
+IMMA = ('extern "C" __global__ void imma(const unsigned *in, unsigned *out) {\n'
+        '    unsigned d0 = in[0], d1 = in[1];\n'
+        '    asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"\n'
+        '                 : "+r"(d0), "+r"(d1) : "r"(in[2]), "r"(in[3]));\n'
+        '    out[0] = d0; out[1] = d1;\n'
+        '}\n')
+NVJITLINK_ERROR_PTX_COMPILE = 4
+NVJITLINK_ERROR_UNRECOGNIZED_INPUT = 8
+
+
+def refusals(lib, toolkit, work, log):
+    """Every kernel traps: refused, by AddData and AddFile, with the type given and with
+    NVJITLINK_INPUT_ANY, as PTX text and as a fat binary (compressed or not) of that PTX alike;
+    also relocatable Turing machine code that the translator refuses. (Until 2026-11-23 the fat
+    binaries were linked into machine code that only traps.) With one kernel that runs, the same
+    inputs are linked, the PTX and the machine code, and the kernel that traps is said in the log
+    for each, as the layer says a kernel that it does not give to the program."""
+    nvcc = [toolkit / "bin/nvcc", "-allow-unsupported-compiler", "-Wno-deprecated-gpu-targets"]
+    inputs = []
+    for name, source in [("bad", BAD), ("half", BAD + GOOD)]:
+        (work / f"{name}.cu").write_text(source)
+        subprocess.run(nvcc + ["-ptx", "-arch=compute_90", f"{name}.cu", "-o", f"{name}.ptx"], cwd=work, check=True)
+        subprocess.run(nvcc + ["-fatbin", "-gencode", "arch=compute_90,code=compute_90", f"{name}.cu",
+                               "-o", f"{name}.fatbin"], cwd=work, check=True)
+        subprocess.run(nvcc + ["-fatbin", "-Xfatbin=-compress=false", "-gencode", "arch=compute_90,code=compute_90",
+                               f"{name}.cu", "-o", f"{name}.raw.fatbin"], cwd=work, check=True)
+        inputs += [(name, f"{name}.ptx", 2), (name, f"{name}.fatbin", 4), (name, f"{name}.raw.fatbin", 4)]
+    (work / "imma.cu").write_text(IMMA)
+    subprocess.run(nvcc + ["-fatbin", "-rdc=true", "-gencode", "arch=compute_75,code=sm_75", "imma.cu",
+                           "-o", "imma.fatbin"], cwd=work, check=True)
+    inputs.append(("imma", "imma.fatbin", 4))
+    (work / "halfimma.cu").write_text(IMMA + GOOD)
+    subprocess.run(nvcc + ["-fatbin", "-rdc=true", "-gencode", "arch=compute_75,code=sm_75", "halfimma.cu",
+                           "-o", "halfimma.fatbin"], cwd=work, check=True)
+    inputs.append(("halfimma", "halfimma.fatbin", 4))
+    wrong = []
+    for name, file, explicit_type in inputs:
+        path = work / file
+        data = path.read_bytes() + (b"\0" if explicit_type == 2 else b"")
+        for kind in (explicit_type, 10):
+            for memory in (True, False):
+                h = c.c_void_p()
+                assert lib.nvJitLinkCreate(c.byref(h), 1, (c.c_char_p * 1)(b"-arch=sm_70")) == 0
+                said = log.stat().st_size
+                if memory:
+                    rc = lib.nvJitLinkAddData(h, kind, data, c.c_size_t(len(data)), os.fsencode(path))
+                else:
+                    rc = lib.nvJitLinkAddFile(h, kind, os.fsencode(path))
+                complete = lib.nvJitLinkComplete(h) if rc == 0 else None
+                with open(log, "rb") as f:
+                    f.seek(said)
+                    lines = f.read()
+                assert lib.nvJitLinkDestroy(c.byref(h)) == 0
+                case = (file, kind, "AddData" if memory else "AddFile")
+                trapping = {"half": "bad", "halfimma": "imma"}.get(name)
+                if name == "bad":
+                    want = (NVJITLINK_ERROR_PTX_COMPILE, None)
+                elif name == "imma":
+                    want = (NVJITLINK_ERROR_UNRECOGNIZED_INPUT, None)
+                else:
+                    want = (0, 0)
+                if (rc, complete) != want:
+                    wrong.append(f"{case}: AddData/AddFile {rc}, Complete {complete}, want {want}")
+                elif trapping and f"kernel {trapping} cannot run on this GPU".encode() not in lines:
+                    wrong.append(f"{case}: linked without saying that kernel {trapping} traps")
+                elif not trapping and b"compilation refused" not in lines:
+                    wrong.append(f"{case}: refused without saying why")
+    assert not wrong, "\n".join(wrong)
+    return len(inputs) * 4
+
+
 if __name__ == "__main__":
     adapter = str(Path(sys.argv[1]).resolve())
     toolkit = Path(sys.argv[2]).resolve()
     os.environ["VF_JITLINK_REAL"] = str(toolkit / "lib/libnvJitLink.so.12")
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
+        log = work / "vf.log"
+        os.environ["VF_LOG"] = str(log)
+        log.write_bytes(b"")
         (work / "helper.cu").write_text('extern "C" __device__ void helper() { asm volatile("membar.cta;"); }\n')
         subprocess.run([toolkit / "bin/nvcc", "-allow-unsupported-compiler", "-arch=sm_70",
                         "-dc", "helper.cu", "-o", "helper.o"], cwd=work, check=True)
@@ -72,5 +152,6 @@ if __name__ == "__main__":
             for kind in (explicit_type, 10):  # NVJITLINK_INPUT_ANY
                 for memory in (True, False):
                     check(lib, work / file, kind, memory)
+        refused = refusals(lib, toolkit, work, log)
         print("PASS host objects and archives through AddData/AddFile and explicit/automatic types, "
-              "null arguments and empty inputs")
+              f"null arguments and empty inputs, {refused} inputs of kernels that trap")
