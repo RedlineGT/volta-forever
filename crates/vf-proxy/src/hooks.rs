@@ -645,10 +645,10 @@ pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     // What is kept for the module is forgotten before the driver unloads it: from then on, the
     // driver may give its handle to a load in another thread, whose records are not to be dropped.
     fit::unload(module as usize);
-    let kept = images::release(module as usize);
+    let released = images::release(module as usize);
     let result = unsafe { real(module) };
     if result != CUDA_SUCCESS {
-        images::unload_failed(module as usize, kept);
+        images::unload_failed(released);
     }
     result
 }
@@ -1098,10 +1098,10 @@ pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
     }
     let real = real!(cuLibraryUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     fit::unload(library as usize);
-    let kept = images::release(library as usize);
+    let released = images::release(library as usize);
     let result = unsafe { real(library) };
     if result != CUDA_SUCCESS {
-        images::unload_failed(library as usize, kept);
+        images::unload_failed(released);
     }
     result
 }
@@ -1707,9 +1707,13 @@ pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_v
 pub unsafe extern "C" fn cuLinkDestroy(state: *mut c_void) -> CUresult {
     let real = real!(cuLinkDestroy: unsafe extern "C" fn(*mut c_void) -> CUresult);
     // Before the driver's: once it returns, the driver may give the state to a link in another
-    // thread, whose inputs are recorded under it.
-    images::link_destroyed(state as usize);
-    unsafe { real(state) }
+    // thread, whose inputs are recorded under it. Given back if the link was not destroyed.
+    let taken = images::link_destroyed(state as usize);
+    let result = unsafe { real(state) };
+    if result != CUDA_SUCCESS {
+        images::link_destroy_failed(taken);
+    }
+    result
 }
 
 // ---- failed launches (diagnostics) -------------------------------------------------------------------

@@ -250,6 +250,33 @@ def check(proxy, mock):
     c.c_void_p.in_dll(backend, "while_freed").value = None
     assert lookup(api, second, b"bad") == (218, None)
 
+    # A module or a library that the driver does not unload, and a link that it does not destroy,
+    # are still the program's, and what is known of them stays. (Until 2026-11-23 the refused
+    # kernel was given after an unload that failed, and the inputs of a link were forgotten.)
+    marked = refusal_note.mark(output, [("bad", "bad", "an instruction without a Volta sequence")])
+    library = c.c_void_p()
+    assert api.cuLibraryLoadData(c.byref(library), marked, None, None, 0, None, None, 0) == 0
+    c.c_uint.in_dll(backend, "unload_fails").value = 1
+    assert api.cuModuleUnload(second) == 201
+    assert lookup(api, second, b"bad") == (218, None)
+    assert api.cuLibraryUnload(library) == 201
+    kernel = c.c_void_p(0xDEADBEEF)
+    assert (api.cuLibraryGetKernel(c.byref(kernel), library, b"bad"), kernel.value) == (218, None)
+    c.c_uint.in_dll(backend, "unload_fails").value = 0
+    assert api.cuModuleUnload(second) == 0 and api.cuLibraryUnload(library) == 0
+    sixth = bytearray(output)
+    sixth[len(sixth) // 6] ^= 0xff
+    sixth_linked = c.create_string_buffer(bytes(sixth), len(sixth))
+    c.c_void_p.in_dll(backend, "linked").value = c.addressof(sixth_linked)
+    assert api.cuLinkCreate_v2(0, None, None, c.byref(state)) == 0
+    assert api.cuLinkAddData_v2(state, INPUT_PTX, PTX, len(PTX), b"bad.ptx", 0, None, None) == 0
+    c.c_uint.in_dll(backend, "destroy_fails").value = 1
+    assert api.cuLinkDestroy(state) == 400
+    c.c_uint.in_dll(backend, "destroy_fails").value = 0
+    assert api.cuLinkComplete(state, c.byref(image), c.byref(size)) == 0
+    assert lookup(api, load(api, image), b"bad") == (218, None)
+    assert api.cuLinkDestroy(state) == 0
+
     # A cubin that names its kernels that trap is refused them, loaded in any way. (Until
     # 2026-11-23 they were given to the program.)
     with tempfile.TemporaryDirectory() as tmp:

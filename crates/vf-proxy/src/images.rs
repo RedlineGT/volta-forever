@@ -230,6 +230,7 @@ pub fn retained(handle: usize) -> Option<Arc<Replacement>> {
 
 /// The driver loaded `replacement` as `handle`: keep it, and what is known of its kernels.
 pub fn keep(handle: usize, mut replacement: Replacement) {
+    given(handle);
     // Context destruction can retire a CUmodule without an explicit unload.
     // The driver's next load starts a new lifetime at the same address. (The context's record
     // first: what `contexts::destroyed` drops for the handle is then dropped before this.)
@@ -257,16 +258,54 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         .insert(handle, Arc::new(replacement));
 }
 
+/// What `release` took of a module or library: held until the driver's unload returned, and
+/// given back to `unload_failed` when it failed.
+pub struct Released {
+    handle: usize,
+    /// The number of the load of `handle` it was taken from (`LOADS`).
+    load: u64,
+    kept: Option<Arc<Replacement>>,
+    kernels: kernels::Taken,
+    context: crate::contexts::Taken,
+}
+
+/// The number of each load of a module or library whose handle the driver gave, by handle: a
+/// handle given again (a load once the unload of the one before returned) has another.
+static LOADS: LazyLock<Mutex<HashMap<usize, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LOAD_NUMBERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The driver gave `handle` to a load: it is the handle of a load of another number.
+fn given(handle: usize) {
+    let number = LOAD_NUMBERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    LOADS.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, number);
+}
+
+fn load_of(handle: usize) -> u64 {
+    LOADS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&handle)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// The module or library `handle` is unloaded: what is kept for it is forgotten. Called before the
 /// driver's unload, which may give the handle to a load in another thread as soon as it returns:
-/// the image is given back, for the caller to hold until the driver's unload returned
+/// what is taken is given back, for the caller to hold until the driver's unload returned
 /// (`unload_failed` when it failed).
-pub fn release(handle: usize) -> Option<Arc<Replacement>> {
+pub fn release(handle: usize) -> Released {
+    let load = load_of(handle);
     // (The context's record first, as in `keep`.)
-    crate::contexts::forget(handle);
+    let context = crate::contexts::take(handle);
     let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
-    kernels::forget(handle);
-    kept
+    let kernels = kernels::take(handle);
+    Released {
+        handle,
+        load,
+        kept,
+        kernels,
+        context,
+    }
 }
 
 /// The module `handle` went with its context (`contexts::destroyed`, which holds its record's
@@ -276,16 +315,29 @@ pub fn dropped(handle: usize) {
     kernels::forget(handle);
 }
 
-/// The driver did not unload `handle`, of which `release` gave `kept`: the driver may still read
-/// the image, which is kept again. (What else was known of its kernels is not: a kernel refused
-/// in it that the program asks for again is given, and traps.)
-pub fn unload_failed(handle: usize, kept: Option<Arc<Replacement>>) {
+/// The driver did not unload the module or library of which `release` took `released`: it is
+/// still the program's, and what was known of it is known again (the image, which the driver may
+/// still read, the kernels refused in it, its context), if its handle was not given to another
+/// load since. (What the second translation at launch kept for it is not: `fit::unload` let it go.)
+pub fn unload_failed(released: Released) {
+    let Released {
+        handle,
+        load,
+        kept,
+        kernels,
+        context,
+    } = released;
+    if load_of(handle) != load {
+        return;
+    }
+    crate::contexts::restore(context);
     if let Some(kept) = kept {
         KEPT.lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(handle)
             .or_insert(kept);
     }
+    kernels::restore(kernels);
 }
 
 /// What the adaptation found in the inputs of a link.
@@ -308,6 +360,9 @@ struct Links {
     /// The architecture that the options of a link name for its output (`CU_JIT_TARGET`), by
     /// link state.
     targets: HashMap<usize, u32>,
+    /// The number of the link that each state was last given to (`link_created`).
+    created: HashMap<usize, u64>,
+    links: u64,
 }
 
 static LINKS: LazyLock<Mutex<Links>> = LazyLock::new(|| Mutex::new(Links::default()));
@@ -369,6 +424,9 @@ pub unsafe fn link_output(state: usize, image: *const c_void, size: usize) {
 /// The driver made the link `state`, for the architecture `target` when its options name one.
 pub fn link_created(state: usize, target: Option<u32>) {
     let mut links = links();
+    links.links += 1;
+    let number = links.links;
+    links.created.insert(state, number);
     links.inputs.remove(&state);
     match target {
         Some(sm) => links.targets.insert(state, sm),
@@ -381,12 +439,40 @@ pub fn link_target(state: usize) -> Option<u32> {
     links().targets.get(&state).copied()
 }
 
+/// What `link_destroyed` took of a link, for `link_destroy_failed`.
+pub struct LinkTaken {
+    state: usize,
+    inputs: Option<Found>,
+    target: Option<u32>,
+    /// The number of the link of `state` it was taken from (`Links::created`).
+    link: u64,
+}
+
 /// The link `state` is to be destroyed: the driver may give its handle to another as soon as it
-/// is, and this is called before.
-pub fn link_destroyed(state: usize) {
+/// is, and this is called before. What is known of it is given back, for `link_destroy_failed`.
+pub fn link_destroyed(state: usize) -> LinkTaken {
     let mut links = links();
-    links.inputs.remove(&state);
-    links.targets.remove(&state);
+    LinkTaken {
+        state,
+        inputs: links.inputs.remove(&state),
+        target: links.targets.remove(&state),
+        link: links.created.get(&state).copied().unwrap_or(0),
+    }
+}
+
+/// The driver did not destroy the link of which `link_destroyed` took `taken`: what was known of
+/// it is known again, if its handle was not given to another link since.
+pub fn link_destroy_failed(taken: LinkTaken) {
+    let mut links = links();
+    if links.created.get(&taken.state).copied().unwrap_or(0) != taken.link {
+        return;
+    }
+    if let Some(inputs) = taken.inputs {
+        links.inputs.entry(taken.state).or_insert(inputs);
+    }
+    if let Some(target) = taken.target {
+        links.targets.entry(taken.state).or_insert(target);
+    }
 }
 
 /// The kernels that the note of a cubin names, which the nvJitLink of this project made from code in
@@ -604,7 +690,8 @@ pub unsafe fn loaded_as_is(result: c_int, handle: *mut *mut c_void) {
     if result == 0 && !handle.is_null() {
         // (Nothing of a module that is gone may be left under a handle that the driver gives again.)
         let fresh = unsafe { *handle } as usize;
-        release(fresh);
+        drop(release(fresh));
+        given(fresh);
         crate::fit::forget(fresh);
     }
     if !config().profile {

@@ -2,7 +2,8 @@
 // in `linked`, with one handle for every link state (as an allocator may give a freed one again),
 // and modules that have every kernel they are asked for. What another thread may do while the
 // driver destroys a link or unloads a module, once the handle is free (`while_freed`), is done
-// there; the next module loaded can be given a handle chosen by the test (`next_module`).
+// there; the next module loaded can be given a handle chosen by the test (`next_module`). An unload
+// fails with 201 while `unload_fails` is set, a link destroy with 400 while `destroy_fails` is.
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +14,7 @@ size_t linked_size;
 unsigned inputs, links, destroyed;
 void (*while_freed)(void);
 uintptr_t next_module;
+unsigned unload_fails, destroy_fails;
 
 int cuLinkCreate_v2(unsigned count, int *options, void **values, void **state) {
     ++links;
@@ -35,6 +37,7 @@ int cuLinkComplete(void *state, void **image, size_t *size) {
     return 0;
 }
 int cuLinkDestroy(void *state) {
+    if (destroy_fails) return 400;
     ++destroyed;
     if (while_freed) while_freed();
     return 0;
@@ -47,6 +50,7 @@ int cuModuleLoadData(void **module, const void *image) {
     return 0;
 }
 int cuModuleUnload(void *module) {
+    if (unload_fails) return 201;
     if (while_freed) while_freed();
     return 0;
 }
