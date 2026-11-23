@@ -159,6 +159,8 @@ pub fn count_emulated(body: &[u8]) -> EmulatedCounts {
         } else if has(".NaN.") {
             &mut counts.nan_minmax
         } else if has(".bf16")
+            || opcode.starts_with("min.f16")
+            || opcode.starts_with("max.f16")
             || has(".tf32")
             || opcode.ends_with(".f32x2")
             || opcode.starts_with("redux.sync.")
@@ -237,13 +239,15 @@ mod tests {
             ld.global.v8.b32 {%r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8}, [%rd1];\n\
             st.global.v4.b64 [%rd1], {%rd2, %rd3, %rd4, %rd5};\n\
             griddepcontrol.wait;\n\
+            max.f16x2 %r11, %r12, %r13;\n\
+            min.f16 %h2, %h3, %h4;\n\
             ret;\n\
         }";
         let counts = count_emulated(body);
         assert_eq!(counts.integer_tensor, 1);
         assert_eq!(counts.fp16_tensor, 0);
         assert_eq!(counts.cvt_packed, 1);
-        assert_eq!(counts.other, 6);
+        assert_eq!(counts.other, 8);
     }
 
     #[test]

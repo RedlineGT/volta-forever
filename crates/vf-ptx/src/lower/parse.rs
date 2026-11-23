@@ -158,9 +158,18 @@ pub(super) fn is_plain(opcode: &str) -> bool {
         || opcode.starts_with("createpolicy.")
         || opcode.contains(".relu.")
         || opcode.ends_with(".f32x2")
+        || half_bound(&words)
         || LATER_TYPES.iter().any(|kind| opcode.contains(kind))
         || (matches!(words[0], "ld" | "st")
             && (opcode.contains(".L2::") || opcode.contains(".volatile.local") || wide(&words).is_some()))
+}
+
+/// `min` or `max` of halves, with or without `.NaN`: instructions from sm_80 on.
+pub(super) fn half_bound(words: &[&str]) -> bool {
+    matches!(
+        words,
+        ["min" | "max", "f16" | "f16x2"] | ["min" | "max", "NaN", "f16" | "f16x2"]
+    )
 }
 
 /// For a load or store of more than 128 bits: the number of registers and the bytes of each.

@@ -1,0 +1,43 @@
+.version 7.8
+.target sm_80
+.address_size 64
+
+// Scalar bf16 bounds without .NaN, as Triton emits for a relu on bf16 tiles: a NaN input gives
+// the other input; two NaN inputs give a NaN, 0x7fff as on an RTX 5090 (sm_120).
+.visible .entry k(.param .u64 output) .reqntid 32,1,1
+{
+    .reg .b16 %a, %b, %hi, %lo;
+    .reg .b32 %r<4>, %lane;
+    .reg .b64 %out;
+    .reg .pred %p;
+    // A negative and a positive subnormal.
+    mov.b16 %a, 0x8001;
+    mov.b16 %b, 0x0002;
+    max.bf16 %lo, %a, %b;
+    min.bf16 %hi, %a, %b;
+    mov.b32 %r0, {%lo, %hi};
+    // One NaN: the number is kept.
+    mov.b16 %a, 0x7fc1;
+    mov.b16 %b, 0x3f80;
+    max.bf16 %lo, %a, %b;
+    min.bf16 %hi, %b, %a;
+    mov.b32 %r1, {%lo, %hi};
+    // Two NaN: a NaN (0x7fff).
+    mov.b16 %b, 0xffc3;
+    max.bf16 %lo, %a, %b;
+    min.bf16 %hi, %b, %a;
+    mov.b32 %r2, {%lo, %hi};
+    // -2 and -3; the guarded bound never runs.
+    mov.b16 %a, 0xc000;
+    mov.b16 %b, 0xc040;
+    max.bf16 %lo, %a, %b;
+    min.bf16 %hi, %a, %b;
+    mov.u32 %lane, %laneid;
+    setp.ge.u32 %p, %lane, 32;
+    @%p max.bf16 %hi, %hi, %a;
+    mov.b32 %r3, {%lo, %hi};
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.b32 [%out], {%r0,%r1,%r2,%r3};
+    ret;
+}

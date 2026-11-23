@@ -956,6 +956,17 @@ mod tests {
     }
 
     #[test]
+    fn a_half_bound_alone_needs_lowering() {
+        for bound in ["max.f16x2 %r0, %r1, %r2;", "min.f16 %h0, %h1, %h2;"] {
+            let text = format!(
+                ".version 8.0\n.target sm_80\n.address_size 64\n.visible .entry k () {{\n\
+                 \t.reg .b16 %h<3>;\n\t.reg .b32 %r<3>;\n\t{bound}\n\tret;\n}}\n"
+            );
+            assert!(needs_lowering(text.as_bytes()), "{bound}");
+        }
+    }
+
+    #[test]
     fn extern_functions_are_the_declarations_marked_extern() {
         let text = b".version 8.0\n.target sm_80\n.address_size 64\n\
             .extern .func (.param .b32 r) vprintf (.param .b64 f, .param .b64 a);\n\

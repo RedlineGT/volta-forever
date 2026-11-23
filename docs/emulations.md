@@ -279,6 +279,7 @@ bf16 x bf16 has at most 14 significant bits, well within f32).
 | `mul{.rn}.bf16`, `mul{.rn}.bf16x2` | Multiply widened operands and round each result to bf16 |
 | `add.rn.f32.bf16`, `sub.rn.f32.bf16` | Widen the first operand and add or subtract in f32 |
 | `min.NaN.bf16`, `max.NaN.bf16` | Compare the widened inputs, propagating a NaN from either operand |
+| `min.bf16`, `max.bf16`, `min{.NaN}.bf16x2`, `max{.NaN}.bf16x2` | Compare the widened inputs with `min.f32`/`max.f32`: a NaN input gives the other input, two NaN give 0x7fff (the manual says a NaN); with `.NaN`, a NaN from either input gives 0x7fff |
 | `cvt.rn.bf16.f16` | Widen exactly to f32, then round to bf16 |
 | `fma.rn.bf16`, `fma.rn.bf16x2` | Rounded to odd in f32 first (from `fma.rm.f32` and `fma.rp.f32`), then to bf16. Packed lanes with proven exact cancellation use a single f32 add per lane |
 | `cvt.rn.bf16.f64` | f32 rounded to odd (from `cvt.rm.f32.f64` and `cvt.rp.f32.f64`), then to bf16 |
@@ -326,7 +327,9 @@ touch memory. The bf16x2 form uses `atom.cas.b32` on the whole word. `atom.cas.b
 available from sm_70.
 
 **Test cases.** `tests/gpu/run.sh`: `bf16` (15 kernels, 0 wrong). The arithmetic tests
-use operands at and near bf16 halfway points, subnormals, NaN and infinity. The atomic
+use operands at and near bf16 halfway points, subnormals, NaN and infinity. The bounds:
+`packed-bf16-bounds`, `scalar-bf16-bounds` and `signed-zero-bounds` (their words agree with an
+RTX 5090 run natively). The atomic
 tests run 64 threads adding to the same address.
 
 ## 5. Integer products
@@ -619,6 +622,7 @@ The reference vectors are in `tests/kernels/blackwell/ref_scaled/`.
 | `redux.sync.{add,min,max}.{s32,u32}` | A ballot identifies the participating lanes. A full warp uses five butterfly shuffles. A partial warp gathers the input of each participating lane once, from the highest lane down: in the same order in every lane. |
 | `redux.sync.{min,max}.NaN.f32` | Reduce the active lanes and use a warp vote to propagate a NaN from any participating lane. |
 | `{min,max}.NaN.f32` | Compare two or three operands and propagate a NaN from any operand. |
+| `min{.NaN}.f16`, `max{.NaN}.f16` and their `.f16x2` forms | Each half widened exactly (`cvt.f32.f16`), `min.f32`/`max.f32`, converted back (`cvt.rn.f16.f32`, exact: the result is an input). A NaN input gives the other input, two NaN give 0x7fff; with `.NaN`, 0x7fff. +0 > -0, subnormals kept. As CUDA's `__hmax`/`__hmin` below sm_80. The `.ftz` and `.xorsign.abs` forms are refused. |
 | `{min,max,add,mul,...}.relu.{s32,f32,...}` | The operation followed by a clamp to zero. |
 | `fma.rn.f32x2`, `add.rn.f32x2`, ... | Arithmetic on pairs of f32, packed in a 64-bit register. Each is two scalar operations. |
 | `ld.global.L2::cache_hint` | The cache hint is dropped; the load is otherwise unchanged. |
@@ -641,7 +645,7 @@ collected is replaced by a trap, and its kernels are refused at the lookup
 
 **Test cases.** `tests/gpu/run.sh`: `refuse-library`, `refuse-module` (through both driver
 interfaces: a refused kernel is refused at the lookup, the others run; an emulated kernel
-is announced).
+is announced). Half bounds: `f16-bounds` and `signed-zero-bounds`.
 
 ## 10. The same emulations in machine code
 
