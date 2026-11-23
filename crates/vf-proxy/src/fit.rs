@@ -551,6 +551,8 @@ pub fn unload(handle: usize) {
 }
 
 fn unload_second(second: usize, library: bool) {
+    // (Forgotten before the driver's unload, which may give the handle to another load at once.)
+    let _kept = crate::images::release(second);
     let unload: unsafe extern "C" fn(*mut c_void) -> CUresult = unsafe {
         std::mem::transmute(
             REALS[if library {
@@ -568,7 +570,6 @@ fn unload_second(second: usize, library: bool) {
             "fit: the second translation could not be unloaded (error {result})"
         ));
     }
-    crate::images::release(second);
 }
 
 /// When the process ends, at the level of the log's information: what was held and done.

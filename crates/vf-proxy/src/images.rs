@@ -254,10 +254,27 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         .insert(handle, Arc::new(replacement));
 }
 
-pub fn release(handle: usize) {
-    KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+/// The module or library `handle` is unloaded: what is kept for it is forgotten. Called before the
+/// driver's unload, which may give the handle to a load in another thread as soon as it returns:
+/// the image is given back, for the caller to hold until the driver's unload returned
+/// (`unload_failed` when it failed).
+pub fn release(handle: usize) -> Option<Arc<Replacement>> {
+    let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
     kernels::forget(handle);
     crate::contexts::forget(handle);
+    kept
+}
+
+/// The driver did not unload `handle`, of which `release` gave `kept`: the driver may still read
+/// the image, which is kept again. (What else was known of its kernels is not: a kernel refused
+/// in it that the program asks for again is given, and traps.)
+pub fn unload_failed(handle: usize, kept: Option<Arc<Replacement>>) {
+    if let Some(kept) = kept {
+        KEPT.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(handle)
+            .or_insert(kept);
+    }
 }
 
 /// What the adaptation found in the inputs of a link.
@@ -335,7 +352,8 @@ pub unsafe fn link_output(state: usize, image: *const c_void, size: usize) {
     links.outputs.insert((length, digest(bytes)), found);
 }
 
-/// The link `state` is destroyed: the driver may give its handle to another.
+/// The link `state` is to be destroyed: the driver may give its handle to another as soon as it
+/// is, and this is called before.
 pub fn link_destroyed(state: usize) {
     links().inputs.remove(&state);
 }

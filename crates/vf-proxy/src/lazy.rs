@@ -1370,9 +1370,9 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
              materializing full module as fallback"
         ));
         // Unload the sub-module and try materializing.
+        let _kept = crate::images::release(sub_handle);
         // SAFETY: sub_handle is a valid library handle.
         unsafe { real_unload_fn()(sub_handle as *mut c_void) };
-        crate::images::release(sub_handle);
         // SAFETY: caller guarantees `kernel` and `name` are valid.
         return unsafe { materialize_and_get_kernel(library, name, &name_str, kernel) };
     }
@@ -1389,9 +1389,9 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
         );
     } else {
         // The library was unloaded while we were compiling. Clean up the orphaned sub-module.
+        let _kept = crate::images::release(sub_handle);
         // SAFETY: sub_handle is a valid library handle.
         unsafe { real_unload_fn()(sub_handle as *mut c_void) };
-        crate::images::release(sub_handle);
         condvar.notify_all();
         return CUDA_ERROR_NOT_FOUND;
     }
@@ -1428,9 +1428,9 @@ pub fn unload(library: usize) -> Option<CUresult> {
         if let KernelState::Ready(entry) = state {
             let is_materialized = lazy_lib.materialized_handle == Some(entry.lib_handle);
             if !is_materialized {
+                let _kept = crate::images::release(entry.lib_handle);
                 // SAFETY: lib_handle is a valid library handle from a prior load.
                 let result = unsafe { real_unload(entry.lib_handle as *mut c_void) };
-                crate::images::release(entry.lib_handle);
                 report_unload(format_args!("the sub-module of kernel {name}"), result);
             }
         }
@@ -1440,9 +1440,9 @@ pub fn unload(library: usize) -> Option<CUresult> {
 
     // Unload the materialized module.
     if let Some(mat_handle) = lazy_lib.materialized_handle {
+        let _kept = crate::images::release(mat_handle);
         // SAFETY: mat_handle is a valid library handle from materialization.
         let result = unsafe { real_unload(mat_handle as *mut c_void) };
-        crate::images::release(mat_handle);
         report_unload(format_args!("the whole module"), result);
     }
 

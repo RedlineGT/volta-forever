@@ -168,7 +168,8 @@ without the launcher's marker and `VF_CAPABILITY`; it needs gcc and objcopy. The
 the capability that NVML gives through the audit library, by `ctypes` (as `pynvml` asks) and
 to a library linked against it; it needs gcc. The fourth checks, with another stand-in, that
 a kernel refused in an input of the driver's linker is refused in the image the link makes,
-and in a copy of it. The fifth checks that a refused kernel of NCCL makes the layer say once,
+and in a copy of it, and that what is known of a link or a module made with a handle that the
+driver gives again, while the destruction or unload of the one before returns, is kept. The fifth checks that a refused kernel of NCCL makes the layer say once,
 at the default log level, that NCCL's CUDA 12 build is the remedy. The last links a native
 sm_70 device function from both a host object and a static library with the CUDA 12.9 toolkit.
 

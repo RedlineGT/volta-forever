@@ -623,9 +623,14 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     let real = real!(cuModuleUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    let result = unsafe { real(module) };
+    // What is kept for the module is forgotten before the driver unloads it: from then on, the
+    // driver may give its handle to a load in another thread, whose records are not to be dropped.
     fit::unload(module as usize);
-    images::release(module as usize);
+    let kept = images::release(module as usize);
+    let result = unsafe { real(module) };
+    if result != CUDA_SUCCESS {
+        images::unload_failed(module as usize, kept);
+    }
     result
 }
 
@@ -1064,15 +1069,21 @@ unsafe extern "C" fn library_load_from_file(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
     // Check if this is a lazy library: unload its sub-modules and stand-in.
-    if let Some(result) = lazy::unload(library as usize) {
+    // (Forgotten before the driver's unload: see `cuModuleUnload`.)
+    if lazy::is_lazy(library as usize) {
         fit::unload(library as usize);
-        images::release(library as usize);
-        return result;
+        let _kept = images::release(library as usize);
+        if let Some(result) = lazy::unload(library as usize) {
+            return result;
+        }
     }
     let real = real!(cuLibraryUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    let result = unsafe { real(library) };
     fit::unload(library as usize);
-    images::release(library as usize);
+    let kept = images::release(library as usize);
+    let result = unsafe { real(library) };
+    if result != CUDA_SUCCESS {
+        images::unload_failed(library as usize, kept);
+    }
     result
 }
 
@@ -1617,9 +1628,10 @@ pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_v
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkDestroy(state: *mut c_void) -> CUresult {
     let real = real!(cuLinkDestroy: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    let result = unsafe { real(state) };
+    // Before the driver's: once it returns, the driver may give the state to a link in another
+    // thread, whose inputs are recorded under it.
     images::link_destroyed(state as usize);
-    result
+    unsafe { real(state) }
 }
 
 // ---- failed launches (diagnostics) -------------------------------------------------------------------

@@ -1,12 +1,16 @@
 // Driver for link_refusals.py and nccl_remedy.py: a linker whose output is the image the test puts
 // in `linked`, with one handle for every link state (as an allocator may give a freed one again),
-// and modules that have every kernel they are asked for.
+// and modules that have every kernel they are asked for. What another thread may do while the
+// driver destroys a link or unloads a module, once the handle is free (`while_freed`), is done
+// there; the next module loaded can be given a handle chosen by the test (`next_module`).
 #include <stddef.h>
 #include <stdint.h>
 
 const void *linked;
 size_t linked_size;
 unsigned inputs, links, destroyed;
+void (*while_freed)(void);
+uintptr_t next_module;
 
 int cuLinkCreate_v2(unsigned count, int *options, void **values, void **state) {
     ++links;
@@ -20,20 +24,25 @@ int cuLinkAddData_v2(void *state, int type, void *data, size_t size, const char 
 }
 int cuLinkComplete(void *state, void **image, size_t *size) {
     *image = (void *)linked;
-    *size = linked_size;
+    if (size) *size = linked_size;
     return 0;
 }
 int cuLinkDestroy(void *state) {
     ++destroyed;
+    if (while_freed) while_freed();
     return 0;
 }
 
 static uintptr_t modules;
 int cuModuleLoadData(void **module, const void *image) {
-    *module = (void *)(0x100000 + 0x100 * ++modules);
+    *module = (void *)(next_module ? next_module : 0x100000 + 0x100 * ++modules);
+    next_module = 0;
     return 0;
 }
-int cuModuleUnload(void *module) { return 0; }
+int cuModuleUnload(void *module) {
+    if (while_freed) while_freed();
+    return 0;
+}
 int cuModuleGetFunction(void **function, void *module, const char *name) {
     *function = (void *)((uintptr_t)module + 1);
     return 0;
