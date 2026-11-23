@@ -270,7 +270,15 @@ with the next instruction waiting, and the distances between the steps and after
   only after such a barrier or wait: none otherwise among 44,052 such writes in 821 sm_75
   cubins, PyTorch's 475 and 346 of Triton (2026-11-23). Until that day the sequence of a matrix load wrote the lanes of its rows
   into its destinations first, the validator found nothing, and on a V100 a store of one of them
-  just before the load stored the lane.
+  just before the load stored the lane. A store under a guard (an atomic operation too) reads
+  nothing in the lanes where its predicate does not hold: a write under the complement of that
+  guard, on the same predicate, which nothing between them writes, runs in those lanes alone and
+  is not objected to (`ptxas` writes so at once, `@P2 STS.64 [R6], R4` then `@!P2 IMAD.MOV.U32
+  R5, RZ, RZ, RZ`: 1,270 writes in 14 cubins of the held-out corpus, of cuSOLVER, NCCL and
+  vLLM); the register is still followed after it, for the lanes where the store ran. Not after a
+  shuffle, which reads the register in other lanes. (Until 2026-11-23 such a write was objected
+  to.) The controls `complement_rewritten` (a write of that predicate between them, in the
+  program) and `complement_same` (the write under the store's own guard) are objected to.
 
 ### What the validator does not check
 
@@ -294,7 +302,7 @@ with the next instruction waiting, and the distances between the steps and after
 ## 3. Controls
 
 A check that never objects proves nothing. `reference/controls.py` makes the reference translator
-wrong on purpose, one way at a time, and counts what the validator finds in the result: 108
+wrong on purpose, one way at a time, and counts what the validator finds in the result: 110
 controls, each described at the head of that file. A control that changes translations and meets
 no objection anywhere is a hole in the validator, or a control that tests nothing.
 

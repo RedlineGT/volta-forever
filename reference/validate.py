@@ -2073,9 +2073,19 @@ def schedule(mc, code, highest, sequences=frozenset(), borrowed=frozenset(), add
     return out, late
 
 
+def predicates_written(d):
+    """The predicates (0 to 6) that the decoded instruction `d` may write: those its operands name,
+    and for R2P those of its mask (all seven when the mask is not a number)."""
+    out = {register for letter, register in d.writes if letter == 'P' and register < 7}
+    if d.mnemonic == 'R2P':
+        out |= {p for p in range(7) if 'Sb' not in d.ops or d.ops['Sb'] >> p & 1}
+    return out
+
+
 def data_overwritten(mc, code):
     """What does not hold of the registers that memory instructions read as data: (offset, what) for
-    each, and how many such registers were followed.
+    each, how many such registers were followed, and how many writes of them under the complement
+    of a store's guard were left out.
 
     A store, an atomic operation and a shuffle read their data (what is stored, combined or
     exchanged) some time after they are issued, and native code counts on the memory instructions
@@ -2091,10 +2101,21 @@ def data_overwritten(mc, code):
     before a barrier or such a wait. (Until 2026-11-23 the sequence of a matrix load wrote the
     lanes of its rows into its destinations first, and on a V100 a store of one of them just
     before the load stored the lane. Not followed: past a branch, and from the end of a loop to
-    its start.)"""
+    its start.)
+
+    But a store under a guard (an atomic operation or a reduction too) runs in the lanes where its
+    predicate holds, as it held when the store was issued, and reads nothing in the others: an
+    instruction under the complement of that guard, on the same predicate, which nothing between
+    them writes (in straight-line code, as everything here), runs in those others alone, and may
+    write the data there at once. `ptxas` does (`@P2 STS.64 [R6], R4` and then `@!P2 IMAD.MOV.U32
+    R5, RZ, RZ, RZ`, no wait: 1,270 writes in 14 cubins of the held-out corpus, of cuSOLVER, NCCL
+    and vLLM, 2026-11-23). Such a write is not objected to, and the register is still followed:
+    in the lanes where the store ran it holds what the store may not have read yet. Not for a
+    shuffle, which reads the register in other lanes than its own. (Until 2026-11-23 such a write
+    was objected to.)"""
     words = [int.from_bytes(code[i:i + 16], 'little') for i in range(0, len(code) - 15, 16)]
     decoded = [mc.decode(70, w) for w in words]
-    out, followed = [], 0
+    out, followed, complement = [], 0, 0
     for k, d in enumerate(decoded):
         if d is None or not d.kind.startswith('MIO'):
             continue
@@ -2112,19 +2133,29 @@ def data_overwritten(mc, code):
             continue
         followed += len(data)
         boards = {(words[k] >> WRITE_BARRIER) & 7, (words[k] >> READ_BARRIER) & 7} - {7}
+        # The guard of a memory access, (predicate, negated), while nothing has written its predicate since.
+        guard = (d.ops.get('Pg', 7), bool(d.ops.get('Pg@not'))) if address else None
+        if guard is not None and guard[0] == 7:
+            guard = None
         for j in range(k + 1, len(words)):
             y = decoded[j]
             if y is None or ((words[j] >> WAIT) & 63) & sum(1 << b for b in boards) or y.mnemonic == 'BAR':
                 break
             written = data & {register for letter, register in y.writes if letter == 'R'}
             if written and not y.kind.startswith('MIO'):
-                out += [(16 * j, 'writes R%d, which the memory instruction at 0x%x reads as data and may not have read yet (nothing waited since for a scoreboard that it or a later memory instruction names, and no barrier)' % (r, 16 * k)) for r in sorted(written)]
+                if guard is not None and y.ops.get('Pg', 7) == guard[0] and bool(y.ops.get('Pg@not')) != guard[1]:
+                    complement += len(written)
+                    written = set()         # (still followed: the lanes where the store ran)
+                else:
+                    out += [(16 * j, 'writes R%d, which the memory instruction at 0x%x reads as data and may not have read yet (nothing waited since for a scoreboard that it or a later memory instruction names, and no barrier)' % (r, 16 * k)) for r in sorted(written)]
             data -= written
+            if guard is not None and guard[0] in predicates_written(y):
+                guard = None
             if not data or y.kind == 'BRU' and y.mnemonic not in ('BSSY', 'BMOV'):
                 break
             if y.kind.startswith('MIO'):
                 boards |= {(words[j] >> WRITE_BARRIER) & 7, (words[j] >> READ_BARRIER) & 7} - {7}
-    return out, followed
+    return out, followed, complement
 
 
 # ---- level 3: validation of "everything at the instruction" (the frame) ----
@@ -4816,8 +4847,9 @@ def main():
         kinds['(schedule) instructions that read late a register of the translation'] += late
         for at, what in wrong:
             problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
-        wrong, followed = data_overwritten(mc, result_code)
+        wrong, followed, complement = data_overwritten(mc, result_code)
         kinds['(schedule) registers that a memory instruction reads as data, followed to what writes them next'] += followed
+        kinds['(schedule) writes of such a register under the complement of the guard of the store that reads it'] += complement
         for at, what in wrong:
             problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
         # ---- even-register alignment: an operand of two registers begins on an even one ----

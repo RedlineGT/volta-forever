@@ -40,6 +40,16 @@ sm_75 cubins named with it, and counts what validate.py finds. A control that pa
                 that the sequence writes with arithmetic first: the lanes of the rows of a plain
                 load go into its destinations, and the arithmetic of a transposed one does not
                 wait for the shuffles before it (as until 2026-11-23: the store may store the lane)
+    complement_rewritten
+                in the ORIGINAL, where an instruction under the complement of the guard of a store
+                writes a register that the store reads as data, with nothing waited for between
+                (`ptxas` does so: the store reads nothing in the lanes where that instruction
+                runs), an instruction between them that can write a predicate besides its result
+                (a carry) writes the store's predicate, and that program is translated as it is:
+                the write then runs in lanes where the store may not have read the register yet
+    complement_same
+                in the ORIGINAL, such a write is put under the store's own guard, and that program
+                is translated as it is
     soon        the selections after the last step of a product come two cycles after it, with a
                 wait for its scoreboard, and not eight (on a V100 they then read registers that
                 are not written yet)
@@ -337,6 +347,75 @@ def stored_before(f, i):
                 data -= {r for letter, r in f.src[k].writes if letter == 'R'}
         found |= data
     return found
+
+
+def complemented(mc, data, same, listing):
+    """The cubin `data` changed at the first place where an instruction under the complement of the
+    guard of a store (an atomic operation, a reduction) writes a register that the store reads as
+    data, in straight-line code, with no barrier and no wait for a scoreboard that the store or a
+    later memory instruction names between them, and nothing between them writing the store's
+    predicate (validate.py, `data_overwritten`, leaves such a write out): with `same`, that write
+    is put under the store's own guard; otherwise the first instruction between them that can
+    write a predicate besides its result (a carry, the outcome of a comparison) and writes none is
+    made to write the store's predicate. Only where the translation as it is (its map, `listing`)
+    has each instruction from the store to the write unchanged and alone: what the translation
+    puts there may wait for the store (the arithmetic of an address register that it reuses).
+    None when the cubin has no such place."""
+    unchanged = collections.defaultdict(collections.Counter)
+    for function, new, old, what in listing:
+        unchanged[function][old] += 1 if what == 'same' else 2
+    def field(c, word, wanted, value):
+        for kind, fields, what in mc.d75.plan(c):
+            if kind in ('operand', 'attribute') and what == wanted:
+                return fields[0].put(word, value)
+        return None
+    container = elf.Elf(data)
+    for s in container.sections:
+        if not s.name.startswith('.text.') or s.type != 1:
+            continue
+        words = [int.from_bytes(s.data[i:i + 16], 'little') for i in range(0, len(s.data) - 15, 16)]
+        decoded = [mc.decode(75, w) for w in words]
+        alone = unchanged[s.name[len('.text.'):]]
+        for k, d in enumerate(decoded):
+            if d is None or not d.kind.startswith('MIO') or not re.match(r'(ST|ATOM|RED)', d.mnemonic):
+                continue
+            pg, negated = d.ops.get('Pg', 7), bool(d.ops.get('Pg@not'))
+            uses = mc._uses.get((75, d.c.name))
+            if pg == 7 or uses is None:
+                continue
+            read = {d.ops[o] + n for letter, o, span in uses.reads if letter == 'R' and o in d.ops and d.ops[o] != 255
+                    and o != 'Ra' for n in range(machine.registers(span, d.ops))}
+            boards = {(words[k] >> WRITE_BARRIER) & 7, (words[k] >> READ_BARRIER) & 7} - {7}
+            between = None
+            for j in range(k + 1, len(words)):
+                y = decoded[j]
+                if not read or y is None or ((words[j] >> WAIT) & 63) & sum(1 << b for b in boards) or y.mnemonic == 'BAR':
+                    break
+                written = read & {r for letter, r in y.writes if letter == 'R'}
+                complement = written and not y.kind.startswith('MIO') and y.ops.get('Pg', 7) == pg and bool(y.ops.get('Pg@not')) != negated
+                if complement and all(alone[16 * x] == 1 for x in range(k, j + 1)):
+                    if same:
+                        word = field(y.c, words[j], ('Pg', 'not'), int(negated))
+                        at = j
+                    elif between is not None:
+                        word, at = field(decoded[between].c, words[between], 'Pu', pg), between
+                    else:
+                        word = None
+                    if word is not None:
+                        s.data = s.data[:16 * at] + word.to_bytes(16, 'little') + s.data[16 * at + 16:]
+                        return container.write()
+                if not complement:
+                    read -= written
+                if y.kind.startswith('MIO'):
+                    boards |= {(words[j] >> WRITE_BARRIER) & 7, (words[j] >> READ_BARRIER) & 7} - {7}
+                predicates = {r for letter, r in y.writes if letter == 'P'}
+                if y.mnemonic == 'R2P':
+                    predicates |= {p for p in range(7) if 'Sb' not in y.ops or y.ops['Sb'] >> p & 1}
+                if pg in predicates or y.kind == 'BRU' and y.mnemonic not in ('BSSY', 'BMOV'):
+                    break
+                if between is None and not y.kind.startswith('MIO') and y.kind != 'BRU' and 'Pu' in y.c.operands and y.ops.get('Pu', 7) == 7:
+                    between = j
+    return None
 
 
 def patched(control):
@@ -653,6 +732,8 @@ def patched(control):
         'lanes': {'matrix_load': other_lane, 'matrix_product': other_lane},
         'unwaited': {'matrix_load': unwaited, 'matrix_product': unwaited},
         'unordered': {'matrix_load': unordered},
+        'complement_rewritten': {},
+        'complement_same': {},
         'soon': {'matrix_product': soon},
         'partial': {'all_predicates': partial},
         'boardless': {'waits_for': boardless},
@@ -1107,7 +1188,7 @@ def patched(control):
     return all_controls[control]
 
 
-CONTROLS = ['as it is', 'unsaved', 'blind', 'cut', 'masks', 'nowait', 'close', 'returns', 'waitless', 'unlisted', 'swapped', 'batched', 'unmoved', 'named', 'unguarded', 'lanes', 'unwaited', 'unordered', 'soon', 'partial', 'boardless', 'unmasked', 'early', 'unheld', 'unwritten', 'stale', 'unkept', 'slowno', 'slowshort', 'slownowait', 'slownever', 'slowfree', 'slowsaved', 'alive_scratch']
+CONTROLS = ['as it is', 'unsaved', 'blind', 'cut', 'masks', 'nowait', 'close', 'returns', 'waitless', 'unlisted', 'swapped', 'batched', 'unmoved', 'named', 'unguarded', 'lanes', 'unwaited', 'unordered', 'complement_rewritten', 'complement_same', 'soon', 'partial', 'boardless', 'unmasked', 'early', 'unheld', 'unwritten', 'stale', 'unkept', 'slowno', 'slowshort', 'slownowait', 'slownever', 'slowfree', 'slowsaved', 'alive_scratch']
 # (Those of pairs of products on whole rows: only when the translator makes them, not with VF_PAIRS=0.)
 PAIR_CONTROLS = ['rowlane', 'otherrow', 'rowwait', 'rowread', 'halfswap', 'halfk', 'inplace', 'stepfast', 'unsettled', 'unsynced', 'unpermuted', 'unconverted', 'notalso']
 CONTROLS += PAIR_CONTROLS
@@ -1443,6 +1524,10 @@ def run(mc, control, path, out_dir, untouched, validated=True):
         if source is None:
             return None, ''
         translate.relocations_of = lambda *args: (relocations_of(*args)[0], set(), set())
+    if control in ('complement_rewritten', 'complement_same'):
+        source = complemented(mc, source, control == 'complement_same', untouched[(path, 'rest')]['listing'])
+        if source is None:
+            return None, ''
     try:
         listing, lives = [], []
         out, report = translate.translate(source, mc, listing, lives)
@@ -1491,8 +1576,9 @@ def run(mc, control, path, out_dir, untouched, validated=True):
         out = container.write()
         if out == untouched[path]:
             return None, ''
-    elif control == 'named':
-        # The check is given the original that was translated: the one with the relocation changed.
+    elif control in ('named', 'complement_rewritten', 'complement_same'):
+        # The check is given the original that was translated: the one with the relocation, or the
+        # instruction, changed.
         given = os.path.join(out_dir, 'original.' + os.path.basename(path))
         open(given, 'wb').write(source)
     elif control == 'no_c3_wait':
