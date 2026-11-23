@@ -69,6 +69,17 @@ def check(proxy, mock):
     assert api.cuLinkDestroy(state) == 0
     assert c.c_uint.in_dll(backend, "inputs").value == 2
 
+    # A link whose options name the architecture of its output (CU_JIT_TARGET) is given its inputs
+    # for that one: adapted for this GPU when it is this GPU's, as they are when it is a later one.
+    for target, expected in ((None, b".target sm_70"), (70, b".target sm_70"), (90, b".target sm_75"),
+                             (0x10000 + 90, b".target sm_75")):
+        options, values = (c.c_int * 1)(9), (c.c_void_p * 1)(target)
+        count = 0 if target is None else 1
+        assert api.cuLinkCreate_v2(count, options, values, c.byref(state)) == 0
+        assert api.cuLinkAddData_v2(state, INPUT_PTX, PTX, len(PTX), b"bad.ptx", 0, None, None) == 0
+        assert c.c_char_p(c.addressof(c.c_char.in_dll(backend, "seen_target"))).value == expected, target
+        assert api.cuLinkDestroy(state) == 0
+
     # The image that a link gives without its size (sizeOut may be NULL) is known all the same.
     third = bytearray(output)
     third[len(third) // 3] ^= 0xff

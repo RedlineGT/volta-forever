@@ -294,6 +294,9 @@ struct Found {
 struct Links {
     inputs: HashMap<usize, Found>,
     outputs: HashMap<(usize, u64), Found>,
+    /// The architecture that the options of a link name for its output (`CU_JIT_TARGET`), by
+    /// link state.
+    targets: HashMap<usize, u32>,
 }
 
 static LINKS: LazyLock<Mutex<Links>> = LazyLock::new(|| Mutex::new(Links::default()));
@@ -352,10 +355,27 @@ pub unsafe fn link_output(state: usize, image: *const c_void, size: usize) {
     links.outputs.insert((length, digest(bytes)), found);
 }
 
+/// The driver made the link `state`, for the architecture `target` when its options name one.
+pub fn link_created(state: usize, target: Option<u32>) {
+    let mut links = links();
+    links.inputs.remove(&state);
+    match target {
+        Some(sm) => links.targets.insert(state, sm),
+        None => links.targets.remove(&state),
+    };
+}
+
+/// The architecture that the options of the link `state` named for its output, if they did.
+pub fn link_target(state: usize) -> Option<u32> {
+    links().targets.get(&state).copied()
+}
+
 /// The link `state` is to be destroyed: the driver may give its handle to another as soon as it
 /// is, and this is called before.
 pub fn link_destroyed(state: usize) {
-    links().inputs.remove(&state);
+    let mut links = links();
+    links.inputs.remove(&state);
+    links.targets.remove(&state);
 }
 
 /// The cubin at `bytes`, when a link made it from inputs in which kernels trap or run emulated

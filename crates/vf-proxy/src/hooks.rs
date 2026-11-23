@@ -19,6 +19,9 @@ const JIT_ERROR_LOG_BUFFER_SIZE: c_int = 6;
 /// `CUdevice_attribute` values of the compute capability.
 const ATTRIBUTE_CAPABILITY_MAJOR: c_int = 75;
 const ATTRIBUTE_CAPABILITY_MINOR: c_int = 76;
+/// `CUjit_option` value of the architecture of a link's output (`CUjit_target`: the SM number,
+/// with a flag above for the architecture-specific and family variants).
+const JIT_TARGET: c_int = 9;
 /// `CUjitInputType` values.
 const INPUT_CUBIN: c_int = 0;
 const INPUT_PTX: c_int = 1;
@@ -1511,8 +1514,14 @@ unsafe fn link_add_data(
     size: usize,
     call: impl Fn(c_int, *mut c_void, usize) -> CUresult,
 ) -> CUresult {
+    // A link whose options name the architecture of its output links for that one, whatever the
+    // device of the current context.
+    let for_this_gpu = match images::link_target(state as usize) {
+        Some(sm) => sm == config().policy.device_sm,
+        None => context_needs_adapting(),
+    };
     let replacement = match input {
-        _ if !context_needs_adapting() => None,
+        _ if !for_this_gpu => None,
         INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
         // (Read within the size given, when there is one.)
         INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size).filter(|&size| size > 0)) },
@@ -1614,6 +1623,53 @@ unsafe extern "C" fn link_add_data_v2(
             real(state, input, data, size, name, count, options, values)
         })
     }
+}
+
+type LinkCreate = unsafe extern "C" fn(c_uint, *mut c_int, *mut *mut c_void, *mut *mut c_void) -> CUresult;
+
+/// `cuLinkCreate` through `real`, and the architecture that its options name for the output
+/// (`CU_JIT_TARGET`), recorded for its inputs (`link_add_data`).
+///
+/// # Safety
+/// The arguments of the program's `cuLinkCreate`.
+unsafe fn link_create(
+    real: LinkCreate,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    state: *mut *mut c_void,
+) -> CUresult {
+    let result = unsafe { real(count, options, values, state) };
+    if result == CUDA_SUCCESS && !state.is_null() {
+        let target = (!options.is_null() && !values.is_null())
+            .then(|| (0..count as usize).find(|&i| unsafe { *options.add(i) } == JIT_TARGET))
+            .flatten()
+            .map(|i| (unsafe { *values.add(i) } as usize & 0xffff) as u32);
+        images::link_created(unsafe { *state } as usize, target);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLinkCreate(
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    state: *mut *mut c_void,
+) -> CUresult {
+    let real = real!(cuLinkCreate: LinkCreate);
+    unsafe { link_create(real, count, options, values, state) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLinkCreate_v2(
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    state: *mut *mut c_void,
+) -> CUresult {
+    let real = real!(cuLinkCreate_v2: LinkCreate);
+    unsafe { link_create(real, count, options, values, state) }
 }
 
 #[unsafe(no_mangle)]

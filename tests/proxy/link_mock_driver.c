@@ -3,8 +3,10 @@
 // and modules that have every kernel they are asked for. What another thread may do while the
 // driver destroys a link or unloads a module, once the handle is free (`while_freed`), is done
 // there; the next module loaded can be given a handle chosen by the test (`next_module`).
+#define _GNU_SOURCE
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 const void *linked;
 size_t linked_size;
@@ -17,9 +19,14 @@ int cuLinkCreate_v2(unsigned count, int *options, void **values, void **state) {
     *state = (void *)(uintptr_t)0x1000;
     return 0;
 }
+/* The .target line of the last PTX input. */
+char seen_target[32];
 int cuLinkAddData_v2(void *state, int type, void *data, size_t size, const char *name, unsigned count,
                      int *options, void **values) {
     ++inputs;
+    const char *line = type == 1 ? memmem(data, size, ".target", 7) : 0;
+    memset(seen_target, 0, sizeof seen_target);
+    for (size_t n = 0; line && n < sizeof seen_target - 1 && line[n] != '\n'; ++n) seen_target[n] = line[n];
     return 0;
 }
 int cuLinkComplete(void *state, void **image, size_t *size) {
