@@ -102,6 +102,9 @@ px same-line-debug-write "$G/ptx-cases/same-line-location.ptx" 43004300 43004300
 px packed-bf16-convert "$G/ptx-cases/packed-bf16-convert.ptx" 40203f88 c13cc238 7fff0001 ff80ff80
 px bf16-product "$G/ptx-cases/bf16-product.ptx" 00008000 00020000 7f807fff 0
 px packed-bf16-bounds "$G/ptx-cases/packed-bf16-bounds.ptx" 00000002 80008001 7fff0002 40007fff
+px scalar-bf16-bounds "$G/ptx-cases/scalar-bf16-bounds.ptx" 80010002 3f803f80 7fff7fff c040c000
+px f16-bounds "$G/ptx-cases/f16-bounds.ptx" 80010002 7fff3c00 c0007fff 80017fff
+px signed-zero-bounds "$G/ptx-cases/signed-zero-bounds.ptx" 00000000 80008000 80000000 80000000
 px bf16-mma-branches "$G/ptx-cases/bf16-cases.ptx" 180 0 0 0
 # An exactly representable BF16 tile and a tile with one out-of-range lane.
 VF_BF16_TC_GROUPS=0 px bf16-mma-group-off "$G/ptx-cases/bf16-group.ptx" 42400000 5aa55aa5 12345678 0
@@ -141,9 +144,10 @@ px ptx-reduction-exited "$G/ptx-cases/reduction-exited.ptx" 5 1 4 5
 px ptx-reduction-exited-f32 "$G/ptx-cases/reduction-exited-f32.ptx" 80000000 00000000 7fffffff 7fffffff
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
 px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
-# Built from the same source with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
+# Built from the same sources with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
 px cubin-embedded-ptx "$G/ptx-cases/copy-octal.sm80.cubin" 12345678 abcdef01 0 0
 px cubin-embedded-division "$G/ptx-cases/signed-division.sm80.cubin" 0 0 0 0
+px cubin-embedded-import "$G/ptx-cases/assert-import.sm80.cubin" 12345678 9abcdef0 0badf00d 00c0ffee
 # CUDA 12.9 ptxas -lineinfo -arch=sm_75 predicates the HMMA; the PTX keeps its uniform branch.
 px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 41400000 41500000 41600000
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"

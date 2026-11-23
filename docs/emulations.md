@@ -295,6 +295,7 @@ bf16 x bf16 has at most 14 significant bits, well within f32).
 | `add.rn.f32.bf16`, `sub.rn.f32.bf16` | Widen the first operand and add or subtract in f32 |
 | `min.NaN.bf16`, `max.NaN.bf16` | Compare the widened inputs, propagating a NaN from either operand |
 | `{min,max}.bf16x2`, `{min,max}.NaN.bf16x2` | Each half widened and compared on its own; with `.NaN`, a NaN in either operand gives a NaN in that half |
+| `min.bf16`, `max.bf16` | Compare the widened inputs with `min.f32`/`max.f32`: a NaN input gives the other input, two NaN give 0x7fff (the manual says a NaN; 0x7fff measured on sm_120) |
 | `cvt.rn.bf16.f16` | Widen exactly to f32, then round to bf16 |
 | `fma.rn.bf16`, `fma.rn.bf16x2` | Rounded to odd in f32 first (from `fma.rm.f32` and `fma.rp.f32`), then to bf16. Packed lanes with proven exact cancellation use a single f32 add per lane. A scalar `fma` whose addend is a register set to -0 (`mov.b16` of `0x8000`) in the same block is the `mul` above |
 | `cvt.rn.bf16.f64` | f32 rounded to odd (from `cvt.rm.f32.f64` and `cvt.rp.f32.f64`), then to bf16 |
@@ -347,7 +348,7 @@ use operands at and near bf16 halfway points, subnormals, NaN and infinity. The 
 tests run 64 threads adding to the same address. The PTX cases `packed-bf16-*`,
 `bf16-product` and `xla-sort-bounds` check more forms of the table, and the `bf16-mma-*`
 cases run the products under each switch above (groups and tiles off and on, column and row
-`ordered` and `tree`).
+`ordered` and `tree`). The bounds: `packed-bf16-bounds`, `scalar-bf16-bounds` and `signed-zero-bounds` (their words agree with a native run on an RTX 5090).
 
 ## 5. Integer products
 
@@ -659,6 +660,7 @@ The reference vectors are in `tests/kernels/blackwell/ref_scaled/`.
 | `{min,max}.relu.s32` | The operation, then `max.s32` with 0. Other `.relu` forms are refused, except those of the E2M1 conversions (section 7). |
 | `{add,sub,mul,fma}{.rnd}{.ftz}.f32x2` | Arithmetic on pairs of f32, packed in a 64-bit register. Each is two scalar operations. Other `.f32x2` operations are refused. |
 | `ld` and `st` with `.L2::cache_hint`, `.L2::evict_*` or a prefetch size; `createpolicy` | The hints and the cache-policy operand are dropped; the access is otherwise unchanged. `createpolicy` writes 0. `.volatile` on `.local` memory, which Volta's compiler refuses, is dropped too. |
+| `min{.NaN}.f16`, `max{.NaN}.f16` and their `.f16x2` forms | Each half widened exactly (`cvt.f32.f16`), `min.f32`/`max.f32`, converted back (`cvt.rn.f16.f32`, exact: the result is an input). A NaN input gives the other input, two NaN give 0x7fff; with `.NaN`, 0x7fff. +0 > -0, subnormals kept. As CUDA's `__hmax`/`__hmin` below sm_80. The `.ftz` and `.xorsign.abs` forms are refused. |
 | `griddepcontrol` | Dropped (a Hopper/Blackwell instruction for grid-level dependencies, which Volta's driver does not support). |
 
 ### What is refused
@@ -688,7 +690,7 @@ collected is replaced by a trap, and its kernels are refused at the lookup
 `cta-mbarrier`, `ptx-reduction-exited`, `ptx-reduction-exited-f32` and `guarded-copy` for the
 table above; `refuse-library`, `refuse-module` (through both driver
 interfaces: a refused kernel is refused at the lookup, the others run; an emulated kernel
-is announced).
+is announced). Half bounds: `f16-bounds` and `signed-zero-bounds`.
 
 ## 10. The same emulations in machine code
 

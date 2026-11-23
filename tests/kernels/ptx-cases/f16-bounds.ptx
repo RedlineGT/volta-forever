@@ -1,0 +1,42 @@
+.version 7.8
+.target sm_80
+.address_size 64
+
+// Half bounds, which sm_70 lacks (Triton emits them for a relu on f16 tiles): without .NaN a NaN
+// input gives the other input; with .NaN, the canonical NaN (0x7fff); two NaN inputs give a NaN,
+// 0x7fff as on an RTX 5090 (sm_120) and as CUDA's __hmax.
+.visible .entry k(.param .u64 output) .reqntid 32,1,1
+{
+    .reg .b16 %a, %b, %hi, %lo;
+    .reg .b32 %r<4>, %x, %y, %lane;
+    .reg .b64 %out;
+    .reg .pred %p;
+    // A negative and a positive subnormal.
+    mov.b16 %a, 0x8001;
+    mov.b16 %b, 0x0002;
+    max.f16 %lo, %a, %b;
+    min.f16 %hi, %a, %b;
+    mov.b32 %r0, {%lo, %hi};
+    // One NaN: kept out without .NaN, given with it.
+    mov.b16 %a, 0x7e01;
+    mov.b16 %b, 0x3c00;
+    max.f16 %lo, %a, %b;
+    max.NaN.f16 %hi, %a, %b;
+    mov.b32 %r1, {%lo, %hi};
+    // Pairs: two NaN in the lower halves, -2 and -3 in the upper ones.
+    mov.b32 %x, 0xc0007e01;
+    mov.b32 %y, 0xc200fe03;
+    max.f16x2 %r2, %x, %y;
+    // A NaN against 1.0 with .NaN, the subnormals in the upper halves.
+    mov.b32 %x, 0x80013c00;
+    mov.b32 %y, 0x00027e01;
+    min.NaN.f16x2 %r3, %x, %y;
+    // A guarded bound that never runs (run, it would leave c0007fff).
+    mov.u32 %lane, %laneid;
+    setp.ge.u32 %p, %lane, 32;
+    @%p max.f16x2 %r3, %r2, %r2;
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.b32 [%out], {%r0,%r1,%r2,%r3};
+    ret;
+}

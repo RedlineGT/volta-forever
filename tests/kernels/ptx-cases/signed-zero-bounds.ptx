@@ -1,0 +1,30 @@
+.version 7.8
+.target sm_80
+.address_size 64
+
+// Bounds of +0 and -0, which the manual orders (+0 > -0), for halves and bf16 values.
+.visible .entry k(.param .u64 output) .reqntid 32,1,1
+{
+    .reg .b16 %pz, %nz, %hi, %lo;
+    .reg .b32 %r<4>, %x, %y, %lane;
+    .reg .b64 %out;
+    // Halves: (+0, -0) in the lower lanes, (-0, +0) in the upper ones.
+    mov.b32 %x, 0x80000000;
+    mov.b32 %y, 0x00008000;
+    max.f16x2 %r0, %x, %y;
+    min.f16x2 %r1, %x, %y;
+    // bf16, both orders.
+    mov.b16 %pz, 0x0000;
+    mov.b16 %nz, 0x8000;
+    max.bf16 %lo, %pz, %nz;
+    min.bf16 %hi, %pz, %nz;
+    mov.b32 %r2, {%lo, %hi};
+    max.bf16 %lo, %nz, %pz;
+    min.bf16 %hi, %nz, %pz;
+    mov.b32 %r3, {%lo, %hi};
+    mov.u32 %lane, %laneid;
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.b32 [%out], {%r0,%r1,%r2,%r3};
+    ret;
+}

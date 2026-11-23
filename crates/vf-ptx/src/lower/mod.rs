@@ -158,6 +158,8 @@ pub(crate) const REWRITTEN: &[&str] = &[
     "max.f32",
     "min.ftz.f32",
     "max.ftz.f32",
+    "min.f16",
+    "max.f16",
     ".bf16",
     ".tf32",
     "redux.sync",

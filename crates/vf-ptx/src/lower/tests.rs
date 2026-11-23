@@ -2501,6 +2501,38 @@ fn xla_nan_reductions_and_bf16_bounds() {
 }
 
 #[test]
+fn triton_scalar_bf16_bounds() {
+    // As Triton emits for a relu on bf16 tiles: max.bf16 against a zero register.
+    let text = lower(
+        "{\n\t.reg .b16 %h<3>;\n\t.reg .pred %p;\n\
+          \tmax.bf16 %h0, %h1, %h2;\n\t@%p min.bf16 %h1, %h0, %h2;\n\tret;\n}",
+    );
+    assert_eq!(count(&text, "max.f32 "), 1);
+    assert_eq!(count(&text, "min.f32 "), 1);
+    assert!(text.contains("@%p cvt.u16.u32 %h1,"));
+    assert!(!text.contains(".bf16"));
+    assert!(!text.contains("setp.nan"), "no NaN propagation without .NaN");
+    assert_eq!(undeclared(&text), Vec::<String>::new());
+}
+
+#[test]
+fn triton_half_bounds_go_through_f32() {
+    // sm_70 has no max.f16/min.f16 nor their f16x2 forms.
+    let text = lower(
+        "{\n\t.reg .b16 %h<3>;\n\t.reg .b32 %r<3>;\n\t.reg .pred %p;\n\
+          \tmax.f16 %h0, %h1, %h2;\n\tmin.NaN.f16 %h1, %h0, %h2;\n\
+          \tmax.f16x2 %r0, %r1, %r2;\n\t@%p min.NaN.f16x2 %r1, %r0, %r2;\n\tret;\n}",
+    );
+    assert_eq!(count(&text, "max.f32 "), 3);
+    assert_eq!(count(&text, "min.f32 "), 3);
+    assert_eq!(count(&text, "setp.nan.f32 "), 3, "only the .NaN forms propagate NaN");
+    assert!(text.contains("cvt.rn.f16.f32 %h0,"));
+    assert!(text.contains("@%p mov.b32 %r1, {"));
+    assert!(!text.contains(".f16 %h") && !text.contains(".f16x2 %r"), "{text}");
+    assert_eq!(undeclared(&text), Vec::<String>::new());
+}
+
+#[test]
 fn ninfer_packed_bf16_weights() {
     let source = "{\n\t.reg .b16 %h<3>;\n\t.reg .b32 %r<4>;\n\t.reg .pred %p;\n\
                   \tcvt.rn.bf16x2.e4m3x2 %r0, %h0;\n\tcvt.rn.bf16x2.e5m2x2 %r1, %h1;\n\

@@ -123,7 +123,8 @@ leads to:
 - **The only image is a cubin for sm_80 or later.** NVIDIA's assembler can retain its source in
   the `.nv_debug_ptx_txt` ELF section. VF checks for a single PTX module with the same target and
   kernel names. Executables exporting additional device symbols and relocatable objects require a
-  separate PTX image. With matching source, VF uses the same lowering and driver JIT as for ordinary
+  separate PTX image. Calls that the executable leaves to the driver (`__assertfail`, `vprintf`,
+  `malloc`, `free`) are accepted when the retained source declares them `.extern .func`. With matching source, VF uses the same lowering and driver JIT as for ordinary
   PTX. For stripped sm_80 executables, the machine-code translator checks each function against a
   set of supported instruction forms. It converts descriptor-based global memory accesses after
   proving the descriptor on every incoming path, then uses the same register allocator, scheduler and

@@ -9,7 +9,7 @@ use crate::scan;
 
 use super::Unsupported;
 use super::body::Body;
-use super::parse::wide;
+use super::parse::{half_bound, wide};
 use super::types::{Fp8, all_ones, first_operand, place_of};
 
 impl<'a> Body<'a> {
@@ -315,14 +315,21 @@ impl<'a> Body<'a> {
             emit!(self, "xor.b32 {bits}, {bits}, 0x8000;");
             self.written(d);
             emit!(self, "{guard}cvt.u16.u32 {d}, {bits};");
-        } else if let [op @ ("max" | "min"), "NaN", "bf16"] = words[..] {
+        } else if let [op @ ("max" | "min"), "bf16"] | [op @ ("max" | "min"), "NaN", "bf16"] = words[..] {
             let [d, a, b] = parts[..] else {
                 return Err(unsupported("operands not recognised"));
             };
             let a = self.bf16_to_f32(a);
             let b = self.bf16_to_f32(b);
             let result = self.fresh();
-            self.bound(&format!("{op}.f32"), &result, &a, &b);
+            let plain = format!("{op}.f32");
+            if words.len() == 3 {
+                self.bound(&plain, &result, &a, &b);
+            } else {
+                // Without .NaN, as max.f32: a NaN input gives the other one; two give a NaN, whose
+                // high halfword is 0x7fff here, as CUDA's __hmax (measured on sm_120 for the cases).
+                emit!(self, "{plain} {result}, {a}, {b};");
+            }
             emit!(self, "shr.u32 {result}, {result}, 16;");
             self.written(d);
             emit!(self, "{guard}cvt.u16.u32 {d}, {result};");
@@ -344,6 +351,45 @@ impl<'a> Body<'a> {
             // Each result is an input bf16 or a canonical NaN. Pack the two high halfwords.
             self.written(d);
             emit!(self, "{guard}prmt.b32 {d}, {low}, {high}, 0x7632;");
+        } else if half_bound(&words) {
+            // Half bounds are from sm_80 on. Through f32, exactly, as CUDA's __hmax/__hmin below
+            // sm_80: each bound is an input, which f16 holds, or a NaN, which converts to 0x7fff
+            // (measured on sm_120 for the cases).
+            let [d, a, b] = parts[..] else {
+                return Err(unsupported("operands not recognised"));
+            };
+            let (op, nan, pair) = (words[0], words[1] == "NaN", words.last() == Some(&"f16x2"));
+            let plain = format!("{op}.f32");
+            let lanes: &[_] = if pair { &[0, 1] } else { &[0] };
+            let mut halves = Vec::new();
+            let (a_halves, b_halves) = if pair {
+                let [a0, a1, b0, b1] = [(); 4].map(|_| self.fresh_half());
+                emit!(self, "mov.b32 {{{a0}, {a1}}}, {a};");
+                emit!(self, "mov.b32 {{{b0}, {b1}}}, {b};");
+                (vec![a0, a1], vec![b0, b1])
+            } else {
+                (vec![a.to_string()], vec![b.to_string()])
+            };
+            for &lane in lanes {
+                let [wa, wb, result]: [String; 3] = self.fresh_n();
+                emit!(self, "cvt.f32.f16 {wa}, {};", a_halves[lane]);
+                emit!(self, "cvt.f32.f16 {wb}, {};", b_halves[lane]);
+                if nan {
+                    self.bound(&plain, &result, &wa, &wb);
+                } else {
+                    emit!(self, "{plain} {result}, {wa}, {wb};");
+                }
+                halves.push(result);
+            }
+            self.written(d);
+            if pair {
+                let [lo, hi] = [(); 2].map(|_| self.fresh_half());
+                emit!(self, "cvt.rn.f16.f32 {lo}, {};", halves[0]);
+                emit!(self, "cvt.rn.f16.f32 {hi}, {};", halves[1]);
+                emit!(self, "{guard}mov.b32 {d}, {{{lo}, {hi}}};");
+            } else {
+                emit!(self, "{guard}cvt.rn.f16.f32 {d}, {};", halves[0]);
+            }
         } else if let ["abs", kind @ ("bf16" | "bf16x2")] = words[..] {
             let [d, a] = parts[..] else {
                 return Err(unsupported("operands not recognised"));

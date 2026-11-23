@@ -1090,6 +1090,42 @@ else
     fail "$name" "exit $_st; left: $(ls -A "$tmp/half-empty" 2>/dev/null | tr '\n' ' ')"
 fi
 
+# Run-time compilers keep the PTX of what they build (setup_jit): by default only for a program told
+# 8.0 or later, after flags of the user's, once, never next to -G; always with VF_JIT_LINEINFO=1,
+# never with 0. env prints the variables only when it sets them.
+name="jit-lineinfo"
+vf=$arch/bin/vf
+# nv VAR [ENV...]: VAR as a command run through the launcher sees it (unset: "unset"), the
+# launcher's environment cleared of both variables first.
+nv() {
+    _v=$1; shift
+    env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO -u VF_CAPABILITY -u VF_JIT_LINEINFO "$@" \
+        "$vf" sh -c 'printf "%s" "${'"$_v"'-unset}"'
+}
+_default=$(nv NVCC_APPEND_FLAGS)
+_told=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0)
+_told12=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=12.0)
+_told75=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=7.5)
+_forced=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1)
+_off=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 VF_JIT_LINEINFO=0)
+_kept=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80')
+_once=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-O3 -lineinfo')
+_debug=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-G -O0')
+_cute=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0)
+_cute_default=$(nv CUTE_DSL_LINEINFO)
+_cute_kept=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 CUTE_DSL_LINEINFO=0)
+_env=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 "$vf" env | grep -E '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' | tr '\n' ' ' || true)
+_env_none=$(env -u CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-lineinfo' CUTE_DSL_LINEINFO=1 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
+if [ "$_default" = unset ] && [ "$_told" = "-lineinfo" ] && [ "$_told12" = "-lineinfo" ] \
+    && [ "$_told75" = unset ] && [ "$_forced" = "-lineinfo" ] && [ "$_off" = unset ] \
+    && [ "$_kept" = "-gencode=arch=compute_80,code=compute_80 -lineinfo" ] && [ "$_once" = "-O3 -lineinfo" ] \
+    && [ "$_debug" = "-G -O0" ] && [ "$_cute" = 1 ] && [ "$_cute_default" = unset ] && [ "$_cute_kept" = 0 ] \
+    && [ "$_env" = "export NVCC_APPEND_FLAGS='-lineinfo' export CUTE_DSL_LINEINFO='1' " ] && [ "$_env_none" = 0 ]; then
+    pass "$name"
+else
+    fail "$name" "default '$_default' told '$_told' '$_told12' '$_told75' forced '$_forced' off '$_off' kept '$_kept' once '$_once' debug '$_debug' cute '$_cute' '$_cute_default' '$_cute_kept' env '$_env' none '$_env_none'"
+fi
+
 # --- done -----------------------------------------------------------------------
 
 if [ "$failed" = 0 ]; then

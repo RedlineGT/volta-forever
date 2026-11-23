@@ -403,6 +403,8 @@ fn elf_string(table: &[u8], offset: u32) -> Option<&str> {
 
 /// Source retained by ptxas with line information. Treat a linked or relocatable object with
 /// additional externally visible symbols conservatively: kernel names alone cannot check its ABI.
+/// Functions the object calls without defining them (`cubin_imports`) add nothing to its interface;
+/// the caller (`embedded_ptx` in vf-adapt) checks that the source declares each of them.
 pub fn cubin_debug_ptx(bytes: &[u8]) -> Option<&[u8]> {
     let sections = cubin_sections(bytes)?;
     if u16_at(bytes, 16) != 2 {
@@ -425,11 +427,28 @@ pub fn cubin_debug_ptx(bytes: &[u8]) -> Option<&[u8]> {
     let source = source?;
     let symbols = cubin_symbols(bytes, sections)?;
     for (index, symbol) in symbols.table.iter().enumerate() {
-        if symbol[4] >> 4 != 0 && !is_kernel(symbol) && !symbols.assembler_helper(index, sections) {
+        if symbol[4] >> 4 != 0
+            && !is_kernel(symbol)
+            && !symbols.assembler_helper(index, sections)
+            && !symbols.import(index)
+        {
             return None;
         }
     }
     Some(source)
+}
+
+/// Functions a little-endian 64-bit CUDA ELF calls but does not define, which the driver resolves
+/// when it loads the module: `__assertfail` and `vprintf` for device assertions and `printf`. In an
+/// executable from ptxas only the functions it knows the driver provides can be undefined: it
+/// refuses any other (`Unresolved extern function`); `-c` and `-ewp` objects are not executables.
+pub fn cubin_imports(bytes: &[u8]) -> Option<Vec<&str>> {
+    let symbols = cubin_symbols(bytes, cubin_sections(bytes)?)?;
+    let mut imports = Vec::new();
+    for index in (0..symbols.table.len()).filter(|&i| symbols.import(i)) {
+        imports.push(elf_string(symbols.names, u32_at(&symbols.table[index], 0))?);
+    }
+    Some(imports)
 }
 
 fn is_kernel(symbol: &[u8; 24]) -> bool {
@@ -443,6 +462,18 @@ struct CubinSymbols<'a> {
 }
 
 impl CubinSymbols<'_> {
+    /// An undefined global function with default visibility and no value: a call that the module
+    /// leaves to the loader (PTX `.extern .func`).
+    fn import(&self, index: usize) -> bool {
+        let symbol = &self.table[index];
+        index >= self.first_global
+            && symbol[4] == 0x12
+            && symbol[5] == 0
+            && u16_at(symbol, 6) == 0
+            && u64_at(symbol, 8) == 0
+            && u64_at(symbol, 16) == 0
+    }
+
     /// CUDA 12 ptxas marks its out-of-line routines (for instance, 64-bit integer division)
     /// as weak functions in the local portion of .symtab. Their machine code is inside the
     /// owning kernel. CUDA 13 emits local functions for the same PTX operations.
