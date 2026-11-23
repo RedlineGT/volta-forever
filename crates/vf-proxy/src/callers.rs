@@ -351,9 +351,11 @@ struct Names {
 fn dynamic_names(file: &[u8]) -> Option<Names> {
     const PT_LOAD: u32 = 1;
     const PT_DYNAMIC: u32 = 2;
-    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at + 2)?.try_into().ok()?));
-    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at + 4)?.try_into().ok()?));
-    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at + 8)?.try_into().ok()?) as usize);
+    // (Every offset is the file's: added to with checks, and read within the file.)
+    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at.checked_add(4)?)?.try_into().ok()?));
+    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at.checked_add(8)?)?.try_into().ok()?) as usize);
+    let field = |at: usize, offset: usize| at.checked_add(offset);
     if file.get(..6)? != b"\x7fELF\x02\x01" {
         return None;
     }
@@ -362,13 +364,18 @@ fn dynamic_names(file: &[u8]) -> Option<Names> {
     let headers: Vec<(u32, usize, usize, usize)> = (0..count)
         .map(|i| {
             let at = table.checked_add(i.checked_mul(size)?)?;
-            Some((u32_at(at)?, u64_at(at + 8)?, u64_at(at + 16)?, u64_at(at + 32)?))
+            Some((
+                u32_at(at)?,
+                u64_at(field(at, 8)?)?,
+                u64_at(field(at, 16)?)?,
+                u64_at(field(at, 32)?)?,
+            ))
         })
         .collect::<Option<_>>()?;
     let &(_, dynamic, _, length) = headers.iter().find(|header| header.0 == PT_DYNAMIC)?;
     let (mut strings, mut strings_size, mut names, mut soname) = (None, 0, Vec::new(), None);
     for at in (dynamic..dynamic.checked_add(length)?).step_by(16) {
-        match (u64_at(at)?, u64_at(at + 8)?) {
+        match (u64_at(at)?, u64_at(field(at, 8)?)?) {
             (0, _) => break,
             (1, name) => names.push(name),
             (5, address) => strings = Some(address),
@@ -397,9 +404,10 @@ fn dynamic_names(file: &[u8]) -> Option<Names> {
 /// The sections of the 64-bit ELF object in `file` in which compilers put GPU code:
 /// `.nv_fatbin`, and `__nv_relfatbin` for code linked again when it is loaded.
 fn fat_binary_sections(file: &[u8]) -> Vec<&[u8]> {
-    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at + 2)?.try_into().ok()?) as usize);
-    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at + 4)?.try_into().ok()?) as usize);
-    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at + 8)?.try_into().ok()?) as usize);
+    // (Every offset is the file's: added to with checks, and read within the file.)
+    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at.checked_add(2)?)?.try_into().ok()?) as usize);
+    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at.checked_add(4)?)?.try_into().ok()?) as usize);
+    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at.checked_add(8)?)?.try_into().ok()?) as usize);
     let sections = || -> Option<Vec<&[u8]>> {
         if file.get(..6)? != b"\x7fELF\x02\x01" {
             return None;
@@ -408,7 +416,7 @@ fn fat_binary_sections(file: &[u8]) -> Vec<&[u8]> {
         // (name, offset, size) of each section header.
         let header = |i: usize| {
             let at = table.checked_add(i.checked_mul(size)?)?;
-            Some((u32_at(at)?, u64_at(at + 24)?, u64_at(at + 32)?))
+            Some((u32_at(at)?, u64_at(at.checked_add(24)?)?, u64_at(at.checked_add(32)?)?))
         };
         let (_, start, length) = header(names)?;
         let names = file.get(start..start.checked_add(length)?)?;
@@ -434,6 +442,18 @@ fn fat_binary_sections(file: &[u8]) -> Vec<&[u8]> {
 /// this GPU's, which is adapted, the limit is the lowest that adapted code sets (7.5). Once they
 /// are loaded, the files that the loader took are read (`dependents_limit`).
 fn beside_limit(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32, CString)> {
+    // The files read are any beside the caller: a panic while reading them sets no limit, as one
+    // while reading the code of a caller does (`unpanicked`), instead of ending the process.
+    catch_unwind(AssertUnwindSafe(|| beside_limit_unguarded(path, caller, objects))).unwrap_or_else(|_| {
+        log::error(format_args!(
+            "internal error while reading the libraries beside {}; they set no limit to the capability told",
+            path.to_string_lossy()
+        ));
+        None
+    })
+}
+
+fn beside_limit_unguarded(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32, CString)> {
     let bytes = path.to_bytes();
     let own_name = file_name(bytes);
     if !matches!(caller, Caller::Direct | Caller::Other)
@@ -744,6 +764,19 @@ mod tests {
         assert!(dynamic_names(b"not an object").is_none());
         assert!(fat_binary_sections(&file).is_empty());
         assert!(fat_binary_sections(b"\x7fELF\x02\x01 a file cut short").is_empty());
+        // Tables said to be at the end of what an offset can be: nothing read, no overflow (until
+        // 2026-11-23 the field after the table's offset was computed unchecked, which a debug build
+        // stops at, in the capability hook).
+        let mut wild = vec![0u8; 0x40];
+        wild[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        for (table, size, count) in [(0x20, 0x36, 0x38), (0x28, 0x3a, 0x3c)] {
+            wild[table..table + 8].copy_from_slice(&(u64::MAX - 3).to_le_bytes());
+            wild[size..size + 2].copy_from_slice(&64u16.to_le_bytes());
+            wild[count..count + 2].copy_from_slice(&1u16.to_le_bytes());
+        }
+        wild[0x3e..0x40].copy_from_slice(&0u16.to_le_bytes());
+        assert!(dynamic_names(&wild).is_none());
+        assert!(fat_binary_sections(&wild).is_empty());
     }
 
     #[test]
