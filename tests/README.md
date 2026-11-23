@@ -51,12 +51,13 @@ scripts of `tests/sass/`).
   what the native sm_70 build of the same source, the host models or the reference vectors of
   an RTX 5090 say. 126 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
-  (error 218 and a NULL handle, through a module, a library and the driver's linker), and
-  lookup tables asked for by name, answered as NVIDIA's driver answers them, except where the
-  layer refuses one (`tables.py`).
+  (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
+  with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
+  (`CUDA_MODULE_LOADING`), and lookup tables asked for by name, answered as NVIDIA's driver
+  answers them, except where the layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
-  functions through the forwarding library and gets the host's result (cuBLAS is exercised by
-  `run.sh`).
+  functions through the forwarding library and gets the host's result, five of them again under
+  `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL

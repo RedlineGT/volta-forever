@@ -65,6 +65,36 @@ kernels of its module load and run. The same holds for the image that the driver
 another input of the link that cannot run is not refused, and traps when it is launched; and
 inputs given with `cuLinkAddFile` are not adapted at all.
 
+**Eager loading (`CUDA_MODULE_LOADING=EAGER`).** The CUDA 13 runtime asks for each kernel by
+itself, and goes on without one that is refused, under eager loading as under lazy loading. The
+CUDA 12 runtime, which the CUDA 12.9 libraries that the layer forwards to carry inside them,
+takes the kernels of each of its fat binaries from the module of its library
+(`cuLibraryGetModule`, then `cuModuleGetFunction` for each); under eager loading it does so for
+every fat binary at its start, and gives up altogether at the first lookup that fails. NVIDIA's
+driver gives no module for an image without code for the GPU (209,
+`CUDA_ERROR_NO_BINARY_FOR_GPU`), and the runtime then does without that image. Under eager
+loading the layer gives no module either (its kernels stay given by `cuLibraryGetKernel`) for an
+image with a kernel that it refuses, and for an image that it made from one without code for
+the V100 when the caller has code for the V100 of its own, as the CUDA 12.9 libraries do, which
+choose that code here: the module would have every kernel of the image compiled at the start,
+for nothing (cuBLAS 12.9 and cuBLASLt have hundreds of such images, kernels for sm_80 and later;
+one took more than nine minutes to compile). So cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT,
+cuRAND and cuDNN 9.10 (its CUDA 12 build) start under eager loading as on NVIDIA's driver (until
+2026-11-23 the handles of the first four could not be created, and cuDNN 9.10's first operation
+failed: one of cuBLAS 12.9's images has ten grouped GEMM kernels for sm_80 that the layer does
+not translate). A program of the CUDA 12 runtime whose own fat binary has a refused kernel
+starts without the kernels of that fat binary under eager loading; under lazy loading it is
+given the others.
+
+What eager loading costs through the layer: every image of machine code that a runtime
+registered is translated, and every kernel of retargeted PTX that it asks for is compiled by the
+driver, at its start, and every refused kernel is named then on standard error. With the layer's
+cache off (`VF_PROXY_CACHE=0`), cuBLAS 12.9 started in 30 s (2 s without the layer); the start of
+PyTorch 2.14 (3,358 images of PyTorch, cuDNN, cuBLAS and the others adapted, 1,411 kernels
+named) had not ended after ten minutes, nor that of cuDNN 9.28 (its CUDA 13 build) after two, by
+which it had compiled 1,441 kernels one by one (2026-11-23). A later start takes what it can from
+the layer's cache and the driver's (`CUDA_CACHE_PATH`); that was not measured.
+
 **PyTorch 2.14.0.** Of the 23,693 functions for sm_75 in the 475 units of machine code of its
 library, 23,664 are translated (99.9 %) and 29 are refused: 10 for a branch through a uniform
 register, 6 for the instruction `I2IP`, 4 for a call whose return address is not given the

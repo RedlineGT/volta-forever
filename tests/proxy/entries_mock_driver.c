@@ -118,3 +118,6 @@ int cuGetProcAddress(const char *symbol, void **ptr, int version, uint64_t flags
 int cuKernelGetFunction(void **func, void *kernel) { *func = (void *)((uintptr_t)kernel | FUNCTION_TAG); return 0; }
 int cuKernelGetLibrary(void **lib, void *kernel) { *lib = (void *)((uintptr_t)kernel / 16); return 0; }
 int cuFuncGetModule(void **mod, void *func) { return cuLibraryGetModule(mod, (void *)(((uintptr_t)func & ~((uintptr_t)FUNCTION_TAG)) / 16)); }
+/* What CUDA_MODULE_LOADING made of the loading of modules: 1 eager, 2 lazy. */
+int loading_mode = 2;
+int cuModuleGetLoadingMode(int *mode) { *mode = loading_mode; return 0; }

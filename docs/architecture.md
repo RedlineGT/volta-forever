@@ -180,6 +180,20 @@ name it does not have), with the reason on the console. The other kernels
 of its module load and run. Module and library enumeration return the usable handles, and
 the corresponding count includes only those entries.
 
+The module of a library (`cuLibraryGetModule`) is what the CUDA 12 runtime takes the kernels of
+a fat binary from, by name, one after the other; under eager loading
+(`cuModuleGetLoadingMode`, from `CUDA_MODULE_LOADING`) it does so for every fat binary at its
+start, and a lookup that fails there ends its initialization. Under eager loading, therefore, a
+library with a refused kernel is given no module in a context on the V100
+(`CUDA_ERROR_NO_BINARY_FOR_GPU`, 209, NVIDIA's answer for an image without code for the GPU,
+which the runtime takes as an image to do without); its other kernels stay given by
+`cuLibraryGetKernel`. Nor is a library whose image was adapted, when the caller of
+`cuLibraryGetModule` has code for the V100 of its own (`callers`: it is told the real
+capability and chooses that code): the CUDA 12.9 libraries would otherwise have the kernels for
+later GPUs of hundreds of images compiled at their start. Under lazy loading the runtime asks
+for the module at the first launch of one of its kernels, and goes on without those it is
+refused: the module is given.
+
 Through the driver's linker the same holds: what was refused or emulated in each input of
 `cuLinkAddData` is kept for the link, given at `cuLinkComplete` to the image the link made
 (known by its length and a hash of its bytes, so that a copy of it loaded later is known

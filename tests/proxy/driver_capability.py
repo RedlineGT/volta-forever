@@ -89,6 +89,9 @@ int cuLinkAddData_v2(void *s, int type, void *data, size_t size, const char *nam
     keep(data);
     return seen(data, size);
 }
+/* What CUDA_MODULE_LOADING made of the loading of modules: 1 eager, 2 lazy. */
+int mock_loading_mode = 2;
+int cuModuleGetLoadingMode(int *mode) { *mode = mock_loading_mode; return 0; }
 """
 
 # A normal (non-tail) call makes this DSO the return address seen by the proxy.
@@ -110,6 +113,7 @@ int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, in
          unsigned long size) {
     return f(0, 2, image, size, 0, 0, 0, 0);
 }
+int module(int (*f)(void **, void *), void **m, void *l) { return f(m, l); }
 """
 
 
@@ -531,6 +535,42 @@ def run_mixed(proxy, directory):
     device.value = -1
 
 
+def run_eager(proxy, directory):
+    """Under eager loading (cuModuleGetLoadingMode), a library whose image the layer made, from one
+    without code for the V100, is given no module in a context on the V100 for a caller with code of
+    its own for it (209, as NVIDIA's driver answers for an image without code for a GPU): such a
+    caller chooses its own code there, and its CUDA 12 runtime, which takes every kernel of every
+    module at its start, would have them all compiled (until 2026-11-23 the module was given). A
+    caller without code for the V100 is given the module, as is any caller under lazy loading, on a
+    later card, and for an image with code for the V100."""
+    api = c.CDLL(str(proxy))
+    mock = c.CDLL(str(directory / "mock.so"))
+    device, mode = c.c_int.in_dll(mock, "mock_device"), c.c_int.in_dll(mock, "mock_loading_mode")
+    data = Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data"
+    own, other = c.CDLL(str(directory / "volta")), c.CDLL(str(directory / "turing_only"))
+    for image, caller, ordinal, eager, expected in (
+        ("turing_only.fatbin", own, 0, True, 209),     # machine code for sm_75, translated
+        ("ptx80.fatbin", own, 0, True, 209),           # PTX for sm_80, retargeted
+        ("turing_only.fatbin", other, 0, True, 0),
+        ("ptx80.fatbin", other, 0, True, 0),
+        ("turing_only.fatbin", own, 0, False, 0),
+        ("turing_only.fatbin", own, 2, True, 0),
+        (data / "elf70-elf75-ptx70-lz4.fatbin", own, 0, True, 0),
+    ):
+        device.value = ordinal
+        code = (directory / image).read_bytes()
+        buffer = c.create_string_buffer(code, len(code))
+        library, module = c.c_void_p(), c.c_void_p(0xDEADBEEF)
+        assert api.cuLibraryLoadData(c.byref(library), buffer, None, None, 0, None, None, 0) == 0
+        mode.value = 1 if eager else 2
+        status = caller.module(api.cuLibraryGetModule, c.byref(module), library)
+        assert status == expected, (image, ordinal, eager, status)
+        assert (module.value is None) == (expected != 0), (image, module.value)
+        mode.value = 2
+        assert api.cuLibraryUnload(library) == 0
+    device.value = -1
+
+
 def run_binary(proxy, directory):
     """The architecture of a kernel's machine code is answered as the capability that its caller is
     told only on the V100: on a later card the program's code runs, whose architecture the driver
@@ -671,6 +711,8 @@ if __name__ == "__main__":
         run_runtimes(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 4 and sys.argv[3] == "--mixed":
         run_mixed(proxy, Path(sys.argv[2]))
+    elif len(sys.argv) == 4 and sys.argv[3] == "--eager":
+        run_eager(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 5 and sys.argv[3] == "--beside":
         run_beside(proxy, Path(sys.argv[2]), sys.argv[4])
     elif len(sys.argv) == 4 and sys.argv[3] == "--binary":
@@ -711,6 +753,8 @@ if __name__ == "__main__":
             run_main(proxy, directory, env)
             subprocess.run([sys.executable, __file__, proxy, directory, "--mixed"],
                            env={**env, "VOLTA_FOREVER": "test", "VF_PROXY_CACHE": "0"}, check=True)
+            subprocess.run([sys.executable, __file__, proxy, directory, "--eager"],
+                           env={**env, "VOLTA_FOREVER": "test", "VF_PROXY_CACHE": "0"}, check=True)
             subprocess.run([sys.executable, __file__, proxy, directory, "--binary"],
                            env={**env, "VOLTA_FOREVER": "test", "VF_CAPABILITY": "9.0"}, check=True)
             subprocess.run([sys.executable, __file__, proxy, directory, "--loader"], timeout=30, check=True,
@@ -718,4 +762,5 @@ if __name__ == "__main__":
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
               "machine code that limits what its callers are told, the code given for what they are told, "
               "values of VF_CAPABILITY that are not used, main programs however they were started, modules "
-              "loaded on a later card, and the architecture of kernels on a later card")
+              "loaded on a later card, the architecture of kernels on a later card, and the module of a library under "
+              "eager loading")
