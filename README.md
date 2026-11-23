@@ -8,6 +8,14 @@ Run unmodified CUDA 13 applications on a Tesla V100 with a simple two-letter com
 
 [Inference engines and Ubuntu guides](#inference-engines) · [Installation](INSTALL.md) · [Compatibility limits](LIMITS.md)
 
+> **A young project.** volta-forever runs the engines listed below and a large part of PyTorch,
+> but not every CUDA 13 program works out of the box yet: a kernel may be refused, a library may
+> need a CUDA 12 counterpart, a program may need a setting. The recommended way to get a program
+> running is to hand the job to your AI coding agent: point it at this repository, tell it which
+> program you want on your V100, and ask it to follow [AGENTS.md](AGENTS.md). When the layer
+> itself is what is missing, ask the agent to fix it here and to send a pull request: that is
+> how the project grows. [Reporting a wrong result](CONTRIBUTING.md#reporting-a-wrong-result)
+
 ## Quick start
 
 You need a Tesla V100, the NVIDIA R580 driver, Linux x86-64 with glibc 2.34 or later, and `curl`, `python3` and `xz`. Ubuntu 22.04+ and Debian 12+ meet the glibc requirement. The installer places `vf` in `~/.local/bin` and downloads NVIDIA’s CUDA 12.9.2 cuBLAS and nvJitLink.
