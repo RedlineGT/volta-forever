@@ -35,9 +35,9 @@
 #   VF_AUDIT_MAP, VF_AUDIT_MAP_FILE
 #                  substitutions of your own: the first stay before the launcher's, the
 #                  file is read after them (--map gives a file priority)
-#   VF_JIT_LINEINFO=1|0
-#                  1: run-time CUDA compilers keep the PTX of what they build (setup_jit); 0: never.
-#                  By default only when VF_CAPABILITY is 8.0 or later
+#   VF_JIT_LINEINFO=1
+#                  run-time CUDA compilers keep the PTX of what they build (setup_jit): for a
+#                  program told 8.0 or later (VF_CAPABILITY) that compiles kernels while it runs
 # A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 set -eu
 
@@ -275,8 +275,10 @@ build_map() {
 # --- prepend to a colon-separated list without duplicating entries ---------------
 
 path_prepend() {
-    # $1 = new components (colon-separated), $2 = old value.
-    _new_parts=$1 _old=$2 _result=
+    # $1 = new components (colon-separated), $2 = old value, $3 = the characters that separate
+    # the components of the old value (':' when not given; ':;' for LD_LIBRARY_PATH, which the
+    # loader splits at a ';' too). The result is colon-separated.
+    _new_parts=$1 _old=$2 _old_ifs=${3:-:} _result=
     # Build the result from new parts, then add old parts not already present. An empty
     # component, of either, is left out (the loader takes it for the current directory), and
     # a component is taken as it is (no pattern expanded, no backslash read).
@@ -292,7 +294,7 @@ path_prepend() {
             *) if [ -n "$_result" ]; then _result=$_result:$_p; else _result=$_p; fi ;;
         esac
     done
-    _oifs=$IFS; IFS=:
+    _oifs=$IFS; IFS=$_old_ifs
     # shellcheck disable=SC2086
     set -- $_old
     IFS=$_oifs
@@ -311,6 +313,21 @@ path_prepend() {
 
 setup_env() {
     find_cuda12
+    # A tree into which vf fetch is putting a component, file by file, or was stopped while it
+    # did, has its journal (scripts/fetch-redist.py): its files may be of two versions until the
+    # next vf fetch completes it. Refused, in the tree of the CUDA 12.9.2 directory and in the
+    # installation's own (its NCCL may be taken). (_publishing: that tree; vf doctor says so.)
+    _publishing=
+    for _tree in "${_cuda12%/*}" "$home/cuda-12.9.2"; do
+        if [ -n "$_tree" ] && [ -e "$_tree/.vf-publishing" ]; then
+            _publishing=$_tree
+            break
+        fi
+    done
+    if [ -n "$_publishing" ] && [ "${_doctor:-0}" != 1 ]; then
+        echo "vf: a vf fetch is putting libraries in place in $_publishing, or was stopped while it did: its libraries may be of two versions. Wait for it to end, or run vf fetch again, which completes it (for a directory given to vf fetch --to, the same --to)." >&2
+        exit 2
+    fi
     # (LD_LIBRARY_PATH, LD_AUDIT and VF_AUDIT_MAP are lists whose entries a ':' separates, and
     # the loader splits LD_LIBRARY_PATH at a ';' too: a directory with one in its path would be
     # split there.)
@@ -344,17 +361,23 @@ setup_env() {
     # what the layer substituted and has the last word, as the user's entries of VF_AUDIT_MAP
     # come before the launcher's.
     _others_audit=
+    _layer_audit_there=0
     set -f
     _oifs=$IFS; IFS=:
     for _a in ${LD_AUDIT:-}; do
         case $_a in
-            libvf_audit.so|*/libvf_audit.so) ;;
+            libvf_audit.so|*/libvf_audit.so) _layer_audit_there=1 ;;
             *) _others_audit=$_others_audit:$_a ;;
         esac
     done
     IFS=$_oifs
     set +f
     _ld_audit=$(path_prepend "$_audit" "$_others_audit")
+    # Without the audit library (--no-audit, or none in the installation), an audit library of
+    # the layer that LD_AUDIT already names (after eval "$(vf env)") is taken out of it too: the
+    # loader would load it all the same. (_ld_audit_without: what is left; LD_AUDIT is unset
+    # when nothing is.)
+    _ld_audit_without=$(path_prepend "" "$_others_audit")
 
     # The library path: the layer's own libraries, the forwarding libraries, the CUDA 12.9.2
     # libraries, then what was there. The directory of the forwarding libraries is left out
@@ -366,7 +389,9 @@ setup_env() {
         _ldpath_new=$_ldpath_new:$fwd_dir
     fi
     [ -n "$_cuda12" ] && _ldpath_new=$_ldpath_new:$_cuda12
-    _ldpath=$(path_prepend "$_ldpath_new" "${LD_LIBRARY_PATH:-}")
+    # (What was there is split at both separators of the loader, ':' and ';': a component left
+    # empty between two of them, which the loader takes for the current directory, goes.)
+    _ldpath=$(path_prepend "$_ldpath_new" "${LD_LIBRARY_PATH:-}" ':;')
 
     # (The marker is the version alone, as the library's volta_forever_version() gives it.)
     _version=$(get_version)
@@ -444,6 +469,12 @@ cmd_env() {
     if [ "$_with_audit" = 1 ]; then
         printf 'export LD_AUDIT=%s\n' "$(quoted "$_ld_audit")"
         [ -n "$_full_map" ] && printf 'export VF_AUDIT_MAP=%s\n' "$(quoted "$_full_map")"
+    elif [ "$_layer_audit_there" = 1 ]; then
+        if [ -n "$_ld_audit_without" ]; then
+            printf 'export LD_AUDIT=%s\n' "$(quoted "$_ld_audit_without")"
+        else
+            printf 'unset LD_AUDIT\n'
+        fi
     fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
     printf 'export VOLTA_FOREVER_HOME=%s\n' "$(quoted "$home")"
@@ -453,8 +484,12 @@ cmd_env() {
 }
 
 # Bazel applications can select their own CUDA toolkit after startup. Give them a
-# runfiles directory with VF's assembler and links to their installed resources.
+# runfiles directory with VF's assembler and links to their installed resources: sets
+# $_runfiles_view to the runfiles to make a view of (empty: none), which cmd_run has the
+# assembler make, and run the command with it (vf-ptxas --vf-runfiles): the command and what it
+# starts hold the lock of the view, which is not removed while they run.
 setup_runfiles() {
+    _runfiles_view=
     [ -z "${RUNFILES_MANIFEST_FILE:-}" ] || return 0
     _compiler=${tool%/*}/vf-ptxas
     [ -x "$_compiler" ] || return 0
@@ -475,9 +510,10 @@ setup_runfiles() {
         if [ -f "$_candidate" ]; then _has_ptxas=1; break; fi
     done
     [ "$_has_ptxas" = 1 ] || return 0
-    _cache=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/runfiles-v1
-    RUNFILES_DIR=$("$_compiler" --vf-runfiles "$_runfiles" "$_cache") || exit 1
-    export RUNFILES_DIR
+    # (runfiles-v1 holds the views of releases before 0.1.3, which held no lock: an engine that
+    # one of them started may run with one, and they are not touched.)
+    _cache=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/runfiles-v2
+    _runfiles_view=$_runfiles
 }
 
 # Programs that compile CUDA at run time with nvcc (PyTorch extensions, FlashInfer, TileLang)
@@ -487,16 +523,14 @@ setup_runfiles() {
 # compiles again for sm_70. The machine code itself is unchanged; the cubins gain line tables.
 # nvcc reads NVCC_APPEND_FLAGS at every invocation, whoever starts it. NVIDIA's CuTe DSL (CUTLASS
 # Python kernels) compiles without nvcc; CUTE_DSL_LINEINFO=1 makes it keep the PTX the same way.
-# The cubins grow (60-120 %), so by default only for programs told Ampere or later, whose run-time
-# builds are then machine code for sm_80 and later; never next to -G, which overrides line
-# information and fails with it under -Werror all-warnings. _jit_nvcc/_jit_cute: what was set here.
+# Only with VF_JIT_LINEINFO=1 (vf doctor suggests it to a program told 8.0 or later, whose
+# run-time builds are machine code for sm_80 and later): the launcher cannot see the command
+# line of a compiler, and -lineinfo next to a -G there fails under -Werror all-warnings; the
+# cubins grow too (60-120 %). Never next to a -G of NVCC_APPEND_FLAGS. _jit_nvcc/_jit_cute: what
+# was set here.
 setup_jit() {
     _jit_nvcc=0 _jit_cute=0
-    case ${VF_JIT_LINEINFO:-auto} in
-        0) return 0 ;;
-        1) ;;
-        *) case ${VF_CAPABILITY:-} in [89].* | [1-9][0-9].*) ;; *) return 0 ;; esac ;;
-    esac
+    [ "${VF_JIT_LINEINFO:-}" = 1 ] || return 0
     if [ -z "${CUTE_DSL_LINEINFO+set}" ]; then
         CUTE_DSL_LINEINFO=1 _jit_cute=1
     fi
@@ -519,9 +553,12 @@ cmd_run() {
     if [ "$_with_audit" = 1 ]; then
         export LD_AUDIT="$_ld_audit"
         [ -n "$_full_map" ] && export VF_AUDIT_MAP="$_full_map"
+    elif [ "$_layer_audit_there" = 1 ]; then
+        if [ -n "$_ld_audit_without" ]; then export LD_AUDIT="$_ld_audit_without"; else unset LD_AUDIT; fi
     fi
     export VOLTA_FOREVER="$_version"
     export VOLTA_FOREVER_HOME="$home"
+    [ -z "$_runfiles_view" ] || exec "$_compiler" --vf-runfiles "$_runfiles_view" "$_cache" "$@"
     exec "$@"
 }
 
@@ -656,7 +693,12 @@ cmd_doctor() {
     opt_no_audit=0
     opt_map_file=
     VF_QUIET=1
+    _doctor=1
     setup_env
+    if [ -n "$_publishing" ]; then
+        echo "MISSING complete CUDA 12.9.2 libraries in $_publishing: a vf fetch is putting them in place there, or was stopped while it did (run vf fetch again, which completes it; the launcher refuses the directory meanwhile)"
+        _ok=0
+    fi
     if [ -n "$_cuda12_left" ]; then
         echo "NOTICE in $home/cuda-12.9.2/lib, not counted as libraries:$_cuda12_left"
         echo "       (a .vf-part file is what an interrupted vf fetch left; the next vf fetch removes it)"
@@ -710,6 +752,15 @@ cmd_doctor() {
     fi
     venv_release
     [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
+    # (Told 8.0 or later, a program that compiles CUDA while it runs builds machine code for
+    # sm_80 or later, of which the layer can translate little.)
+    case ${VF_CAPABILITY:-} in
+        [89].* | [1-9][0-9].*)
+            if [ "${VF_JIT_LINEINFO:-}" != 1 ]; then
+                echo "NOTICE VF_CAPABILITY is $VF_CAPABILITY: a program that compiles CUDA while it runs (PyTorch extensions, FlashInfer, TileLang, CuTe DSL) builds machine code for that capability, of which the layer can translate little"
+                echo "       VF_JIT_LINEINFO=1 makes those compilers keep the PTX of what they build, which the layer compiles for the V100 (not for a build with -G: INSTALL.md)"
+            fi ;;
+    esac
 
     if [ "$_ok" = 0 ]; then
         exit 1
@@ -870,10 +921,11 @@ Environment:
   VF_AUDIT_MAP, VF_AUDIT_MAP_FILE
                  substitutions of your own: the first stay before the launcher's, the
                  file is read after them (--map gives a file priority)
-  VF_JIT_LINEINFO=1|0
-                 1: run-time CUDA compilers keep the PTX of what they build (nvcc gets
-                 -lineinfo, CuTe DSL CUTE_DSL_LINEINFO=1); 0: never; by default only when
-                 VF_CAPABILITY is 8.0 or later. Not with -G (see INSTALL.md)
+  VF_JIT_LINEINFO=1
+                 run-time CUDA compilers keep the PTX of what they build (nvcc gets
+                 -lineinfo, CuTe DSL CUTE_DSL_LINEINFO=1), which the layer compiles for
+                 the V100: for a program told 8.0 or later (VF_CAPABILITY) that compiles
+                 kernels while it runs. Not for a build with -G (see INSTALL.md)
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }

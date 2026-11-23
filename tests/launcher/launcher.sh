@@ -525,6 +525,23 @@ else
     fail "$name" "LD_AUDIT is set: $lda"
 fi
 
+# --no-audit takes an audit library of the layer out of an LD_AUDIT that was there (after
+# eval "$(vf env)": the loader would load it all the same), and keeps the others; LD_AUDIT is
+# unset when nothing is left. env says so too. (Until 2026-11-23 it was left as it was.)
+name="no-audit-inherited"
+lda1=$(LD_AUDIT="$arch/lib/libvf_audit.so:/my/audit.so" "$vf" --no-audit sh -c 'printf "%s" "${LD_AUDIT-unset}"')
+lda2=$(LD_AUDIT="$arch/lib/libvf_audit.so" "$vf" --no-audit sh -c 'printf "%s" "${LD_AUDIT-unset}"')
+lda3=$(LD_AUDIT=/my/audit.so "$vf" --no-audit sh -c 'printf "%s" "${LD_AUDIT-unset}"')
+env1=$(LD_AUDIT="/other/lib/libvf_audit.so:/my/audit.so" "$vf" env --no-audit | grep LD_AUDIT || true)
+env2=$(LD_AUDIT="$arch/lib/libvf_audit.so" "$vf" env --no-audit | grep LD_AUDIT || true)
+env3=$(LD_AUDIT=/my/audit.so "$vf" env --no-audit | grep LD_AUDIT || true)
+if [ "$lda1" = /my/audit.so ] && [ "$lda2" = unset ] && [ "$lda3" = /my/audit.so ] \
+    && [ "$env1" = "export LD_AUDIT='/my/audit.so'" ] && [ "$env2" = "unset LD_AUDIT" ] && [ -z "$env3" ]; then
+    pass "$name"
+else
+    fail "$name" "run: $lda1 | $lda2 | $lda3; env: $env1 | $env2 | $env3"
+fi
+
 # 7. --cuda12 DIR overrides auto-detection.
 
 name="cuda12-override"
@@ -697,10 +714,29 @@ sed -n '/^path_prepend() {/,/^}/p' "$launcher" >"$tmp/path_prepend.sh"
 got=$(. "$tmp/path_prepend.sh"; path_prepend '/a::/c:' ':/c:/d::/a:')
 got2=$(cd "$tmp" && . "$tmp/path_prepend.sh"; path_prepend '*:/b\tc' '/b\tc:/d\n')
 got3=$(. "$tmp/path_prepend.sh"; path_prepend '' ':/d:')
-if [ "$got" = "/a:/c:/d" ] && [ "$got2" = '*:/b\tc:/d\n' ] && [ "$got3" = /d ]; then
+# (Told that ';' separates the old value too, as the loader has it for LD_LIBRARY_PATH; otherwise
+# a ';' is part of a component, as in LD_AUDIT and VF_AUDIT_MAP.)
+got4=$(. "$tmp/path_prepend.sh"; path_prepend '/a' ';/usr/lib;;/lib:;/a;' ':;')
+got5=$(. "$tmp/path_prepend.sh"; path_prepend '/a' '/x;y::/z')
+if [ "$got" = "/a:/c:/d" ] && [ "$got2" = '*:/b\tc:/d\n' ] && [ "$got3" = /d ] && [ "$got4" = /a:/usr/lib:/lib ] \
+    && [ "$got5" = '/a:/x;y:/z' ]; then
     pass "$name"
 else
-    fail "$name" "got: $got | $got2 | $got3"
+    fail "$name" "got: $got | $got2 | $got3 | $got4 | $got5"
+fi
+
+# An LD_LIBRARY_PATH that was there is split at both separators of the loader, ':' and ';', and
+# what comes of it has no empty component (the loader takes one for the current directory),
+# in what env prints and in what a command sees. (Until 2026-11-23 '/usr/lib;;/lib' was kept
+# as it was.)
+name="ldpath-semicolons"
+want="$arch/lib:$arch/forward:$arch/cuda-12.9.2/lib:/usr/lib:/lib"
+ldp1=$(LD_LIBRARY_PATH='/usr/lib;;/lib' get_var "$vf" LD_LIBRARY_PATH)
+ldp2=$(LD_LIBRARY_PATH=';/usr/lib;:/lib;' run_var "$vf" LD_LIBRARY_PATH)
+if [ "$ldp1" = "$want" ] && [ "$ldp2" = "$want" ]; then
+    pass "$name"
+else
+    fail "$name" "env: $ldp1, run: $ldp2"
 fi
 
 # 13b. What env prints is read back by eval as it is, whatever the path holds: a space, a
@@ -1118,9 +1154,10 @@ else
     fail "$name" "exit $_st; left: $(ls -A "$tmp/half-empty" 2>/dev/null | tr '\n' ' ')"
 fi
 
-# Run-time compilers keep the PTX of what they build (setup_jit): by default only for a program told
-# 8.0 or later, after flags of the user's, once, never next to -G; always with VF_JIT_LINEINFO=1,
-# never with 0. env prints the variables only when it sets them.
+# Run-time compilers keep the PTX of what they build (setup_jit): with VF_JIT_LINEINFO=1 only, after
+# flags of the user's, once, never next to -G; not by default, whatever the capability (the launcher
+# cannot see a -G on a compiler's command line: until 2026-11-23 a program told 8.0 had -lineinfo by
+# default, and nvcc -G -Werror all-warnings failed). env prints the variables only when it sets them.
 name="jit-lineinfo"
 vf=$arch/bin/vf
 # nv VAR [ENV...]: VAR as a command run through the launcher sees it (unset: "unset"), the
@@ -1133,26 +1170,94 @@ nv() {
 _default=$(nv NVCC_APPEND_FLAGS)
 _told=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0)
 _told12=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=12.0)
-_told75=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=7.5)
 _forced=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1)
+_forced80=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 VF_JIT_LINEINFO=1)
 _off=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 VF_JIT_LINEINFO=0)
-_kept=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80')
-_once=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-O3 -lineinfo')
-_debug=$(nv NVCC_APPEND_FLAGS VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-G -O0')
-_cute=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0)
-_cute_default=$(nv CUTE_DSL_LINEINFO)
-_cute_kept=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 CUTE_DSL_LINEINFO=0)
-_env=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 "$vf" env | grep -E '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' | tr '\n' ' ' || true)
-_env_none=$(env -u CUTE_DSL_LINEINFO VF_CAPABILITY=8.0 NVCC_APPEND_FLAGS='-lineinfo' CUTE_DSL_LINEINFO=1 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
-if [ "$_default" = unset ] && [ "$_told" = "-lineinfo" ] && [ "$_told12" = "-lineinfo" ] \
-    && [ "$_told75" = unset ] && [ "$_forced" = "-lineinfo" ] && [ "$_off" = unset ] \
+_kept=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-gencode=arch=compute_80,code=compute_80')
+_once=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-O3 -lineinfo')
+_debug=$(nv NVCC_APPEND_FLAGS VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-G -O0')
+_cute=$(nv CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1)
+_cute_default=$(nv CUTE_DSL_LINEINFO VF_CAPABILITY=8.0)
+_cute_kept=$(nv CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1 CUTE_DSL_LINEINFO=0)
+_env=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1 "$vf" env | grep -E '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' | tr '\n' ' ' || true)
+_env_told=$(env -u NVCC_APPEND_FLAGS -u CUTE_DSL_LINEINFO -u VF_JIT_LINEINFO VF_CAPABILITY=8.0 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
+_env_none=$(env -u CUTE_DSL_LINEINFO VF_JIT_LINEINFO=1 NVCC_APPEND_FLAGS='-lineinfo' CUTE_DSL_LINEINFO=1 "$vf" env | grep -cE '^export (NVCC_APPEND_FLAGS|CUTE_DSL_LINEINFO)=' || true)
+if [ "$_default" = unset ] && [ "$_told" = unset ] && [ "$_told12" = unset ] \
+    && [ "$_forced" = "-lineinfo" ] && [ "$_forced80" = "-lineinfo" ] && [ "$_off" = unset ] \
     && [ "$_kept" = "-gencode=arch=compute_80,code=compute_80 -lineinfo" ] && [ "$_once" = "-O3 -lineinfo" ] \
     && [ "$_debug" = "-G -O0" ] && [ "$_cute" = 1 ] && [ "$_cute_default" = unset ] && [ "$_cute_kept" = 0 ] \
-    && [ "$_env" = "export NVCC_APPEND_FLAGS='-lineinfo' export CUTE_DSL_LINEINFO='1' " ] && [ "$_env_none" = 0 ]; then
+    && [ "$_env" = "export NVCC_APPEND_FLAGS='-lineinfo' export CUTE_DSL_LINEINFO='1' " ] && [ "$_env_told" = 0 ] \
+    && [ "$_env_none" = 0 ]; then
     pass "$name"
 else
-    fail "$name" "default '$_default' told '$_told' '$_told12' '$_told75' forced '$_forced' off '$_off' kept '$_kept' once '$_once' debug '$_debug' cute '$_cute' '$_cute_default' '$_cute_kept' env '$_env' none '$_env_none'"
+    fail "$name" "default '$_default' told '$_told' '$_told12' forced '$_forced' '$_forced80' off '$_off' kept '$_kept' once '$_once' debug '$_debug' cute '$_cute' '$_cute_default' '$_cute_kept' env '$_env' '$_env_told' none '$_env_none'"
 fi
+
+# vf doctor suggests VF_JIT_LINEINFO=1 to a program told 8.0 or later, and only then.
+name="doctor-jit-lineinfo"
+_d80=$(env -u VF_JIT_LINEINFO VF_CAPABILITY=8.0 "$vf" doctor 2>&1 || true)
+_d120=$(env -u VF_JIT_LINEINFO VF_CAPABILITY=12.0 "$vf" doctor 2>&1 || true)
+_d75=$(env -u VF_JIT_LINEINFO VF_CAPABILITY=7.5 "$vf" doctor 2>&1 || true)
+_dset=$(VF_JIT_LINEINFO=1 VF_CAPABILITY=8.0 "$vf" doctor 2>&1 || true)
+case $_d80$_d120 in
+    *"VF_JIT_LINEINFO=1 makes"*"VF_JIT_LINEINFO=1 makes"*)
+        case $_d75$_dset in
+            *VF_JIT_LINEINFO*) fail "$name" "said without reason: $_d75 $_dset" ;;
+            *) pass "$name" ;;
+        esac ;;
+    *) fail "$name" "8.0: $_d80" ;;
+esac
+
+# A Bazel program (NAME.runfiles beside it, in which a toolkit has bin/ptxas) is started by the
+# assembler, which makes the view of its runfiles and runs it with the lock of the view held:
+# vf-ptxas --vf-runfiles RUNFILES CACHE COMMAND ARGS... (here a stand-in that says what it was
+# given and runs the command). Another command is run as it is. (Until 2026-11-23 the launcher
+# took the view's path from the assembler, and nothing held the view.)
+name="runfiles-through-the-assembler"
+bz=$tmp/bazel-install
+mk_archive "$bz" cuda12
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "$VF_TEST_SAID"\nshift 3\nexec "$@"\n' >"$bz/bin/vf-ptxas"
+chmod +x "$bz/bin/vf-ptxas"
+mkdir -p "$tmp/app.runfiles/toolkit/bin"
+: >"$tmp/app.runfiles/toolkit/bin/ptxas"
+printf '#!/bin/sh\necho "app $*"\n' >"$tmp/app"
+chmod +x "$tmp/app"
+_out=$(VF_TEST_SAID=$tmp/said XDG_CACHE_HOME=$tmp/xdg VF_QUIET=1 "$bz/bin/vf" "$tmp/app" 'one two' three)
+_said=$(tr '\n' '|' <"$tmp/said")
+_plain=$(VF_TEST_SAID=$tmp/said-plain VF_QUIET=1 "$bz/bin/vf" sh -c 'echo plain')
+_want="--vf-runfiles|$tmp/app.runfiles|$tmp/xdg/volta-forever/runfiles-v2|$tmp/app|one two|three|"
+if [ "$_out" = "app one two three" ] && [ "$_said" = "$_want" ] && [ "$_plain" = plain ] && [ ! -e "$tmp/said-plain" ]; then
+    pass "$name"
+else
+    fail "$name" "out '$_out' said '$_said' plain '$_plain'"
+fi
+
+# A tree that vf fetch is putting a component in, or was stopped in (its journal, .vf-publishing,
+# is there), is refused: its files may be of two versions; doctor says so. The CUDA 12.9.2
+# directory's tree, and the installation's own when another directory is taken (its NCCL may be).
+# (Until 2026-11-23 nothing marked it.)
+name="cuda12-being-fetched"
+pub=$tmp/publishing
+mk_archive "$pub" cuda12
+: >"$pub/cuda-12.9.2/.vf-publishing"
+_st=0
+_err=$(VF_QUIET=1 "$pub/bin/vf" env 2>&1 >/dev/null) || _st=$?
+_st2=0
+"$pub/bin/vf" --cuda12 "$arch/cuda-12.9.2/lib" true 2>/dev/null || _st2=$?
+_st3=0
+_doc=$("$pub/bin/vf" doctor 2>&1) || _st3=$?
+rm "$pub/cuda-12.9.2/.vf-publishing"
+_st4=0
+VF_QUIET=1 "$pub/bin/vf" true 2>/dev/null || _st4=$?
+case $_err/$_doc in
+    *"a vf fetch is putting libraries in place in $pub/cuda-12.9.2"*/*"MISSING complete CUDA 12.9.2 libraries in $pub/cuda-12.9.2"*)
+        if [ "$_st" = 2 ] && [ "$_st2" = 2 ] && [ "$_st3" = 1 ] && [ "$_st4" = 0 ]; then
+            pass "$name"
+        else
+            fail "$name" "status env $_st, --cuda12 $_st2, doctor $_st3, after $_st4"
+        fi ;;
+    *) fail "$name" "env said: $_err; doctor said: $_doc" ;;
+esac
 
 # --- done -----------------------------------------------------------------------
 

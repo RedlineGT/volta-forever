@@ -8,9 +8,10 @@ Each program is loaded with the path of its workers replaced by this file, which
 that does what a scenario says: kernels that print on standard output with no end of line (as the
 stub of a kernel built for a later GPU does), more on standard error than a pipe holds, a case that
 does not end, a worker that dies in a case, that says it lost the GPU, that ends early or outside a
-case, that does not end after its last case, a line that is not a verdict. Each program must count
-every case, say what went wrong, end with the right status, and not wait for ever. The exit status
-is the number of checks that failed.
+case, that does not end after its last case, a line that is not a verdict, a second verdict for a case,
+a verdict for a case that it did not start or did not name. Each program must count every case
+once, say what went wrong, end with the right status, and not wait for ever. The exit status is the
+number of checks that failed.
 """
 import importlib.util, os, signal, subprocess, sys, tempfile, time
 
@@ -38,7 +39,8 @@ def ops_worker(first, channel, patterns):
     if scenario == 'flood':
         os.write(2, b'device-side assertion failed\n' * 10000)          # 290 kB: more than a pipe holds
     names = ['case.%d' % n for n in range(CASES)]
-    say('cases', sum(1 for name in names if not patterns or any(p in name for p in patterns)))
+    selected = [n for n, name in enumerate(names) if not patterns or any(p in name for p in patterns)]
+    say('cases', len(selected), ','.join(map(str, selected)))
     for number, name in enumerate(names):
         if number < first or (patterns and not any(p in name for p in patterns)):
             continue
@@ -46,7 +48,23 @@ def ops_worker(first, channel, patterns):
             return
         if scenario == 'outside' and number == 9:
             sys.exit(1)
+        if scenario == 'unexpected' and number == 9:
+            # A case it did not name, in place of one it named.
+            say(99, 'case.99', 'start', '')
+            say(99, 'case.99', 'ok', '')
+            continue
         say(number, name, 'start', '')
+        if scenario == 'duplicate' and number == 3:
+            # A second verdict, without a start, after a DIFFERENT.
+            say(number, name, 'DIFFERENT', '1 of 4 elements')
+            say(number, name, 'ok', '')
+            continue
+        if scenario == 'mismatch' and number == 4:
+            say(number, 'case.40', 'ok', '')
+            continue
+        if scenario == 'again' and number == 5:
+            say(number, name, 'ok', '')
+            say(number, name, 'start', '')
         if scenario == 'noise':
             noise('FATAL: kernel `k` is for sm80-sm121, but was built for sm75' * 3)
         if scenario == 'hang' and number == 5:
@@ -117,6 +135,13 @@ CHECKS = [
     ('torch-ops.py', 'outside', [], 1, ['RUN       the worker from case 0 ended with status 1 outside a case', 'RUN       9 verdicts for 12 cases']),
     ('torch-ops.py', 'stuck-exit', [], 1, ['RUN       the worker from case 0 did not end within 2 s after its last case and was stopped', '12 cases: 12 ok']),
     ('torch-ops.py', 'silent-start', [], 2, ['no worker said how many cases there are']),
+    ('torch-ops.py', 'duplicate', [], 1, ['RUN       a worker gave a verdict for case 3 (case.3), which it had not started',
+                                          '12 cases: 11 ok, 1 DIFFERENT']),
+    ('torch-ops.py', 'unexpected', [], 1, ['RUN       a worker started case 99 (case.99), which is not one of those it named',
+                                           'RUN       11 verdicts for 12 cases (none for case 9)']),
+    ('torch-ops.py', 'mismatch', [], 1, ['RUN       a worker gave a verdict for case 4 (case.40), which it had not started (it had started case 4, case.4)',
+                                         'RUN       11 verdicts for 12 cases (none for case 4)']),
+    ('torch-ops.py', 'again', [], 1, ['RUN       a worker started case 5 (case.5) again, which has a verdict already', '12 cases: 12 ok']),
     ('torch-models.py', 'clean', [], 0, ['6 cases: 6 ok']),
     ('torch-models.py', 'noise', [], 1, ['DIFFERENT model.2', '6 cases: 5 ok, 1 DIFFERENT']),
     ('torch-models.py', 'flood', [], 0, ['6 cases: 6 ok']),

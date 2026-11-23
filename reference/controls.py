@@ -277,7 +277,8 @@ nothing in that cubin's translation, its map or its lives (it has nothing of wha
 takes away, and says nothing); or `refused` when all that the control changed is functions that
 the translator then refused: they are traps, and nothing of what the control did reaches the
 validator. The exit status is 0 when the translation as it is has no problem and every control is
-objected to in one cubin at least. Which cubins: ones that have what the controls take away
+objected to in every cubin whose translation it changes, but the cases of RIGHT_THERE (below).
+(Until 2026-11-23 a control objected to in one cubin passed here, whatever the others.) Which cubins: ones that have what the controls take away
 (predicates saved, a P2R of the program next to a uniform predicate, a call that is told where
 to return). With -c, only the controls named (and the translation as it is). With -u, the
 translation as it is is made and not validated: for a run of many processes, one of which
@@ -293,8 +294,8 @@ in the same process.)
 A control may change a translation and find no objection: `blind` takes the lowest predicate the
 instructions of a life do not touch, and where the translator's own lives of predicates are more
 careful than nvdisasm's (they are, across calls within a function) that predicate may hold
-nothing after all. Such a 0 is worth a look, and is not a hole by itself: tests/sass/controls.sh
-fails on each but those it lists, each looked at (RIGHT_THERE).
+nothing after all. Such a 0 is worth a look, and is not a hole by itself: this program and
+tests/sass/controls.sh fail on each but those of RIGHT_THERE, each looked at.
 """
 import collections, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1072,6 +1073,48 @@ CONTROLS += PRODUCT_L3_CONTROLS
 # translation of it. The validator objects where it is the more careful of the two; no objection
 # is what a translator as careful as the validator gets, and is no hole.)
 CHANGES_THE_PROGRAM = ['copy_after_write']
+
+# Where a control changes the translation of a cubin and the validator rightly finds nothing, each
+# looked at (2026-11-23): (setting, control, cubin): why. The setting is `default` or the value of
+# VF_BORROW (setting()), the cubin the name of its file. Any other such case fails, here (main)
+# and in tests/sass/controls.sh, which both decide by unobjected().
+HOLDS_NOTHING = ('the instruction left out of the declared life is one where, by the validator\'s own lives, '
+                 'the uniform register holds nothing: the translator declares the life longer than it is')
+FREE_TOO = 'the next register, where every home is moved, is free too'
+NOTHING_IN_FLIGHT = ('no load of the program in flight writes the borrowed register: the wait for the six '
+                     'scoreboards that the control takes away is not needed there')
+RIGHT_THERE = {
+    ('default', 'short_home', '0161.sm_75.cubin'): HOLDS_NOTHING,
+    ('1', 'short_home', '0142.sm_75.cubin'): HOLDS_NOTHING,
+    ('1', 'alive_home', 'k_convert.sm75.cubin'): FREE_TOO,
+    ('1', 'alive_home', '0097.sm_75.cubin'): FREE_TOO,
+    ('1', 'alive_home', '0142.sm_75.cubin'): FREE_TOO,
+    ('1', 'no_borrow_wait', 'k_params.sm75.cubin'): NOTHING_IN_FLIGHT,
+    ('1', 'no_borrow_wait', '0142.sm_75.cubin'): NOTHING_IN_FLIGHT,
+    ('1', 'written_pair', '0086.sm_75.cubin'): ('the translator gives level 2 up for the pair (a borrowed register '
+                                                'receives a result that nothing announces) and translates the four '
+                                                'functions at level 1, with pairs that their instructions do not write'),
+}
+
+
+def setting():
+    """The setting of the translator as RIGHT_THERE names it: `default`, or the value of VF_BORROW."""
+    return os.environ.get('VF_BORROW') or 'default'
+
+
+def unobjected(control, setting, cubins, counts):
+    """Of the cubins (`cubins`, the names of their files) with what the validator found in the
+    translation that `control` changed at `setting` (`counts`, as printed: '0' when it found
+    nothing there, '=' when the control changed nothing, `refused` or `failed`), those where it
+    found nothing: ([the others], [the cases of RIGHT_THERE]). A control is objected to where
+    it changes a translation, but in the first list's cubins (a hole in the validator, or a
+    control that tests nothing there)."""
+    assert len(cubins) == len(counts)
+    holes, right = [], []
+    for cubin, count in zip(cubins, counts):
+        if str(count) == '0':
+            (right if (setting, control, cubin) in RIGHT_THERE else holes).append(cubin)
+    return holes, right
 
 
 def naming_code(data):
@@ -2297,15 +2340,21 @@ def main():
             results = [run(mc, control, path, out_dir, untouched) for path in paths]
             counts = [problems for problems, _ in results]
             changed = [c for c in counts if isinstance(c, int)]
+            holes, right = unobjected(control, setting(), [os.path.basename(p) for p in paths], counts)
             good = (all(c == 0 for c in counts) if control == 'as it is'
                     else all(c >= 0 for c in changed) if control in CHANGES_THE_PROGRAM and changed
-                    else (any(c > 0 for c in changed) and all(c >= 0 for c in changed)))
+                    else (bool(changed) and all(c >= 0 for c in changed) and not holes))
             ok = ok and good
             verdict = 'as expected' if good else 'changes nothing in these cubins: name one that has what it takes away' if not changed else 'NOT AS EXPECTED'
             print('%-10s %s   %s' % (control, '  '.join('%14s' % ('=' if c is None else c if isinstance(c, str) else 'failed' if c < 0 else c) for c in counts), verdict))
             example = next((first for problems, first in results if problems and problems != 'refused' and first), None)
             if example:
                 print('           e.g. %s' % re.sub(r'_Z\w+', '<function>', example)[:150])
+            if control != 'as it is' and control not in CHANGES_THE_PROGRAM:
+                if holes:
+                    print('           not objected to in %s' % ', '.join(holes))
+                if right:
+                    print('           (and rightly not in %s: RIGHT_THERE)' % ', '.join(right))
     if not translate.PAIRS:
         print('(the controls of pairs on whole rows were not run: the translator makes none with VF_PAIRS=0)')
     if not translate.BORROW:

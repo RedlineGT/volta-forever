@@ -298,10 +298,10 @@ and where a control makes the translator's own attempt fail, the function is tra
 way or refused. `controls.py` prints `refused` for a cubin where all that a control changed is
 functions that the translator then refused (they are traps: nothing of it reaches the validator),
 and `=` where it changed neither the code, nor the map, nor the lives; neither counts as a
-change. `tests/sass/controls.sh` fails on every other cubin whose translation a control changes
-and where the validator finds nothing, but for the 8 cases of its list `RIGHT_THERE`, each
-looked at. (Until 2026-11-23 one objection anywhere was enough: the validator could have lost its
-objection to a control in every other cubin unnoticed.) The tables give, for each pass, in how
+change. `tests/sass/controls.sh`, and `controls.py` run by itself, fail on every other cubin whose
+translation a control changes and where the validator finds nothing, but for the 8 cases of the
+list `RIGHT_THERE` of `controls.py`, each looked at. (Until 2026-11-23 one objection anywhere was
+enough: the validator could have lost its objection to a control in every other cubin unnoticed.) The tables give, for each pass, in how
 many cubins the control changed the translation and in how many of those the validator objected.
 (`summary.tsv` of the run has the first objection to each, which is not always the one the
 control was written for: a fault often breaks more than one rule.)

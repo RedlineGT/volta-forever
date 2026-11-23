@@ -249,7 +249,9 @@ def worker(name, path):
 def verdict(runs, reference, tolerance):
     """(ok, what to say) of the results of the runs on the GPU (the first, in which kernels are
     compiled and caches filled, then a second) against the CPU's: each run, as many tensors as the
-    CPU's, each within `tolerance` of the largest value of the CPU's, none NaN or infinite."""
+    CPU's, each of the shape and type of the CPU's (compared before any arithmetic, which would
+    broadcast one shape to the other), within `tolerance` of the largest value of the CPU's, none
+    NaN or infinite."""
     import torch
 
     def tensors(result):
@@ -259,6 +261,11 @@ def verdict(runs, reference, tolerance):
     for result in map(tensors, runs):
         if len(result) != len(reference):
             found.append((None, 0, '%d tensors where the CPU has %d' % (len(result), len(reference))))
+            continue
+        other = next(((tuple(got.shape), got.dtype, tuple(want.shape), want.dtype) for got, want in zip(result, reference)
+                      if tuple(got.shape) != tuple(want.shape) or got.dtype != want.dtype), None)
+        if other:
+            found.append((None, 0, 'a tensor of %s %s where the CPU has %s %s' % other))
             continue
         worst, nan = 0.0, 0
         for got, want in zip(result, reference):
@@ -280,11 +287,16 @@ def verdict(runs, reference, tolerance):
 def comparison_checks():
     """What verdict must refuse, and take, on tensors of the CPU: a check that was never seen to
     fail has not been shown to check. (Until 2026-11-23 the first run was not compared, and a
-    run with fewer tensors than the CPU's was compared on those it had.)"""
+    run with fewer tensors than the CPU's was compared on those it had; and a tensor of another
+    shape was broadcast to the CPU's: [1, 2] against [[1, 2], [1, 2]] was 0 off.)"""
     import torch
     right, off = torch.ones(4), torch.ones(4) + 1
+    row, rows = torch.tensor([1.0, 2.0]), torch.tensor([[1.0, 2.0], [1.0, 2.0]])
     wrong = []
     for runs, reference, ok, said in [
+        ([row, row], rows, False, 'the first run: a tensor of (2,) torch.float32 where the CPU has (2, 2) torch.float32'),
+        ([rows, rows[:1]], rows, False, 'the second: a tensor of (1, 2) torch.float32 where the CPU has (2, 2)'),
+        ([right.double(), right], right, False, 'the first run: a tensor of (4,) torch.float64 where the CPU has (4,) torch.float32'),
         ([right, right], right, True, 'from the CPU by 0.00e+00'),
         ([(right, right), (right, right)], (right, right), True, 'from the CPU by 0.00e+00'),
         ([off, right], right, False, 'the first run differs'),

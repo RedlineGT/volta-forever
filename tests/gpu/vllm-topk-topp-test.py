@@ -252,7 +252,18 @@ def comparison_checks():
         ok, msg = compare_results(torch.tensor([gpu]), torch.tensor([cpu]), f'{gpu} against {cpu}')
         if ok != same:
             wrong.append(f'{msg} (should {"pass" if same else "fail"})')
+    # (Until 2026-11-23 the cases were zipped with the interpreter's results: with one result
+    # fewer, 17 cases were compared and PASS said.)
+    if paired([torch.zeros(1)] * (len(CASES) - 1)) is not None or paired([torch.zeros(1)] * len(CASES)) is None:
+        wrong.append('a reference with one result fewer than the cases is paired with them, or one with all is not')
     return wrong
+
+
+def paired(on_cpu):
+    """[(case, the interpreter's result)], or None when the results are not as many as the cases."""
+    if not isinstance(on_cpu, (list, tuple)) or len(on_cpu) != len(CASES):
+        return None
+    return list(zip(CASES, on_cpu))
 
 
 # Test cases: (batch_size, vocab_size, k, p, description)
@@ -358,10 +369,15 @@ def main():
             print(f'FAIL: the kernel could not be run on the CPU by Triton\'s interpreter (status {child.returncode})')
             return 1
         on_cpu = torch.load(path)
+    pairs = paired(on_cpu)
+    if pairs is None:
+        print(f'FAIL: the interpreter gave {len(on_cpu) if isinstance(on_cpu, (list, tuple)) else "no list of"} results '
+              f'for {len(CASES)} cases')
+        return 1
 
     passed = 0
     failed_cases = []
-    for case, cpu_result in zip(CASES, on_cpu):
+    for case, cpu_result in pairs:
         batch_size, vocab_size, k_val, p_val, desc = case
         label = f'batch={batch_size} vocab={vocab_size} k={k_val} p={p_val}'
         try:

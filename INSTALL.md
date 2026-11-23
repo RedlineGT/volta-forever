@@ -84,8 +84,12 @@ NCCL comes from NVIDIA's `nvidia-nccl-cu12` wheel. VF verifies its SHA-256 and i
 It needs `python3` and GNU `tar` (and uses `aria2c` when there is one). It unpacks the shared
 libraries and NVIDIA's licence, nothing else, and removes each archive once it is unpacked.
 Each archive, and the NCCL library, is unpacked in a staging directory and moved into place: a
-fetch that fails or is stopped (Ctrl-C, SIGTERM, SIGHUP) leaves the files that were there before,
-and the next one removes what it left. It can be run again: what is unpacked already is not
+fetch that fails or is stopped (Ctrl-C, SIGTERM, SIGHUP) while it unpacks leaves the files that
+were there before, and the next one removes what it left; once it has begun to move a component
+into place, it finishes before it stops. While it moves one, or when it was killed (SIGKILL, a
+power cut) or failed meanwhile, a journal (`.vf-publishing`) is in the directory: the launcher
+refuses that directory (its files may be of two versions), `vf doctor` says so, and the next
+fetch completes the move. It can be run again: what is unpacked already is not
 downloaded again. `--only REGEX` chooses the
 packages of NVIDIA's manifest by name, `--to DIR` another directory (then tell the launcher
 where: `--cuda12 DIR/lib`, or `VF_CUDA12=DIR/lib`).
@@ -175,7 +179,7 @@ eval "$(vf env)"
 | `vf version`, `help` | |
 | `--cuda12 DIR` | the directory of the CUDA 12.9.2 libraries (else `VF_CUDA12`, then `cuda-12.9.2/lib` of the installation, then in a source tree `toolkits/cuda-12.9.2/lib`, then `/usr/local/cuda-12.9/lib64`); a path with a `:` is refused |
 | `--map FILE` | substitutions of your own, which come before the launcher's (the format of section 4, B) |
-| `--no-audit` | do not set `LD_AUDIT` (a program that finds all its libraries through the loader does without it) |
+| `--no-audit` | do not set `LD_AUDIT` (a program that finds all its libraries through the loader does without it); an audit library of the layer that `LD_AUDIT` already names (after `eval "$(vf env)"`) is taken out of it |
 
 **What the launcher sets.**
 
@@ -195,20 +199,21 @@ eval "$(vf env)"
   script can tell that it runs through the launcher.
 - For the command it runs (not in what `vf env` prints): `VF_CUDA12`, the CUDA 12.9.2
   directory it took, and, for a Bazel program, `RUNFILES_DIR` (below).
-- With `VF_CAPABILITY` at 8.0 or later (or `VF_JIT_LINEINFO=1`), `NVCC_APPEND_FLAGS` gains
-  `-lineinfo` (after what it already holds; not twice) and `CUTE_DSL_LINEINFO=1` is set unless it
-  is set already. Programs that compile CUDA while they run (PyTorch extensions, FlashInfer,
-  TileLang through nvcc; NVIDIA's CuTe DSL, CUTLASS kernels written in Python, without it) target
-  the capability they are told and keep machine code only, of which the layer can translate little
-  when it is for sm_80 or later. With line information they also keep each cubin's PTX, which the
-  layer compiles again for sm_70. The machine code is the same; the cubins grow by 60 to 120 %.
-  NVRTC (PyTorch's jiterator, CuPy) reads neither. Caches keyed without the environment
-  (PyTorch extensions, FlashInfer, TileLang, ccache) keep what they built before: clear them once.
-  It is left out when `NVCC_APPEND_FLAGS` holds `-G`; a `-G` on the command line itself then warns
-  twice, and fails under `-Werror all-warnings`: use `VF_JIT_LINEINFO=0` for such debug builds.
-  `vf env` prints the two variables only when it sets them.
+- With `VF_JIT_LINEINFO=1`, `NVCC_APPEND_FLAGS` gains `-lineinfo` (after what it already holds;
+  not twice) and `CUTE_DSL_LINEINFO=1` is set unless it is set already. This is for a program told
+  8.0 or later (`VF_CAPABILITY`) that compiles CUDA while it runs (PyTorch extensions, FlashInfer,
+  TileLang through nvcc; NVIDIA's CuTe DSL, CUTLASS kernels written in Python, without it): such
+  compilers target the capability they are told and keep machine code only, of which the layer can
+  translate little when it is for sm_80 or later. With line information they also keep each
+  cubin's PTX, which the layer compiles again for sm_70. The machine code is the same; the cubins
+  grow by 60 to 120 %. NVRTC (PyTorch's jiterator, CuPy) reads neither. Caches keyed without the
+  environment (PyTorch extensions, FlashInfer, TileLang, ccache) keep what they built before:
+  clear them once. `vf doctor` suggests it when `VF_CAPABILITY` is 8.0 or later. It is not set by
+  default because the launcher cannot see a compiler's command line: next to a `-G` there,
+  `-lineinfo` makes nvcc warn twice, and fail under `-Werror all-warnings`. It is left out when
+  `NVCC_APPEND_FLAGS` itself holds `-G`. `vf env` prints the two variables only when it sets them.
 
-A Bazel program that ships a CUDA toolkit in its runfiles can invoke an external assembler through an absolute path. When you start it with `vf`, the launcher prepares a private runfiles directory with the VF assembler and links to the program's other resources. It uses the local temporary directory when the user's cache cannot store private links. Install NVIDIA's `cuda-nvcc-12-9` package for this path. VF looks for `bin/ptxas` beside the selected CUDA 12.9 libraries and under `/usr/local/cuda-12.9`. Set `VF_PTXAS_REAL` to the absolute path of the CUDA 12.9 assembler to select another installation. For a file on disk, run `vf ptxas -arch=sm_80 kernel.ptx -o kernel.cubin` to produce code for sm_70. `vf ptxas` reads the options of `ptxas` 13.5 that take a value as `ptxas` does, ends with status 255 on the errors it finds itself, as `ptxas` does, and passes on the assembler's messages with the names of your files. The private runfiles directories are kept under `$XDG_CACHE_HOME/volta-forever/runfiles-v1` (`~/.cache/...`).
+A Bazel program that ships a CUDA toolkit in its runfiles can invoke an external assembler through an absolute path. When you start it with `vf`, the launcher prepares a private runfiles directory with the VF assembler and links to the program's other resources. It uses the local temporary directory when the user's cache cannot store private links. Install NVIDIA's `cuda-nvcc-12-9` package for this path. VF looks for `bin/ptxas` beside the selected CUDA 12.9 libraries and under `/usr/local/cuda-12.9`. Set `VF_PTXAS_REAL` to the absolute path of the CUDA 12.9 assembler to select another installation. For a file on disk, run `vf ptxas -arch=sm_80 kernel.ptx -o kernel.cubin` to produce code for sm_70. `vf ptxas` reads the options of `ptxas` 13.5 that take a value as `ptxas` does, ends with status 255 on the errors it finds itself, as `ptxas` does, and passes on the assembler's messages with the names of your files. The private runfiles directories are kept under `$XDG_CACHE_HOME/volta-forever/runfiles-v2` (`~/.cache/...`). The program and every process it starts hold a lock on its directory, which other machines that share the cache over NFS see too; when another directory is made, those that nothing holds are removed. None is removed on NFS mounted with local locks (`local_lock`, `nolock`) or on FUSE, where a lock is not seen by every machine. Releases before 0.1.3 kept theirs under `runfiles-v1`, without a lock: remove that directory once nothing that such a release started runs.
 
 **When only some of the CUDA 12.9.2 libraries are there** (cuBLAS alone, after `vf fetch`
 without `--all`), a forwarding library that has nothing to forward to is not used: it is left

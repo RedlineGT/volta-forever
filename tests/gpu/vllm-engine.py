@@ -18,8 +18,9 @@ With sampling and TOP_K: every token sampled must be among the TOP_K most likely
 TOP_P of their probability at TEMPERATURE, by the log-probabilities of the model's own logits that
 the engine gives with each token (`raw_logprobs`): what the kernels of the sampling did is checked,
 not what the model computed (that is the greedy stage's). Prints `verdict: ALL_WITHIN` or
-`verdict: SOME_OUTSIDE`.
-Prints PASS or FAIL with the reason.
+`verdict: SOME_OUTSIDE`. A log-probability that is not a number, or that says more than a
+probability of 1, or log-probabilities that make more than 1 together, are outside too.
+Prints PASS or FAIL with the reason; the exit status is 1 after FAIL.
 """
 import sys, os, json, math, time, traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -52,14 +53,26 @@ PROMPTS = [
 def outside(logprobs, chosen):
     """None when token `chosen` is among the TOP_K most likely by `logprobs` (the engine's
     {token: Logprob} at one place, of the logits before any processing), and the more likely of
-    those make less than TOP_P (and SLACK) of their probability at TEMPERATURE; else why not."""
+    those make less than TOP_P (and SLACK) of their probability at TEMPERATURE; else why not.
+    The log-probabilities are checked first: each a number, none above a probability of 1 (and
+    SLACK), all of them together not above 1 (and SLACK), the chosen one's not of a probability
+    of 0. (A NaN compares false with everything: until 2026-11-23 a token whose log-probability
+    was NaN passed.)"""
+    for token, lp in logprobs.items():
+        if math.isnan(lp.logprob) or lp.logprob > math.log1p(SLACK):
+            return 'token %d has the log-probability %r, which is not one' % (token, lp.logprob)
+    total = math.fsum(math.exp(lp.logprob) for lp in logprobs.values())
+    if total > 1 + SLACK:
+        return 'the log-probabilities given make %.4f of the probability together, more than 1' % total
     ranked = sorted(logprobs.items(), key=lambda kv: -kv[1].logprob)[:TOP_K]
     tokens = [token for token, _ in ranked]
     if chosen not in tokens:
         return 'token %d is not among the %d most likely (its rank: %s)' % (chosen, TOP_K, logprobs[chosen].rank if chosen in logprobs else '?')
+    if logprobs[chosen].logprob == -math.inf:
+        return 'token %d was sampled with a probability of 0' % chosen
     weights = [math.exp((lp.logprob - ranked[0][1].logprob) / TEMPERATURE) for _, lp in ranked]
     before = sum(weights[:tokens.index(chosen)]) / sum(weights)
-    if before >= TOP_P + SLACK:
+    if not before < TOP_P + SLACK:
         return 'token %d comes after tokens that make %.4f of the probability, more than %g' % (chosen, before, TOP_P)
     return None
 
@@ -136,9 +149,11 @@ def main():
             print('verdict:', 'SOME_OUTSIDE' if any(wrong) else 'ALL_WITHIN')
 
         print('PASS')
+        return 0
     except Exception as e:
         print(f'FAIL: {e}')
         traceback.print_exc()
+        return 1
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
