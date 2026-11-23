@@ -2093,6 +2093,27 @@ $str:
     }
 
     #[test]
+    fn linked_kernel_reading_a_table_is_left_to_the_linker() {
+        // Several objects of one link can reach a table through each other (a pointer stored by one,
+        // a call into another): a kernel of a linked library is never compiled alone with a copy of
+        // a table, even one that the module alone would copy.
+        let source = format!(
+            "{}\n{}",
+            TABLE,
+            ".visible .entry reader(.param .u64 out) {\n\t.reg .b32 %r<2>;\n\t.reg .b64 %rd<3>;\n\
+             \tld.param.u64 %rd1, [out];\n\tld.global.u32 %r1, [t];\n\tst.global.u32 [%rd1], %r1;\n\tret;\n}\n\
+             .visible .entry other() { ret; }\n"
+        );
+        let source = format!(".version 8.8\n.target sm_70\n.address_size 64\n{source}");
+        let info = super::ModuleInfo::analyse(source.as_bytes());
+        assert_eq!(info.copied_tables("reader"), ["t"]);
+        let mut shared = LinkedShared::default();
+        shared.add_object(source.as_bytes()).unwrap();
+        assert!(info.extract_linked_leaf("reader", &shared).is_none());
+        assert!(info.extract_linked_leaf("other", &shared).is_some());
+    }
+
+    #[test]
     fn linked_calls_and_external_table_reach_a_helper_in_another_object() {
         let mut graph = super::LinkedDependencies::default();
         assert!(graph.add(
