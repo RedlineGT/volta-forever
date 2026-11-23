@@ -20,9 +20,10 @@
  *     on deterministic data (bf16-accept-gen.h): 10 families and 3 configurations of the adversarial search,
  *     k = 256, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a general C, the cuBLASLt bias
  *     epilogue. Calls below the gate are run but not judged (with VF_ACCEPT_EXPECT_GATE=1, a call below the
- *     gate that the path serves is a failure: for when the runtime has its gate). Prints "ok bf16-accept" and
- *     exits 0, or FAIL lines and exits 1. Control: VF_ACCEPT_GATE=256 judges k = 256 too, where the path
- *     exceeds A on craftsub: the test must fail.
+ *     gate that the path serves is a failure, and so is a call from the gate on that it does not serve: for when
+ *     the runtime has its gate; the number judged is printed). Prints "ok bf16-accept" and exits 0, or FAIL lines
+ *     and exits 1. Controls: VF_ACCEPT_GATE=256 judges k = 256 too, where the path exceeds A on craftsub: the
+ *     test must fail; with the tensor-core path off and VF_ACCEPT_EXPECT_GATE=1, nothing is served: it must fail.
  *
  *   bf16-accept safe       with VF_SAFE=1: no call served by the tensor-core path, every result with 12.9's bits
  *                          (the conservative switch; the skinny path, whose results are 12.9's bits, still serves
@@ -57,7 +58,8 @@ static cudaStream_t st;
 static void *ws_lt;
 #define WS_LT (4u << 20)
 static int gate = 2048; /* the gate measured for policy B (VF_TC_MIN_K, crates/vf-fwdgen/bf16tc/runtime.c) */
-static int expect_gate; /* VF_ACCEPT_EXPECT_GATE=1: a call with k below the gate must not be served by the path */
+static int expect_gate; /* VF_ACCEPT_EXPECT_GATE=1: the path serves exactly the calls with k >= the gate: one below it
+                         * that it serves, or one from it on that it does not serve, is a failure */
 static double bias_margin = 0.8; /* VF_ACCEPT_BIAS_MARGIN */
 #define U32 0x1p-24
 
@@ -367,7 +369,15 @@ static int bias_ok(const Res *r, int k)
 }
 
 /* ---- the test ------------------------------------------------------------------------------------- */
-static int fails;
+static int fails, njudged;
+/* VF_ACCEPT_EXPECT_GATE=1: a call at k >= the gate must be served, so that its bounds are judged. */
+static void expect_served(const char *what, int k, int served)
+{
+    if (expect_gate && !served && k >= gate) {
+        printf("FAIL  %s: not served by the tensor-core path at k >= the gate (k %d >= %d)\n", what, k, gate);
+        ++fails;
+    }
+}
 static void judge(const char *what, const Prob *p, const Res *r)
 {
     const int served = r->path == 2;
@@ -376,6 +386,8 @@ static void judge(const char *what, const Prob *p, const Res *r)
         printf("FAIL  %s: served by the tensor-core path below the gate (k %d < %d)\n", what, p->k, gate);
         ++fails;
     }
+    expect_served(what, p->k, served);
+    njudged += judged;
     const int a_ok = r->nfail == 0, s_ok = r->cls == 0 && r->nanbits == 0 && r->rerun_same && r->st12 == r->stv;
     const int b_ok = p->ct || bias_ok(r, p->k);
     printf("%s %s: path %s, A worst %.3f (%ld of %ld over), bias %+.2f u (12.9 %+.2f, bound %.1f), max %.2f u (12.9 %.2f), "
@@ -412,6 +424,8 @@ static void invariance(const Gen *g, Prob p)
     const int judged = p1 == 2 && p.k >= gate;
     char name[128];
     prob_name(name, sizeof name, g, &p);
+    expect_served(name, p.k, p1 == 2);
+    njudged += judged;
     printf("%s S2 %s: path %s / %s / %s; no workspace: %s; half the columns: %s%s\n",
            judged && !(same_ws && (p3 != 2 || same_n)) ? "FAIL " : judged ? "ok   " : "note ", name, path_name(p1),
            path_name(p2), path_name(p3), same_ws ? "same" : "DIFFERENT", p3 != 2 ? "not served" : same_n ? "same" : "DIFFERENT",
@@ -437,6 +451,8 @@ static void special_case(const char *name, const Prob *p, const uint16_t *A, con
         else if ((a & 0x7fffffffu) > 0x7f800000u && a != b) ++nanb;
     }
     const int judged = pv == 2 && p->k >= gate, bad = cls || nanb || s12 != sv;
+    expect_served(name, p->k, pv == 2);
+    njudged += judged;
     printf("%s S1 %s %s alpha %g beta %g %s: path %s, class mismatches %ld, NaN bits %ld, status %d/%d%s\n",
            judged && bad ? "FAIL " : judged ? "ok   " : "note ", name, p->ct ? "bf16" : "fp32", p->alpha, p->beta,
            p->devptr ? "device" : "host", path_name(pv), cls, nanb, (int)s12, (int)sv, judged ? "" : " (not judged)");
@@ -593,6 +609,7 @@ static int test_mode(void)
             }
     }
     fails += failures; /* bf16-common.h's CHECK, should a helper use it */
+    printf("note  %d calls served by the tensor-core path at k >= %d and judged\n", njudged, gate);
     if (fails) {
         printf("FAIL  %d checks failed\n", fails);
         return 1;

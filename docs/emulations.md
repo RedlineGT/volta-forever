@@ -910,6 +910,7 @@ the bias bound needs k = 2048 for the search's worst configuration (0.76 times t
 1.02 at 1536, 1.52 at 1024). One family, built against the 256-element slices (a product of 2^20 at
 the start of every slice, then products of half to one ulp of it), exceeds the bias bound up to
 about k = 4096 (1.36 times at 2048): the test judges its bias from k = 4096, and
-`VF_ACCEPT_STRICT=1` removes that exception. The test fails when the gate is moved to 1536, 1024 or
-256 (a test build's `VF_BF16_TC_MIN_K`), and with `VF_SAFE=1` it requires that no call be served by
-the tensor-core path and every result be 12.9's.
+`VF_ACCEPT_STRICT=1` removes that exception. Every call from the gate on must be served by the path
+(131 in the suite's run: a call left to 12.9 there would not be judged), and the test fails with the
+path off; it fails when the gate is moved to 1536, 1024 or 256 (a test build's `VF_BF16_TC_MIN_K`), and
+with `VF_SAFE=1` it requires that no call be served by the tensor-core path and every result be 12.9's.

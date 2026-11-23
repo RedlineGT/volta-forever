@@ -77,9 +77,10 @@ for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve b
 done
 # The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 2048
 # against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), and
-# no call below the gate served. Controls: the gate moved to 1536, 1024 and 256 (VF_BF16_TC_MIN_K, read by test
-# builds only, with the test's gate the same) must fail at a call of that k. VF_SAFE=1: no call served by the
-# tensor-core path, every result 12.9's. -fopenmp shortens its host side only.
+# no call below the gate served, every call from the gate on served. Controls: the gate moved to 1536, 1024 and 256
+# (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the same) must fail at a call of that k; the
+# tensor-core path off must fail as not serving. VF_SAFE=1: no call served by the tensor-core path, every result
+# 12.9's. -fopenmp shortens its host side only.
 if want bf16-accept; then
     if build bf16-accept -fopenmp; then
         run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=2048 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
@@ -91,6 +92,12 @@ if want bf16-accept; then
                 echo "PASS  bf16-accept control: the gate at $g fails at k = $g"
             else echo "FAIL  bf16-accept control: the gate at $g did not fail at k = $g ($out/logs/forward-bf16-accept-gate$g.log)"; failed=1; fi
         done
+        # Control: the tensor-core path off, the gate expected: every call from the gate on must then fail as not served.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=2048 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
+        cp "$log" "$out/logs/forward-bf16-accept-tc-off.log"
+        if [ "$status" != 0 ] && grep -q "^FAIL  .*: not served by the tensor-core path at k >= the gate" "$log"; then
+            echo "PASS  bf16-accept control: with the tensor-core path off, the calls from the gate on are not served and it fails"
+        else echo "FAIL  bf16-accept control: the tensor-core path off did not fail as not served ($out/logs/forward-bf16-accept-tc-off.log)"; failed=1; fi
         run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=1 VF_SAFE=1 VF_ACCEPT_MODE=safe
         cp "$log" "$out/logs/forward-bf16-accept-safe.log"
         if [ "$status" = 0 ] && grep -qx "ok bf16-accept safe" "$log"; then echo "PASS  bf16-accept safe (VF_SAFE=1)"
