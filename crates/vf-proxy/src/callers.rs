@@ -108,6 +108,14 @@ struct Object {
     path: Option<CString>,
     /// The address of its first loaded segment.
     first: Option<usize>,
+    /// What the file it was loaded from must have to be that file (`loaded_file`): its table of
+    /// program headers and the contents of its notes (the build ID among them), as they are in
+    /// memory.
+    headers: Vec<u8>,
+    notes: Vec<(usize, Vec<u8>)>,
+    /// The inode of the file mapped at its first segment, as `/proc/self/maps` says (`None`
+    /// without `/proc`).
+    inode: Option<u64>,
     /// Whether the address asked about is in one of its segments.
     holds: bool,
     /// Its `DT_SONAME`, and the `DT_NEEDED` names of the libraries it was loaded with.
@@ -143,6 +151,31 @@ fn objects(address: usize) -> Vec<Object> {
             let found = unsafe { libc::dladdr(address as *const c_void, &mut info) } != 0;
             (found && !info.dli_fname.is_null()).then(|| unsafe { CStr::from_ptr(info.dli_fname) }.to_owned())
         });
+    }
+    // The inode of what is mapped where each object starts (`loaded_file`).
+    if let Ok(maps) = std::fs::read("/proc/self/maps") {
+        let mappings: Vec<(usize, usize, u64)> = maps
+            .split(|&b| b == b'\n')
+            .filter_map(|line| {
+                let line = std::str::from_utf8(line).ok()?;
+                let mut fields = line.split_ascii_whitespace();
+                let (start, end) = fields.next()?.split_once('-')?;
+                let inode = fields.nth(3)?.parse().ok()?;
+                Some((
+                    usize::from_str_radix(start, 16).ok()?,
+                    usize::from_str_radix(end, 16).ok()?,
+                    inode,
+                ))
+            })
+            .collect();
+        for object in &mut list {
+            object.inode = object.first.and_then(|at| {
+                mappings
+                    .iter()
+                    .find(|&&(start, end, _)| (start..end).contains(&at))
+                    .map(|&(_, _, inode)| inode)
+            });
+        }
     }
     list
 }
@@ -182,9 +215,29 @@ unsafe fn object(info: &libc::dl_phdr_info, address: usize, first: bool) -> Obje
         [] => None,
         name => CString::new(name).ok(),
     };
+    const PT_NOTE: u32 = 4;
+    let notes = headers
+        .iter()
+        .filter(|h| h.p_type == PT_NOTE)
+        .filter_map(|h| {
+            let (start, size) = (base.wrapping_add(h.p_vaddr as usize), h.p_filesz as usize);
+            // SAFETY: `size` bytes inside a segment of the object.
+            mapped(start, size).then(|| {
+                (
+                    h.p_offset as usize,
+                    unsafe { std::slice::from_raw_parts(start as *const u8, size) }.to_vec(),
+                )
+            })
+        })
+        .collect();
+    // SAFETY: the program headers that the loader gives, `count` of them.
+    let table = unsafe { std::slice::from_raw_parts(headers.as_ptr().cast::<u8>(), std::mem::size_of_val(headers)) };
     let mut found = Object {
         path,
         first: segments.first().map(|&(start, _)| start),
+        headers: table.to_vec(),
+        notes,
+        inode: None,
         holds: mapped(address, 1),
         soname: None,
         needed: Vec::new(),
@@ -241,6 +294,7 @@ fn readable(path: &CStr) -> bool {
 struct Mapped {
     start: *mut c_void,
     len: usize,
+    inode: u64,
 }
 
 impl Mapped {
@@ -257,13 +311,14 @@ impl Mapped {
             } else {
                 0
             };
+            let inode = stat.st_ino;
             let start = if len > 0 {
                 libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, fd, 0)
             } else {
                 libc::MAP_FAILED
             };
             libc::close(fd);
-            (start != libc::MAP_FAILED).then_some(Mapped { start, len })
+            (start != libc::MAP_FAILED).then_some(Mapped { start, len, inode })
         }
     }
 
@@ -280,12 +335,45 @@ impl Drop for Mapped {
     }
 }
 
+/// The file of `object`, when the file at its path is the one it was loaded from: the inode that
+/// `/proc/self/maps` gives for the object (the device is not compared: an overlay file system
+/// gives another than `stat` does), and the same table of program headers and the same notes (the
+/// build ID, when it has one) as are in memory. A file replaced at that path since, or one that
+/// cannot be read, is not taken for it (`None`): what code the object has is then not known.
+/// (Without `/proc`, a file of the same build whose GPU code is in sections that are not loaded,
+/// as `objcopy --add-section` puts it, cannot be told from the one loaded.)
+fn loaded_file(object: &Object) -> Option<Mapped> {
+    let file = Mapped::open(object.path.as_deref()?)?;
+    if object.inode.is_some_and(|inode| inode != file.inode) {
+        return None;
+    }
+    let bytes = file.bytes();
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let u64_at = |at: usize| Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?) as usize);
+    let same = || -> Option<bool> {
+        if object.headers.is_empty() || bytes.get(..6)? != b"\x7fELF\x02\x01" || u16_at(0x36)? != 56 {
+            return Some(false);
+        }
+        let table = u64_at(0x20)?;
+        let headers = bytes.get(table..table.checked_add(usize::from(u16_at(0x38)?).checked_mul(56)?)?)?;
+        Some(
+            headers == object.headers.as_slice()
+                && object.notes.iter().all(|(offset, note)| {
+                    offset.checked_add(note.len()).and_then(|end| bytes.get(*offset..end)) == Some(note.as_slice())
+                }),
+        )
+    };
+    same().unwrap_or(false).then_some(file)
+}
+
 /// The major version in `libcudart.so.<major>[.minor...]`.
 fn runtime_version(file_name: &str) -> Option<u32> {
     file_name.strip_prefix("libcudart.so.")?.split('.').next()?.parse().ok()
 }
 
-fn classify(path: &CStr) -> Caller {
+/// The caller of file `path`, whose contents are `file` when it is the file that was loaded
+/// (`loaded_file`).
+fn classify(path: &CStr, file: Option<&[u8]>) -> Caller {
     let policy = &config().policy;
     let name = path.to_string_lossy();
     let file_name = name.rsplit('/').next().unwrap_or(&name);
@@ -296,7 +384,7 @@ fn classify(path: &CStr) -> Caller {
             Caller::Other
         };
     }
-    match Mapped::open(path).map(|file| policy.embedded(file.bytes())) {
+    match file.map(|file| policy.embedded(file)) {
         Some(Embedded::Usable) => Caller::Native,
         Some(Embedded::Nothing) if *UNDER_LAUNCHER => Caller::Direct,
         Some(Embedded::Other { lowest_sm }) if policy.retargetable(lowest_sm) => Caller::From(lowest_sm),
@@ -308,7 +396,13 @@ fn classify(path: &CStr) -> Caller {
 /// told (`vf_adapt::Policy::told_limit_in`, with `policy`, which tells what the caller is told so
 /// far), with the file. Each file is read once for what is told while the loader's count of
 /// unloads is `unloads`.
-fn file_limit(path: &CStr, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
+fn file_limit(object: &Object, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
+    let path = object.path.as_deref()?;
+    // A file that is not the one loaded, or cannot be read: what code the object runs is not
+    // known, and it is taken to run from the lowest that adapted code does (7.5).
+    let Some(file) = loaded_file(object) else {
+        return unknown_limit(path);
+    };
     let key = (path.to_owned(), policy.told_sm);
     let known = {
         let cache = callers();
@@ -317,7 +411,7 @@ fn file_limit(path: &CStr, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u
             .flatten()
     };
     let limit = known.unwrap_or_else(|| {
-        let limit = Mapped::open(path).and_then(|file| unpanicked(path, || policy.told_limit_in(file.bytes())));
+        let limit = unpanicked(path, || policy.told_limit_in(file.bytes()));
         let mut cache = callers();
         if cache.unloads == unloads {
             cache.limits.insert(key, limit);
@@ -325,6 +419,18 @@ fn file_limit(path: &CStr, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u
         limit
     });
     limit.map(|sm| (sm, path.to_owned()))
+}
+
+/// The limit of an object loaded from `path` whose file is not known (`loaded_file`): what
+/// adapted code sets at least (7.5).
+fn unknown_limit(path: &CStr) -> Option<(u32, CString)> {
+    let description = format!(
+        "{} (the file at that path is not the one that was loaded, or cannot be read: its code is taken to run \
+         from code for sm_{}),",
+        path.to_string_lossy(),
+        vf_adapt::TRANSLATED_FROM
+    );
+    Some((vf_adapt::TRANSLATED_FROM, CString::new(description).ok()?))
 }
 
 /// What `scan` answers of the file at `path`, or `None` (no limit: the answer without the scan)
@@ -355,10 +461,17 @@ fn file_name(path: &[u8]) -> &[u8] {
 
 /// The limit that the code in the file of the caller of class `caller` at `path` sets, when it
 /// embeds code.
-fn own_limit(path: &CStr, caller: Caller, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
+fn own_limit(
+    object: Option<&Object>,
+    caller: Caller,
+    policy: &vf_adapt::Policy,
+    unloads: u64,
+) -> Option<(u32, CString)> {
+    let object = object?;
+    let path = object.path.as_deref()?;
     let own = matches!(caller, Caller::From(_))
         && runtime_version(&String::from_utf8_lossy(file_name(path.to_bytes()))).is_none();
-    own.then(|| file_limit(path, policy, unloads)).flatten()
+    own.then(|| file_limit(object, policy, unloads)).flatten()
 }
 
 /// The names in the dynamic section of a shared object.
@@ -505,29 +618,49 @@ fn beside_limit_unguarded(path: &CStr, caller: Caller, objects: &[Object]) -> Op
     } else {
         directory
     }));
-    let mut beside: Vec<Beside> = std::fs::read_dir(directory_path)
+    // A link is followed (cuDNN's libraries are links to files, and a link can lead to another
+    // directory), and a file is read once, under all its names in the directory.
+    let mut beside: Vec<Beside> = Vec::new();
+    let mut files: HashMap<(u64, u64), Option<usize>> = HashMap::new();
+    let mut entries: Vec<Vec<u8>> = std::fs::read_dir(directory_path)
         .ok()?
         .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_vec();
-            // (Not the links to a file, as from the name of a library to its file: the file is
-            // read, and its `DT_SONAME` is that name.)
-            if name.as_slice() == own_name
-                || !name.windows(3).any(|w| w == b".so")
-                || loaded.contains(&name)
-                || !entry.file_type().is_ok_and(|kind| kind.is_file())
-            {
-                return None;
-            }
-            let path = CString::new([directory, &name].concat()).ok()?;
-            let Names { soname, needed } = Mapped::open(&path).and_then(|file| dynamic_names(file.bytes()))?;
-            if soname.as_ref().is_some_and(|soname| loaded.contains(soname)) {
-                return None;
-            }
-            let names = soname.into_iter().chain([name]).collect();
-            Some(Beside { path, names, needed })
-        })
+        .map(|entry| entry.file_name().into_vec())
         .collect();
+    entries.sort();
+    for name in entries {
+        if name.as_slice() == own_name || !name.windows(3).any(|w| w == b".so") || loaded.contains(&name) {
+            continue;
+        }
+        let Ok(path) = CString::new([directory, &name].concat()) else {
+            continue;
+        };
+        let Ok(metadata) = std::fs::metadata(std::ffi::OsStr::from_bytes(path.to_bytes())) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        use std::os::unix::fs::MetadataExt as _;
+        let file = (metadata.dev(), metadata.ino());
+        if let Some(read) = files.get(&file) {
+            if let Some(at) = *read {
+                beside[at].names.push(name);
+            }
+            continue;
+        }
+        let Some(Names { soname, needed }) = Mapped::open(&path).and_then(|file| dynamic_names(file.bytes())) else {
+            files.insert(file, None);
+            continue;
+        };
+        if soname.as_ref().is_some_and(|soname| loaded.contains(soname)) {
+            files.insert(file, None);
+            continue;
+        }
+        files.insert(file, Some(beside.len()));
+        let names = soname.into_iter().chain([name]).collect();
+        beside.push(Beside { path, names, needed });
+    }
     beside.sort_by(|a, b| a.path.cmp(&b.path));
     // Those that depend on the caller, directly or through each other.
     let mut dependents = Vec::new();
@@ -590,8 +723,8 @@ fn dependents_limit(objects: &[Object], policy: &vf_adapt::Policy, unloads: u64)
                 continue;
             }
             (seen[at], more) = (true, true);
-            if let Some(path) = &object.path {
-                lowest = lower(lowest, file_limit(path, policy, unloads));
+            if object.path.is_some() {
+                lowest = lower(lowest, file_limit(object, policy, unloads));
             }
             names.extend(names_of(object));
         }
@@ -639,17 +772,24 @@ fn caller(return_address: usize) -> Decision {
         .filter(|object| object.holds)
         .and_then(|object| object.path.as_deref());
     let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
-    let caller = classify(path);
+    // Its code is read from its file only when that is the file it was loaded from: a path can
+    // name another file once the object is loaded (replaced, or removed).
+    let own = objects.iter().find(|object| object.holds);
+    let file = own.and_then(loaded_file);
+    let caller = classify(path, file.as_ref().map(Mapped::bytes));
+    let runtime = runtime_version(&String::from_utf8_lossy(file_name(path.to_bytes()))).is_some();
+    let unknown = (file.is_none() && !runtime).then(|| unknown_limit(path)).flatten();
+    drop(file);
     let mut limit = None;
     if limits_apply() && caller != Caller::Native {
         // Told the lowest limit that its code and the code it answers for set, the caller is given
         // the code for it, which can set a lower one: lowered until nothing lowers it more
         // (`vf_adapt::Policy::lowered`), keeping the file that sets it.
-        let beside = beside_limit(path, caller, &objects);
+        let beside = lower(beside_limit(path, caller, &objects), unknown);
         let mut policy = config().policy;
         loop {
             let found = lower(
-                lower(own_limit(path, caller, &policy, unloads), beside.clone()),
+                lower(own_limit(own, caller, &policy, unloads), beside.clone()),
                 dependents_limit(&objects, &policy, unloads),
             );
             match found {

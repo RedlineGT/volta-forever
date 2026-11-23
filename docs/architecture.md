@@ -307,7 +307,7 @@ classifies it:
 | A file whose embedded code starts at sm_75 or later | Its lowest target (default) | The caller selects that architecture's code. |
 | A readable caller with no detectable CUDA fat binary, under `vf` or `vf venv` | 7.5 (default) | Direct driver clients, including Python bindings, can load code from a separate file. |
 | A CUDA 12 or older runtime | The real 7.0 by default | The runtime supports Volta directly. |
-| Unidentified or unreadable caller | The real 7.0 by default | The proxy cannot classify its GPU code. |
+| Unidentified or unreadable caller, or one whose path now names another file than the one loaded (another inode, other program headers or notes) | The real 7.0 by default; 7.5 at most with `VF_CAPABILITY` at 8.0 or more | The proxy cannot classify its GPU code. |
 
 On a V100, `VF_CAPABILITY=7.0`, `8.0` or `12.0` explicitly sets the answer for
 direct clients, older CUDA runtimes and programs built for later GPUs. A value that is
@@ -318,9 +318,9 @@ not told a later generation than the code it is given: when the code embedded
 in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
 that use a CUDA runtime, and those that use these), or, for a caller without GPU code of
 its own, in a library beside it that depends on it and that it may load later (as cuDNN's
-graph library loads the library of its engines; until such a library is loaded, which file
-the loader takes for it is not known, and code of it to adapt is taken to be sm_75 machine
-code), runs from the translation of its sm_75 machine code, or
+graph library loads the library of its engines, also through a link to a file elsewhere; until
+such a library is loaded, which file the loader takes for it is not known, and code of it to
+adapt is taken to be sm_75 machine code), runs from the translation of its sm_75 machine code, or
 from its PTX for sm_75 when it has none for the generation asked,
 the caller is told 7.5 (8.0 for sm_80 code, when 9.0 or later is asked), and a line at
 the default log level says so. The images that such a caller loads are then adapted for

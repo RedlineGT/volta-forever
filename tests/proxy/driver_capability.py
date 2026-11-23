@@ -297,13 +297,26 @@ def run(proxy, directory):
         previous_address = address
         probe(api, client, sm, binary)
         _ctypes.dlclose(client._handle)
-    # The loader can still identify this mapping after unlink, but VF cannot inspect its code.
+    # The loader can still identify this mapping after unlink, but VF cannot inspect its code: it
+    # is taken to run from the lowest that adapted code does (7.5) when a later generation is asked
+    # (until 2026-11-23, told what was asked).
     path = directory / "unreadable.so"
     shutil.copyfile(directory / "plain", path)
     client = c.CDLL(str(path))
     path.unlink()
-    probe(api, client, given or 70, given or 70)
+    probe(api, client, limited(given, 75) or 70, limited(given, 75) or 70)
     _ctypes.dlclose(client._handle)
+    # The same when the file at its path is now another, without GPU code (here replaced at once,
+    # as an installation does), while the object loaded has machine code for sm_75: its code is not
+    # read from that file (until 2026-11-23, told what was asked, as a library without code).
+    path = directory / "replaced.so"
+    shutil.copyfile(directory / "turing_only", path)
+    client = c.CDLL(str(path))
+    shutil.copyfile(directory / "plain", directory / "replacement.so")
+    os.replace(directory / "replacement.so", path)
+    probe(api, client, limited(given, 75) or 70, limited(given, 75) or 70)
+    _ctypes.dlclose(client._handle)
+    path.unlink()
 
 
 def run_beside(proxy, directory, case):
@@ -311,14 +324,15 @@ def run_beside(proxy, directory, case):
     that it may load later (libkernels.so, with code to adapt; as cuDNN's graph library and the
     library of its engines): told what the code of the library that the loader loaded allows, when
     it is loaded, whatever is beside the first; before, 7.5 at most, whatever is beside it, also
-    through a library without code that depends on it; told what was asked when nothing beside it
-    depends on it."""
+    through a library without code that depends on it, and through a link to a file in another
+    directory (until 2026-11-23, not followed: told what was asked); told what was asked when
+    nothing beside it depends on it."""
     api = c.CDLL(str(proxy))
     launched = "VOLTA_FOREVER" in os.environ
     given = asked()
     front, loaded, code_sm = {"none": ("front-ampere", None, 75), "turing": ("front-ampere", "kernels-turing", 75),
                               "ampere": ("front-turing", "kernels-ampere", 80), "chain": ("front-chain", None, 75),
-                              "alone": ("front-alone", None, None)}[case]
+                              "alone": ("front-alone", None, None), "linked": ("front-linked", None, 75)}[case]
     library = c.CDLL(str(directory / front / "libfront.so"))
     if loaded:
         c.CDLL(str(directory / loaded / "libkernels.so"))
@@ -398,6 +412,14 @@ def build(directory):
         else:
             # Code beside it, of a library that does not depend on it.
             shared(directory / name / "libother.so", "libother.so", None, directory / "turing_only.fatbin")
+    # libkernels.so beside libfront.so is a link to a file in another directory, under another name.
+    (directory / "front-linked").mkdir()
+    (directory / "store").mkdir()
+    shared(directory / "front-linked/libfront.so", "libfront.so")
+    shutil.copyfile(directory / "front-linked/libfront.so", directory / "store/libfront.so")
+    shared(directory / "store/libkernels.so.1", "libkernels.so.1", "libfront.so", directory / "turing_only.fatbin")
+    (directory / "store/libfront.so").unlink()
+    (directory / "front-linked/libkernels.so").symlink_to(directory / "store/libkernels.so.1")
     for code in ("turing", "ampere"):
         (directory / f"kernels-{code}").mkdir()
         shutil.copyfile(directory / f"front-{code}/libfront.so", directory / f"kernels-{code}/libfront.so")
@@ -638,7 +660,7 @@ if __name__ == "__main__":
                     settings["VF_CAPABILITY"], _, everyone = override.partition(" ")
                     if everyone:
                         settings["VF_CAPABILITY_ALL"] = "1"
-                besides = [["--beside", case] for case in ("none", "turing", "ampere", "chain", "alone")]
+                besides = [["--beside", case] for case in ("none", "turing", "ampere", "chain", "alone", "linked")]
                 for mode in ([], ["--runtimes"], *besides):
                     subprocess.run([sys.executable, __file__, proxy, directory, *mode], env={**env, **settings},
                                    check=True)
