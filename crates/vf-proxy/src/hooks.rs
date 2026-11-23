@@ -1618,8 +1618,11 @@ unsafe extern "C" fn link_add_data_v2(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_void, size: *mut usize) -> CUresult {
     let real = real!(cuLinkComplete: unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> CUresult);
+    // The program need not ask for the size (`sizeOut` may be NULL): the image is known by it.
+    let mut own = 0usize;
+    let size = if size.is_null() { &raw mut own } else { size };
     let result = unsafe { real(state, image, size) };
-    if result == CUDA_SUCCESS && !image.is_null() && !size.is_null() {
+    if result == CUDA_SUCCESS && !image.is_null() {
         unsafe { images::link_output(state as usize, *image, *size) };
     }
     result

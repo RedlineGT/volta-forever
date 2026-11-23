@@ -67,6 +67,17 @@ def check(proxy, mock):
     assert api.cuLinkDestroy(state) == 0
     assert c.c_uint.in_dll(backend, "inputs").value == 2
 
+    # The image that a link gives without its size (sizeOut may be NULL) is known all the same.
+    third = bytearray(output)
+    third[len(third) // 3] ^= 0xff
+    third_linked = c.create_string_buffer(bytes(third), len(third))
+    c.c_void_p.in_dll(backend, "linked").value = c.addressof(third_linked)
+    assert api.cuLinkCreate_v2(0, None, None, c.byref(state)) == 0
+    assert api.cuLinkAddData_v2(state, INPUT_PTX, PTX, len(PTX), b"bad.ptx", 0, None, None) == 0
+    assert api.cuLinkComplete(state, c.byref(image), None) == 0
+    assert lookup(api, load(api, image), b"bad") == (218, None)
+    assert api.cuLinkDestroy(state) == 0
+
     # What another thread does with a handle that the driver gives again once it is free, while
     # the destruction of a link or the unload of a module returns, is not dropped with what was
     # known of the handle before: a link made then, and a module loaded then.
