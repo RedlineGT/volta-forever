@@ -2,23 +2,33 @@
 // variable is found in a library when its name is in the library's text. The module that the driver
 // gives for a library (cuLibraryGetModule, or the module of a function of one of its kernels) is the
 // library's handle plus MODULE; a kernel is the library's handle times 16 plus 1, a function the
-// kernel plus FUNCTION.
+// kernel plus FUNCTION. With `hold` set, the load of an image that has `counting` (the whole module)
+// sets `holding` and waits until another image is loaded, or a second has passed, before it ends.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum { MAX = 4096, MODULE = 100000, FUNCTION = 1 << 30 };
 static char *text[MAX];
 unsigned loads;
 uintptr_t last;
+int hold, holding;
 
 int cuLibraryLoadData(void **lib, const void *image, int *jo, void **jv, unsigned jc,
                       int *opts, void **values, unsigned count) {
     (void)jo, (void)jv, (void)jc, (void)opts, (void)values, (void)count;
-    if (++loads >= MAX) return 2;
-    text[loads] = strdup(image);
-    last = loads;
-    *lib = (void *)(uintptr_t)loads;
+    unsigned mine = __atomic_add_fetch(&loads, 1, __ATOMIC_SEQ_CST);
+    if (mine >= MAX) return 2;
+    text[mine] = strdup(image);
+    if (hold && strstr(image, "counting(")) {
+        __atomic_store_n(&holding, 1, __ATOMIC_SEQ_CST);
+        struct timespec ms = {0, 1000000};
+        for (int i = 0; i < 1000 && __atomic_load_n(&loads, __ATOMIC_SEQ_CST) == mine; i++) nanosleep(&ms, 0);
+        __atomic_store_n(&holding, 0, __ATOMIC_SEQ_CST);
+    }
+    last = mine;
+    *lib = (void *)(uintptr_t)mine;
     return 0;
 }
 int cuLibraryUnload(void *lib) {

@@ -217,7 +217,9 @@ given, that a deferred library gives a kernel that only reads a table of its mod
 sub-module that holds a copy of the table, and then refuses the table by every name the program
 could ask for it with (error 801; a name that the module does not have stays 500), while a
 variable that kernels write is given; and that a table
-the program was given first keeps the kernels that read it in the whole module. Each case in a
+the program was given first keeps the kernels that read it in the whole module, also one that
+another thread asks for while the whole module is compiled for the table (the stand-in holds that
+compilation). Each case in a
 process of its own, a second time from the proxy cache; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)

@@ -249,7 +249,8 @@ variable, the program is not given that variable (`cuLibraryGetGlobal`, and
 (801; NVIDIA's driver gives a variable of internal linkage by its name in the PTX, so
 `CUDA_ERROR_NOT_FOUND` would wrongly say that there is none), and a line at the default
 log level says why. A variable that the program was given first is the whole module's,
-and the kernels that read it are then served from there.
+and the kernels that read it are then served from there, also one asked for by another
+thread while the whole module is being compiled for the variable.
 
 Over llama.cpp's 149 modules (b12418, its sm_75 PTX), all 7,628 entries are
 independent (7,365 before read-only data was copied); over the 52 modules of Strata's
