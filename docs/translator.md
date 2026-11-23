@@ -1,8 +1,9 @@
 # Machine code for sm_75 made machine code for sm_70
 
 The translator turns a cubin compiled for Turing (sm_75) into one that runs on
-Volta (sm_70), function by function. This document says what it does, why each
-rule is there, and where to look in the code.
+Volta (sm_70), function by function. It also translates a subset of stripped
+Ampere (sm_80) cubins (section 1, "What is translated"). This document says what
+it does, why each rule is there, and where to look in the code.
 
 For the instructions it emulates (the tensor-core products, the conversions, the
 arithmetic on bf16), see `docs/emulations.md`. For what translation costs in
@@ -43,6 +44,15 @@ Supported functions then pass through the existing register allocator and Volta 
 A function outside this subset is refused at lookup. The supported forms are
 listed in `reference/ampere-forms.txt` and `reference/ampere_forms.py`.
 
+The sm_80 path is `crates/vf-sass/src/translate/ampere.rs`, on the forms that
+`reference/generate.py` writes into `crates/vf-tables/src/ampere.rs`, and
+`reference/ampere.py` in the reference. The independent validator
+(`reference/validate.py`) does not check it: it reads every original with the
+sm_75 descriptions. What checks the sm_80 path is the agreement of the two
+translators (`tests/sass/compare.sh`, whose test kernels include sm_80 cubins),
+unit tests, the sm_80 cases of `tests/gpu/run.sh`, and engines run by hand.
+`docs/validation.md`, section 8, says what this leaves out.
+
 **Where the translation happens.** The proxy (`crates/vf-proxy`, by the
 decisions of `crates/vf-adapt`) calls the translator when a program loads a
 module whose only usable code is supported machine code. The translation is done on the host CPU, before the driver sees the
@@ -51,6 +61,13 @@ module. It is also available as a command:
 ```
 vf translate INPUT.cubin OUTPUT.cubin [MAP [REPORT]]
 ```
+
+MAP gets one line per instruction of the result (function, new offset, old
+offset, what was done), and `MAP.lives` beside it what `reference/validate.py`
+reads with the map (where the uniform predicates live, what was borrowed where),
+as `reference/translate.py` writes them. REPORT gets one line per function
+(`ok`, or why it was refused). `VF_BORROW`, `VF_PAIRS` and `VF_ALIGNED_ROWS`
+apply as in the layer.
 
 
 ## 2. The two instruction sets
@@ -99,7 +116,13 @@ and `LEA.HI` with a uniform source. Its unified attention kernel also uses
 `ULEA.HI.SX32`, which maps to `LEA.HI.SX32` on ordinary registers. SGLang's
 all-reduce kernel for four ranks uses `ULEA.HI` with an immediate
 (`ULEA.HI UR4, UR4, 0x1, URZ, 0x1e`), which maps to `LEA.HI` with the same
-operands.
+operands. No cubin kept here has a `USGXT` (387 Triton cubins were searched,
+2026-11-22). The words of these kernels, and seven more with other fields (a
+third register that is not `URZ`, a negated operand, a guard, the other forms of
+`USGXT`), each as nvdisasm reads it on both sides, are the unit test of these
+rules (`remap_uniform_operands_in_triton_kernels` in `crates/vf-sass/src/rule.rs`);
+a `USGXT` put into a test kernel goes through the whole translator
+(`a_uniform_sign_extension_becomes_sgxt` in `crates/vf-sass/src/translate/tests.rs`).
 
 An instruction with a uniform operand (a load at `[R4 + UR6 + 0x10]`, a
 comparison against UR2) is rewritten to the sm_70 form with an ordinary
@@ -154,9 +177,11 @@ barrier register (`B0`) that the comparison does not read from the word.
 **What is generated.** `reference/generate.py` reads the descriptions and the
 rules and writes the Rust tables of `crates/vf-tables/src/` (1.9 MB
 of source; 1,229 sm_75 classes and 648 sm_70 classes, each with its opcode, its
-fields, its operands, what it reads and writes and its scheduling kind; the 75
-rules; templates for the 32 classes of instructions the translator builds; 73
-distances; `cargo fmt -p vf-tables` then formats the output). The generator
+fields, its operands, what it reads and writes and its scheduling kind; the 79
+rules; templates for the 44 classes of instructions the translator builds; 73
+distances; the sm_80 forms of `reference/ampere-forms.txt`, which
+`reference/ampere_forms.py` checks against the sm_75 and sm_80 descriptions;
+`cargo fmt -p vf-tables` then formats the output). The generator
 checks what the translator takes for granted of the descriptions instead of
 looking it up: a distance in the code is one operand in one scaled field, and
 the values of two enumerations.
@@ -187,8 +212,11 @@ The cubin is read as an ELF file (`crates/vf-sass/src/elf.rs`,
 `reference/elf.py`). Each section of code (`.text.NAME`) holds one function.
 Every 128-bit word is decoded by the sm_75 tables: its class, its operands,
 what it reads and writes, its scheduling fields (stall count, scoreboards,
-yield hint). The container's attributes (`.nv.info` and `.nv.info.NAME`
-sections) are read: they record, for each function, properties the driver needs
+yield hint). In sm_80 code, each word must first match one of the supported
+forms, which `normalize` (`crates/vf-sass/src/translate/ampere.rs`;
+`reference/ampere.py`) turns into a word the sm_75 tables read; a word that
+matches none refuses the function. The container's attributes (`.nv.info` and
+`.nv.info.NAME` sections) are read: they record, for each function, properties the driver needs
 (register count, shared memory, the lists of exits, shuffles, votes, calls
 through a register, stack accesses, some shared-memory loads, and 16-bit
 atomics, each by offset in the code). An attribute the translator does not
@@ -242,6 +270,16 @@ predicates hold something, one is saved in a register before the life (`P2R`),
 used as the stand-in, and given back after it (`R2P`), as native code does when
 it runs out.
 
+Where that cannot be either (the program touches all seven during the life, or
+the life goes through branches), the uniform predicate is held in a register of
+the translation for that life: written there after each instruction that writes
+it (`P2R`), and read back into an ordinary predicate before each one that reads
+it (`ISETP.NE`). At level 3 with room made (section 5, "Room"), a held predicate
+for which no register holds nothing through its lives is kept in a word of the
+frame instead: loaded, through a register taken at the instruction, before an
+instruction that reads it, and stored after one that writes it (`held-slot` in
+`MAP.lives`; `reference/validate.py` checks these moves).
+
 ### Rewriting each instruction
 
 Each instruction of the original becomes one or more instructions in the
@@ -254,7 +292,8 @@ result:
 - **By a sequence**: `IMAD.HI`, `IMNMX`, `ULDC`, memory with a scaled index,
   memory at a uniform address, a conversion with a uniform operand, and
   `LDSM` and `HMMA.1688` (section 6) each become a sequence of sm_70
-  instructions.
+  instructions. In sm_80 code, so do a 16-byte asynchronous copy, a paired
+  conversion to halves and a shared counter increment (section 1).
 
 A memory instruction with a uniform address part (`LDG [R4 + UR6]`) becomes the
 sum of the two into the pool registers (`IADD3` or `IMAD.WIDE.U32`), then the
@@ -317,8 +356,9 @@ is refused keeps only its exit offsets, so the driver can visit them.
 
 The register count in the section header and the `.nv.info` attributes is set
 to the translation's count. The cubin is tagged as machine code for sm_70; the
-field that says which architecture it was compiled for stays 7.5 (what
-`cudaFuncGetAttributes` gives as `ptxVersion`): a program chooses by it among
+field that says which architecture it was compiled for stays the original's, 7.5
+(8.0 for sm_80 code; what `cudaFuncGetAttributes` gives as `ptxVersion`): a
+program chooses by it among
 what it was built with, and the algorithms of Thrust and CUB answer "invalid
 device function" to an architecture below the lowest of theirs.
 
@@ -449,8 +489,8 @@ register above (`docs/performance.md`, "Where the time goes"). The budget is
 used where it is needed: for the second translation of a kernel that the driver
 refuses to launch (below).
 
-On PyTorch's 475 cubins, with the default (`VF_BORROW=7`): 23,663 of 23,693
-functions are translated (99.9 %), 30 refused, two of them for registers. The
+On PyTorch's 475 cubins, with the default (`VF_BORROW=7`): 23,664 of 23,693
+functions are translated (99.9 %), 29 refused, one of them for registers (2026-11-23). The
 usual translation takes 1,012 kernels from 64 registers or fewer to more than
 64: those cannot be launched in blocks of 1,024 threads without the second
 translation.
@@ -465,9 +505,12 @@ translation.
 | `5` | The same, with room made at level 3. What the second translation at launch uses (`crates/vf-proxy/src/fit.rs`). |
 | `6` | Level 0 wherever that translates, the same bytes as with `0`; for a kernel refused for want of registers, levels 1, 2, then 3 with room made. A kernel with tensor-core products is refused at level 3 (the default until 2026-11-20). |
 | `7` (default) | The same, and a kernel with tensor-core products is translated at level 3 too. |
+| `9` | What `7` does. Then, for a kernel whose translation takes more registers than would let it be launched with every block size its own register count allowed on a V100 (up to the block size its attributes declare): levels 1, 2, then 3 within that count, and the first that fits is taken when it keeps every offset of the first translation. A kernel with relocations on its code or a jump table keeps the first. For CUDA graphs, where a launch is recorded before the driver counts registers (`crates/vf-sass/src/translate/block_registers.rs`; `docs/architecture.md`, "Translation control"). |
 
-The other values (1 to 3, 8) put a level first for every kernel; they are for
-tests of the levels themselves.
+The other values are for tests of the levels themselves: `1` tries levels 2, 1,
+then 0 for every kernel; `2` the same, then level 3 for a kernel still refused;
+`3` and `8` level 3 first with every uniform register in memory (`8` kernels
+with products included), then levels 2, 1, 0 when that is refused.
 
 
 ### The second translation at launch
@@ -537,7 +580,7 @@ not, plus exchanges with the thread two lanes away.
 **Example.** The kernel `t_mma_f32` of `tests/kernels/k_tensor.cu` has one
 Turing product of halves with float accumulators,
 `HMMA.1688.F32 R8, R4, R6, R8`, among 24 instructions. Translated
-(`vf translate tests/kernels/k_tensor.135.sm75.cubin`), the function has 57:
+(`vf translate tests/kernels/k_tensor.135.sm75.cubin OUT.cubin`), the function has 57:
 nine at its entry, and 25 in place of the product. As nvdisasm prints them:
 
 ```
@@ -785,9 +828,9 @@ they are (the driver visits them), and the proxy refuses the kernels that need
 it at the lookup (error 218, with the reason on standard error). Other kernels
 of the same module work.
 
-**PyTorch 2.14.0** (475 cubins, 23,693 sm_75 functions): 23,663 translated
-(99.9 %), 30 refused. The reasons and counts (each function counted by the
-first reason met):
+**PyTorch 2.14.0** (475 cubins, 23,693 sm_75 functions): 23,664 translated
+(99.9 %), 29 refused (`vf translate` of 0.1.3, 2026-11-23). The reasons and counts (each
+function counted by the first reason met):
 
 | Reason | Count |
 |---|---|
@@ -797,7 +840,7 @@ first reason met):
 | A conversion of a uniform register (a form not written) | 4 |
 | `IMAD.HI.X` (a carry form not handled) | 2 |
 | A jump table the translator cannot handle | 2 |
-| Registers (no room at any level) | 2 |
+| Registers (no room at any level) | 1 |
 
 Of 925 operations tested against the CPU on a V100 (`tests/gpu/torch.sh`): 924
 give the same result, 1 is skipped (the CPU does not do it), none is refused,
@@ -805,7 +848,9 @@ none is wrong. Of 32 small whole models (`tests/gpu/torch-models.sh`): 32 pass.
 
 **FlashInfer** (SGLang's default attention): of 18 prefill kernels, 13 are
 translated. Five are refused: three that name 255 registers (no room at any
-level), two for `LEA.HI` with a uniform register (a form not written).
+level), two for `LEA.HI` with a uniform register (a form not written). These
+are the counts of 2026-11-20, before the rule for `LEA.HI` with a uniform source
+(section 2) was added.
 
 **The held-out corpus** (3,108 cubins of NVIDIA's CUDA 13.5 libraries, cuDNN,
 NCCL and others; not programs that were run): 3,105 translated in whole or in
@@ -821,22 +866,27 @@ with their instructions; those functions are refused.
 The translator exists as a Python reference (`reference/translate.py`) and a
 Rust implementation (`crates/vf-sass/src/translate/`). The rule is that they
 give the same bytes: for every cubin at hand, the translated bytes, the map of
-instructions, and the refusals with their reasons must be identical.
+instructions, the lives written beside it (`MAP.lives`), and the refusals with
+their reasons must be identical.
 
 **How it is checked.** `tests/sass/compare.sh` runs both translators on every
-cubin and compares byte for byte. On PyTorch's 475 cubins (23,693 functions):
-all 475 the same, the same refusals for the same reasons. On the test kernels:
-all the same. On the held-out corpus of 3,108 cubins: all the same.
+cubin and compares the cubin, the map, `MAP.lives` and the refusals, byte for
+byte. On PyTorch's 475 cubins (23,693 functions): all 475 the same, the same
+refusals for the same reasons, and since 2026-11-22 the same lives. On the test
+kernels: all the same. On the held-out corpus of 3,108 cubins: all the same
+(2026-11-20, before the lives were compared).
 `tests/sass/fuzz.py` sets the two against each other on cubins damaged at random
 (fields flipped, instructions removed, sections truncated): 200,000 mutants
-(2026-11-20) with no difference in output or refusals. A change to what one translator does
-is a change to both.
+(2026-11-20) with no difference in bytes, map or refusals. A change to what one
+translator does is a change to both.
 
 The Rust translator is what runs in the layer. The Python reference is what the
 independent validator (`reference/validate.py`) is tested against, what the
 planner of pairs (`reference/pairing.py`) works from, what the hand-made
 controls (`reference/controls.py`) are tried on, and what the corpora are
-checked with. The two exist so that neither is trusted by itself.
+checked with. Both write the map and `MAP.lives` that the validator reads, so
+the validator also checks a translation made by `vf translate IN OUT MAP`
+directly. The two exist so that neither is trusted by itself.
 
 The Rust translator takes two and a half minutes for PyTorch's 475 cubins (626
 MB) one after the other on one core, and 2.4 s for the largest of them (22 MB,
