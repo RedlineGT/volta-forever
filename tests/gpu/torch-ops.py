@@ -455,9 +455,9 @@ def comparison_checks():
 
 
 def worker(first, channel, patterns):
-    """Run the cases from number `first` on. On the descriptor `channel`: the number of cases
-    selected ('cases', N), then a line when a case starts and one when it ends: number, name,
-    verdict, detail."""
+    """Run the cases from number `first` on. On the descriptor `channel`: the cases selected
+    ('cases', how many, their numbers joined by commas), then a line when a case starts and one
+    when it ends: number, name, verdict, detail."""
     import faulthandler
     import torch
     os.set_inheritable(channel, False)
@@ -468,7 +468,8 @@ def worker(first, channel, patterns):
     # (Where it was, on standard error, when it is stopped for taking too long.)
     faulthandler.register(signal.SIGUSR1)
     cases = build()
-    say('cases', sum(1 for name, fn, inputs in cases if not patterns or any(p in name for p in patterns)))
+    selected = [n for n, (name, fn, inputs) in enumerate(cases) if not patterns or any(p in name for p in patterns)]
+    say('cases', len(selected), ','.join(map(str, selected)))
     torch.zeros(1, device='cuda')
     for number, (name, fn, inputs) in enumerate(cases):
         if number < first or (patterns and not any(p in name for p in patterns)):
@@ -564,6 +565,7 @@ def main():
     log = tempfile.NamedTemporaryFile(prefix='vf-torch-', suffix='.log', delete=False, dir=logs).name
     output, errors = log[:-len('.log')] + '.out', log[:-len('.log')] + '.err'
     env = dict(os.environ, VF_LOG=log, VF_LOG_LEVEL=os.environ.get('VF_LOG_LEVEL', '1'))
+    # (expected: the numbers of the cases, as the first worker named them.)
     results, first, expected, problems = {}, 0, None, []
 
     def problem(text):
@@ -582,17 +584,37 @@ def main():
                 silent = True
                 break
             fields = line.split('\t', 3)
-            if len(fields) == 2 and fields[0] == 'cases' and fields[1].isdigit():
-                if expected is not None and int(fields[1]) != expected:
-                    problem('a worker said %s cases, the first %d' % (fields[1], expected))
-                expected = int(fields[1])
+            if len(fields) == 3 and fields[0] == 'cases' and re.fullmatch(r'\d+', fields[1]) \
+                    and re.fullmatch(r'(\d+(,\d+)*)?', fields[2]):
+                named = [int(n) for n in fields[2].split(',') if n]
+                if len(named) != int(fields[1]) or len(set(named)) != len(named):
+                    problem('a worker said %s cases and named %d different ones' % (fields[1], len(set(named))))
+                if expected is not None and named != expected:
+                    problem('a worker named %d cases, not the %d that the first named' % (len(named), len(expected)))
+                elif expected is None:
+                    expected = named
                 continue
             if len(fields) != 4 or not fields[0].isdigit() or fields[2] not in VERDICTS + ('start',):
                 problem('a worker wrote what is not a verdict: %r' % line[:200])
                 continue
             number, name, verdict, detail = int(fields[0]), fields[1], fields[2], fields[3]
             if verdict == 'start':
-                running = (number, name)
+                # A case that it named, that has no verdict yet, after the end of the one before.
+                if expected is None or number not in expected:
+                    problem('a worker started case %d (%s), which is not one of those it named' % (number, name))
+                elif number in results:
+                    problem('a worker started case %d (%s) again, which has a verdict already' % (number, name))
+                else:
+                    if running is not None:
+                        # (The one before stays without a verdict, and is counted so at the end.)
+                        problem('a worker started case %d (%s) while case %d (%s) had no verdict' % (number, name, *running))
+                    running = (number, name)
+                continue
+            if running != (number, name):
+                # (Not taken: a verdict of a case that it did not start, or of another case than
+                # the one it started, or a second one; the first stays.)
+                problem('a worker gave a verdict for case %d (%s), which it had not started%s' % (
+                    number, name, ' (it had started case %d, %s)' % running if running else ''))
                 continue
             results[number] = (name, verdict, detail)
             running, last = None, verdict
@@ -636,8 +658,10 @@ def main():
         print(tail(errors, 0))
         print('no worker said how many cases there are')
         return 2
-    if len(results) != expected:
-        problem('%d verdicts for %d cases' % (len(results), expected))
+    missing = [number for number in expected if number not in results]
+    if missing or len(results) != len(expected):
+        problem('%d verdicts for %d cases%s' % (len(results), len(expected), ' (none for case %s)' % ', '.join(
+            map(str, missing[:5])) + (', ...' if len(missing) > 5 else '') if missing else ''))
     count = {}
     for name, verdict, detail in results.values():
         count[verdict] = count.get(verdict, 0) + 1

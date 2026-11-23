@@ -115,7 +115,8 @@ verdicts on a descriptor or to a file of their own (what kernels print on standa
 hide one); a case that has not ended after `$VF_CASE_WAIT` seconds (default 600) is stopped and
 counted as a CRASH. `python3 tests/gpu/torch-workers.py` checks that on the host, with fake
 workers (no GPU, no PyTorch, 15 seconds): kernels that print, a worker that fills its standard
-error or does not end, a line that is not a verdict, fewer verdicts than cases.
+error or does not end, a line that is not a verdict, fewer verdicts than cases, a second verdict
+for a case, a verdict for a case that the worker did not start or did not name.
 `python3 tests/gpu/vllm-engine-verdicts.py` checks, with a stand-in for vLLM (no GPU, no vLLM),
 the verdict lines of `vllm-engine.py` (stages c and c2 of `vllm.sh`): fewer results than prompts,
 or none, or a reference with fewer texts, do not pass.
