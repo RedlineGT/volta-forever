@@ -49,7 +49,7 @@ scripts of `tests/sass/`).
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 113 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
+  an RTX 5090 say. 125 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
