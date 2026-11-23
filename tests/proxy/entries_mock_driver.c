@@ -1,5 +1,8 @@
-// Driver for library_entries.py. Entry 1 is refused by the layer and entry 2 works.
+// Driver for library_entries.py. Entry 1 is refused by the layer and entry 2 works. Its compiler
+// refuses PTX with a line that holds 12345 (error 218, and the line in the error log, as ptxas
+// writes it); a lookup of a name with "absent" in it finds nothing (500, and NULL).
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 unsigned loads, unloads, preserved;
@@ -14,8 +17,26 @@ static void *loaded(void) {
     return (void *)handle;
 }
 
+static int compile(const char *text, int *jo, void **jv, unsigned jc) {
+    const char *hit = strstr(text, "12345");
+    if (!hit) return 0;
+    int line = 1;
+    for (const char *p = text; p < hit; ++p) line += *p == '\n';
+    char *buffer = 0;
+    size_t size = 0;
+    for (unsigned i = 0; i < jc; ++i) {
+        if (jo[i] == 5) buffer = jv[i];
+        if (jo[i] == 6) size = (size_t)(uintptr_t)jv[i];
+    }
+    if (buffer && size)
+        snprintf(buffer, size, "ptxas application ptx input, line %d; error   : Feature 'x' requires .target sm_80\n",
+                 line);
+    return 218;
+}
+
 int cuLibraryLoadData(void **lib, const void *image, int *jo, void **jv, unsigned jc,
                       int *opts, void **values, unsigned count) {
+    if (compile(image, jo, jv, jc)) return 218;
     for (unsigned i = 0; i < count; ++i) preserved += opts[i] == 1;
     *lib = loaded();
     // The proxy passes ordinary PTX in this fixture. A lazy submodule contains
@@ -57,6 +78,10 @@ int cuModuleEnumerateFunctions(void **out, unsigned cap, void *mod) {
     return rc;
 }
 int cuLibraryGetKernel(void **kernel, void *lib, const char *name) {
+    if (strstr(name, "absent")) {
+        *kernel = 0;
+        return 500;
+    }
     *kernel = entry(lib, strcmp(name, "good") == 0 ? 2 : 1);
     return 0;
 }

@@ -558,8 +558,11 @@ unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
 
 /// A lookup of kernel `name` in the module or library `handle`: refused when the kernel cannot run on
 /// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced.
-/// A refusal leaves NULL in `kernel_out`, as NVIDIA's driver does for a name it does not have: a
-/// program that ignores the error then launches nothing, not what its variable held before.
+/// A refusal, and any lookup that fails, leaves NULL in `kernel_out`, as NVIDIA's driver does for a
+/// name it does not have: a program that ignores the error then launches nothing, not what its
+/// variable held before. (A lookup in a deferred library can fail where the driver is not asked: a
+/// name that the library does not have, a kernel that the compiler refuses while the whole module
+/// is loaded for it.)
 /// When `kernel_out` is not null and the lookup succeeds, the profiler records the kernel handle ->
 /// name mapping (since `cuFuncGetName` does not work for lazily compiled sub-modules).
 ///
@@ -583,6 +586,9 @@ unsafe fn lookup(
         return CUDA_ERROR_INVALID_PTX;
     }
     let result = find();
+    if result != CUDA_SUCCESS && !kernel_out.is_null() {
+        unsafe { *kernel_out = std::ptr::null_mut() };
+    }
     if result == CUDA_SUCCESS {
         kernels::given(handle, &name);
         // Record the kernel handle -> name mapping for the profiler: cuFuncGetName does not

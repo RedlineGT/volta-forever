@@ -89,6 +89,18 @@ def check(proxy, mock):
     assert api.cuLibraryLoadData(c.byref(library), native, None, None, 0, options, values, 1) == 0
     assert c.c_uint.in_dll(backend, "preserved").value == 1
     assert api.cuLibraryUnload(library) == 0
+    # A lookup that fails leaves NULL in the handle, in a deferred library too: a kernel that the
+    # driver's compiler refuses only when the whole module is loaded for it (the layer learns it
+    # during that lookup), and a name that the library does not have.
+    refused = (b".version 8.8\n.target sm_75\n.address_size 64\n"
+               b".visible .entry refused()\n{\n .reg .b32 %r<2>;\n mov.u32 %r1, 12345;\n ret;\n}\n"
+               b".visible .entry good()\n{\n ret;\n}\n")
+    assert api.cuLibraryLoadData(c.byref(library), refused, None, None, 0, None, None, 0) == 0
+    for name, error in ((b"absent", 500), (b"refused", 218), (b"refused", 218), (b"absent", 500), (b"good", 0)):
+        kernel = c.c_void_p(0xDEADBEEF)
+        assert api.cuLibraryGetKernel(c.byref(kernel), library, name) == error, name
+        assert (kernel.value is None) == (error != 0), (name, kernel.value)
+    assert api.cuLibraryUnload(library) == 0
     assert c.c_uint.in_dll(backend, "loads").value == c.c_uint.in_dll(backend, "unloads").value
 
 

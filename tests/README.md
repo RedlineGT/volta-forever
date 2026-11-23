@@ -159,8 +159,9 @@ python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
-deferred loads and the lifetime of replacement images, and that a refused lookup leaves NULL in
-the handle. The second checks the compute capability that the proxy gives (device attributes,
+deferred loads and the lifetime of replacement images, and that a lookup that fails leaves NULL
+in the handle (refused by the layer, by the driver's compiler when a deferred library is loaded
+whole for it, or of a name the library does not have). The second checks the compute capability that the proxy gives (device attributes,
 `cuDeviceComputeCapability`, the attributes of a function and of a kernel) to callers whose
 code is for different GPUs, on a stand-in driver with a V100 and three later cards, with and
 without the launcher's marker and `VF_CAPABILITY`; it needs gcc and objcopy. The third checks
