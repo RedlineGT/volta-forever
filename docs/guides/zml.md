@@ -75,7 +75,7 @@ vf venv "$HOME/.venvs/zml-download"
   --revision 2e19c6576db91e5d5a93455415619262218bf8a1 --local-dir "$MODEL"
 ```
 
-Start the extracted server. The measured configuration uses XLA autotuning, tree accumulation and single-token decoding. The two BF16 multiply measurements below both use `tree`.
+Start the extracted server. The measured configuration uses XLA autotuning, tree accumulation and single-token decoding. The two BF16 multiply measurements below both use `tree`. With `VF_BF16_TC_TILES=1` and `VF_BF16_COLUMN=tree`, results are not bit-reproducible from run to run when a kernel leaves unused operands of a product uninitialised; the differences are of rounding size. [Determinism of the BF16 switches](../emulations.md#4-bf16)
 
 ```bash
 cd ~/llmd-v100/llmd

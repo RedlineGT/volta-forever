@@ -65,6 +65,8 @@ VF_CAPABILITY=8.0 VF_FIT_SHARED=1 VF_BF16_TC_GROUPS=1 VF_BF16_ROW=tree TF_QWEN_K
   --no-drafts --prompt-precision int8
 ```
 
+With `VF_BF16_TC_GROUPS=1` and `VF_BF16_ROW=tree`, results are not bit-reproducible from run to run when a kernel leaves unused operands of a product uninitialised; the differences are of rounding size. [Determinism of the BF16 switches](../emulations.md#4-bf16)
+
 When `curl -fsS http://127.0.0.1:8080/health` reports `"backend":"cuda"`, send a request from a second terminal.
 
 ```sh

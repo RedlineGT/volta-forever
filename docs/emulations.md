@@ -34,7 +34,11 @@ per octet (lanes `4q..4q+3` and `16+4q..16+4q+3`). Each thread holds:
 - **C/D (f16)**: 8 values, one complete row of the 8x8 output.
 
 Every product of two f16 values is exact as an f32; the instruction adds four of them and
-the accumulator, in f32.
+the accumulator in f32 with truncation: the terms are aligned to the largest, the bits shifted
+out are dropped, and the sum is cut to f32, not rounded (measured by Fasi, Higham, Mikaitis and
+Pranesh, "Numerical behavior of NVIDIA tensor cores", PeerJ Computer Science, 2021). Its results
+differ in the last bits from a sum of `fma.rn.f32`, and long sums of terms of one sign come out
+slightly low.
 
 Volta has no tensor-core instruction for int8, bf16, tf32, f64, FP8 or the 4-bit formats.
 It does have `dp4a` (the dot product of four pairs of int8, accumulated into an int32),
@@ -75,7 +79,7 @@ accumulating on the first.
 **Exactness.** The products are computed on Volta's tensor cores. Each term (f16 x f16) is
 exact as an f32. What differs from a later GPU is how the eight terms of k and the
 accumulator are added: here four at a time, by Volta's instruction (the even k, then the odd
-k), each sum rounded to f32; later hardware adds otherwise, in an accumulator wider than f32.
+k), each sum truncated to f32 (section 1); later hardware adds otherwise, in an accumulator wider than f32.
 
 - On the inputs of the test suite, where every sum is exact whatever its order, every result
   is the host model's, and an RTX 5090 gives the same (all shapes of the FP16 product).
@@ -252,10 +256,25 @@ Four switches, off by default, change this for `m16n8k16` on bf16 (`lower/bf16_g
 products, and with `VF_BF16_TC_TILES=1`, a two-by-two tile of them, runs on Volta's FP16
 tensor cores when a warp vote finds that every multiplicand converts exactly to a normal half
 or a signed zero; otherwise the warp takes the scalar sequence. On the tensor cores the f32
-sums can round differently from the scalar sequence (section 2). `VF_BF16_COLUMN` and `VF_BF16_ROW` (`ordered` or `tree`) specialize
+sums are truncated (section 1) and can differ from the scalar sequence in the last bits. `VF_BF16_COLUMN` and `VF_BF16_ROW` (`ordered` or `tree`) specialize
 products where, as a test finds when the code runs, only column 0 of B, or only the first
 row of A, contributes: `ordered` keeps the scalar order of the sums, `tree` adds partial
 sums and can round differently.
+
+**Determinism.** With `VF_BF16_TC_GROUPS` and `VF_BF16_TC_TILES`, the path of a group (or a
+tile) is chosen by one `vote.sync.any` over every multiplicand of the group in the 32 lanes,
+including rows and columns whose results the program discards. A result of row i and column j
+then depends, in its last bits, on other rows of A, other columns of B and other products of
+the group, where the hardware of later GPUs and the default path make it of row i, column j and
+its accumulator only. A program that leaves unused operands of a product uninitialised (stale
+shared memory in the rows that FlashAttention-2 masks out of its last tile) gets results that
+are not bit-reproducible from run to run; where a tile mixes the tokens of several requests (a
+mixture of experts), a result of one request can change with the others.
+The differences are of the size of rounding: both paths are within what the PTX manual allows.
+The `tree` modes of `VF_BF16_ROW` and `VF_BF16_COLUMN` have the same property, since a vote
+over the other rows or columns (which must be zero) and over the bounds of every operand
+chooses their path. The `ordered` modes give the same bits on both paths (the same order, the
+same `fma.rn`), and the default path has no vote: both are reproducible.
 
 **Instruction counts.** One `m16n8k16` on bf16: 199 instructions (64 `fma`, 32 shuffles).
 One `m16n8k8` on bf16: 116. One `m16n8k8` on tf32: 103 (plus operand truncation, below).
