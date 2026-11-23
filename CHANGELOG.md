@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+### Changed
+
+- The tensor-core path of the bf16 cuBLAS variants takes only products with k from 2048 to 16384 (`VF_TC_MIN_K`); a product with a smaller k goes to the skinny path when its rule takes it, else to cuBLAS 12.9 as it is (`docs/emulations.md`, section 11, "The tensor-core path's gate", says why).
+
+### Added
+
+- `VF_SAFE=1` turns the tensor-core path of the bf16 cuBLAS variants off, whatever `VF_CUBLAS_BF16_TC` says; the skinny path, whose results are 12.9's bits, is not affected.
+
 ## 0.1.4 (2026-11-23)
 
 ### Fixed

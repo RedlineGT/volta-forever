@@ -109,12 +109,12 @@ int main(void)
     open_runtime();
     cublasSetStream(hv, st);
     c129.SetStream(h12, st);
-    legacy("TN 1536 x 256 x 1536", 1, 0, 1536, 256, 1536, 0);
+    legacy("TN 1536 x 256 x 2048", 1, 0, 1536, 256, 2048, 0);
     legacy("TN 4096 x 64 x 4096", 1, 0, 4096, 64, 4096, 0);
     legacy("NN 2048 x 128 x 2048", 0, 0, 2048, 128, 2048, 0);
-    legacy("NT 1536 x 96 x 1536", 0, 1, 1536, 96, 1536, 0);
+    legacy("NT 1536 x 96 x 2048", 0, 1, 1536, 96, 2048, 0);
     legacy("TN 1536 x 8 x 1536 (skinny)", 1, 0, 1536, 8, 1536, 1);
-    lt_bias(1536, 512, 1536);
+    lt_bias(1536, 512, 2048);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;

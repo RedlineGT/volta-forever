@@ -1,7 +1,7 @@
 /* Rule S1 for the tensor-core path (a default's condition): each element's class is cuBLAS 12.9's (NaN, +inf,
  * -inf, +0, -0, finite; the sign of a finite value is not a class), a NaN has 12.9's bits, and C is left
  * untouched when beta = 0: not read (a NaN in C does not reach D) and, for cublasLtMatmul with C != D, not
- * written. Calls the tensor-core path takes (TN 1536 x 128 x 1536, both interfaces, fp32 and bf16 output),
+ * written. Calls the tensor-core path takes (TN 1536 x 128 x 2048, both interfaces, fp32 and bf16 output),
  * with special values put in A, B and C: NaN of both signs with payloads, infinities (inf - inf and inf x 0
  * among them), rows of +0 and -0 with alpha and beta of both signs, sums that overflow, results below the
  * normal range, beta 0 and -0 over a NaN C (host and device scalars), beta 1 over infinite and NaN C,
@@ -13,7 +13,7 @@
 static cublasHandle_t hv, h12;
 static cublasLtHandle_t ltv, lt12;
 static cudaStream_t st;
-static const int M = 1536, N = 128, K = 1536;
+static const int M = 1536, N = 128, K = 2048;
 
 static int cls(float v) { return isnan(v) ? 0 : isinf(v) ? (v > 0 ? 1 : 2) : v == 0 ? (signbit(v) ? 4 : 3) : 5; }
 static const char *const cname[6] = {"NaN", "+inf", "-inf", "+0", "-0", "finite"};

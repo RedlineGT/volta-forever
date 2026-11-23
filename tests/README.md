@@ -72,14 +72,16 @@ scripts of `tests/sass/`).
   layout of linear layers, bit for bit against a host model (`bf16-fallback.c`); the runtime told
   the real capability under the layer's settings, under both module loading modes
   (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
-  the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); with
+  the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the
+  tensor-core path's special values against 12.9 (`bf16-s1.c`); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), and `bf16-cost.c` the one behind the
   documented host times, fallback cost and same-sign error; both run by hand.
 - `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
-  the design review), each control making its test fail.
+  the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k,
+  each control making its test fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL

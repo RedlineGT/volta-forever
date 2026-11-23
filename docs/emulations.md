@@ -845,8 +845,8 @@ times for TN).
 
 ### The tensor-core path (`VF_CUBLAS_BF16_TC=1`)
 
-For the other products (m k >= 2^20 or n >= 32, k <= 16384), when the call is not captured in a
-graph, each row of op(A) and each column of
+For the other products (m k >= 2^20 or n >= 32, with 2048 <= k <= 16384: the gate below), when the
+call is not captured in a graph, each row of op(A) and each column of
 op(B) is scaled by a power of two, 2^(15 - e) for e the exponent of its largest magnitude, and
 converted to fp16; a row or column is kept only when every element converts exactly (the exponent of
 its maximum in [-24, 31], no infinity, NaN or subnormal maximum, no element that would round or become
@@ -861,7 +861,7 @@ kernel cuBLAS chose for a slice; the same arithmetic reached 32.8 units at k = 6
 products are forwarded, and an RTX 5090's own bf16 product gave 37.9 to 42.1 units on the same
 same-sign data at k = 1024. On this runtime, with both operands uniform in (0, 1], over 256 sampled
 elements, the largest error was 19.4 units at TN 4096 x 256 x 16384, 16.0 at 7344 x 512 x 4096 and
-17.6 at 2048 x 64 x 1024, and the mean error -13.1, -13.1 and -13.2 units: such sums come out low by
+17.6 at 2048 x 64 x 1024 (a k now below the gate), and the mean error -13.1, -13.1 and -13.2 units: such sums come out low by
 about 13 units, the truncation's bias (cuBLAS 12.9 on the same data: largest 96.5, 36.8 and 19.2
 units, mean -1.2, -1.9 and 0.1). With both operands in one binade, uniform in [0.5, 1), a slice's
 256-term sum of products is exact (16-bit products and 8 bits of growth fit in fp32's 24) and the
@@ -879,3 +879,34 @@ A tensor-core call captured in a graph goes to cuBLAS 12.9 (its workspace would 
 program's graph: `LIMITS.md`, "The bf16 cuBLAS variants"), so a replay has 12.9's bits, not those of
 the same call made outside a capture; so does a call whose workspace cannot be allocated. The variants do not change cuBLAS's workspace contract: a forwarded call uses the
 handle's workspace as 12.9 does, with the same rules for threads and streams.
+
+### The tensor-core path's gate
+
+The tensor-core path takes a product with n >= 2 and k from 2048 (`VF_TC_MIN_K`) to 16384 when m k >=
+2^20 or n >= 32, after the skinny path has declined it; a product it does not take goes to cuBLAS 12.9.
+The gate depends on n, so one element's bits depend on the batch: the same row of op(A) times the same
+column of op(B) has 12.9's bits in a narrow product (n = 1, or within the skinny path's rule) and the
+tensor-core path's in a wide one (`LIMITS.md`). n = 1 is never taken: 12.9 computes it faster. Were
+it taken, its internal fp16 GEMM would give column 0 other bits than at n >= 2 (measured on 15
+shapes, where n = 2 to 512 agreed); a zero second column given to that GEMM is the expected remedy
+(not run on a GPU).
+
+The shortest k comes from an evaluation of the path against the exact product: 10 families of data
+(normal,
+squared ReLU, outliers, cancelling pairs, spreads over about 30 binades, one sign, log-normal, an
+adversarial positive construction, and two built against the path's 256-element slices, with large
+values at the start of every slice) and the configurations of an adversarial search, at k = 256 to
+16384 (1024 x 128, TN, both output types; NN, NT and TT at 2048; alpha and beta with a general C, the
+cuBLASLt bias epilogue). A call is accepted
+when every element's class and NaN bits are 12.9's, two runs, a handle without workspace and a call of
+half the columns give the same bits, each element's error is at most the larger of 12.9's own error
+and (k - 1) u sum |a b| + h (u = 2^-24, h half an ulp of the output at the exact value; with alpha,
+beta or a bias, (k + 2) u S' + h, S' adding |beta c| and |bias|), and, per matrix with fp32 output,
+the mean error towards zero in units of u sum |a b| is at most the larger of 12.9's and 0.8 times
+that of an RTX 5090's own accumulation on the same data (its native bias slope per family, measured
+once at k = 1024 to 2048, where that card does not split its sums).
+The error bound held from k = 384 on (at k = 256 one family reached 1.54 times it, the search 1.29);
+the bias bound needs k = 2048 for the search's worst configuration (0.76 times the bound at 2048,
+1.02 at 1536, 1.52 at 1024). One family, built against the 256-element slices (a product of 2^20 at
+the start of every slice, then products of half to one ulp of it), exceeds the bias bound up to
+about k = 4096 (1.36 times at 2048).

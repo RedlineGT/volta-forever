@@ -9,7 +9,7 @@
  * program's captures fail. Prints "ok bf16-reserve". */
 #include "bf16-common.h"
 
-static const int M = 1536, N = 256, K = 1536;
+static const int M = 1536, N = 256, K = 2048;
 static cublasHandle_t h1, h2;
 static cudaStream_t s1, s2;
 static void *dA, *dB, *dC1, *dC2;

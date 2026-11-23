@@ -247,23 +247,26 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   12.9 runs its sequential kernel are computed by one kernel of the layer, with 12.9's bits
   (`docs/emulations.md`, section 11, says where exactly, and how that was established).
 - `VF_SAFE=1` keeps the conservative paths: the tensor-core path serves nothing, whatever
-  `VF_CUBLAS_BF16_TC` says; the skinny path, whose results are 12.9's bits, is not affected. Only the
-  exact value `1` turns it on: any other value (`true`, `yes`, an empty one, ` 1`) leaves it off, and
-  the runtime says so.
-- `VF_CUBLAS_BF16_TC=1`: larger products run on the tensor cores, with exact scaling to fp16 and
-  fixed slices of k, and differ from 12.9's in the last bits (within 25 units of 2^-24 sum |a b|
-  measured; sums of products of one sign come out low, by about 13 units on average when the data
-  spans many binades), except when they are captured in a CUDA graph; the skinny
-  path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. It is for inference: it makes
+  `VF_CUBLAS_BF16_TC` says; the skinny path, whose results are 12.9's bits, is not affected. Every
+  result is then 12.9's, eager or captured, at any batch size. Only the exact value `1` turns it on:
+  any other value (`true`, `yes`, an empty one, ` 1`) leaves it off, and the runtime says so.
+- `VF_CUBLAS_BF16_TC=1`: larger products with k from 2048 to 16384 run on the tensor cores, with
+  exact scaling to fp16 and fixed slices of k, and differ from 12.9's in the last bits (within 25
+  units of 2^-24 sum |a b| measured; sums of products of one sign come out low, by about 13 units on
+  average when the data spans many binades), except when they are captured in a CUDA graph; the
+  skinny path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. One element's bits then
+  depend on the batch size and on capture (`LIMITS.md`), and a model whose layers have fewer than
+  2048 in-features gets the tensor cores only on its wider layers. It is for inference: it makes
   bf16 training slower (`LIMITS.md`, "The bf16 cuBLAS variants"; `docs/performance.md`, "bf16
   products through cuBLAS: the opt-in variants on real programs").
 
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
-explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 for the tensor cores,
+explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 or below 2048 for the tensor cores,
 tensor-core calls captured in a CUDA graph (`LIMITS.md`, "The bf16 cuBLAS variants", says why), and
-calls whose workspace cannot be allocated. An eager tensor-core call (TN 1536 x 480 x 1536) cost
-16.5 microseconds of host time against 6.5 for 12.9's, a skinny call (TN 1536 x 8 x 1536) 2.4 against
-5.8 (`tests/gpu/forward/bf16-cost.c`, mean over 100 calls).
+calls whose workspace cannot be allocated. An eager tensor-core call (TN 1536 x 480 x 1536, measured
+before the gate of k >= 2048 that now sends it to 12.9) cost 16.5 microseconds of host time against
+6.5 for 12.9's, a skinny call (TN 1536 x 8 x 1536) 2.4 against 5.8 (`tests/gpu/forward/bf16-cost.c`,
+mean over 100 calls).
 The layer's workspace is not the program's: a framework's allocator does not see it. The variables do nothing without the
 launcher: by hand, put `forward/bf16tc` before `forward` and set the variable.
 

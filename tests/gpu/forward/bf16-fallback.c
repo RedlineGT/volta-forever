@@ -151,15 +151,15 @@ int main(void)
     open_runtime();
     cublasSetStream(hv, st);
     static const int cols[] = {1, 5, 8, 9, 20, 32, 33, 100, 300};
-    for (size_t c = 0; c < sizeof cols / sizeof *cols; ++c) one_case(1536, 320, 1536, cols[c], 0, 0, 0, 0);
-    one_case(1536, 320, 1536, 9, 7, 0, 0, 0);
-    one_case(1536, 320, 1536, 33, 33, 1, 0, 0);
-    one_case(1536, 320, 1536, 5, 3, 2, 0, 0);
-    one_case(1536, 320, 1536, 20, 9, 0, 1, 0);
-    one_case(4608, 64, 1536, 8, 16, 0, 1, 0);
+    for (size_t c = 0; c < sizeof cols / sizeof *cols; ++c) one_case(1536, 320, 2048, cols[c], 0, 0, 0, 0);
+    one_case(1536, 320, 2048, 9, 7, 0, 0, 0);
+    one_case(1536, 320, 2048, 33, 33, 1, 0, 0);
+    one_case(1536, 320, 2048, 5, 3, 2, 0, 0);
+    one_case(1536, 320, 2048, 20, 9, 0, 1, 0);
+    one_case(4608, 64, 2048, 8, 16, 0, 1, 0);
     one_case(896, 512, 4864, 32, 5, 0, 0, 0);
-    one_case(1536, 320, 1536, 9, 0, 0, 0, 1);
-    one_case(4608, 64, 1536, 5, 0, 0, 0, 1);
+    one_case(1536, 320, 2048, 9, 0, 0, 0, 1);
+    one_case(4608, 64, 2048, 5, 0, 0, 0, 1);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;

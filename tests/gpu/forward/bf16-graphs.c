@@ -13,7 +13,7 @@
 
 static cublasHandle_t hv, h12;
 static cudaStream_t st;
-static const int M = 1536, K = 1536;
+static const int M = 1536, K = 2048;
 static int N = 512; /* VF_BF16_GRAPHS_N: 512 (tensor-core size, forwarded in captures) or 8 (skinny, served) */
 static size_t CB;
 static void *dA, *dB, *dC, *dRef;
