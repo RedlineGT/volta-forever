@@ -28,8 +28,8 @@
 # control changes the translation of a cubin and is not objected to there (a hole in the
 # validator, or a control that tests nothing there), or when the validator stopped without a
 # verdict. Apart: the controls of CHANGES_THE_PROGRAM in reference/controls.py (no objection is no
-# hole), and the cases of RIGHT_THERE below, where what a control changed stays right, each looked
-# at. (Until 2026-11-23 a control had to be objected to in one cubin only: the validator could
+# hole), and the cases of RIGHT_THERE there, where what a control changed stays right, each looked
+# at (reference/controls.py decides a cubin's verdict for both: unobjected()). (Until 2026-11-23 a control had to be objected to in one cubin only: the validator could
 # have lost the objection in all others unnoticed.) A cubin whose translation as it is has
 # problems in a pass is left out of the counts of that pass: what a control adds there cannot be
 # told apart.
@@ -87,28 +87,14 @@ one() {
 export -f one
 xargs -a "$out/todo" -P "$JOBS" -L 1 bash -c 'one "$@"' _
 fi
-python3 -I - "$out" <<'PY'
+python3 -I - "$out" "$W/reference" <<'PY'
 import collections, os, re, sys
 out = sys.argv[1]
-# Where a control changes the translation of a cubin and the validator rightly finds nothing, each
-# looked at (2026-11-23): (pass, control, cubin): why. Any other such case fails the run.
-HOLDS_NOTHING = ('the instruction left out of the declared life is one where, by the validator\'s own lives, '
-                 'the uniform register holds nothing: the translator declares the life longer than it is')
-FREE_TOO = 'the next register, where every home is moved, is free too'
-NOTHING_IN_FLIGHT = ('no load of the program in flight writes the borrowed register: the wait for the six '
-                     'scoreboards that the control takes away is not needed there')
-RIGHT_THERE = {
-    ('default', 'short_home', '0161.sm_75.cubin'): HOLDS_NOTHING,
-    ('1', 'short_home', '0142.sm_75.cubin'): HOLDS_NOTHING,
-    ('1', 'alive_home', 'k_convert.sm75.cubin'): FREE_TOO,
-    ('1', 'alive_home', '0097.sm_75.cubin'): FREE_TOO,
-    ('1', 'alive_home', '0142.sm_75.cubin'): FREE_TOO,
-    ('1', 'no_borrow_wait', 'k_params.sm75.cubin'): NOTHING_IN_FLIGHT,
-    ('1', 'no_borrow_wait', '0142.sm_75.cubin'): NOTHING_IN_FLIGHT,
-    ('1', 'written_pair', '0086.sm_75.cubin'): ('the translator gives level 2 up for the pair (a borrowed register '
-                                                'receives a result that nothing announces) and translates the four '
-                                                'functions at level 1, with pairs that their instructions do not write'),
-}
+sys.path.insert(0, sys.argv[2])
+# (A cubin's verdict, and the cases where a control changes the translation and the validator
+# rightly finds nothing, each looked at: reference/controls.py, which decides the same when it is
+# run by itself.)
+import controls as ctl
 cubins = [os.path.basename(l.strip()) for l in open(os.path.join(out, 'cubins'))]
 changed, objected, failed, refused = collections.Counter(), collections.Counter(), collections.Counter(), collections.Counter()
 where, first, names, bad = collections.defaultdict(list), {}, [], []
@@ -134,12 +120,10 @@ for line in open(os.path.join(out, 'todo')):
         if 'every control is objected to' not in text and 'NOT EVERY CONTROL' not in text:
             bad.append('%s in pass %s: did not run (%s)' % (name, p, (text.strip().splitlines() or ['nothing'])[-1][:120]))
         continue                          # not run with this setting of the translator
-    for i, x in enumerate(m.group(1).split()):
-        if x == '0' and i not in dirty[p]:
-            if (p, name, cubins[i]) in RIGHT_THERE:
-                right.append((p, name, cubins[i]))
-            else:
-                unobjected[name].append('%s %s' % (p, cubins[i]))
+    clean = [i for i in range(len(m.group(1).split())) if i not in dirty[p]]
+    holes, rightly = ctl.unobjected(name, p, [cubins[i] for i in clean], [m.group(1).split()[i] for i in clean])
+    right += [(p, name, cubin) for cubin in rightly]
+    unobjected[name] += ['%s %s' % (p, cubin) for cubin in holes]
     counts = [x for i, x in enumerate(m.group(1).split()) if i not in dirty[p]]
     c = sum(1 for x in counts if x not in ('=', 'refused'))
     o = sum(1 for x in counts if x not in ('=', 'refused', '0', 'failed'))
@@ -161,7 +145,10 @@ with open(os.path.join(out, 'summary.tsv'), 'w') as f:
                                                             + unobjected[name]) or '-', refused[name]))
 # (A control that changes the program, not the translation: no objection is no hole.)
 of_the_program = open(os.path.join(out, 'of-the-program')).read().split()
-silent = [n for n in names if changed[n] and not objected[n] and n not in of_the_program]
+# (Not counted as changed there: the cases of RIGHT_THERE. Until 2026-11-23 a control met only in
+# them was taken for one objected to nowhere, and the run failed on what it accepted.)
+exempt = collections.Counter(n for _, n, _ in right)
+silent = [n for n in names if changed[n] - exempt[n] and not objected[n] and n not in of_the_program]
 # (A control makes the translation wrong: it is objected to wherever it changes it, but in RIGHT_THERE.)
 missed = [n for n in names if unobjected[n] and n not in of_the_program and n not in silent]
 idle = [n for n in names if not changed[n]]
@@ -170,7 +157,7 @@ print('%d controls on %d cubins: %d objected to; %d change translations and are 
       % (len(names), len(cubins), sum(1 for n in names if objected[n]), len(silent), ' '.join(silent) or '-', len(idle), ' '.join(idle) or '-'))
 print('%d are not objected to in a cubin whose translation they change: %s' % (
     len(missed), '; '.join('%s (%s)' % (n, ', '.join(unobjected[n])) for n in missed) or '-'))
-gone = sorted(set(RIGHT_THERE) - set(right))
+gone = sorted(set(ctl.RIGHT_THERE) - set(right))
 print('(%d cases where a control changes the translation and the validator rightly finds nothing, of RIGHT_THERE; %d of its cases not met%s)'
       % (len(right), len(gone), ': ' + ', '.join(' '.join(case) for case in gone) if gone else ''))
 if stopped:
