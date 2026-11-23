@@ -84,6 +84,18 @@ if want bf16-lazy; then
         done
     fi
 fi
+# A language model's output layer (m = 151936): the skinny path alone forwards it; the tensor-core path
+# serves it outside a capture, chunked, and forwards it captured.
+if want bf16-lmhead; then
+    if build bf16-lmhead; then
+        for sw in skinny tc; do
+            if [ $sw = skinny ]; then run bf16-lmhead "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1
+            else run bf16-lmhead "$test_dir"; fi
+            if [ "$status" = 0 ] && grep -qx "ok bf16-lmhead" "$log"; then echo "PASS  bf16-lmhead $sw"
+            else echo "FAIL  bf16-lmhead $sw (exit status $status; $log)"; failed=1; fi
+        done
+    fi
+fi
 # G3 with the skinny path: its captured calls are kernel nodes of the runtime's module.
 if want bf16-graphs-skinny; then
     build bf16-graphs && { run bf16-graphs "$test_dir" VF_BF16_GRAPHS_N=8; verdict bf16-graphs; }
