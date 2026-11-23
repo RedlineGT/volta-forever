@@ -63,10 +63,13 @@ scripts of `tests/sass/`).
   inputs that tell a fused multiply-add chain, a multiply-and-add chain and the epilogue's orders
   apart (`bf16-arith.c`); the tensor-core path within 32 units of 2^-24 sum |a b| of fp64,
   deterministic; every forwarded call with 12.9's bits; what a program's graphs, capture modes,
-  threads and contexts see (`bf16-graphs.c`, `bf16-threads.c`, `bf16-life.c`, `bf16-reserve.c`);
+  threads and contexts see (`bf16-graphs.c`, `bf16-threads.c`, `bf16-life.c`, `bf16-reserve.c`;
+  a graph captured through the variant behaves step for step as with 12.9 alone, and replays 12.9's
+  bits);
   the runtime told the real capability under the layer's settings; with `VF_BF16_SANITIZE` set,
   under compute-sanitizer. `bf16-skinny.c` is the measurement behind the skinny path's rule and
-  bounds (12.9's kernel per configuration; path, bits, error and time per shape).
+  bounds (12.9's kernel per configuration; path, bits over the m rows of each column, writes outside
+  them, error and time per shape), run by hand.
 - `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
   the design review), each control making its test fail.

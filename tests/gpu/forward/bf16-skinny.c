@@ -5,11 +5,15 @@
  *                                 pointers and leading dimensions, handle workspaces, legacy and
  *                                 cuBLASLt): the call is captured into a graph that is never launched,
  *                                 and the kernel nodes' names are read. Nothing is computed.
- *   bf16-skinny check OUT.tsv     for each configuration of a smaller grid: the path the variant takes,
- *                                 whether its result has 12.9's bits, the error of both against fp64
- *                                 (on a sample of rows), and the time of both.
+ *   bf16-skinny check OUT.tsv [rule|bounds|edges]
+ *                                 for each configuration of a smaller grid: the path the variant takes,
+ *                                 whether its result has 12.9's bits (the m rows of each column),
+ *                                 whether either wrote outside them (the padding rows of a leading
+ *                                 dimension above m, and 256 bytes after the matrix), the error of both
+ *                                 against fp64 (on a sample of rows), and the time of both.
  *
- * tests/gpu/forward-bf16.sh runs both and analyses the files (tests/gpu/forward/bf16-skinny.py). */
+ * A measurement, run by hand on a V100 with the test runtime (tests/README.md); not part of
+ * tests/gpu/forward-bf16.sh. */
 #include "bf16-common.h"
 
 #define NWS 10
@@ -283,40 +287,70 @@ static uint16_t *bf16_uniform(size_t n, double scale)
     return h;
 }
 
+/* Every output byte is set to this before the calls: the padding must come back with it. */
+#define PAD_BYTE 0x5a
+#define GUARD 256
+
+/* Elements of the m rows of each column that differ between the two outputs; and, for each output, the
+ * padding elements (rows m to ldc - 1) and the bytes of the guard after it that no longer hold PAD_BYTE. */
+static void compare_columns(const Cfg *c, const char *o1, const char *o2, long long ldc, size_t es, size_t *diff,
+                            size_t *pad1, size_t *pad2)
+{
+    unsigned char pad[4];
+    memset(pad, PAD_BYTE, sizeof pad);
+    *diff = *pad1 = *pad2 = 0;
+    for (long long j = 0; j < c->n; ++j) {
+        const char *a = o1 + (size_t)(j * ldc) * es, *b = o2 + (size_t)(j * ldc) * es;
+        *diff += ndiff(a, b, (size_t)c->m * es, es);
+        for (long long i = c->m; i < ldc; ++i) {
+            *pad1 += memcmp(a + i * es, pad, es) != 0;
+            *pad2 += memcmp(b + i * es, pad, es) != 0;
+        }
+    }
+    const size_t cb = (size_t)(ldc * c->n) * es;
+    for (size_t i = 0; i < GUARD; ++i) {
+        *pad1 += (unsigned char)o1[cb + i] != PAD_BYTE;
+        *pad2 += (unsigned char)o2[cb + i] != PAD_BYTE;
+    }
+}
+
 static void check_one(FILE *f, const Cfg *c, const char *region)
 {
     long long lda = (c->ta ? c->k : c->m) + c->ldpad, ldb = (c->tb ? c->n : c->k) + c->ldpad, ldc = c->m + c->ldpad;
     const size_t na = (size_t)lda * (c->ta ? c->m : c->k), nb = (size_t)ldb * (c->tb ? c->k : c->n);
     const size_t es = c->ct ? 2 : 4, cb = (size_t)ldc * c->n * es;
-    if (na * 2 > big_bytes / 2 || nb * 2 > big_bytes / 4 || 2 * cb > big_bytes / 4) return;
+    if (na * 2 > big_bytes / 2 || nb * 2 > big_bytes / 4 || 2 * (cb + GUARD) + 64 > big_bytes / 4) return;
     const int fast = !strcmp(region, "bounds") || na > (64u << 20);
     uint16_t *hA = fast ? bf16_uniform(na, 0.1) : bf16_random(na, 0.05);
     uint16_t *hB = fast ? bf16_uniform(nb, 2.0) : bf16_random(nb, 1.0);
     void *A = big + c->aoff, *B = big + big_bytes / 2 + c->boff, *C1 = big + big_bytes / 2 + big_bytes / 4 + c->coff,
-         *C2 = (char *)C1 + cb + 256;
+         *C2 = (char *)C1 + cb + GUARD;
     /* the variant's handle with the workspace of the configuration (cublasSetStream gives the default back) */
     if (c->ws) cublasSetWorkspace(hv, ws_big, ws_size[c->ws]);
     CU(cudaMemcpy(A, hA, na * 2, cudaMemcpyHostToDevice));
     CU(cudaMemcpy(B, hB, nb * 2, cudaMemcpyHostToDevice));
+    CU(cudaMemset(C1, PAD_BYTE, 2 * (cb + GUARD))); /* both outputs and their guards */
+    CU(cudaDeviceSynchronize());
     const Counts k0 = counts(API_GEMMEX);
     const float tv = time_call(1, c, A, lda, B, ldb, C1, ldc, 5);
     const Counts k1 = counts(API_GEMMEX);
     const float t12 = time_call(0, c, A, lda, B, ldb, C2, ldc, 5);
     CU(cudaStreamSynchronize(cap_stream));
     if (c->ws) cublasSetStream(hv, cap_stream);
-    void *o1 = from_device(C1, cb), *o2 = from_device(C2, cb);
+    char *o1 = from_device(C1, cb + GUARD), *o2 = from_device(C2, cb + GUARD);
     const char *path = delta(&k0, &k1, SERVED_SKINNY) ? "skinny" : delta(&k0, &k1, SERVED_TC) ? "tc" : "forward";
     char names[1024];
     Cfg g = *c;
     capture_129(&g, names, sizeof names);
     const char *kernel = strstr(names, "gemmSN") ? "gemmSN" : strstr(names, "magma_sgemmEx") ? "magma" : "other";
-    const size_t diff = ndiff(o1, o2, cb, es);
+    size_t diff, pad1, pad2;
+    compare_columns(c, o1, o2, ldc, es, &diff, &pad1, &pad2);
     const int sample = (long long)c->m * c->n * c->k <= (1LL << 31);
     const double ev = sample ? sample_error(c, hA, lda, hB, ldb, o1, ldc) : -1;
     const double e12 = sample ? sample_error(c, hA, lda, hB, ldb, o2, ldc) : -1;
-    fprintf(f, "%s\t%s%s\t%d\t%d\t%d\t%s\t%s\t%s\t%zu\t%.2f\t%.2f\t%.1f\t%.1f\t%d/%d/%d/%d/%s\n", region,
+    fprintf(f, "%s\t%s%s\t%d\t%d\t%d\t%s\t%s\t%s\t%zu\t%.2f\t%.2f\t%.1f\t%.1f\t%d/%d/%d/%d/%s\t%zu/%zu\n", region,
             opname(c->ta), opname(c->tb), c->m, c->n, c->k, c->ct ? "bf16" : "fp32", path, kernel, diff, ev, e12, tv, t12,
-            c->aoff, c->boff, c->coff, c->ldpad, ws_name[c->ws]);
+            c->aoff, c->boff, c->coff, c->ldpad, ws_name[c->ws], pad1, pad2);
     fflush(f);
     free(hA);
     free(hB);
@@ -328,7 +362,7 @@ static void check_mode(const char *path, const char *which)
 {
     FILE *f = fopen(path, "w");
     if (!f) exit(1);
-    fprintf(f, "region\top\tm\tn\tk\tout\tpath\tkernel129\tdiffering\terr_variant\terr_129\tus_variant\tus_129\tvariant\n");
+    fprintf(f, "region\top\tm\tn\tk\tout\tpath\tkernel129\tdiffering\terr_variant\terr_129\tus_variant\tus_129\tvariant\tpad_written\n");
     rng_state = 0xc0ffee;
     /* 1. Bits, inside the rule's regions (both output types). */
     const int rule = !which || !strcmp(which, "rule"), bounds = !which || !strcmp(which, "bounds");

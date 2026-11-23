@@ -330,7 +330,9 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   at all, while the same graph without the node works; the layer cannot tell any of these apart when
   it is called. In a program that runs its decode steps from graphs (vLLM), the tensor-core path
   therefore speeds up only what runs outside them (prefill above the captured sizes, eager programs);
-  the skinny path serves captured calls (one kernel node, nothing allocated).
+  the skinny path serves captured calls (one kernel node, nothing allocated). A replayed tensor-core
+  call therefore has 12.9's bits, which differ in their last bits from the same call made outside a
+  capture: a program that compares a graph's replay with an eager run of the same step sees it.
 - **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
   explicit algorithms, pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with
   any attribute outside the supported set, and every call of a context that is not a V100's.

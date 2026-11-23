@@ -4,7 +4,8 @@
  * 12.9: its workspace would be a node of the graph) and a skinny call (served: one kernel node); both
  * replay with 12.9's bits, and the graph holds no memory node. An eager tensor-core call by a thread
  * on a stream it is not capturing, during its own capture in global mode, is served and leaves the
- * capture valid. Two forked streams in one capture.
+ * capture valid; so does one on a blocking stream while another thread captures on a blocking stream
+ * (nothing of the call on the legacy stream). Two forked streams in one capture.
  * G7: two threads call through one shared handle while a third switches its stream (and, unless
  * VF_BF16_CONTROL is set, its pointer mode: the callers' alpha and beta are in managed memory, valid
  * in both modes); every call is served and every result is the one computed alone. Prints
@@ -121,6 +122,87 @@ static void eager_during_own_capture(void)
     cudaFree(C1);
     cudaFree(C2);
     cudaStreamDestroy(s1);
+    cudaStreamDestroy(s2);
+}
+
+/* Another thread captures in global mode on a blocking stream (one that synchronizes with the legacy
+ * default stream) while this thread makes an eager tensor-core call on a blocking stream of its own:
+ * the call is served and the capture stays valid. Nothing of the call may go to the legacy stream,
+ * which would join the capturing stream. Results are read after the capture ends: a synchronous copy
+ * goes to the legacy stream too. */
+static struct {
+    cudaStream_t s;
+    void *C;
+    cudaGraph_t g;
+    cudaError_t end;
+    int captured, eager_done;
+} other;
+
+static void *other_capturer(void *arg)
+{
+    (void)arg;
+    const float one = 1.0f, zero = 0.0f;
+    cudaSetDevice(0);
+    if (cudaStreamBeginCapture(other.s, cudaStreamCaptureModeGlobal) != cudaSuccess) {
+        other.end = cudaErrorUnknown;
+        __atomic_store_n(&other.captured, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    gemm(hv, N, other.C, &one, &zero); /* captured: forwarded */
+    __atomic_store_n(&other.captured, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&other.eager_done, __ATOMIC_ACQUIRE)) {
+    }
+    other.end = cudaStreamEndCapture(other.s, &other.g);
+    return NULL;
+}
+
+static void eager_during_other_thread_capture(void)
+{
+    cudaStream_t s2;
+    CU(cudaStreamCreate(&other.s)); /* blocking streams, both */
+    CU(cudaStreamCreate(&s2));
+    void *C2;
+    CU(cudaMalloc(&other.C, (size_t)M * N * 4));
+    CU(cudaMalloc(&C2, (size_t)M * N * 4));
+    cublasHandle_t h2;
+    cublasCreate(&h2);
+    cublasSetStream(hv, other.s);
+    cublasSetStream(h2, s2);
+    CU(cudaDeviceSynchronize());
+    const float one = 1.0f, zero = 0.0f;
+    const Counts c0 = counts(API_GEMMEX);
+    pthread_t th;
+    pthread_create(&th, NULL, other_capturer, NULL);
+    while (!__atomic_load_n(&other.captured, __ATOMIC_ACQUIRE)) {
+    }
+    const cublasStatus_t eager = gemm(h2, N, C2, &one, &zero); /* eager, during the other thread's capture */
+    __atomic_store_n(&other.eager_done, 1, __ATOMIC_RELEASE);
+    pthread_join(th, NULL);
+    cudaGetLastError();
+    const Counts c1 = counts(API_GEMMEX);
+    CHECK(other.end == cudaSuccess,
+          "an eager call on a blocking stream during another thread's capture on a blocking stream invalidated it: %s",
+          cudaGetErrorName(other.end));
+    CHECK(eager == CUBLAS_STATUS_SUCCESS && (!rt_counters || (delta(&c0, &c1, SERVED_TC) == 1 &&
+                                                              delta(&c0, &c1, FWD(R_CAPTURED)) == 1)),
+          "the eager call during the other thread's capture: status %d, served %llu, captured calls forwarded %llu",
+          eager, delta(&c0, &c1, SERVED_TC), delta(&c0, &c1, FWD(R_CAPTURED)));
+    cudaStreamSynchronize(s2);
+    cudaGetLastError();
+    CHECK(same(C2, ref, N), "the eager call's result is wrong");
+    if (other.end == cudaSuccess && other.g) {
+        cudaGraphExec_t e;
+        CU(cudaGraphInstantiate(&e, other.g, 0));
+        CU(cudaGraphLaunch(e, other.s));
+        CU(cudaStreamSynchronize(other.s));
+        CHECK(same(other.C, ref12, N), "the other thread's replay is not 12.9's result");
+        cudaGraphExecDestroy(e);
+    }
+    if (other.g) cudaGraphDestroy(other.g);
+    cublasDestroy(h2);
+    cudaFree(other.C);
+    cudaFree(C2);
+    cudaStreamDestroy(other.s);
     cudaStreamDestroy(s2);
 }
 
@@ -264,6 +346,7 @@ int main(void)
         capture_mode(cudaStreamCaptureModeThreadLocal, "thread-local");
         capture_mode(cudaStreamCaptureModeRelaxed, "relaxed");
         eager_during_own_capture();
+        eager_during_other_thread_capture();
         two_streams_one_capture();
     }
     if (!only || strcmp(only, "g5")) shared_handle();
