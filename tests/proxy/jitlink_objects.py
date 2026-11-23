@@ -133,6 +133,28 @@ def refusals(lib, toolkit, work, log):
     return len(inputs) * 4
 
 
+def file_names(lib, work):
+    """AddFile reads a file by the bytes of its name, one that is not UTF-8 too, and not the file
+    whose name its text gives, with U+FFFD for each byte that is not (here one in which every
+    kernel traps, which is refused); for PTX, given as such and as NVJITLINK_INPUT_ANY. (Until
+    2026-11-23 the adapter opened that other file, or found none.)"""
+    head = b".version 8.8\n.target sm_75\n.address_size 64\n"
+    asked = work / os.fsdecode(b"k\xff.ptx")
+    asked.write_bytes(head + b".visible .entry good() { ret; }\n")
+    other = work / "k\ufffd.ptx"
+    for decoy in (False, True):
+        if decoy:
+            other.write_bytes(head + b".visible .entry bad() { barrier.cluster.arrive; ret; }\n")
+        for kind in (2, 10):
+            h = c.c_void_p()
+            assert lib.nvJitLinkCreate(c.byref(h), 1, (c.c_char_p * 1)(b"-arch=sm_70")) == 0
+            rc = lib.nvJitLinkAddFile(h, kind, os.fsencode(asked))
+            complete = lib.nvJitLinkComplete(h) if rc == 0 else None
+            assert lib.nvJitLinkDestroy(c.byref(h)) == 0
+            assert (rc, complete) == (0, 0), (os.fsencode(asked), kind, "with" if decoy else "without", rc, complete)
+    other.unlink()
+
+
 if __name__ == "__main__":
     adapter = str(Path(sys.argv[1]).resolve())
     toolkit = Path(sys.argv[2]).resolve()
@@ -148,10 +170,11 @@ if __name__ == "__main__":
         subprocess.run(["ar", "rcs", "helper.a", "helper.o"], cwd=work, check=True)
         lib = c.CDLL(adapter)
         null_arguments(lib)
+        file_names(lib, work)
         for file, explicit_type in [("helper.o", 5), ("helper.a", 6)]:
             for kind in (explicit_type, 10):  # NVJITLINK_INPUT_ANY
                 for memory in (True, False):
                     check(lib, work / file, kind, memory)
         refused = refusals(lib, toolkit, work, log)
         print("PASS host objects and archives through AddData/AddFile and explicit/automatic types, "
-              f"null arguments and empty inputs, {refused} inputs of kernels that trap")
+              f"null arguments and empty inputs, a file whose name is not UTF-8, {refused} inputs of kernels that trap")

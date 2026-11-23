@@ -740,6 +740,15 @@ fn do_add_data(handle: HandlePtr, input_type: c_int, data: *const c_void, size: 
     }
 }
 
+/// The bytes of the file `name`, a name of the file system: its bytes, whatever they are (made into
+/// text, a name that is not UTF-8 would be another file's).
+fn read_file(name: &CStr) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = Vec::new();
+    std::fs::File::open(std::ffi::OsStr::from_bytes(name.to_bytes()))?.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 fn do_add_file(handle: HandlePtr, input_type: c_int, file_name: *const c_char) -> c_int {
     let lib = match real() {
         Ok(l) => l,
@@ -757,23 +766,14 @@ fn do_add_file(handle: HandlePtr, input_type: c_int, file_name: *const c_char) -
 
     if needs_adaptation {
         // Safety: file_name is a valid C string.
-        let path = unsafe { CStr::from_ptr(file_name) }.to_string_lossy();
-        match std::fs::File::open(path.as_ref()) {
-            Ok(mut f) => {
-                let mut buf = Vec::new();
-                return match f.read_to_end(&mut buf) {
-                    Ok(_) => do_add_data(handle, input_type, buf.as_ptr() as *const c_void, buf.len(), file_name),
-                    Err(e) => {
-                        log::error(format_args!("cannot read file {path}: {e}"));
-                        NVJITLINK_ERROR_INVALID_INPUT
-                    }
-                };
-            }
+        let name = unsafe { CStr::from_ptr(file_name) };
+        return match read_file(name) {
+            Ok(buf) => do_add_data(handle, input_type, buf.as_ptr() as *const c_void, buf.len(), file_name),
             Err(e) => {
-                log::error(format_args!("cannot read file {path}: {e}"));
-                return NVJITLINK_ERROR_INVALID_INPUT;
+                log::error(format_args!("cannot read file {}: {e}", name.to_string_lossy()));
+                NVJITLINK_ERROR_INVALID_INPUT
             }
-        }
+        };
     }
 
     unsafe { (lib.add_file)(handle, input_type, file_name) }
@@ -1274,6 +1274,23 @@ mod tests {
             let adapted = check_fatbin_data(&ptx_fatbin(half.as_bytes(), sm)).unwrap().unwrap();
             assert_eq!(fatbin_kernels(&adapted, vf_fatbin::KIND_PTX, 70), ["bad", "good"]);
         }
+    }
+
+    #[test]
+    fn a_file_whose_name_is_not_utf8_is_read_by_its_name() {
+        // (Until 2026-11-23 the name was made into text: the byte 0xff became U+FFFD, and a file of
+        // that name was read in its place.)
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = std::env::temp_dir().join(format!("vf-jitlink-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut name = dir.as_os_str().as_bytes().to_vec();
+        name.extend_from_slice(b"/k\xff.ptx");
+        let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&name));
+        std::fs::write(&path, b"the file asked for").unwrap();
+        std::fs::write(dir.join("k\u{fffd}.ptx"), b"another file").unwrap();
+        let read = read_file(&CString::new(name).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read.unwrap(), b"the file asked for");
     }
 
     #[test]

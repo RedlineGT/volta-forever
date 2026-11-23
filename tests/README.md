@@ -171,6 +171,7 @@ a kernel refused in an input of the driver's linker is refused in the image the 
 and in a copy of it. The fifth checks that a refused kernel of NCCL makes the layer say once,
 at the default log level, that NCCL's CUDA 12 build is the remedy. The sixth links a native
 sm_70 device function from both a host object and a static library with the CUDA 12.9 toolkit,
+reads a file whose name is not UTF-8 by that name (not the one its text names),
 and checks that PTX in which every kernel traps is refused as text and in a fat binary alike
 (and Turing machine code whose every kernel the translator refuses), and that with one kernel
 that runs both are linked. The seventh checks, with a stand-in for nvJitLink 12.9.2, that a child
