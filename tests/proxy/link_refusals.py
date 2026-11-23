@@ -303,6 +303,10 @@ def check(proxy, mock):
     inputs = c.c_uint.in_dll(backend, "inputs").value
     assert api.cuLinkAddData_v2(state, INPUT_FATBINARY, c.c_void_p(start + page - cut), cut, None, 0, None, None) == 0
     assert c.c_uint.in_dll(backend, "inputs").value == inputs + 1
+    # And one of no bytes, at memory that cannot be read: nothing of it is read (until 2026-11-23 a
+    # size of 0 made the layer read a header there, and the process ended).
+    assert api.cuLinkAddData_v2(state, INPUT_FATBINARY, c.c_void_p(start + page), 0, None, 0, None, None) == 0
+    assert c.c_uint.in_dll(backend, "inputs").value == inputs + 2
     assert api.cuLinkDestroy(state) == 0
 
 

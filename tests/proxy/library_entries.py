@@ -19,6 +19,14 @@ def check(proxy, mock):
            b".visible .entry bad()\n{\n barrier.cluster.arrive;\n ret;\n}\n"
            b".visible .entry good()\n{\n ret;\n}\n")
     library = c.c_void_p()
+    # Compiler options without the array of their values are the driver's to answer: the image goes
+    # to it as it is, with them (until 2026-11-23 the layer read the values through the null
+    # pointer, and the process ended).
+    loads = c.c_uint.in_dll(backend, "loads").value
+    jit = (c.c_int * 1)(0)  # CU_JIT_MAX_REGISTERS
+    assert api.cuLibraryLoadData(c.byref(library), ptx, jit, None, 1, None, None, 0) == 0
+    assert c.c_uint.in_dll(backend, "loads").value == loads + 1
+    assert api.cuLibraryUnload(library) == 0
     options = (c.c_int * 1)(1)  # CU_LIBRARY_BINARY_IS_PRESERVED
     values = (c.c_void_p * 1)(None)
     assert api.cuLibraryLoadData(c.byref(library), ptx, None, None, 0, options, values, 1) == 0

@@ -177,7 +177,8 @@ fn extract_ptx_from_adapted(data: &[u8]) -> Option<Vec<u8>> {
 /// # Safety
 /// The option and value pointers must be valid for `count` elements.
 unsafe fn filter_jit_options(options: *mut c_int, values: *mut *mut c_void, count: c_uint) -> (Vec<c_int>, Vec<usize>) {
-    if count == 0 || options.is_null() {
+    // (Arrays that are not both there are not read: `options_readable`.)
+    if count == 0 || options.is_null() || values.is_null() {
         return (Vec::new(), Vec::new());
     }
     // SAFETY: caller guarantees the pointers are valid for `count` elements.
@@ -204,6 +205,13 @@ unsafe fn filter_jit_options(options: *mut c_int, values: *mut *mut c_void, coun
         }
     }
     (opts, vals)
+}
+
+/// Whether the `count` compiler options at `options` and their values at `values` can be read:
+/// none, or both arrays given. A load with options and no array for them, or no array for their
+/// values, is given to the driver as it is, which answers it (the layer reads neither).
+pub fn options_readable(options: *const c_int, values: *const *mut c_void, count: c_uint) -> bool {
+    count == 0 || (!options.is_null() && !values.is_null())
 }
 
 /// Copy the library options for internal images. CU_LIBRARY_BINARY_IS_PRESERVED is

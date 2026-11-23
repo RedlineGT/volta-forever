@@ -814,6 +814,12 @@ unsafe extern "C" fn library_load_data(
             library_count,
         )
     };
+    // Compiler options that cannot be read (a count, and no array for them or their values) are
+    // the driver's to answer: nothing is adapted, and the layer reads neither array. (The values
+    // of the library options may be missing: the layer reads them as 0, `lazy`.)
+    if !lazy::options_readable(jit_options, jit_values, jit_count) {
+        return call(code);
+    }
 
     // Proxy cache: hash the original image before adapting it.  On a cache hit the adaptation
     // and analysis are skipped entirely.  A copy of the original bytes is kept so that the
@@ -1044,6 +1050,10 @@ unsafe extern "C" fn library_load_from_file(
             library_count,
         )
     };
+    // Compiler options that cannot be read are the driver's to answer, as for cuLibraryLoadData.
+    if !lazy::options_readable(jit_options, jit_values, jit_count) {
+        return from_file();
+    }
     // This hint is only valid for the data API. Forward it unchanged on a file
     // load so that adapting through cuLibraryLoadData cannot turn it into success.
     if !library_options.is_null()
@@ -1554,9 +1564,9 @@ unsafe fn link_add_data(
     };
     let replacement = match input {
         _ if !for_this_gpu => None,
-        INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
-        // (Read within the size given, when there is one.)
-        INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size).filter(|&size| size > 0)) },
+        // (Read within the size given, which is the length of the input, as the header has it: of
+        // no bytes, nothing is read, and the input goes to the driver as it is.)
+        INPUT_CUBIN | INPUT_PTX | INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size)) },
         _ => None,
     };
     let Some(replacement) = replacement else {

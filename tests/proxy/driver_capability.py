@@ -106,8 +106,9 @@ int library(int (*f)(void **, const void *, int *, void **, unsigned, int *, voi
             const void *image) {
     return f(l, image, 0, 0, 0, 0, 0, 0);
 }
-int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, int *, void **), void *image) {
-    return f(0, 2, image, 0, 0, 0, 0, 0);
+int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, int *, void **), void *image,
+         unsigned long size) {
+    return f(0, 2, image, size, 0, 0, 0, 0);
 }
 """
 
@@ -241,7 +242,7 @@ def given_code(api, mock, client, image):
     for load in (lambda: client.load(api.cuModuleLoadData, c.byref(handle), data),
                  lambda: client.load_ex(api.cuModuleLoadDataEx, c.byref(handle), data),
                  lambda: client.library(api.cuLibraryLoadData, c.byref(handle), data),
-                 lambda: client.link(api.cuLinkAddData_v2, data)):
+                 lambda: client.link(api.cuLinkAddData_v2, data, c.c_ulong(len(image)))):
         c.c_size_t.in_dll(mock, "mock_image_length").value = 0
         assert load() == 0
         length = c.c_size_t.in_dll(mock, "mock_image_length").value
