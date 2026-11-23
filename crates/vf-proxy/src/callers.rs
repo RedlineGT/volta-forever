@@ -325,26 +325,42 @@ fn lower(limit: Option<(u32, CString)>, other: Option<(u32, CString)>) -> Option
     }
 }
 
-/// The files read for what limits the caller of class `caller` whose file is `path`, besides the
-/// libraries loaded with it as a dependency: its own, when it embeds code; for cuDNN's graph
-/// library, which chooses the engines and loads the library of its precompiled ones only when it
-/// needs them (after it asked), that library, beside it.
-fn own_files(path: &CStr, caller: Caller) -> Vec<CString> {
-    let bytes = path.to_bytes();
-    let (directory, name) = match bytes.iter().rposition(|&b| b == b'/') {
-        Some(at) => bytes.split_at(at + 1),
-        None => (&b""[..], bytes),
-    };
-    let mut files = Vec::new();
-    if matches!(caller, Caller::From(_)) && runtime_version(&String::from_utf8_lossy(name)).is_none() {
-        files.push(path.to_owned());
+/// The file name of `path`.
+fn file_name(path: &[u8]) -> &[u8] {
+    path.rsplit(|&b| b == b'/').next().unwrap_or_default()
+}
+
+/// The limit that the code in the file of the caller of class `caller` at `path` sets, when it
+/// embeds code.
+fn own_limit(path: &CStr, caller: Caller, unloads: u64) -> Option<(u32, CString)> {
+    let own = matches!(caller, Caller::From(_))
+        && runtime_version(&String::from_utf8_lossy(file_name(path.to_bytes()))).is_none();
+    own.then(|| file_limit(path, unloads)).flatten()
+}
+
+/// For cuDNN's graph library at `path`, which chooses the engines and loads the library of its
+/// precompiled ones only when it needs them (often after it asked): the limit that the code of
+/// that library sets, of the one that the loader loaded when one is. Before, which one the loader
+/// will find is not known (the search path decides, or an audit library), and the limit is 7.5,
+/// the lowest: these engines run from machine code for sm_75, as a rule.
+fn engines_limit(path: &CStr, objects: &[Object], unloads: u64) -> Option<(u32, CString)> {
+    let version = file_name(path.to_bytes()).strip_prefix(b"libcudnn_graph.so")?;
+    let engines = [&b"libcudnn_engines_precompiled.so"[..], version].concat();
+    let loaded: Vec<&CStr> = objects
+        .iter()
+        .filter_map(|object| object.path.as_deref())
+        .filter(|path| file_name(path.to_bytes()) == engines.as_slice())
+        .collect();
+    if loaded.is_empty() {
+        let description = format!(
+            "{}, not loaded yet (as a rule, its engines run from machine code for sm_75),",
+            String::from_utf8_lossy(&engines)
+        );
+        return Some((vf_adapt::TRANSLATED_FROM, CString::new(description).ok()?));
     }
-    if let Some(version) = name.strip_prefix(b"libcudnn_graph.so")
-        && let Ok(engines) = CString::new([directory, b"libcudnn_engines_precompiled.so", version].concat())
-    {
-        files.push(engines);
-    }
-    files
+    loaded
+        .into_iter()
+        .fold(None, |lowest, path| lower(lowest, file_limit(path, unloads)))
 }
 
 /// The limit that the code of the libraries loaded with the caller as a dependency sets to what
@@ -431,9 +447,7 @@ fn caller(return_address: usize) -> Decision {
     let caller = classify(path);
     let mut limit = None;
     if limits_apply() && caller != Caller::Native {
-        for file in own_files(path, caller) {
-            limit = lower(limit, file_limit(&file, unloads));
-        }
+        limit = lower(own_limit(path, caller, unloads), engines_limit(path, &objects, unloads));
         limit = lower(limit, dependents_limit(&objects, unloads));
     }
     let decision = Decision {

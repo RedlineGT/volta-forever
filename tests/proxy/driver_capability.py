@@ -239,8 +239,8 @@ def run(proxy, directory):
     for name, code_sm in (("turing_only", 75), ("ampere_only", 80)):
         sm = limited(given, code_sm) or code_sm
         probe(api, c.CDLL(str(directory / name)), sm, sm)
-    # cuDNN's graph library, which has no code, chooses among the engines of the library beside it,
-    # which it loads later: told what that code allows.
+    # cuDNN's graph library, which has no code, chooses among the engines of a library that it loads
+    # later: before, told what such code allows at most (`run_cudnn`).
     told = limited(given, 75)
     probe(api, c.CDLL(str(directory / "cudnn/libcudnn_graph.so.9")), told or (75 if launched else 70),
           70 if launched else told or 70)
@@ -272,6 +272,22 @@ def run(proxy, directory):
     path.unlink()
     probe(api, client, given or 70, given or 70)
     _ctypes.dlclose(client._handle)
+
+
+def run_cudnn(proxy, directory, case):
+    """cuDNN's graph library, which chooses among the engines of the library of its precompiled
+    ones, which it loads later: told what the code of the library that the loader loaded allows,
+    when it is loaded, whatever is beside the graph library; 7.5 at most before."""
+    api = c.CDLL(str(proxy))
+    launched = "VOLTA_FOREVER" in os.environ
+    given = asked()
+    engines = {"none": None, "turing": 75, "ampere": 80}[case]
+    if engines:
+        c.CDLL(str(directory / f"engines-{case}/libcudnn_engines_precompiled.so.9"))
+    beside = "ampere" if case != "ampere" else "turing"
+    told = limited(given, engines or 75)
+    probe(api, c.CDLL(str(directory / f"cudnn-{beside}/libcudnn_graph.so.9")), told or (75 if launched else 70),
+          70 if launched else told or 70)
 
 
 def run_runtimes(proxy, directory):
@@ -313,6 +329,12 @@ def build(directory):
     (directory / "cudnn").mkdir()
     shutil.copyfile(directory / "plain", directory / "cudnn/libcudnn_graph.so.9")
     shutil.copyfile(directory / "turing_only", directory / "cudnn/libcudnn_engines_precompiled.so.9")
+    for code in ("turing", "ampere"):
+        for kind, name in (("cudnn", "libcudnn_graph.so.9"), ("engines", "libcudnn_engines_precompiled.so.9")):
+            (directory / f"{kind}-{code}").mkdir()
+        shutil.copyfile(directory / "plain", directory / f"cudnn-{code}/libcudnn_graph.so.9")
+        for kind in ("cudnn", "engines"):
+            shutil.copyfile(directory / f"{code}_only", directory / f"{kind}-{code}/libcudnn_engines_precompiled.so.9")
     runtimes = directory / "runtimes"
     runtimes.mkdir()
     for runtime, user, fixture in (("libcudart.so.13", "user_turing.so", directory / "turing_only.fatbin"),
@@ -508,6 +530,8 @@ if __name__ == "__main__":
         run_runtimes(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 4 and sys.argv[3] == "--mixed":
         run_mixed(proxy, Path(sys.argv[2]))
+    elif len(sys.argv) == 5 and sys.argv[3] == "--cudnn":
+        run_cudnn(proxy, Path(sys.argv[2]), sys.argv[4])
     elif len(sys.argv) == 4 and sys.argv[3] == "--binary":
         run_binary(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 4 and sys.argv[3] == "--loader":
@@ -528,7 +552,7 @@ if __name__ == "__main__":
                     settings["VF_CAPABILITY"], _, everyone = override.partition(" ")
                     if everyone:
                         settings["VF_CAPABILITY_ALL"] = "1"
-                for mode in ([], ["--runtimes"]):
+                for mode in ([], ["--runtimes"], ["--cudnn", "none"], ["--cudnn", "turing"], ["--cudnn", "ampere"]):
                     subprocess.run([sys.executable, __file__, proxy, directory, *mode], env={**env, **settings},
                                    check=True)
             # A value that is not used is said once, at the default log level; one that is used is not.

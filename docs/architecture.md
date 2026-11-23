@@ -271,8 +271,9 @@ direct clients, older CUDA runtimes and programs built for later GPUs. A caller
 with embedded Volta code retains 7.0 even with an explicit override. A caller is
 not told a later generation than the code it is given: when the code embedded
 in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
-that use a CUDA runtime), or, for cuDNN's graph library, in the library of cuDNN's
-precompiled engines beside it, runs from the translation of its sm_75 machine code, or
+that use a CUDA runtime, and those that use these), or, for cuDNN's graph library, in the
+library of cuDNN's precompiled engines that the loader loaded (until it is loaded, its engines
+are taken to be sm_75 machine code), runs from the translation of its sm_75 machine code, or
 from its PTX for sm_75 when it has none for the generation asked,
 the caller is told 7.5 (8.0 for sm_80 code, when 9.0 or later is asked), and a line at
 the default log level says so. The images that such a caller loads are then adapted for
