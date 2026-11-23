@@ -225,6 +225,24 @@ impl State {
 
     /// Take out what is known under `handle`, and under the handle of the module that the driver
     /// gave for it if it is a library, with their kernels.
+    /// Whether the kernel `handle` may be launched from `second`, its second kernel, for a launch
+    /// that took the kernel to be of the load `id` of `module`: it still is (neither unloaded nor
+    /// given again since, which recycled handles alone would not tell), the second kernel is still
+    /// its own, and the program asked for no data of the module. (Under `COMMIT`.)
+    fn launches_from(&self, handle: usize, module: usize, id: Option<u64>, second: usize) -> bool {
+        let Some(kernel) = self.kernels.get(&handle) else {
+            return false;
+        };
+        kernel.module == module
+            && !kernel.unavailable
+            && kernel.second == Some(second)
+            && id.is_some()
+            && self
+                .modules
+                .get(&module)
+                .is_some_and(|known| Some(known.id) == id && !known.asked_for_data)
+    }
+
     fn remove(&mut self, handle: usize) -> Vec<(usize, Module)> {
         let handles: Vec<usize> = self
             .modules
@@ -639,6 +657,7 @@ pub unsafe fn retry(
     // none of that starts after them: the second translation is not unloaded meanwhile.
     let _commit = COMMIT.read().unwrap_or_else(|e| e.into_inner());
     let second = match known {
+        // Taken before `COMMIT`: still that load's (`launches_from`, below).
         Some(second) => second,
         None => {
             // Still the second translation of the same load of the module (not unloaded since,
@@ -674,19 +693,8 @@ pub unsafe fn retry(
     if !settle_attributes(handle, second, library, &name) {
         return None;
     }
-    {
-        let state = state();
-        let kernel = state.kernels.get(&handle)?;
-        if kernel.unavailable || kernel.second != Some(second) {
-            return None;
-        }
-        if state
-            .modules
-            .get(&kernel.module)
-            .is_none_or(|module| module.asked_for_data)
-        {
-            return None;
-        }
+    if !state().launches_from(handle, module, id, second) {
+        return None;
     }
     let result = launch(second as *mut c_void);
     drop(_commit);
@@ -995,6 +1003,47 @@ fn apply(second: usize, attribute: Attribute) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launch that took a kernel and its second kernel before `COMMIT` launches from there only if
+    /// the module is still the same load: handles recycled by an unload and a load since (module,
+    /// kernel and second kernel alike, the new load's second translation made) do not pass.
+    #[test]
+    fn a_launch_from_a_second_kernel_is_of_the_load_it_took() {
+        let module = |id: u64| Module {
+            original: Arc::new(Vec::new()),
+            asked_for_data: false,
+            second: Some((0x300, false)),
+            refused: Vec::new(),
+            making: false,
+            failed: false,
+            library: None,
+            id,
+        };
+        let kernel = Kernel {
+            module: 0x100,
+            name: "k".into(),
+            library: false,
+            second: Some(0x301),
+            unavailable: false,
+            attributes: Vec::new(),
+            launched: false,
+            attrs_stale: false,
+        };
+        let mut state = State::default();
+        state.kernels.insert(0x200, kernel);
+        state.modules.insert(0x100, module(7));
+        assert!(state.launches_from(0x200, 0x100, Some(7), 0x301));
+        // Unloaded and loaded again with the same handles, and its second translation made again.
+        state.modules.insert(0x100, module(8));
+        assert!(!state.launches_from(0x200, 0x100, Some(7), 0x301));
+        assert!(state.launches_from(0x200, 0x100, Some(8), 0x301));
+        // Another second kernel, another module, data asked for, or no load known.
+        assert!(!state.launches_from(0x200, 0x100, Some(8), 0x302));
+        assert!(!state.launches_from(0x200, 0x101, Some(8), 0x301));
+        assert!(!state.launches_from(0x200, 0x100, None, 0x301));
+        state.modules.get_mut(&0x100).unwrap().asked_for_data = true;
+        assert!(!state.launches_from(0x200, 0x100, Some(8), 0x301));
+    }
 
     /// Many threads at once want the second translation of one module: one makes it.
     #[test]
