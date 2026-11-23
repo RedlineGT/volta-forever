@@ -108,8 +108,7 @@ fn changed(known: &HashMap<usize, Kernels>) {
 /// A new generation begins (`GENERATION`): a module, a library or a context went, or what is known
 /// here changed. (After what it changed.)
 pub fn new_generation() {
-    let generation = GENERATION.fetch_add(1, SeqCst).wrapping_add(1);
-    crate::guard::generation_began(generation);
+    GENERATION.fetch_add(1, SeqCst);
 }
 
 /// The number of driver calls under way that end a module, a library or a context (`Ending`).

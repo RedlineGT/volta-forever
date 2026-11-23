@@ -30,6 +30,7 @@ volatile unsigned long launched, launched_bad, nodes, asked, asked_bad, identifi
 volatile int destroy_sleep_us;
 volatile uintptr_t hold_library;   // cuLibraryGetKernel on this library waits while `held` is 1
 volatile int held, holding;
+volatile uintptr_t hold_function; // cuFuncGetName of this handle reads the name, then waits while `held`
 
 enum { MODULE = 1, LIBRARY, CONTEXT_MODULE };
 #define MAXOBJ 4096
@@ -325,6 +326,17 @@ static CUresult name_of(const char **name, void *handle, int kernel) {
     else
         *name = objects[fns[h].owner].names[fns[h].name]; // (stays readable: the array is static)
     UNLOCK;
+    if (hold_function && (uintptr_t)handle == hold_function) {
+        // (A copy: the entry may be given to another object meanwhile.)
+        static char kept[32];
+        if (!r) {
+            snprintf(kept, sizeof kept, "%s", *name);
+            *name = kept;
+        }
+        holding = 1;
+        while (held) usleep(100);
+        holding = 0;
+    }
     return r;
 }
 CUresult cuFuncGetName(const char **name, void *function) { return name_of(name, function, 0); }

@@ -21,6 +21,12 @@
  *   greenstale a module with a refused kernel `bad`, loaded in a green context that is destroyed; the
  *             driver gives the module's handle to the module that it makes for another library in a
  *             new context, whose kernel `bad` runs: it is launched and asked about.
+ *   aba       a thread asks about the function `good` of a module with a refused kernel, and is held in
+ *             the driver after its name was read; meanwhile the module goes, the driver gives the
+ *             function's handle to the refused kernel of the module loaded next, and the layer's
+ *             generation moves by exactly 65,536 (read through its symbol: GENERATION_OFFSET and
+ *             INIT_OFFSET, of `cuda::kernels::GENERATION` and of `cuInit`, in hexadecimal); the
+ *             thread goes on, and then the refused kernel is launched: refused.
  *   nocontext the function of a library's refused kernel in context A, taken from the driver, asked
  *             about while no context is current, then while another is; then, in A, asked about and
  *             launched: refused there, whatever was concluded in the other contexts.
@@ -231,6 +237,55 @@ int main(int argc, char **argv) {
                  "its function -> %d, a question -> %d; %lu of 3 launches reached the driver",
                  r1, r2, r3, r4, *launched - before);
         check(line, !r1 && !r2 && !r3 && !r4 && *launched - before == 3);
+    } else if (!strcmp(scenario, "aba")) {
+        static const char NATIVE[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
+                                     ".visible .entry good()\n{\n ret;\n}\n";
+        const char *g = getenv("GENERATION_OFFSET"), *i = getenv("INIT_OFFSET");
+        if (!g || !i) {
+            printf("  aba: skipped (the offsets of the layer's generation and of cuInit are not given)\n");
+            return 0;
+        }
+        volatile uint64_t *generation =
+            (volatile uint64_t *)((uintptr_t)L("cuInit") - strtoull(i, 0, 16) + strtoull(g, 0, 16));
+        volatile uintptr_t *hold = D("hold_function");
+        volatile int *held = D("held"), *holding = D("holding");
+        void *ctx, *m, *f, *m2, *bad;
+        pthread_t a;
+        struct timespec ms = {0, 1000000};
+        l_ctx_create(&ctx, 0, 0);
+        l_load(&m, PTX);
+        d_get_function(&f, m, "good");
+        *hold = (uintptr_t)f;
+        *held = 1;
+        uint64_t read = *generation;
+        pthread_create(&a, NULL, (void *(*)(void *))(void *)go, f);
+        while (!*holding) nanosleep(&ms, NULL);
+        l_unload(m);
+        l_load(&m2, BAD);
+        d_get_function(&bad, m2, "bad");
+        int same = bad == f;
+        // (A load and an unload through the layer each begin generations.)
+        while (*generation - read < 65536 - 8) {
+            void *x;
+            l_load(&x, NATIVE);
+            l_unload(x);
+        }
+        while (*generation - read < 65536) {
+            void *x;
+            l_load(&x, NATIVE);
+        }
+        uint64_t moved = *generation - read;
+        *held = 0;
+        pthread_join(a, NULL);
+        *hold = 0;
+        unsigned long before = *launched_bad;
+        CUresult r = go(bad);
+        char line[300];
+        snprintf(line, sizeof line,
+                 "aba: the handle given to a refused kernel: %s; the generation moved by %lu; its launch -> %d, %lu "
+                 "reached the driver",
+                 same ? "yes" : "no", (unsigned long)moved, r, *launched_bad - before);
+        check(line, same && moved == 65536 && r == REFUSED && *launched_bad == before);
     } else if (!strcmp(scenario, "greenstale")) {
         static const char LIB_RUNS[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
                                        ".visible .entry bad()\n{\n ret;\n}\n";

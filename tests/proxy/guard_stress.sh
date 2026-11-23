@@ -28,6 +28,11 @@ done
 for scenario in samename nocontext greenstale; do
     "$out/guard_stress" "$proxy/libcuda.so.1" "$out/mock.so" $scenario || status=1
 done
+# The generation is read through the symbols of the layer, where it has them.
+symbols=$(nm -C --defined-only "$proxy/libcuda.so.1" 2>/dev/null)
+generation=$(echo "$symbols" | awk '$3 == "cuda::kernels::GENERATION" {print $1}')
+init=$(echo "$symbols" | awk '$3 == "cuInit" {print $1}')
+GENERATION_OFFSET=$generation INIT_OFFSET=$init "$out/guard_stress" "$proxy/libcuda.so.1" "$out/mock.so" aba || status=1
 
 if [ $status -eq 0 ]; then echo "PASS  guard_stress"; else echo "FAIL  guard_stress"; fi
 exit $status
