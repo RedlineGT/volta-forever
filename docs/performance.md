@@ -189,6 +189,10 @@ at a time (runs of 2026-11-20 and 21): 45 to 52 tokens per second with its defau
 
 The upstream build, Qwen3.5-9B in f16 (`tests/gpu/zml.sh`; runs of 2026-11-19 to 21): 28.8 to
 29.4 tokens per second when the program is told capability 7.5, 27.4 to 28.2 when told 8.0.
+The layer of those days told 8.0 to the build's cuDNN as well. Since 0.1.3 the cuDNN is told
+7.5 when 8.0 is asked, because its kernels run from the translation of their sm_75 machine
+code; `libzml_cuda.so`, whose kernels are PTX, is still told 8.0 (`docs/architecture.md`, "What
+a program is told about the GPU").
 
 ## 4. NVFP4 weights
 

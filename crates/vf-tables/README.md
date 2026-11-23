@@ -4,7 +4,8 @@ The instruction sets of NVIDIA's sm_70 (Volta) and sm_75 (Turing) architectures 
 the fields and classes of the instructions, what each instruction reads and writes, the rules that
 turn an instruction with uniform operands into an ordinary one, the templates of the instructions
 that the translator builds, and the distances that native code keeps between a writer and a
-reader. The code that reads them is in `crates/vf-sass`.
+reader; and the sm_80 (Ampere) instruction forms that the translator accepts (`src/ampere.rs`).
+The code that reads them is in `crates/vf-sass`.
 
 ## Where the tables come from
 
@@ -28,6 +29,6 @@ tables of this crate derive from its descriptions and are distributed under the 
 (`LICENSE` in this directory; SPDX `LGPL-2.1-only`). The rest of the workspace is distributed under
 the Apache License 2.0.
 
-The layer's binaries (`libcuda.so.1`, `libnvJitLink.so.13`, `vf`) contain these tables. The
-complete source of the binaries is this repository, so anyone can change the tables and build the
-binaries again (`scripts/build.sh`); `NOTICE` says so with each binary distribution.
+The layer's binaries (`libcuda.so.1`, `libnvJitLink.so.13`, `vf-translate`) contain these
+tables. The complete source of the binaries is this repository, so anyone can change the tables
+and build the binaries again (`scripts/build.sh`); `NOTICE` says so with each binary distribution.

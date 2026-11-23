@@ -13,7 +13,7 @@ translator at their defaults; what ran on a GPU ran on one Tesla V100-SXM2-32GB 
 
 | Layer | What it can find | What it cannot find |
 |---|---|---|
-| **The independent validator** (`reference/validate.py`, section 2) | An instruction of a translation that is not what the original asks for; a register or a predicate that the translation takes where it holds something of the program; a wait that is missing or comes too close; a relocation left behind or carried wrong | A distance that is too short where no scoreboard is named (the table of distances is taken on trust); whatever only the hardware shows |
+| **The independent validator** (`reference/validate.py`, section 2) | An instruction of a translation that is not what the original asks for; a register or a predicate that the translation takes where it holds something of the program; a wait that is missing or comes too close; a relocation left behind or carried wrong | A distance that is too short where no scoreboard is named (the table of distances is taken on trust); whatever only the hardware shows; anything in the translation of sm_80 machine code, which it does not read (section 8) |
 | **Controls** (`reference/controls.py`, section 3) | A rule of the validator that lets a wrong translation through: each control is a translation made wrong on purpose in one way, which the validator must object to | The faults that nobody thought of; a fault in what the validator and the translator share (the descriptions of the instruction sets) |
 | **The decoder against nvdisasm** (`reference/check.py`, section 5) | An instruction word given another class, mnemonic, register or predicate than NVIDIA's disassembler gives it | Fields that nvdisasm's text does not show as registers: constants, modifiers |
 | **What instructions read and write, against nvdisasm** (`reference/uses_check.py`, section 5) | A register or a predicate that an instruction reads or writes by the tables and not by the chart of lives that nvdisasm draws, or the reverse | What the chart does not draw: calls, and code that nvdisasm reads in its older format |
@@ -28,11 +28,15 @@ translator at their defaults; what ran on a GPU ran on one Tesla V100-SXM2-32GB 
 
 ## 2. The independent validator
 
-`reference/validate.py` (4,500 lines of Python) reads an sm_75 cubin, its translation, and the
+`reference/validate.py` (5,100 lines of Python) reads an sm_75 cubin, its translation, and the
 map of the translation: for each instruction of the result, which instruction of the original it
 comes from and what was done to it. It was written to check a translation whichever translator
 made it. The map is the translator's own, so it is checked first, and so is everything else that
-the translator says about its work (which predicate stands for which, which registers it took).
+the translator says about its work (which predicate stands for which, which registers it took:
+the file `MAP.lives` beside the map, which both translators write).
+
+It reads sm_75 code only. The translation of sm_80 machine code, which the layer has made since
+0.1.2, is not checked by it: section 8 says what checks it instead.
 
 What an instruction is, the validator takes from NVIDIA's disassembler: the original is read as
 sm_75 and the result as sm_70 by nvdisasm, and the rules are on its text. The scheduling fields,
@@ -169,6 +173,14 @@ of its own (a branch through a register leads where nvdisasm's listing says), an
 to the frame must be at a place where it knows how far the pointer is: where two ways lead to
 one place with the pointer at two depths, or a branch may lead anywhere, it knows nothing.
 
+A uniform predicate that has no register to be held in may be kept in a word of the frame too:
+before an instruction that names it, it is loaded into a register of the translation and read
+back into a predicate; after one that writes it, it is written down into such a register and
+stored. Each of these moves must be beside its conversion, on its side of the instruction, take
+the predicate's own word through the stack pointer, under no guard, with a register that was
+borrowed or put away there and that the conversion names, once for each direction, and on a
+scoreboard that what follows waits for.
+
 **Room.** Where no register holds nothing, one that the original instruction neither reads nor
 writes is put in the frame for the time of the sequence and brought back after it. The validator
 checks the register (not R0 or R1, not read or written by the original, not a home alive there,
@@ -204,7 +216,12 @@ what puts a register away and what brings it back. Then:
   instruction: the register that it is loaded in, after the instruction that loads it;
 - nothing that is put around an instruction, and no load of the frame, writes the home of a
   uniform register declared there, even where the instruction writes that uniform register:
-  the instruction may still read it.
+  the instruction may still read it;
+- the register that a move of a uniform predicate of the frame takes is not the register of a
+  uniform register of the frame there, not one that the instruction reads or writes, not a
+  home, not a register that holds a predicate, and not the register that the top of the frame
+  is loaded in; what a load of a predicate puts in it is read by its conversion only, and a
+  store of a predicate stores what its conversion wrote down (since 2026-11-22: section 7).
 
 **Products that take everything at the instruction.** In a kernel with no register to spare, a
 tensor-core product takes its sixteen registers for the time of the instruction. The validator
@@ -464,9 +481,10 @@ validator, cubin by cubin (`tests/sass/validate-corpus.sh`). The rules of the tr
 found on the first; the second was kept apart to test them.
 
 **PyTorch.** The 475 cubins of `libtorch_cuda.so` of PyTorch 2.14.0+cu130 (the stock wheel;
-`vf extract`): 23,693 functions, of which 30 are refused. At the default: **475 of 475 cubins
-at 0 problems, with no check left unmade**: 31,017,875 instructions of 23,663 functions (a
-quarter of an hour with 44 processes). Among what the validator counts as checked: 18,315 lives of uniform
+`vf extract`): 23,693 functions, of which 29 are refused. At the default (2026-11-22, with the
+rules of 0.1.3): **475 of 475 cubins at 0 problems, with no check left unmade**: 31,034,665
+instructions of 23,664 functions (a quarter of an hour with 44 processes). The counts that
+follow are of 2026-11-20, when 23,663 functions were translated. Among what the validator counts as checked: 18,315 lives of uniform
 predicates against nvdisasm's chart; 2,354 borrowed registers and 70,030 first writes of them
 (54,443 behind a wait that the rule asks for); 52 homes of uniform registers whose declared
 life is the whole life; 65 functions with a frame; 573 instructions with room made, in 33
@@ -476,11 +494,12 @@ the instruction; 672 products that take what an earlier one gathered.
 **The held-out corpus.** The sm_75 code of 42 libraries: those of CUDA 13.5, cuDNN, cuSPARSELt,
 NCCL, NVSHMEM and the CUDA libraries of the PyTorch wheel, and vLLM's compiled extensions
 (`tests/sass/heldout-extract.sh`): 3,108 cubins, none of which is byte for byte one of
-PyTorch's. At the default: **3,105 of 3,108 cubins at 0 problems, with no check left unmade**:
-51,668,279 instructions of 59,992 functions (three quarters of an hour with 48 processes). The
+PyTorch's. At the default (2026-11-22): **3,105 of 3,108 cubins at 0 problems, with no check
+left unmade**: 52,551,415 instructions of 60,310 functions (three quarters of an hour with 48
+processes). The
 other three cubins are not read at all by either translator (a section table that points
 outside the file; two with two sections of code of one name). More functions are refused here
-than in PyTorch: 10,986 of 70,978 (`LIMITS.md`). None of this code was run.
+than in PyTorch (`LIMITS.md`, "Kernels refused"). None of this code was run.
 
 This corpus showed two faults that PyTorch's code could not, the first time it was translated:
 marks of register reuse that came to name a batch when the schedule was lengthened (225
@@ -696,6 +715,15 @@ and booleans, within a tolerance for floats. With cuBLAS 12.9.2 in front of the 
   transformer encoder and a causal language model with heads of 64 and of 128, recurrent
   networks, an upsampling network; each in f32, under autocast (f16 on the GPU) and through a
   few steps of training.
+- **Told 8.0** (`VF_CAPABILITY=8.0`, 2026-11-22): the same, 924 and the one, 32 of 32, set by
+  hand and through the launcher. PyTorch is then still told 7.5, because its code is the
+  translation of its sm_75 machine code (`docs/architecture.md`, section 4). Until 0.1.3 it was
+  told 8.0 and gave 24 wrong attention cases and 28 wrong models with no error (section 7).
+
+The workers of the two programs write their verdicts on a channel of their own, so that what a
+kernel prints cannot hide or forge one, and a case that does not end in `VF_CASE_WAIT` seconds
+is stopped and counted as a CRASH (`tests/README.md`). Until 2026-11-22 a verdict printed after
+a kernel's message was lost from the count.
 
 With `VF_TRANSLATE_DUMP` the layer writes every cubin that it gives its translator. In one
 pass of the battery and one of the models it translated 157 distinct cubins. 122 are, byte for
@@ -721,11 +749,13 @@ refused, as it must be), and 17 of them fail with the mechanism turned off (`VF_
 a build that does not give a library kernel's settings to the function, the check for it
 fails, and with the build of 2026-11-20 the enumeration into a larger array ends in a fault
 inside NVIDIA's driver. `tests/proxy/fit_api.sh` goes through the same ways and more without
-a GPU, with a stand-in for the driver that refuses the launches of the first image: 33
+a GPU, with a stand-in for the driver that refuses the launches of the first image: 39
 checks, among them a launch whose second translation is being made while another thread asks
-for data of the module, and two threads that set the same thing on one kernel at once (the
+for data of the module, two threads that set the same thing on one kernel at once (the
 stand-in takes the first setting and keeps its call from returning until the second has had
-its turn: the kernel and its second image must end with the same value).
+its turn: the kernel and its second image must end with the same value), and an unload of the
+module from another thread while a setting or a launch of its second image is held (the
+unload must wait for them).
 In the battery, five kernels are launched that way (`avg_pool2d` and bilinear `interpolate` in
 float32 and float64, `unfold` in float32), from three second translations, and their results are
 the CPU's. What the validator finds in second translations: section 4.
@@ -744,8 +774,9 @@ short prompt were the CPU's in both modes, which is reported and not required: a
 implementations disagree on a few most likely tokens in a hundred.
 
 `tests/gpu/llamacpp-ops.sh test` runs llama.cpp's own backend test on the two operations that
-its tensor-core and quantized kernels serve: 4,428 cases of flash attention and 2,690 of matrix
-products, each compared with the CPU backend. None differs.
+its tensor-core and quantized kernels serve: 4,426 cases of flash attention and 2,688 of matrix
+products, each compared with the CPU backend. None differs. (The script counted 4,428 and 2,690
+until 2026-11-22: two summary lines of the program were taken for cases.)
 
 With NVFP4 weights (`tests/gpu/llamacpp-nvfp4.sh`; Qwen3.8-27B, converted
 to GGUF by llama.cpp's own script): the 48 tokens generated are the CPU's, with flash attention
@@ -842,12 +873,14 @@ environment:
 
 The reference translator (`reference/translate.py`) and the translator of the layer
 (`crates/vf-sass`) must give the same bytes, the same map and the same refusals for the same
-reasons on every input. `tests/sass/compare.sh` checks it. With the build of this
-tree: the test kernels and PyTorch's 475 cubins, 484 of 484 the same (23,721 functions, 30
-refused), and the same again when they are translated as the second translation at launch
-does (`VF_BORROW=5`: 42 refused); of the 157 distinct cubins that the PyTorch battery and
-the models made the layer translate, 122 are among those 475, and the other 35 are the same at
-both settings; the held-out corpus, 3,108 of 3,108 (70,978 functions, 10,986 refused).
+reasons on every input, and the same file of lives beside the map (`MAP.lives`, since
+2026-11-22). `tests/sass/compare.sh` checks it. On 2026-11-22, with the build of 0.1.3: the
+14 test cubins (five of them for sm_80) and PyTorch's 475, 489 of 489 the same (23,727
+functions, 30 refused), and the same at `VF_BORROW=8`. Before (2026-11-20): the same again when
+they are translated as the second translation at launch does (`VF_BORROW=5`: 42 refused); of
+the 157 distinct cubins that the PyTorch battery and the models made the layer translate, 122
+are among those 475, and the other 35 are the same at both settings; the held-out corpus, 3,108
+of 3,108 (70,978 functions, 10,986 refused).
 
 The validator checks what the reference translator writes; the comparison is what carries its
 verdict over to the translator that runs in the layer.
@@ -867,8 +900,8 @@ ended badly.
 
 ### Readings by others
 
-The translator, the validator and the tests have one author. Six readings of the code by
-others (2026-11-17 to 21) found faults that every check above had let through:
+The translator, the validator and the tests have one author. Seven readings of the code by
+others (2026-11-17 to 22) found faults that every check above had let through:
 
 - An instruction that becomes several must keep its wait. 949 `ULDC` of the translation of
   PyTorch had lost theirs, and with the schedule arranged for it two test kernels gave wrong
@@ -931,8 +964,25 @@ others (2026-11-17 to 21) found faults that every check above had let through:
 - In the launcher: `--map FILE` copied the lines of the file into a variable, where a
   relative path is no longer relative to the file, and dropped a last line without an end of
   line. And the launcher's own test suite ended with status 1 when all its checks had passed.
+- A review of the whole tree (2026-11-22), with runs on V100s. In the proxy: told 8.0 or more
+  with `VF_CAPABILITY`, PyTorch was given the translation of its sm_75 code, in which the
+  kernels that it chooses for 8.0 are stubs that write nothing: 24 attention cases of the
+  battery and 28 of the 32 models were wrong with no error, and told 9.0, kernels stopped the
+  GPU. No test ran PyTorch told 8.0. A caller is now told no later generation than the code it
+  is given (`docs/architecture.md`, section 4), and the battery and the models give the CPU's
+  results told 8.0 (section 6). The test programs of PyTorch lost a verdict that a kernel's
+  message came before (the battery counted 13 wrong cases where 24 were), could end with
+  status 0 on a wrong model, and waited for ever on a worker that filled its error pipe. The
+  validator did not follow the moves of a uniform predicate kept in the frame: a load of the
+  predicate into a register that the instruction reads passed with 0 problems (two
+  translations of a PyTorch cubin made wrong by hand); the rule of section 2 now follows them,
+  and the four controls `up_*` come from there. The translator does not make such a
+  translation. The review also found that the translation of sm_80 machine code has no
+  independent check (section 8), and faults of the proxy, the launcher, the installer and the
+  parsers that are not faults of a translation (`CHANGELOG.md`).
 
-Each was reproduced and corrected. They are listed because they measure the checks: the
+Each was reproduced and corrected, except the gap of the sm_80 translation, which section 8
+states. They are listed because they measure the checks: the
 validator, the comparison of the two translators and the programs had all passed.
 
 ## 8. What is not covered
@@ -957,8 +1007,28 @@ V100 with one driver. Another V100 is assumed to behave the same.
 3 lists as having no control of their own, and the controls that it lists as changing nothing
 in the code at hand.
 
+**The translation of sm_80 machine code.** Since 0.1.2 the layer also translates a subset of
+stripped sm_80 executables (`crates/vf-sass/src/translate/ampere.rs`, `reference/ampere.py`;
+`LIMITS.md`, "Kernels refused"). This path is **not independently validated**: the validator
+reads its sources with the descriptions of sm_75, and on the reference translator's own
+translation of the five sm_80 test cubins it reports problems that are not faults (it can
+neither pass nor usefully fail such a translation); `validate-corpus.sh` and `controls.sh`
+take sm_75 cubins only, no control exists for an Ampere lowering, and no corpus of sm_80 code
+is validated. What checks it: its own rules, written twice by one author (`compare.sh`: the
+two translators agree on the five sm_80 test cubins), unit tests, five cases of
+`tests/gpu/run.sh` (`cubin-sm80-*`: each kernel's result on a V100), and the engines that were
+run by hand with it (SGLang and FlashInfer, `docs/guides/sglang.md`). A review of 2026-11-22
+added two checks of its own, which found nothing wrong: the 221 forms that the path accepts,
+read by NVIDIA's disassembler as sm_80 and as sm_75 on 453 instruction words of real code
+and 4,420 drawn at random, with no mismatch; and 101 kernels written for it, built for sm_80
+without PTX and for sm_70, of which 28 are translated and give their sm_70 builds' results
+on a V100 at seven block sizes (73 are refused). Of 31,207 functions of 1,193 sm_80 cubins of
+PyTorch, cuBLAS, cuSOLVER and cuFFT, it translated 900 (2.9 %); some of its lowerings
+(`ATOM_ADD32`, `SHARED_INC`, `COPY128`, `COMMIT`, `PACK`) are reached only from code that Triton
+emits, and neither of those checks ran them.
+
 **Kernels that nothing runs.** The battery and the programs launch the kernels that their cases
-ask for; the others of the 23,663 functions translated in PyTorch's library are checked by the
+ask for; the others of the 23,664 functions translated in PyTorch's library are checked by the
 validator only. None of the kernels of the held-out corpus was run.
 
 **Programs and models.** vLLM and SGLang were run with Qwen2.5-0.5B-Instruct and three prompts,
@@ -966,9 +1036,9 @@ llama.cpp with Qwen2.5-0.5B-Instruct and with Qwen3.8-27B, ZML with Qwen3.5-9B. 
 another batch or another option may launch a kernel that no test ran, and with FlashInfer one of
 the five kernels that are refused (`LIMITS.md`). ZML's check compares no token with a reference.
 
-**What was not tried** is listed in `LIMITS.md`: more than one GPU, MPS, later
-drivers, other operating systems. Code for sm_80 and later that comes without PTX and without
-code for sm_75 is not translated: the translator reads sm_75.
+**What was not tried** is listed in `LIMITS.md`: translated kernels on several GPUs at once
+in one process, MPS, later drivers, other operating systems. Machine code for sm_86 and later
+that comes without PTX, without code for sm_75 and without code for sm_80 is not translated.
 
 **One author.** The validator was written by the author of the translator, and so were the
 tests and the choice of what to test. The readings of section 7 are the only ones by others, and

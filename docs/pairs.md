@@ -16,6 +16,11 @@ without sharing the planner's decisions. The words "must" below are what a trans
 satisfy and what the checker verifies on its own. Where the translator has a choice, the text
 says "the translator chooses".
 
+Both translators make pairs by default; `VF_PAIRS=0` turns them off, and every product is then
+translated by itself. `VF_PAIRS_SAY=1` makes the Python reference say on standard error where it
+gives pairs up and why. Pairs are made for sm_75 code only: the sm_80 forms that the translator
+accepts have no tensor-core instruction.
+
 ## 1. Terms
 
 - A lane is `L = 16h + 8sr + 4sc + 2k1 + k0` (five bits). Turing's layouts go by `g = L >> 2` and
@@ -254,7 +259,7 @@ identical and 41.2 % one unit of the last place away; Q 47.2 % and 41.7 %; the s
 1. The original runs aligned instructions with whole warps (PTX's rule for `.aligned`).
 2. The reference layouts of `tests/kernels/tcrun.c`, each checked on a V100.
 3. Rows of a matrix load aligned on 16 bytes when 128-bit loads are used (PTX's rule for
-   `ldmatrix`; an option turns the assumption off).
+   `ldmatrix`; `VF_ALIGNED_ROWS=0` turns the assumption off).
 4. The function is entered at its start only, as for every function with matrix instructions.
 5. Lanes that part at a conditional branch run together again only after a `BSYNC`: nothing else
    promises it, so a compiler that must have 32 lanes at an aligned instruction (1) cannot have a

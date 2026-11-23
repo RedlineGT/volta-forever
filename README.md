@@ -10,7 +10,7 @@ Run unmodified CUDA 13 applications on a Tesla V100 with a simple two-letter com
 
 ## Quick start
 
-You need a Tesla V100, the NVIDIA R580 driver, Linux x86-64 with glibc 2.34 or later, and `curl`, `python3` and `xz`. Ubuntu 22.04+ and Debian 12+ meet the glibc requirement. The installer places `vf` in `~/.local/bin` and downloads NVIDIA’s CUDA 12.9.2 cuBLAS.
+You need a Tesla V100, the NVIDIA R580 driver, Linux x86-64 with glibc 2.34 or later, and `curl`, `python3` and `xz`. Ubuntu 22.04+ and Debian 12+ meet the glibc requirement. The installer places `vf` in `~/.local/bin` and downloads NVIDIA’s CUDA 12.9.2 cuBLAS and nvJitLink.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nbald/volta-forever/main/install.sh | bash
@@ -28,13 +28,13 @@ vf venv .venv
 .venv/bin/python -c "import torch; print(torch.cuda.get_device_name())"
 ```
 
-Run `vf fetch --all` if the application needs more CUDA 12.9 libraries. Builds from `main` also fetch NVIDIA’s CUDA 12 NCCL for multi-GPU collectives. [Installation and launcher options](INSTALL.md)
+Run `vf fetch --all` if the application needs more CUDA 12.9 libraries. PyTorch on several GPUs needs NVIDIA’s CUDA 12 NCCL: `vf fetch --only libnccl` downloads it. [Installation and launcher options](INSTALL.md) · [Several GPUs](LIMITS.md#several-gpus-and-nccl)
 
 ## How it works
 
 CUDA 13 applications ship kernels for GPUs newer than Volta. VF intercepts module loads, retargets supported PTX and translates supported Turing (`sm_75`) machine code to Volta (`sm_70`). The NVIDIA driver runs the resulting kernels on the V100. VF caches translations and routes libraries such as cuBLAS to their CUDA 12.9 implementations.
 
-CUDA 13 programs see capability 7.5 by default. Applications with native Volta kernels keep 7.0. `VF_CAPABILITY=8.0 vf ./my_program` tells an application 8.0, so that it takes its Ampere PTX, as the engine guides below do. An application whose kernels VF can only give from their `sm_75` machine code, such as PyTorch, is still told 7.5, and VF says so. VF can emulate instructions used by BF16, FP8 and NVFP4 kernels. Builds from `main` also handle selected `sm_80` machine code and PTX retained inside a cubin. When a kernel needs an unsupported instruction, VF reports the kernel name and the reason. [Architecture](docs/architecture.md) · [Instruction emulation](docs/emulations.md) · [Supported images and limits](LIMITS.md)
+CUDA 13 programs see capability 7.5 by default. Applications with native Volta kernels keep 7.0. `VF_CAPABILITY=8.0 vf ./my_program` tells an application 8.0, so that it takes its Ampere PTX, as the engine guides below do. An application whose kernels VF can only give from their `sm_75` machine code, such as PyTorch, is still told 7.5, and VF says so. VF can emulate instructions used by BF16, FP8 and NVFP4 kernels. VF also uses PTX retained inside a cubin and translates selected `sm_80` machine code; that translation is not checked by the independent validator. When a kernel needs an unsupported instruction, VF reports the kernel name and the reason. [Architecture](docs/architecture.md) · [Instruction emulation](docs/emulations.md) · [Supported images and limits](LIMITS.md)
 
 ## Inference engines
 
@@ -59,7 +59,7 @@ Compatibility applies to the listed checkpoint and upstream engine on a native V
 
 ## Validation
 
-On V100 with driver 580.178.04, PyTorch matched the CPU on all 924 operations with a CPU reference and all 32 small models. vLLM and SGLang matched the CPU reference token for token on greedy Qwen2.5-0.5B tests. Selected low-precision operations were also checked against an RTX 5090. Coverage depends on the kernel. [Validation results](docs/validation.md) · [Performance measurements](docs/performance.md) · [Known limits](LIMITS.md)
+On V100 with driver 580.178.04, PyTorch matched the CPU on all 924 operations with a CPU reference and all 32 small models, also with `VF_CAPABILITY=8.0`. vLLM and SGLang matched the CPU reference token for token on greedy Qwen2.5-0.5B tests. Selected low-precision operations were also checked against an RTX 5090. Coverage depends on the kernel. [Validation results](docs/validation.md) · [Performance measurements](docs/performance.md) · [Known limits](LIMITS.md)
 
 ## Build and test
 

@@ -98,6 +98,13 @@ modified copy causes error 103, `cudaErrorSoftwareValidityNotEstablished`), so t
 are forwarded untouched. Code is loaded through the public functions
 (`cuLibraryLoadData`, `cuModuleLoadData` and their variants).
 
+In a machine that also has a later card, a module loaded into a context on that card
+(`cuModuleLoadData` and its variants, `cuModuleLoad`, `cuLinkAddData`) is given to the
+driver as the program gave it: the proxy asks the driver which device the current
+context is on. A library (`cuLibraryLoadData`) is loaded for every context of the
+process, the V100's included, so its code is adapted wherever it is loaded; a fat binary
+keeps the entries of the other cards.
+
 ### Fat binaries and what is chosen
 
 A program gives the driver a pointer to a fat-binary wrapper, a fat binary, a cubin
@@ -167,9 +174,22 @@ For details of the translation itself, see `docs/translator.md`.
 
 A kernel that cannot run on the GPU is refused when the program asks for it
 (`cuLibraryGetKernel` or `cuModuleGetFunction` returns
-`CUDA_ERROR_INVALID_PTX`, 218), with the reason on the console. The other kernels
+`CUDA_ERROR_INVALID_PTX`, 218, and writes NULL in the handle, as NVIDIA's driver does for a
+name it does not have), with the reason on the console. The other kernels
 of its module load and run. Module and library enumeration return the usable handles, and
 the corresponding count includes only those entries.
+
+Through the driver's linker the same holds: what was refused or emulated in each input of
+`cuLinkAddData` is kept for the link, given at `cuLinkComplete` to the image the link made
+(known by its length and a hash of its bytes, so that a copy of it loaded later is known
+too), and dropped at `cuLinkDestroy`. Each input is adapted alone: a kernel that calls a
+function of another input that cannot run is not refused, and traps when it is launched.
+Inputs given with `cuLinkAddFile` are not adapted.
+
+The first refused kernel of NCCL in a process (a name that starts with `ncclDevKernel_`,
+`ncclSymkDevKernel_` or `ncclKernel_`) also makes the proxy say, at the default log level,
+that NCCL's CUDA 12 build is what the program needs and that `vf fetch --only libnccl`
+downloads it (`LIMITS.md`, "Several GPUs and NCCL").
 
 There are two origins of refusal:
 
@@ -233,10 +253,30 @@ What a program sees does not change: the same kernels are refused at the same ca
 with the same message, the same emulation warnings appear at the same moment.
 
 The cache directory must be owned by the user and not writable by group or others
-(mode 0700); files are created under a temporary name (mode 0600) and renamed, never
-over an existing file; each file is opened without following links and must, as
-opened, be a regular file of the user. The default limit is 2 GB
+(the layer makes it with mode 0700); files are written under a temporary name of their
+own (created new, mode 0600) and renamed into place; a write that fails removes its
+temporary file, and the first use of the directory in a process removes those that writes
+left more than ten minutes before. Each file is opened without following links and must,
+as opened, be a regular file of the user. The default limit is 2 GB
 (`VF_PROXY_CACHE_MAX`).
+
+### When modules go
+
+What the proxy keeps of a module (its adapted image, its kernels and their refusals, the
+original kept for a second translation, the second translation) is dropped when the
+program unloads it (`cuModuleUnload`, `cuLibraryUnload`), and when its context goes:
+`cuCtxDestroy`, `cuDevicePrimaryCtxReset`, and the last `cuDevicePrimaryCtxRelease`, by
+both names of each (`crates/vf-proxy/src/contexts.rs`). Nothing is unloaded in the driver
+then: it dropped them itself. A library (`cuLibraryLoadData`) is in every context and stays
+until it is unloaded; only the modules that the driver gives for it in a context go with
+that context. A green context destroyed with `cuGreenCtxDestroy` is not seen: its modules are
+forgotten when the driver gives their handles again. An unload waits for a launch from
+the module's second translation and for a setting being given to it.
+
+The reports at exit (`VF_STATS`, `VF_PROFILE`, the summaries of emulated instructions and
+of second translations) are printed by the process that loaded the layer: a child made by
+`fork()` prints none, so that a child that ends with `exit()` cannot wait for ever on a
+lock that another thread of its parent held at the fork.
 
 Measured on one Tesla V100 (driver 580.178.04): llama.cpp's 48-token generation takes
 1.3 seconds with a warm cache and 6.9 seconds with a cold cache. For a stock PyTorch
@@ -255,7 +295,9 @@ be told the real 7.0, so that it uses them.
 The proxy answers by caller (`crates/vf-proxy/src/callers.rs`). When a program or
 library queries the compute capability (`cuDeviceGetAttribute`,
 `cuDeviceComputeCapability`), the hooked function reads the return address to identify
-which loaded file is asking (through `dladdr`), and classifies it:
+which loaded file is asking (through `dladdr`; for the main program, the file that
+`/proc/self/exe` names, so that the answer does not depend on how it was started), and
+classifies it:
 
 | Caller | Told | Why |
 |---|---|---|
@@ -267,7 +309,9 @@ which loaded file is asking (through `dladdr`), and classifies it:
 | Unidentified or unreadable caller | The real 7.0 by default | The proxy cannot classify its GPU code. |
 
 On a V100, `VF_CAPABILITY=7.0`, `8.0` or `12.0` explicitly sets the answer for
-direct clients, older CUDA runtimes and programs built for later GPUs. A caller
+direct clients, older CUDA runtimes and programs built for later GPUs. A value that is
+not `<major>.<minor>`, or that is below 7.0, is not used, and the proxy says so once
+when it is loaded. A caller
 with embedded Volta code retains 7.0 even with an explicit override. A caller is
 not told a later generation than the machine code it is given: when the code embedded
 in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
@@ -289,7 +333,9 @@ proxy without the launcher gets the physical capability by default.
 vLLM also asks NVML for the compute capability before creating a CUDA context. Under
 `vf` or `vf venv`, the audit library binds `nvmlDeviceGetCudaComputeCapability` to a
 wrapper. It calls NVIDIA's function with the original device handle and, on success
-for an sm_70 GPU, reports 7.5 by default or the value of `VF_CAPABILITY`. This covers
+for an sm_70 GPU, reports 7.5 by default or the value of `VF_CAPABILITY`, to every
+caller: the limit above, by the code a caller is given, is not applied there, so told 8.0
+a program that reads NVML and a CUDA runtime that is told 7.5 give it two answers. This covers
 Python's `ctypes` lookup via `dlsym` and native calls through the ELF procedure
 linkage table. Native clients compiled with `-fno-plt` can read the physical value
 through a direct data relocation. Running outside VF or with `vf --no-audit` also
@@ -477,7 +523,10 @@ nvJitLink API and serves it with nvJitLink 12.9.2:
   (the 12.9.2 ptxas limit) and `.target` to sm_70, Turing-only instructions rewritten.
 - Raw cubins must target sm_70. For host objects and static archives the CUDA 12.9 linker
   selects their embedded device code for the requested target.
-- Options only in 13.5 (`-Ofc`, `-nvvm-latest`, `-no-cache`) are dropped silently.
+- Options only in 13.5 (`-Ofc`, `-nvvm-latest`, `-no-cache`, `-device-stack-protector`) are
+  dropped silently.
+- A null array of options, a null option, and an input of no bytes or at a null address are
+  refused with `NVJITLINK_ERROR_INVALID_INPUT`, as nvJitLink 12.9.2 does.
 
 
 ### The launcher
@@ -486,7 +535,7 @@ nvJitLink API and serves it with nvJitLink 12.9.2:
 together for one command: the library path (the proxy and the nvJitLink adapter, the
 forwarding libraries, the CUDA 12.9.2 libraries), the audit library with a table that has, for
 each forwarding library, its name and the name of the library that it calls, and the two
-variables that say the layer is there. It sets nothing else. The audit table also selects the VF nvJitLink adapter when an application bundles CUDA 13's linker under the same name and gives that directory priority through an ELF RPATH. A forwarding library is used
+variables that say the layer is there; for the command it runs, also `VF_CUDA12` and, for a Bazel program, `RUNFILES_DIR` (`INSTALL.md`, "What the launcher sets"). It keeps the audit libraries that `LD_AUDIT` already names, after its own, and refuses an installation or a CUDA 12.9.2 directory whose path has a `:`. The audit table also selects the VF nvJitLink adapter when an application bundles CUDA 13's linker under the same name and gives that directory priority through an ELF RPATH. A forwarding library is used
 only when the CUDA 12.9.2 library that it calls is there: without it the program keeps its
 own library of that name, whose kernels the layer translates like the rest of the program's
 code (cuBLAS is the one that a program cannot keep: the translator refuses some kernels of
@@ -499,26 +548,22 @@ the launcher's use and what it does by hand.
 
 ## 7. Switches and diagnostics
 
-The layer is controlled by environment variables. The ones that affect
-the behaviour of the proxy, the audit library and the nvJitLink adapter are listed
-below by purpose. For the full reference with defaults, see `INSTALL.md`.
+The layer is controlled by environment variables. `INSTALL.md` ("Environment variables") has
+each of them once, with its default, its values and the library that reads it; here they are
+grouped by what they control.
 
 ### Logging
 
-| Variable | Purpose |
-|---|---|
-| `VF_LOG_LEVEL` | 0: fatal only. 1 (default): kernels refused, emulated, images adapted. 2: what was adapted. 3: everything. |
-| `VF_LOG` | Log to a file instead of standard error. |
-| `VF_EMULATION_WARNINGS` | How many kernels with emulated instructions are listed (default 20; 0: none). |
+`VF_LOG_LEVEL`, `VF_LOG`, `VF_EMULATION_WARNINGS`: what the proxy, the audit library and the
+nvJitLink adapter say, and where.
 
 ### Translation control
 
-| Variable | Purpose |
-|---|---|
-| `VF_TRANSLATE` | `0` disables machine-code translation. `first` prefers machine code when PTX also exists. `force`: translate even where sm_70 code exists. |
-| `VF_BORROW` | Where the translation takes registers it needs. `7` (default): above the program's wherever that works; for a kernel refused for registers, among the program's own that hold nothing, then in local memory, kernels with products included. `0`: above the program's only. `9`: for CUDA graphs, try to retain each independent entry's original maximum launchable block size when translating its module. |
-| `VF_PAIRS` | `0`: each Turing tensor-core product is done by itself in machine code; by default they are done two by two on whole rows where the program loads them that way. |
-| `VF_ALIGNED_ROWS` | `0`: do not assume programs keep the rows `ldmatrix` reads at multiples of 16; test addresses at run time (slower emulated tensor-core kernels). |
+`VF_TRANSLATE` (whether machine code is translated, and where PTX or sm_70 code exists too),
+`VF_BORROW` (where the translation of machine code takes the registers it needs:
+`docs/translator.md`, "Registers"), `VF_PAIRS` (pairs of products on whole rows:
+`docs/pairs.md`), `VF_ALIGNED_ROWS` (whether the rows that `ldmatrix` reads are taken to be
+at multiples of 16 bytes).
 
 For a CUDA graph that fails at instantiation with `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`,
 try `VF_BORROW=9 vf ./program`. A graph can record a launch before the driver checks its
@@ -531,37 +576,30 @@ placement restores the full size, the driver receives the default translation.
 
 ### Image adaptation
 
-| Variable | Purpose |
-|---|---|
-| `VF_ADAPT` | `0`: forward images unchanged. |
-| `VF_LAZY` | `0`: compile whole modules when loaded, not each kernel when asked for. |
-| `VF_CAPABILITY` | Compute capability reported to callers without Volta code (e.g. `8.0`). The PTX taken from a program is then the PTX for that capability; a caller whose code runs from sm_75 machine code is still told 7.5 (section 4). |
-| `VF_CAPABILITY_ALL` | `1`: `VF_CAPABILITY` is told also to the callers whose code runs from machine code of an earlier generation (section 4). |
-| `VF_FIT` | `0`: a launch that the driver refuses for registers is refused to the program. |
-| `VF_FIT_SHARED` | `1`: if a V100 rejects an oversized dynamic shared-memory opt-in, retry the setter at the device limit minus the kernel’s static shared memory. Kernel launches still have to fit. |
+`VF_ADAPT` (images given to the driver unchanged), `VF_LAZY` (each kernel compiled when it is
+asked for, or whole modules when they are loaded: section 3), `VF_CAPABILITY` and
+`VF_CAPABILITY_ALL` (what callers are told, and so which PTX is taken: section 4), `VF_FIT`
+and `VF_FIT_SHARED` (the second translation at launch, and the retry of a dynamic shared
+memory setting at the V100's limit: section 5), and the opt-in BF16 paths of the PTX
+rewriting, `VF_BF16_TC_GROUPS`, `VF_BF16_TC_TILES`, `VF_BF16_COLUMN`, `VF_BF16_ROW`
+(`docs/emulations.md`).
 
 ### Cache
 
-| Variable | Purpose |
-|---|---|
-| `VF_PROXY_CACHE` | Directory for the proxy's cache (`0` to disable). Default: `~/.cache/volta-forever/proxy`. |
-| `VF_PROXY_CACHE_MAX` | Maximum size of the cache in bytes (default 2 GB). |
+`VF_PROXY_CACHE`, `VF_PROXY_CACHE_MAX`: where the cache of section 3 is, and how large it may
+grow.
 
 ### Diagnostics
 
-| Variable | Purpose |
-|---|---|
-| `VF_STATS` | `1`: print call counts and the most launched kernels at exit. |
-| `VF_TIMING` | `1`: print the time of each stage for every module and kernel. |
-| `VF_PROFILE` | Write a per-kernel profile to `FILE.PID` at exit. Each launch is synchronised on its stream; the time is what the host waits after the launch call returns. A profile is not a benchmark. |
-| `VF_TRACE_LAUNCH` | `1`: log the kernel launches the driver refuses. |
-| `VF_TRANSLATE_DUMP` | A directory: every cubin given to the translator is written there as received, for offline validation. |
+`VF_STATS` (call counts and the kernels launched most), `VF_TIMING` (the time of each stage),
+`VF_PROFILE` (a profile of each kernel; every launch is synchronised on its stream, so a
+profile is not a benchmark), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
+`VF_TRANSLATE_DUMP` (every cubin given to the translator, for offline validation),
+`VF_BORROW_SAY` (what the translator borrowed), `VF_REAL_LIBCUDA` (where NVIDIA's library is).
 
 ### Audit and nvJitLink
 
-| Variable | Purpose |
-|---|---|
-| `VF_AUDIT_MAP_FILE` | Path to a map file for library substitution (one `name=path` per line). |
-| `VF_AUDIT_MAP` | Map entries in the environment, colon-separated; highest priority. |
-| `VF_JITLINK_REAL` | Path to the nvJitLink 12.9 library (default: `libnvJitLink.so.12` as the loader finds it). |
-| `VF_JITLINK_DUMP` | Directory to receive every PTX input as the program gave it. |
+`VF_AUDIT_MAP`, `VF_AUDIT_MAP_FILE` (the substitutions of the audit library), `VF_JITLINK_REAL`,
+`VF_JITLINK_REAL_DIR` (the nvJitLink 12.9 behind the adapter), `VF_JITLINK_DUMP` (its PTX
+inputs as the program gave them), and for the forwarding libraries `VF_FWD_<KEY>` and
+`VF_FWD_VERBOSE`.

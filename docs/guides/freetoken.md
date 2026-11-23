@@ -16,7 +16,7 @@ FreeToken needs a CUDA 13 compiler for its kernels. If `nvcc --version` reports 
 
 ## 2. VF
 
-Run the installer as your usual user. It fetches the CUDA 12.9.2 libraries used by volta-forever.
+Run the installer as your usual user. It runs `vf fetch`, which downloads NVIDIA’s CUDA 12.9.2 cuBLAS and nvJitLink.
 
 ```sh
 sudo apt-get update

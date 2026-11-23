@@ -35,15 +35,20 @@ where it is not from the build of this release. `docs/` says how each figure was
 
 ## Kernels refused
 
-A kernel that the layer cannot run is refused when the program asks for it: the program gets an
-error that names the kernel, and a line on standard error says why. The other kernels of its
-module load and run.
+A kernel that the layer cannot run is refused when the program asks for it: the lookup
+(`cuModuleGetFunction`, `cuLibraryGetKernel`) returns `CUDA_ERROR_INVALID_PTX` (218) and leaves
+NULL in the handle, and a line on standard error names the kernel and says why. The other
+kernels of its module load and run. The same holds for the image that the driver's linker makes
+(`cuLinkAddData`, `cuLinkComplete`), with two exceptions: a kernel that calls a function of
+another input of the link that cannot run is not refused, and traps when it is launched; and
+inputs given with `cuLinkAddFile` are not adapted at all.
 
 **PyTorch 2.14.0.** Of the 23,693 functions for sm_75 in the 475 units of machine code of its
-library, 23,663 are translated (99.9 %) and 30 are refused: 10 for a branch through a uniform
+library, 23,664 are translated (99.9 %) and 29 are refused: 10 for a branch through a uniform
 register, 6 for the instruction `I2IP`, 4 for a call whose return address is not given the
-usual way, 4 for a conversion of a uniform register, 2 for `IMAD.HI.X`, 2 for a jump table, 2
-for want of registers. None of them is reached by the tests below.
+usual way, 4 for a conversion of a uniform register, 2 for `IMAD.HI.X`, 2 for a jump table, 1
+for want of registers (`vf translate` of 0.1.3 on each unit, 2026-11-23). None of them is
+reached by the tests below.
 
 Of 925 operations compared with the CPU (`tests/gpu/torch.sh`): **924 give the same result**,
 1 is skipped (the CPU does not do it), none is refused, none is wrong. Of 32 small whole models
@@ -57,13 +62,16 @@ as that of 2.14.0 was: the figures above and the timings below are those of 2.14
 **FlashInfer** (SGLang's default attention). Of its eighteen prefill kernels
 (`BatchPrefillWithPagedKVCache` and `BatchPrefillWithRaggedKVCache`, nine each), thirteen are
 translated and five are refused: three that name 255 registers, two for an instruction that
-the translator does not have (`LEA.HI` with a uniform register).
+the translator did not have (`LEA.HI` with a uniform register). These are the counts of
+2026-11-20; the rule for `LEA.HI` with a uniform register came on 2026-11-21 (in 0.1.2), and
+these kernels were not counted again.
 
 **Other libraries.** The machine code of 42 libraries of CUDA 13.5, cuDNN, NCCL and others was
 translated and checked instruction by instruction, not run (`docs/validation.md`, "The corpora"):
 of 3,108 units, 3,105 are translated in whole or in part; three are not read at all (a section
 table that points outside the file; two sections of code of the same name). In these libraries
-more functions are refused than in PyTorch (10,986 of 70,978); cuFFT's kernels for double
+more functions are refused than in PyTorch (10,665 of 70,975, `vf translate` of 0.1.3,
+2026-11-23); cuFFT's kernels for double
 precision are among them (relocations that the translator cannot carry with their instructions).
 The CUDA 13 libraries are not meant to be translated: the layer puts the CUDA 12.9 builds, which
 have code for Volta, behind their names (`INSTALL.md`).
@@ -74,7 +82,7 @@ before compiling that PTX for Volta. This covers standalone cubins from Triton a
 fat binaries. For sm_75, VF also tries retained PTX when its default machine-code translation
 refuses every kernel in the image.
 
-Builds from `main` also translate a subset of stripped `sm_80` executables. VF checks each function's
+Since 0.1.2, VF also translates a subset of stripped `sm_80` executables. VF checks each function's
 instruction forms, branches and memory addressing. Global loads and stores, including 128-bit
 accesses, require the CUDA system descriptor on every path. VF lowers the supported 16-byte
 global-to-shared copy to a guarded Volta load and store and waits for the completed group.
@@ -83,7 +91,10 @@ alignment kernels. The router uses shared counter increments and GPU-scope 32-bi
 FlashInfer uses the same translator for 2D RMSNorm, fused residual RMSNorm and 3D query/key
 normalization. For compiler-generated warp helpers, VF checks the call target, return register
 and descriptor writes. Unsupported functions are refused individually. Other stripped targets above
-`sm_75`, including `sm_86`, still require compatible PTX or a second supported image.
+`sm_75`, including `sm_86`, still require compatible PTX or a second supported image. Of 31,207
+functions in 1,193 sm_80 cubins of PyTorch, cuBLAS, cuSOLVER and cuFFT, 900 (2.9 %) were
+translated (2026-11-22). **This translation is not checked by the independent validator**, which
+reads sm_75 code only: what checks it, and what does not, is in `docs/validation.md`, section 8.
 
 **PTX.** A kernel that uses an instruction with no equivalent on Volta is refused: clusters of
 blocks, Hopper's barriers, tensor maps (`docs/emulations.md`, "Other instructions").
@@ -195,6 +206,28 @@ bytes, as the PTX manual requires. A program that does not stops with a misalign
 fault (error 716); `VF_ALIGNED_ROWS=0` makes the layer test the addresses, with slower
 emulated kernels.
 
+## The capability told with `VF_CAPABILITY`
+
+`VF_CAPABILITY=8.0` (or later) is for programs whose kernels are PTX, which the layer then takes
+for that capability: llama.cpp, TensorFold, ZML's own library, and the engines whose guides set
+it. A caller whose code the layer can only give from its sm_75 machine code (PyTorch, cuDNN,
+cuFFT, cuSOLVER, and the CUDA runtime that such a library uses) is still told 7.5, with one line
+at the default log level: told 8.0, it would choose kernels that its sm_75 code has as stubs,
+which write nothing, and told 9.0, some that stop the GPU (`docs/architecture.md`, section 4).
+What that does not cover:
+
+- `VF_CAPABILITY_ALL=1` tells such callers the value asked for all the same. A PyTorch operation
+  that chooses its kernel by the capability (attention; convolutions through cuDNN) then gives
+  wrong results with no error. It is only for a program that does not launch those kernels, as
+  SGLang with the settings of its guide.
+- NVML, answered by the audit library, reports the value asked for to every caller: told 8.0, a
+  program that reads NVML (vLLM does) and a CUDA runtime that is told 7.5 give it two answers.
+- What a caller is told is decided when it first asks. A library loaded after that (an extension
+  opened once CUDA is in use) is not looked at, nor a library that opens the CUDA runtime with
+  `dlopen` instead of naming it among the libraries it needs.
+- A value that is not `<major>.<minor>` (`8`, `80`, `sm_80`), or that is below 7.0, is not used,
+  and the layer says so once.
+
 ## CUDA graphs
 
 A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ server used CUDA graphs for both prefill and decode. A graph can report error 701 when it is instantiated or replayed if the translated kernel needs too many registers for the recorded block size. For translated machine code, `VF_BORROW=9 vf …` can preserve a source block size that would otherwise be lost. Shared-memory limits still apply. [SGLang measurements](docs/guides/benchmarks/sglang-default-operators.json) · [GPU validation](docs/validation.md#cuda-graph-replay)
@@ -230,7 +263,13 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
 
 ## What was not tried
 
-- Running translated compute kernels concurrently on multiple devices within one process
+- A suite of `tests/` with several GPUs in one process. The review of 2026-11-22 ran PyTorch on
+  four V100s in one process, and the driver API from four threads on four devices, with no wrong
+  result; no script of the repository does.
+- A machine with a V100 and a later GPU. Modules loaded into a context on the later card are
+  given to the driver as the program gave them; this is tested with a stand-in for the driver
+  only. Libraries (`cuLibraryLoadData`) are adapted for the V100 in every context, so a kernel
+  refused for the V100 is refused on the later card too.
 - MPS (the Multi-Process Service)
 - Driver 580.196.07 and later drivers of the 580 branch (everything was run with 580.178.04)
 - Windows; ARM

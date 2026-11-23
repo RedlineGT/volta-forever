@@ -29,12 +29,15 @@ curl -fsSL https://raw.githubusercontent.com/nbald/volta-forever/main/install.sh
 run it as a file. What it does, in order:
 
 1. checks the machine: Linux, x86-64, glibc 2.34 or later, and the tools it uses (`tar`,
-   `gzip`, `sha256sum`, `curl` or `wget`);
+   `gzip`, `sha256sum`, `mktemp`, `flock`, `curl` or `wget`);
 2. downloads the archive of its version and the file `SHA256SUMS` from the project's releases,
-   and stops if the archive's SHA-256 is not the one that the file gives;
-3. unpacks the archive under `~/.local/share/volta-forever` (`/opt/volta-forever` for root)
-   and links `vf` and `volta-forever` in `~/.local/bin` (`/usr/local/bin` for root). The CUDA
-   12.9.2 libraries that an earlier installation downloaded are kept;
+   over HTTPS only, redirections included, and stops if the archive's SHA-256 is not the one
+   that the file gives;
+3. unpacks the archive under `~/.local/share/volta-forever` (`$XDG_DATA_HOME/volta-forever`
+   when that is set; `/opt/volta-forever` for root) and links `vf` and `volta-forever` in
+   `~/.local/bin` (`/usr/local/bin` for root). The CUDA 12.9.2 libraries that an earlier
+   installation downloaded are kept, and what an installer that was killed left there more
+   than a day before is removed;
 4. runs `vf fetch` (section 2: NVIDIA's cuBLAS, from NVIDIA's servers), when `python3` and `xz`
    are there; when one is not, it says which and leaves that step to you;
 5. runs `vf doctor`, and says so if the directory of the commands is not on your `PATH`.
@@ -48,7 +51,7 @@ It installs no package of the system, asks for no password and writes nowhere el
 | `VF_INSTALL_FETCH=0` | do not run `vf fetch` |
 | `VF_INSTALL_BASE` | where the archive and `SHA256SUMS` are taken from (a mirror, a directory served locally): an `https://` URL, or a `file://` one; `VF_INSTALL_ALLOW_HTTP=1` takes an `http://` one too |
 
-Reinstalling or switching releases keeps existing `vf venv` environments pinned to their installed launcher. Releases share one `cuda-12.9.2` directory under `VF_PREFIX`. When upgrading an older installation, this path points to its existing CUDA directory so manual `vf fetch` commands share the same downloads. Keep that directory when removing individual old versions.
+Reinstalling or switching releases keeps existing `vf venv` environments pinned to their installed launcher: with such an environment activated, `vf version` and `vf doctor` say when it runs another release than theirs, and `vf venv DIR` makes it run through the release of that `vf`. Releases share one `cuda-12.9.2` directory under `VF_PREFIX`. When upgrading an older installation, this path points to its existing CUDA directory so manual `vf fetch` commands share the same downloads. Keep that directory when removing individual old versions.
 
 To remove it: delete the directory of `VF_PREFIX` and the two links.
 
@@ -79,8 +82,11 @@ vf fetch --all     # also cuFFT, cuSOLVER, cuSPARSE, cuRAND, NPP, nvJPEG, NVRTC 
 NCCL comes from NVIDIA's `nvidia-nccl-cu12` wheel. VF verifies its SHA-256 and installs the shared library and its license into the same tree. [NVIDIA NCCL on PyPI](https://pypi.org/project/nvidia-nccl-cu12/2.32.6/)
 
 It needs `python3` and GNU `tar` (and uses `aria2c` when there is one). It unpacks the shared
-libraries and NVIDIA's licence, nothing else, and removes each archive once it is unpacked. It
-can be run again: what is unpacked already is not downloaded again. `--only REGEX` chooses the
+libraries and NVIDIA's licence, nothing else, and removes each archive once it is unpacked.
+Each archive, and the NCCL library, is unpacked in a staging directory and moved into place: a
+fetch that fails or is stopped (Ctrl-C, SIGTERM, SIGHUP) leaves the files that were there before,
+and the next one removes what it left. It can be run again: what is unpacked already is not
+downloaded again. `--only REGEX` chooses the
 packages of NVIDIA's manifest by name, `--to DIR` another directory (then tell the launcher
 where: `--cuda12 DIR/lib`, or `VF_CUDA12=DIR/lib`).
 
@@ -101,7 +107,9 @@ with which:
 
 If you already have the CUDA 12.9 toolkit installed, the launcher finds it in
 `/usr/local/cuda-12.9/lib64`; elsewhere, name its library directory with `--cuda12` or
-`VF_CUDA12`. Section 4 has the command that `fetch` runs, for those who would rather run it
+`VF_CUDA12`. The launcher refuses a directory whose path has a `:` (the lists it passes on are
+separated by colons): name it by a link without one. `vf doctor` says which directory it took
+and why. Section 4 has the command that `fetch` runs, for those who would rather run it
 themselves.
 
 ## 3. Run a program
@@ -115,10 +123,11 @@ vf llama-completion -m model.gguf -p "Hello" -n 48 -ngl 99
 
 The launcher sets the environment for that command and runs it: nothing stays in the shell,
 and the exit status is the command's. `vf doctor` says what it finds and what is missing (the
-layer's files, the card, the driver, the C library, the CUDA 12.9.2 libraries and the one that
-each forwarding library calls), and ends with a status other than 0 when something required
-is missing (of the CUDA 12.9.2 libraries, cuBLAS is required; it names the others that are
-not there in one line).
+layer's files, the card, the driver, the C library, which CUDA 12.9.2 directory it took and
+why, the library that each forwarding library calls, the CUDA 12 NCCL, and the
+`LD_LIBRARY_PATH` and `LD_AUDIT` that a command would get), and ends with a status other than
+0 when something required is missing (of the CUDA 12.9.2 libraries, cuBLAS is required; it
+names the others that are not there in one line).
 
 **Python: pip and virtual environments.** pip looks at neither the card nor the CUDA of the
 system: install the ordinary wheels for CUDA 13 (`pip install torch --index-url
@@ -164,7 +173,7 @@ eval "$(vf env)"
 | `vf doctor` | check the installation |
 | `vf inspect`, `extract`, `adapt`, `translate` | the offline tool (`bin/vf-translate`; "Tools", below) |
 | `vf version`, `help` | |
-| `--cuda12 DIR` | the directory of the CUDA 12.9.2 libraries (else `VF_CUDA12`, then `cuda-12.9.2/lib` of the archive, then `/usr/local/cuda-12.9/lib64`) |
+| `--cuda12 DIR` | the directory of the CUDA 12.9.2 libraries (else `VF_CUDA12`, then `cuda-12.9.2/lib` of the installation, then in a source tree `toolkits/cuda-12.9.2/lib`, then `/usr/local/cuda-12.9/lib64`); a path with a `:` is refused |
 | `--map FILE` | substitutions of your own, which come before the launcher's (the format of section 4, B) |
 | `--no-audit` | do not set `LD_AUDIT` (a program that finds all its libraries through the loader does without it) |
 
@@ -172,17 +181,22 @@ eval "$(vf env)"
 
 - `LD_LIBRARY_PATH`: the layer's `lib` (the proxy `libcuda.so.1`, the nvJitLink adapter), its
   `forward` (the libraries with CUDA 13's names), the CUDA 12.9.2 directory, then what was there.
-- `LD_AUDIT` = the audit library (then those that were in `LD_AUDIT`, which see the names it
-  chose), and `VF_AUDIT_MAP` = its table of substitutions: for each
-  forwarding library whose CUDA 12.9.2 library is there, its name to the forwarding library,
-  and the name of the CUDA 12.9.2 library that it calls to that library. So a program that
+- `LD_AUDIT` = the audit library, then those that were in `LD_AUDIT` (an audit library of the
+  layer is not named twice): they see the names that it chose, and have the last word. And
+  `VF_AUDIT_MAP` = its table of substitutions: for each forwarding library whose CUDA 12.9.2
+  library is there, its name to the forwarding library, and the name of the CUDA 12.9.2
+  library that it calls to that library; `libnvJitLink.so.13` to the layer's nvJitLink
+  adapter; `libnccl.so.2` to NCCL's CUDA 12 build when it was fetched. So a program that
   carries CUDA 13 libraries of its own and finds them by a recorded path (a PyTorch wheel) or
   opens them by absolute path gets the forwarding ones instead. Entries that you already have
-  in `VF_AUDIT_MAP` stay first.
+  in `VF_AUDIT_MAP` stay first, and the launcher run under itself (`vf vf ...`, or after
+  `eval "$(vf env)"`) does not add its own again.
 - `VOLTA_FOREVER` (the version) and `VOLTA_FOREVER_HOME` (the archive's directory): how a
   script can tell that it runs through the launcher.
+- For the command it runs (not in what `vf env` prints): `VF_CUDA12`, the CUDA 12.9.2
+  directory it took, and, for a Bazel program, `RUNFILES_DIR` (below).
 
-A Bazel program that ships a CUDA toolkit in its runfiles can invoke an external assembler through an absolute path. When you start it with `vf`, the launcher prepares a private runfiles directory with the VF assembler and links to the program's other resources. It uses the local temporary directory when the user's cache cannot store private links. Install NVIDIA's `cuda-nvcc-12-9` package for this path. VF looks for `bin/ptxas` beside the selected CUDA 12.9 libraries and under `/usr/local/cuda-12.9`. Set `VF_PTXAS_REAL` to the absolute path of the CUDA 12.9 assembler to select another installation. For a file on disk, run `vf ptxas -arch=sm_80 kernel.ptx -o kernel.cubin` to produce code for sm_70.
+A Bazel program that ships a CUDA toolkit in its runfiles can invoke an external assembler through an absolute path. When you start it with `vf`, the launcher prepares a private runfiles directory with the VF assembler and links to the program's other resources. It uses the local temporary directory when the user's cache cannot store private links. Install NVIDIA's `cuda-nvcc-12-9` package for this path. VF looks for `bin/ptxas` beside the selected CUDA 12.9 libraries and under `/usr/local/cuda-12.9`. Set `VF_PTXAS_REAL` to the absolute path of the CUDA 12.9 assembler to select another installation. For a file on disk, run `vf ptxas -arch=sm_80 kernel.ptx -o kernel.cubin` to produce code for sm_70. `vf ptxas` reads the options of `ptxas` 13.5 that take a value as `ptxas` does, ends with status 255 on the errors it finds itself, as `ptxas` does, and passes on the assembler's messages with the names of your files. The private runfiles directories are kept under `$XDG_CACHE_HOME/volta-forever/runfiles-v1` (`~/.cache/...`).
 
 **When only some of the CUDA 12.9.2 libraries are there** (cuBLAS alone, after `vf fetch`
 without `--all`), a forwarding library that has nothing to forward to is not used: it is left
@@ -220,11 +234,13 @@ python3 scripts/fetch-redist.py \
     --only '^(libcublas|libcufft|libcusolver|libcusparse|libcurand|libnpp|libnvjpeg|cuda_nvrtc|libnvjitlink)$'
 ```
 
-The manifest argument can be a local JSON file or an https:// URL. The script downloads and
-verifies (SHA-256) the archives listed in it, then unpacks them into `cuda-12.9.2/`, headers
-and static libraries included, and keeps the archives (6.8 GB unpacked for these nine).
-`vf fetch` adds `--runtime` (the shared libraries and the licence alone) and `--discard` (each
-archive removed once unpacked).
+The manifest argument can be a local JSON file or an https:// URL (an http:// one is refused
+unless `--allow-http` is given: the manifest holds the SHA-256 that the archives are checked
+against). The script downloads and verifies (SHA-256) the archives listed in it, then unpacks
+them into `cuda-12.9.2/`, headers and static libraries included, and keeps the archives (6.8 GB
+unpacked for these nine). `vf fetch` adds `--runtime` (the shared libraries and the licence
+alone), `--discard` (each archive removed once unpacked) and `--with-nccl` (NVIDIA's CUDA 12
+NCCL wheel among the packages that `--only` can choose, as `libnccl`).
 
 Then one of three ways to run a program.
 
@@ -298,7 +314,7 @@ libcusolver.so.12=/path/to/volta-forever/forward/libcusolver.so.12
 libnvrtc.so.13=/path/to/volta-forever/forward/libnvrtc.so.13
 ```
 
-A separate historical comparison set `VF_ZML_CUDNN=9.10.2` and made that older library report 9.24.0 with `@cudnn-version`. Use the cuDNN build the application expects. The verified 35B LLMD server runs through `vf ./llmd` with its matching runfiles and no manual audit map. [LLMD launch command](docs/guides/zml.md#5-benchmarks)
+A separate historical comparison set `VF_ZML_CUDNN=9.10.2` (a setting of `tests/gpu/zml.sh`) and made that older library report 9.24.0 with `@cudnn-version`. Use the cuDNN build the application expects. The verified 35B LLMD server runs through `vf ./llmd` with its matching runfiles and no manual audit map. [LLMD launch command](docs/guides/zml.md#5-benchmarks)
 
 ### C. Forwarding libraries on the library path
 
@@ -320,11 +336,11 @@ On one Tesla V100, with no switch set (`LIMITS.md` has the counts and what does 
 | llama.cpp (official CUDA 13 build) | A or C | flash attention on or off; quantized and NVFP4 weights |
 | Historical ZML source test | B, with the map above | the test opens bundled CUDA libraries by absolute path |
 | vLLM 0.34 (installed with pip) | B, as PyTorch | the engine and its HTTP server |
-| SGLang 0.5 (installed with pip) | B, as PyTorch | the engine and its HTTP server, with its default attention (FlashInfer) or with `--attention-backend triton`. Five of FlashInfer's eighteen prefill kernels are still refused: if a model or a batch asks for one of them, the error names it, and `--attention-backend triton` goes without them |
+| SGLang 0.5 (installed with pip) | B, as PyTorch | the engine and its HTTP server, with its default attention (FlashInfer) or with `--attention-backend triton`. Five of FlashInfer's eighteen prefill kernels were refused when they were last counted (`LIMITS.md`): if a model or a batch asks for one of them, the error names it, and `--attention-backend triton` goes without them |
 
 A kernel that the layer cannot run is refused when the program asks for it (the program gets
-an error that names the kernel, on standard error a line that says why); it is never run wrong
-knowingly. The first run of a program translates its machine code and lets the driver compile
+error 218 and a NULL handle, and on standard error a line names the kernel and says why:
+`LIMITS.md`, "Kernels refused"); it is never run wrong knowingly. The first run of a program translates its machine code and lets the driver compile
 what it compiles (`What the first run costs`, below).
 
 ## 5. Verify that it works
@@ -357,6 +373,10 @@ ok
 
 ## Environment variables
 
+Every variable that the layer, the launcher and the installer read is here (the installer's are
+in section 1). The ones of the test scripts are in `tests/README.md`; `docs/architecture.md`,
+"Switches and diagnostics", groups these by purpose.
+
 **Proxy (`libcuda.so.1`):**
 
 | Variable | Default | Description |
@@ -364,11 +384,12 @@ ok
 | `VF_LOG_LEVEL` | `1` | 0: fatal only; 1: kernels refused, emulated, images adapted; 2: what was adapted; 3: everything |
 | `VF_LOG` | stderr | Log to a file instead of standard error |
 | `VF_EMULATION_WARNINGS` | `20` | How many kernels with emulated instructions are listed; 0 for none |
-| `VF_PROXY_CACHE` | `~/.cache/volta-forever/proxy` | Directory for the proxy's cache (translated machine code, adapted PTX); `0` to disable. Must be a directory only the user can write (mode 0700; group- or world-writable directories are refused). The cache can grow to 2 GB (`VF_PROXY_CACHE_MAX`). On a system whose home directory is on a RAM filesystem, this is memory. |
+| `VF_PROXY_CACHE` | `$XDG_CACHE_HOME/volta-forever/proxy`, else `~/.cache/volta-forever/proxy` | Directory for the proxy's cache (translated machine code, adapted PTX); `0` or empty to disable. Must be a directory of the user that no one else can write (group- or world-writable directories are refused, and the cache is then off); the layer makes it with mode 0700. The cache can grow to 2 GB (`VF_PROXY_CACHE_MAX`). On a system whose home directory is on a RAM filesystem, this is memory. A write that fails leaves no temporary file, and temporary files left more than ten minutes before are removed at the first use of the cache in a process. |
 | `VF_PROXY_CACHE_MAX` | `2147483648` (2 GB) | Maximum size of the cache in bytes |
-| `VF_CAPABILITY` | auto | Compute capability reported to callers without Volta code (default: the lowest the program has code for, which is 7.5 for programs with only sm_75 machine code). `VF_CAPABILITY=8.0` reports Ampere and prefers compatible PTX for the highest target up to 8.0, except to a caller whose code, or the code of the libraries that use it (for a CUDA runtime), runs from sm_75 machine code, such as PyTorch's: that caller is still told 7.5, with a line at the default log level. On `main`, VF can read complete PTX retained with line information and translate supported instructions in stripped sm_80 executables. See `docs/architecture.md` for image selection. |
+| `VF_CAPABILITY` | auto | Compute capability reported to callers without Volta code, as `<major>.<minor>` (default: the lowest the program has code for, which is 7.5 for programs with only sm_75 machine code). `VF_CAPABILITY=8.0` reports Ampere and prefers compatible PTX for the highest target up to 8.0, except to a caller whose code, or the code of the libraries that use it (for a CUDA runtime), runs from sm_75 machine code, such as PyTorch's: that caller is still told 7.5, with a line at the default log level. A value that is not `<major>.<minor>` (`8`, `80`, `sm_80`) or that is below 7.0 is not used, and the layer says so. What it does not cover: `LIMITS.md`, "The capability told with `VF_CAPABILITY`"; how images are chosen: `docs/architecture.md`, section 3. |
 | `VF_CAPABILITY_ALL` | `0` | `1`: report `VF_CAPABILITY` also to the callers that are otherwise still told 7.5. Their kernels for the reported capability then compute nothing, or stop the GPU: only for a program that does not launch them, as SGLang with the settings of its guide, which selects its quantized experts from PyTorch's capability. |
 | `VF_TRANSLATE` | `1` | `0`: disable machine-code translation; `first`: translate even where PTX exists; `force`: translate even where sm_70 code exists |
+| `VF_PAIRS` | `1` | `0`: each Turing tensor-core product of machine code is translated by itself; by default two of them are done together on whole rows where the program loads them that way (`docs/pairs.md`) |
 | `VF_BORROW` | `7` | Where the translation of machine code takes the registers it needs. `7`: above the program's own wherever that translates, and for a kernel that would otherwise be refused for want of registers, among the program's registers that hold nothing, then in the thread's local memory, kernels with tensor-core products included. `6`: the same, such kernels with products refused (the default until 2026-11-20). `0`: above the program's only (kernels that name nearly every register are refused). `9`: try to preserve the source kernel’s maximum block size when translating machine code for CUDA graphs. [Graph limits](LIMITS.md#cuda-graphs). Other values are for experiments (`docs/translator.md`, "Registers") |
 | `VF_FIT` | `1` | `0`: a launch that the driver refuses for its registers (`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`) is refused to the program. By default the kernel is then launched from a second translation of its module in which no kernel takes more registers than it declared (slower code; made once, at the first refused launch). Not for a kernel that can reach data of its module (`docs/architecture.md`, "Launch") |
 | `VF_FIT_SHARED` | `0` | Set to `1` to retry a rejected dynamic shared-memory opt-in on a V100 at the physical maximum available to that kernel. Each launch must still fit its static and dynamic allocation within the device limit. |
@@ -379,27 +400,55 @@ ok
 | `VF_ALIGNED_ROWS` | `1` | `0`: do not take it that the program keeps the rows that `ldmatrix` reads at multiples of 16 bytes, as the PTX manual requires: test the addresses when the code runs. For a program that stops with a misaligned-address fault (error 716); emulated tensor-core kernels are slower with it |
 | `VF_LAZY` | `1` | `0`: let the driver compile a whole module when it is loaded, not each kernel when the program asks for it (a much longer first run) |
 | `VF_ADAPT` | `1` | `0`: give the driver every image as it is (to see what a program does without the layer's rewriting) |
-| `VF_REAL_LIBCUDA` | auto | Path to NVIDIA's real `libcuda.so.1` when it cannot be found by itself |
-| `VF_STATS` | `0` | `1`: print call counts and the most launched kernels at exit |
-| `VF_PROFILE` | off | Write a per-kernel profile to `FILE.PID` at exit |
+| `VF_REAL_LIBCUDA` | auto | Path to NVIDIA's real `libcuda.so.1` when it cannot be found by itself (by default: the library of the loaded kernel module's version in the system's library directories) |
+| `VF_STATS` | `0` | `1`: route every driver function through the layer and print call counts and the most launched kernels at exit |
+| `VF_PROFILE` | off | `FILE`: write a per-kernel profile to `FILE.PID` at exit. Every launch is then synchronised on its stream: a profile is not a benchmark. Each kernel keeps the counts of its first 64 distinct grid, block and shared-memory sizes |
+| `VF_TIMING` | `0` | `1`: print the time of each stage for every module and kernel |
+| `VF_TRACE_LAUNCH` | `0` | `1`: route kernel launches through the layer and log those that the driver refuses (kernel, grid, block, shared memory, launch attributes) |
+| `VF_TRANSLATE_DUMP` | off | `DIR` (which must exist): write every cubin given to the translator there as it was received, as `PID-NUMBER.sm_SM.cubin`, to translate and validate it apart (`reference/validate.py`) |
+| `VF_BORROW_SAY` | off | Set: the translator says on standard error, for each function, what registers it borrowed (as `reference/translate.py` does) |
+
+The reports at exit (`VF_STATS`, `VF_PROFILE`, the summaries of emulated instructions and of
+second translations) are printed by the process that loaded the layer, not by a child that it
+made with `fork()`.
 
 **Audit library (`libvf_audit.so`):**
 
 | Variable | Default | Description |
 |---|---|---|
-| `VF_AUDIT_MAP_FILE` | none | Path to a map file (one `name=path` per line; `#` comments; empty path = not found) |
+| `VF_AUDIT_MAP_FILE` | `vf-audit.map` beside the library, when there is one | Path to a map file (one `name=path` per line; `#` comments; empty path = not found) |
 | `VF_AUDIT_MAP` | none | Map entries in the environment, colon-separated; these come before the file's entries |
+
+It also reads `VF_LOG`, `VF_LOG_LEVEL` (2: each substitution) and `VF_CAPABILITY`, which it
+reports to NVML (`nvmlDeviceGetCudaComputeCapability`) on a V100.
 
 **nvJitLink adapter (`libnvJitLink.so.13`):**
 
 | Variable | Default | Description |
 |---|---|---|
-| `VF_JITLINK_REAL` | `libnvJitLink.so.12` | The nvJitLink 12.9 library to use |
-| `VF_JITLINK_DUMP` | off | Directory to receive every PTX input as the program gave it |
+| `VF_JITLINK_REAL` | `libnvJitLink.so.12`, as the loader finds it | The nvJitLink 12.9 library to use |
+| `VF_JITLINK_REAL_DIR` | none | A directory: take `libnvJitLink.so.12` there (when `VF_JITLINK_REAL` is not set) |
+| `VF_JITLINK_DUMP` | off | `DIR`: write every PTX input there as the program gave it, as `PID-NUMBER.ptx` |
 
-The proxy, the nvJitLink adapter and the audit library share `VF_LOG`, `VF_LOG_LEVEL`,
-`VF_EMULATION_WARNINGS` and `VF_CAPABILITY`. `docs/architecture.md` ("Switches and
-diagnostics") lists the switches for diagnosis that are not here.
+It adapts PTX as the proxy does, with the same switches of the rewriting (`VF_CAPABILITY`,
+`VF_ALIGNED_ROWS`, `VF_BF16_*`), and also reads `VF_LOG`, `VF_LOG_LEVEL` and
+`VF_EMULATION_WARNINGS`.
+
+**Forwarding libraries (`forward/`):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `VF_FWD_<KEY>` | the CUDA 12.9.2 library's name | The library that one forwarding library opens instead, by path or name. KEY is its short name in capitals, `-` written `_`: `VF_FWD_CUBLAS`, `VF_FWD_CUBLASLT`, `VF_FWD_CUFFT`, `VF_FWD_NVRTC_BUILTINS`, `VF_FWD_NPPIF`, ... (`crates/vf-fwdgen/src/libs.rs`) |
+| `VF_FWD_VERBOSE` | off | Set: each forwarding library says which library it opened and each function that it binds |
+
+**Launcher (`vf`) and `vf ptxas`:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `VF_CUDA12` | found (section 2) | The directory of the CUDA 12.9.2 libraries (`--cuda12` comes first). `vf ptxas` takes `bin/ptxas` beside it |
+| `VF_QUIET` | `0` | `1`: no line when the CUDA 12.9.2 libraries are not found |
+| `VF_VENV` | unset | `0`: a Python of an environment made by `vf venv` starts as it is, not through the layer |
+| `VF_PTXAS_REAL` | `bin/ptxas` beside `VF_CUDA12`, else `/usr/local/cuda-12.9/bin/ptxas` | The CUDA 12.9 assembler that `vf ptxas` runs |
 
 ## What the first run costs
 
@@ -449,3 +498,6 @@ vf extract FILE DIR [SM]            # extract the code from a fat binary
 vf adapt IN OUT                     # adapt PTX for Volta (what the proxy does)
 vf translate IN OUT [MAP [REPORT]]  # translate supported sm_75 and sm_80 machine code to sm_70
 ```
+
+`translate` writes beside MAP the file `MAP.lives` that `reference/validate.py` reads with it,
+and REPORT has one line a function: `ok`, or why it is refused.

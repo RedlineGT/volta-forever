@@ -3,8 +3,9 @@
 Offline tools, written to find out what a trustworthy translator needs and to check the one the
 layer has. The translator of the layer (`crates/vf-sass`) is `translate.py` carried over to
 Rust, on tables that `generate.py` writes from the same descriptions; the two must give the same
-bytes (`tests/sass/compare.sh`, `tests/sass/fuzz.py`), so a change to what one translates is a
-change to both. `docs/translator.md` describes the translation, `docs/validation.md` the checks.
+bytes, map and refusals (`tests/sass/compare.sh`, which compares `MAP.lives` too, and
+`tests/sass/fuzz.py`), so a change to what one translates is a change to both.
+`docs/translator.md` describes the translation, `docs/validation.md` the checks.
 
 They read the instruction descriptions that the
 [denvdis](https://github.com/redplait/denvdis) project extracted from NVIDIA's disassembler
@@ -19,7 +20,7 @@ architecture. Run them with `python3 -I`.
 |---|---|
 | `md.py` | The descriptions read into classes (format, opcode, fields); `Decoder`: the class of an instruction word and its operands |
 | `elf.py` | The container read and written back (byte for byte when nothing changed) |
-| `machine.py`, `translate.py IN OUT [MAP]` | The reference translator. `VF_BORROW`, `VF_PAIRS` as in the layer; `VF_BORROW_SAY=1` says what it borrowed |
+| `machine.py`, `translate.py IN OUT [MAP]` | The reference translator; with MAP, it writes `MAP.lives` beside it, for `validate.py` (as `vf translate` does). `VF_BORROW`, `VF_PAIRS`, `VF_ALIGNED_ROWS` as in the layer; `VF_BORROW_SAY=1` says what it borrowed, `VF_PAIRS_SAY=1` where it gives pairs up; `VF_COMPANIONS=1` is an experiment of this translator only (`docs/pairs.md`, section 12) |
 | `pairing.py CUBIN...` | The plan of pairs of products on whole rows for each function (`docs/pairs.md`, section 11): which loads, which products, which conversions where; printed |
 | `batch.py OUT_DIR CUBIN...` | The translator on many cubins in one process (what `tests/sass/compare.sh` compares with) |
 | `ampere.py` | Checks and lowers supported sm80 instructions before the ordinary Turing-to-Volta translation. |
@@ -30,9 +31,9 @@ architecture. Run them with `python3 -I`.
 
 | File | What |
 |---|---|
-| `validate.py SM75 TRANSLATED MAP` | Every instruction of a translation against nvdisasm's reading of it, whichever translator made it; the schedule against the distances that native code keeps; the registers and predicates that the translation takes against the lives of the program's |
+| `validate.py SM75 TRANSLATED MAP` | Every instruction of a translation against nvdisasm's reading of it, whichever translator made it (both write the `MAP.lives` it reads beside MAP); the schedule against the distances that native code keeps; the registers and predicates that the translation takes against the lives of the program's. It reads the original as sm_75: the sm_80 path (`ampere.py`) is not checked by it (`docs/validation.md`, section 8) |
 | `qcheck.py`, `qflow.py` | What a plan of pairs has that the design does not allow, for the original function; the flow, the reaching definitions and the whole places it works from. Written apart from `pairing.py` |
-| `controls.py [-c CONTROL]... SM75...` | Translations that are wrong on purpose, one fault each, which `validate.py` must object to. `tests/sass/controls.sh` runs every control in a process of its own, with the settings of the translator that each needs; `docs/validation.md`, section 3, has what comes of it |
+| `controls.py [-u] [-c CONTROL]... SM75...` | Translations that are wrong on purpose, one fault each, which `validate.py` must object to. `tests/sass/controls.sh` runs every control in a process of its own, with the settings of the translator that each needs; `docs/validation.md`, section 3, has what comes of it |
 | `check.py SM CUBIN...` | The decoder against nvdisasm on every distinct instruction of real code: one class, same mnemonic, same registers |
 | `uses_check.py SM CUBIN...` | What each instruction reads and writes, by the tables, against the lives of registers that nvdisasm draws |
 | `flow_check.py SM75...` | Where each instruction may lead: the translator's flow against the validator's. They must not differ |
@@ -62,6 +63,7 @@ observations that the timing rules of `docs/translator.md` rest on.
 | `pending.py SM CUBIN...` | How many instructions native code leaves pending on one scoreboard before a wait on it |
 | `pairs.py SM CUBIN...` | Whether the operands of two registers or more start at an even register (always) |
 
-To try the translator on a V100: `tests/kernels/translate/diffrun REFERENCE.cubin
-TRANSLATED.cubin` runs each kernel of both files on the same inputs (`tests/gpu/run.sh` builds
-it).
+To try the translator on a V100: `diffrun REFERENCE.cubin TRANSLATED.cubin` runs each kernel of
+both files on the same inputs (`tests/gpu/run.sh` builds it from
+`tests/kernels/translate/diffrun.c` into `bin/` of its output directory, `$VF_OUT` or else
+`$VF_TEST_ROOT`).
