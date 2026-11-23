@@ -75,11 +75,12 @@ int main(int argc, char **argv)
         const float one = 1.0f, zero = 0.0f;
         const int N = 200000;
         static const char *const names[] = {"cublasGemmEx fp32 8x8x8", "cublasGemmEx bf16 n = 1", "cublasSgemm 8x8x8"};
-        for (int kind = 0; kind < 3; ++kind)
-            for (int direct = 0; direct < 2; ++direct) {
-                cublasHandle_t h = direct ? h12 : hv;
-                double total = 0;
-                for (int i = -1000; i < N; ++i) {
+        /* The two calls alternate, so that the drift of the machine's speed falls on both alike. */
+        for (int kind = 0; kind < 3; ++kind) {
+            double total[2] = {0, 0};
+            for (int i = -1000; i < N; ++i)
+                for (int direct = 0; direct < 2; ++direct) {
+                    cublasHandle_t h = direct ? h12 : hv;
                     const double t0 = now_ns();
                     if (kind == 0) {
                         if (direct)
@@ -102,13 +103,13 @@ int main(int argc, char **argv)
                             cublasSgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, 8, 8, 8, &one, a, 8, b, 8, &zero, c, 8);
                     }
                     const double t1 = now_ns();
-                    if (i >= 0) total += t1 - t0;
-                    if ((i & 1023) == 1023) cudaDeviceSynchronize();
+                    if (i >= 0) total[direct] += t1 - t0;
+                    if ((i & 511) == 511 && direct) cudaDeviceSynchronize();
                 }
-                cudaDeviceSynchronize();
-                printf("overhead: %-26s %-12s %7.0f ns per call\n", names[kind], direct ? "12.9 directly" : "through VF",
-                       total / N);
-            }
+            cudaDeviceSynchronize();
+            printf("overhead: %-26s through VF %7.0f ns, 12.9 directly %7.0f ns per call: %+5.0f ns\n", names[kind],
+                   total[0] / N, total[1] / N, (total[0] - total[1]) / N);
+        }
         return 0;
     }
     if (!strcmp(mode, "fork")) {
