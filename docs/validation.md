@@ -74,7 +74,10 @@ the sequence that its recipe gives, on registers of the translation, each for on
 sequence goes by the lane of the thread, read into such a register when the function is entered,
 and a product by four values made of the lane, computed there too: nothing else in the function
 writes those registers, and no global function symbol points into the function elsewhere than at
-its start.
+its start. At level 3 (section 5 of `docs/translator.md`) a sequence takes registers of the
+program that are free at its instruction, as the pool does at others: those are checked
+instruction by instruction with every borrowed register, not for the whole function (until
+2026-11-23 a function with such matrix loads and no product was objected to for that alone).
 
 **Kept values.** A product may take the elements of its B operand from the registers where an
 earlier product gathered them. Then that product must be the last that gathered, from the same
@@ -241,7 +244,14 @@ with the next instruction waiting, and the distances between the steps and after
 - An instruction that reads its operands some time after it is issued (a memory access, a
   conversion, arithmetic on doubles) and reads a register that the translation gave it says on a
   scoreboard when it has read, or when its result is there, and the very next instruction waits
-  for that. Here and wherever a rule asks the next instruction to wait (after a load from the
+  for that. When the register is one of the program's that the translation borrows, read by an
+  instruction that is not the program's own unchanged, what next writes it in the code that
+  follows comes after a wait for that read (the homes of uniform registers are read late and
+  written again only much later). (Until 2026-11-23 the borrowed ones were left out: at level 3 a
+  store at the kept copy of its scaled index, in a borrowed register that the next copy writes,
+  could go without the wait unseen; the control `nowait` changed two Triton cubins so and was
+  objected to in neither, which an objection of a check of the whole function to the translation
+  as it is had hidden.) Here and wherever a rule asks the next instruction to wait (after a load from the
   frame or a store to it, after a register put away or brought back, after a late write to a
   borrowed register), instructions that do nothing may stand between: the schedule puts some
   where it needs more time than a stall holds, a wait holds for everything after it, and an
