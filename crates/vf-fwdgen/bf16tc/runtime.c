@@ -57,6 +57,7 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_SKINNY_SMALL_MK (1LL << 20)
 #define VF_SKINNY_MAX_K 16384        /* skinny path: k at most this (G1, tests/gpu/forward/bf16-skinny.c) */
 #define VF_SKINNY_MIN_M 128          /* skinny path: m at least this (G1) */
+#define VF_SEQ_MIN_WORKSPACE (4u << 20) /* below, 12.9's choice of kernel for op(B) = N changes (G1) */
 #define VF_FB_TN_CTAS_PER_SM 2
 #define VF_FB_WIDE_CTAS_PER_SM 4
 #define VF_FB_NARROW_CTAS_PER_SM 2
@@ -134,6 +135,8 @@ static struct {
     FN(cublasCreate_v2) Create;
     FN(cublasDestroy_v2) Destroy;
     FN(cublasGetStream_v2) GetStream;
+    FN(cublasSetStream_v2) SetStream;
+    FN(cublasSetWorkspace_v2) SetWorkspace;
     FN(cublasGetPointerMode_v2) GetPointerMode;
     FN(cublasGetMathMode) GetMathMode;
     FN(cublasGemmEx) GemmEx;
@@ -198,7 +201,8 @@ static int bind_libraries(void)
     void *l = open_library("VF_FWD_CUBLASLT", "libcublasLt.so.12");
     if (!b || !l) return 0;
     int ok = BIND(b, cb.Create, "cublasCreate_v2") && BIND(b, cb.Destroy, "cublasDestroy_v2") &&
-             BIND(b, cb.GetStream, "cublasGetStream_v2") && BIND(b, cb.GetPointerMode, "cublasGetPointerMode_v2") &&
+             BIND(b, cb.GetStream, "cublasGetStream_v2") && BIND(b, cb.SetStream, "cublasSetStream_v2") &&
+             BIND(b, cb.SetWorkspace, "cublasSetWorkspace_v2") && BIND(b, cb.GetPointerMode, "cublasGetPointerMode_v2") &&
              BIND(b, cb.GetMathMode, "cublasGetMathMode") && BIND(b, cb.GemmEx, "cublasGemmEx") &&
              BIND(b, cb.GemmEx64, "cublasGemmEx_64") && BIND(b, cb.GemmSB, "cublasGemmStridedBatchedEx") &&
              BIND(b, cb.GemmSB64, "cublasGemmStridedBatchedEx_64") && BIND(l, cb.LtCreate, "cublasLtCreate") &&
@@ -269,6 +273,7 @@ enum {
     R_SHAPE,   /* m < 1, n < 2 or k < 16 */
     R_ARGS,    /* an operation, leading dimension or pointer that 12.9 is left to judge */
     R_DOMAIN,  /* outside the skinny path's domain and the tensor-core path's gate, or path off */
+    R_SEQ,     /* in the skinny path's bounds, but 12.9 would not run its sequential kernel there */
     R_K,       /* k beyond the tensor-core path's limit */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
@@ -285,7 +290,8 @@ enum {
 };
 static const char *const reason_name[R_N] = {
     "not bf16 with fp32 accumulation", "explicit algorithm", "batch", "64-bit size", "shape",
-    "arguments left to cuBLAS", "outside the paths' domains", "k > 16384", "unknown handle",
+    "arguments left to cuBLAS", "outside the paths' domains", "12.9 would not run its sequential kernel",
+    "k > 16384", "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
     "no chunking", "graph-memory cap", "allocation failed", "launch failed"};
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
@@ -430,7 +436,26 @@ static void setup_context(Ctx *x)
         SAY(2, "device %d has compute capability %d.%d: its calls are forwarded", x->ordinal, major, minor);
         return;
     }
-    CUresult r = INJECT("module") ? CUDA_ERROR_NOT_SUPPORTED : cu.ModuleLoadData(&x->mod, vf_bf16_fatbin);
+    const void *image = vf_bf16_fatbin;
+#ifdef VF_BF16_TEST
+    /* Test builds: VF_BF16_FATBIN names a fat binary built from kernels.cu with a control. */
+    const char *alt = getenv("VF_BF16_FATBIN");
+    if (alt && *alt) {
+        FILE *f = fopen(alt, "rb");
+        static unsigned char *bytes;
+        if (f && !bytes && fseek(f, 0, SEEK_END) == 0) {
+            const long n = ftell(f);
+            if (n > 0 && (bytes = malloc((size_t)n)) && (fseek(f, 0, SEEK_SET) != 0 || fread(bytes, 1, (size_t)n, f) != (size_t)n)) {
+                free(bytes);
+                bytes = NULL;
+            }
+        }
+        if (f) fclose(f);
+        if (bytes) image = bytes;
+        say("test build: kernels from %s%s", alt, bytes ? "" : " (not read)");
+    }
+#endif
+    CUresult r = INJECT("module") ? CUDA_ERROR_NOT_SUPPORTED : cu.ModuleLoadData(&x->mod, image);
     if (r != CUDA_SUCCESS) {
         SAY(1, "device %d: the kernels did not load (%s); every call in this context is forwarded", x->ordinal,
             cu_error(r));
@@ -499,13 +524,21 @@ static Ctx *current_context(void)
 
 /* ---- handles ---------------------------------------------------------------------------- */
 
-/* Handle -> context state, for handles of both APIs. A sorted array read without a lock under a
- * sequence counter, written under a mutex (handles are created rarely and looked up at every
- * call). A table that grows is replaced, the old one kept (readers may still be in it): the
- * memory kept is at most that of the largest table. */
+/* What the runtime knows of a handle: its context's state, and whether its workspace is one with
+ * which 12.9 chooses its kernels as with its default (legacy API; cublasLtMatmul passes its own). */
+typedef struct {
+    Ctx *ctx;
+    atomic_int workspace_ok;
+} HState;
+
+/* Handle -> state, for handles of both APIs. A sorted array read without a lock under a sequence
+ * counter, written under a mutex (handles are created rarely and looked up at every call). A table
+ * that grows is replaced, the old one kept (readers may still be in it): the memory kept is at most
+ * that of the largest table. A state is freed when its handle is destroyed; a call with a destroyed
+ * handle is the program's error, as it is for cuBLAS. */
 typedef struct {
     uintptr_t key;
-    Ctx *ctx;
+    HState *ctx;
 } HEnt;
 typedef struct {
     size_t n, cap;
@@ -516,7 +549,7 @@ static unsigned g_hseq;
 static pthread_mutex_t g_h_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* NULL for a handle that is not known. */
-static Ctx *handle_context(const void *h)
+static HState *handle_state(const void *h)
 {
     for (;;) {
         const unsigned s = __atomic_load_n(&g_hseq, __ATOMIC_ACQUIRE);
@@ -525,7 +558,7 @@ static Ctx *handle_context(const void *h)
             continue;
         }
         HTab *t = __atomic_load_n(&g_ht, __ATOMIC_ACQUIRE);
-        Ctx *found = NULL;
+        HState *found = NULL;
         if (t) {
             size_t lo = 0, hi = __atomic_load_n(&t->n, __ATOMIC_RELAXED);
             if (hi > t->cap) hi = t->cap;
@@ -551,23 +584,40 @@ static void write_begin(void)
     __atomic_thread_fence(__ATOMIC_RELEASE);
 }
 static void write_end(void) { __atomic_store_n(&g_hseq, g_hseq + 1, __ATOMIC_RELEASE); }
-static void put_entry(HTab *t, size_t i, uintptr_t key, Ctx *ctx)
+static void put_entry(HTab *t, size_t i, uintptr_t key, HState *ctx)
 {
     __atomic_store_n(&t->e[i].key, key, __ATOMIC_RELAXED);
     __atomic_store_n(&t->e[i].ctx, ctx, __ATOMIC_RELAXED);
 }
 
-static void handle_add(const void *h, Ctx *x)
+/* cuBLAS 12 gives a handle its default workspace when it is made and at every cublasSetStream. With
+ * CUBLAS_WORKSPACE_CONFIG set, the default is not known: it does not count as enough. */
+static int default_workspace_ok(void)
 {
+    const char *v = getenv("CUBLAS_WORKSPACE_CONFIG");
+    return !v || !*v;
+}
+
+static void handle_add(const void *h, Ctx *ctx)
+{
+    HState *x = malloc(sizeof *x);
+    if (!x) {
+        SAY(1, "no memory for the handle table: the calls of a handle are forwarded");
+        return;
+    }
+    x->ctx = ctx;
+    atomic_init(&x->workspace_ok, default_workspace_ok());
     pthread_mutex_lock(&g_h_mu);
     HTab *t = g_ht;
     const size_t n = t ? t->n : 0;
     size_t i = 0;
     while (i < n && t->e[i].key < (uintptr_t)h) ++i;
     if (i < n && t->e[i].key == (uintptr_t)h) { /* the address of a destroyed handle, reused */
+        HState *old = t->e[i].ctx;
         write_begin();
         put_entry(t, i, (uintptr_t)h, x);
         write_end();
+        free(old);
     } else if (t && n < t->cap) {
         write_begin();
         for (size_t j = n; j > i; --j) put_entry(t, j, t->e[j - 1].key, t->e[j - 1].ctx);
@@ -588,6 +638,7 @@ static void handle_add(const void *h, Ctx *x)
             __atomic_store_n(&g_ht, u, __ATOMIC_RELEASE);
             write_end();
         } else {
+            free(x);
             SAY(1, "no memory for the handle table: the calls of a handle are forwarded");
         }
     }
@@ -602,10 +653,12 @@ static void handle_remove(const void *h)
     size_t i = 0;
     while (i < n && t->e[i].key < (uintptr_t)h) ++i;
     if (i < n && t->e[i].key == (uintptr_t)h) {
+        HState *old = t->e[i].ctx;
         write_begin();
         for (size_t j = i; j + 1 < n; ++j) put_entry(t, j, t->e[j + 1].key, t->e[j + 1].ctx);
         __atomic_store_n(&t->n, n - 1, __ATOMIC_RELAXED);
         write_end();
+        free(old);
     }
     pthread_mutex_unlock(&g_h_mu);
 }
@@ -621,6 +674,22 @@ EXPORT cublasStatus_t vf_bf16_cublasDestroy_v2(cublasHandle_t handle)
 {
     handle_remove(handle);
     return cb.Destroy(handle);
+}
+
+EXPORT cublasStatus_t vf_bf16_cublasSetStream_v2(cublasHandle_t handle, cudaStream_t stream)
+{
+    const cublasStatus_t s = cb.SetStream(handle, stream);
+    HState *h = s == CUBLAS_STATUS_SUCCESS ? handle_state(handle) : NULL;
+    if (h) atomic_store_explicit(&h->workspace_ok, default_workspace_ok(), memory_order_relaxed);
+    return s;
+}
+
+EXPORT cublasStatus_t vf_bf16_cublasSetWorkspace_v2(cublasHandle_t handle, void *workspace, size_t size)
+{
+    const cublasStatus_t s = cb.SetWorkspace(handle, workspace, size);
+    HState *h = s == CUBLAS_STATUS_SUCCESS ? handle_state(handle) : NULL;
+    if (h) atomic_store_explicit(&h->workspace_ok, size >= VF_SEQ_MIN_WORKSPACE, memory_order_relaxed);
+    return s;
 }
 
 EXPORT cublasStatus_t vf_bf16_cublasLtCreate(cublasLtHandle_t *handle)
@@ -784,19 +853,48 @@ typedef struct {
 
 enum { PATH_NONE, PATH_SKINNY, PATH_TC };
 
-/* A static function of the shape: n small enough for one CTA to hold every column, k bounded (the
- * chain is sequential), m large enough to fill the GPU. */
-static int skinny_domain(long long m, long long n, long long k)
+/* What decides a path, from the call alone. */
+typedef struct {
+    int ta, tb;           /* op(A), op(B) transposed */
+    long long m, n, k;
+    int aligned;          /* A, B, C at 16-byte addresses; lda, ldb, ldc multiples of 8 */
+    int workspace_ok;     /* the workspace is cuBLAS's default or at least VF_SEQ_MIN_WORKSPACE */
+} Shape;
+
+/* The skinny path's bounds: n small enough for one CTA to hold every column, k bounded (the chain
+ * is sequential), m large enough to fill the GPU. */
+static int skinny_bounds(const Shape *s)
 {
-    if (n < 2 || !(n <= VF_SKINNY_MAX_N || (n < 32 && m * k < VF_SKINNY_SMALL_MK))) return 0;
-    if (k > VF_SKINNY_MAX_K && !CONTROL("skinny-k")) return 0;
-    if (m < VF_SKINNY_MIN_M && !CONTROL("skinny-m")) return 0;
+    if (s->n < 2 || !(s->n <= VF_SKINNY_MAX_N || (s->n < 32 && s->m * s->k < VF_SKINNY_SMALL_MK))) return 0;
+    if (s->k > VF_SKINNY_MAX_K && !CONTROL("skinny-k")) return 0;
+    if (s->m < VF_SKINNY_MIN_M && !CONTROL("skinny-m")) return 0;
     return 1;
 }
 
-static int choose_path(long long m, long long n, long long k, int *reason)
+/* Where cuBLAS 12.9 runs its sequential kernel (magma_sgemmEx), whose result the skinny path gives
+ * bit for bit, and not its small-n kernels (gemmSN), whose order differs. Measured by capturing 12.9's
+ * calls and reading the kernels' names (tests/gpu/forward/bf16-skinny.c), over 266,195 configurations
+ * of shapes, operations, output types, alignments, workspaces and both APIs: with op(B) transposed
+ * 12.9 ran magma in every one with m >= 2; with op(B) = N, its choice depends on the shape, on the
+ * alignment and on the workspace (unchanged from 4 MiB up), and these are the regions where it ran
+ * magma in every measured case, kept conservative. */
+static int sequential_kernel_129(const Shape *s)
 {
-    if (cfg.skinny && skinny_domain(m, n, k)) return PATH_SKINNY;
+    if (CONTROL("seq-any")) return 1;
+    if (s->tb) return s->m >= 2;
+    if (!s->aligned || !s->workspace_ok || s->m % 8 || s->k % 8) return 0;
+    if (s->ta) return s->m >= 448 && s->m <= 16384 && s->k >= 256 && s->k <= 4096; /* TN */
+    return s->m >= 8 && s->m <= 9728 && s->k >= 896 && s->k <= 16384;              /* NN */
+}
+
+static int choose_path(const Shape *s, int *reason)
+{
+    int not_sequential = 0;
+    if (cfg.skinny && skinny_bounds(s)) {
+        if (sequential_kernel_129(s)) return PATH_SKINNY;
+        not_sequential = 1;
+    }
+    const long long m = s->m, n = s->n, k = s->k;
     if (cfg.tc && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
         if (k > VF_TC_MAX_K && !CONTROL("tc-k")) {
             *reason = R_K;
@@ -804,9 +902,11 @@ static int choose_path(long long m, long long n, long long k, int *reason)
         }
         return PATH_TC;
     }
-    *reason = R_DOMAIN;
+    *reason = not_sequential ? R_SEQ : R_DOMAIN;
     return PATH_NONE;
 }
+
+static int aligned16(const void *p) { return (uintptr_t)p % 16 == 0; }
 
 static CUresult launch(Ctx *x, CUfunction f, unsigned gx, unsigned gy, unsigned bx, unsigned smem, CUstream s, void *arg)
 {
@@ -954,7 +1054,14 @@ static cublasStatus_t gemm16(const Call *c, const Plan *p, CUdeviceptr A16, CUde
     const long long ldb16 = p->b_contig ? p->kp : p->r16B;
     const long long sb = p->b_contig ? p->Ls : p->Ls * p->r16B;
 #ifdef VF_BF16_TEST
-    if (CONTROL("caller-handle") && c->api != API_LT) /* what the review found unsafe: the caller's handle */
+    /* The control does what the review found unsafe (3.5): the internal GEMM through the caller's
+     * handle, which follows whatever another thread sets on it. Only while that handle says host
+     * pointer mode: in device mode 12.9 would read the host's 1.0 as a device address (that fault,
+     * Xid 31, was seen once with this control on 2026-11-23). */
+    cublasPointerMode_t caller_mode = CUBLAS_POINTER_MODE_DEVICE;
+    if (CONTROL("caller-handle") && c->api != API_LT &&
+        cb.GetPointerMode((cublasHandle_t)c->handle, &caller_mode) == CUBLAS_STATUS_SUCCESS &&
+        caller_mode == CUBLAS_POINTER_MODE_HOST)
         return cb.GemmSB((cublasHandle_t)c->handle, (cublasOperation_t)oa, (cublasOperation_t)ob, mc, nc, (int)p->Ls,
                          &one, (const void *)(uintptr_t)A16, CUDA_R_16F, (int)lda16, sa, (const void *)(uintptr_t)B16,
                          CUDA_R_16F, (int)ldb16, sb, &zero, (void *)(uintptr_t)Cp, CUDA_R_32F, mc, (long long)mc * nc,
@@ -1191,8 +1298,9 @@ static int overlap(uintptr_t a0, uintptr_t a1, uintptr_t b0, uintptr_t b1) { ret
 /* The handle's context, if it has the kernels and is the current one, and owns the stream. */
 static int context_check(const void *handle, CUstream stream, Ctx **out)
 {
-    Ctx *x = handle_context(handle);
-    if (!x) return R_HANDLE;
+    HState *h = handle_state(handle);
+    if (!h) return R_HANDLE;
+    Ctx *x = h->ctx;
     if (!x->ok) return R_CONTEXT;
     CUcontext cur = NULL, sctx = NULL;
     unsigned long long id = 0;
@@ -1237,12 +1345,16 @@ static cublasStatus_t legacy(int api, cublasHandle_t handle, cublasOperation_t t
     if (!op_ok(transa) || !op_ok(transb) || !handle || !alpha || !beta || !A || !B || !C || lda < (ta ? k : m) ||
         ldb < (tb ? n : k) || ldc < m)
         goto forward;
-    path = choose_path(m, n, k, &reason);
+    reason = R_HANDLE;
+    HState *hs = handle_state(handle);
+    if (!hs) goto forward;
+    const Shape shape = {ta, tb, m, n, k,
+                         aligned16(A) && aligned16(B) && aligned16(C) && lda % 8 == 0 && ldb % 8 == 0 && ldc % 8 == 0,
+                         atomic_load_explicit(&hs->workspace_ok, memory_order_relaxed)};
+    path = choose_path(&shape, &reason);
     if (path == PATH_NONE) goto forward;
     cudaStream_t stream = NULL;
-    reason = R_HANDLE;
-    Ctx *x = handle_context(handle);
-    if (!x) goto forward;
+    Ctx *x = hs->ctx;
     reason = R_CONTEXT;
     if (!x->ok || cb.GetStream(handle, &stream) != CUBLAS_STATUS_SUCCESS) goto forward;
     reason = context_check(handle, (CUstream)stream, &x);
@@ -1550,7 +1662,11 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     if (!handle || !alpha || !beta || !A || !B || !D || la.ld < (int64_t)la.rows || lb.ld < (int64_t)lb.rows ||
         lc.ld < (int64_t)lc.rows || ld.ld < (int64_t)ld.rows)
         goto forward;
-    path = choose_path((long long)m, (long long)n, (long long)k, &reason);
+    const Shape shape = {ta, tb, (long long)m, (long long)n, (long long)k,
+                         aligned16(A) && aligned16(B) && aligned16(D) && (!C || aligned16(C)) && la.ld % 8 == 0 &&
+                             lb.ld % 8 == 0 && lc.ld % 8 == 0 && ld.ld % 8 == 0,
+                         workspaceSizeInBytes >= VF_SEQ_MIN_WORKSPACE};
+    path = choose_path(&shape, &reason);
     if (path == PATH_NONE) goto forward;
     Ctx *x = NULL;
     reason = context_check(handle, (CUstream)stream, &x);

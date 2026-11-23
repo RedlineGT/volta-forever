@@ -18,7 +18,7 @@
 
 /* The runtime's reasons to forward (crates/vf-fwdgen/bf16tc/runtime.c, the same order). */
 enum {
-    R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_K, R_HANDLE, R_CONTEXT, R_MATH,
+    R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_K, R_HANDLE, R_CONTEXT, R_MATH,
     R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAP, R_ALLOC, R_LAUNCH, R_N
 };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };

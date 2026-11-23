@@ -207,6 +207,38 @@ static void forwarded_cases(void)
                    1.0f, CUBLAS_GEMM_DEFAULT, R_DOMAIN);
 }
 
+/* The skinny path serves only where 12.9 runs its sequential kernel (results of the kernel capture,
+ * tests/gpu/forward/bf16-skinny.c): TN with m = 384 is where 12.9 runs gemmSN, and a workspace under
+ * 4 MiB changes 12.9's choice for op(B) = N; cublasSetStream gives the handle its default workspace
+ * back. Run with the skinny path alone (VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1), so that such
+ * calls are forwarded rather than served by the tensor-core path. */
+static void sequential_rule_cases(void)
+{
+    forwarded_case("TN m = 384 (12.9 runs gemmSN there)", shape(1, 0, 384, 8, 1536, CUDA_R_32F), 1.0f,
+                   CUBLAS_GEMM_DEFAULT, R_SEQ);
+    forwarded_case("TN m = 777 (not a multiple of 8)", shape(1, 0, 777, 8, 1536, CUDA_R_32F), 1.0f, CUBLAS_GEMM_DEFAULT,
+                   R_SEQ);
+    void *ws;
+    CU(cudaMalloc(&ws, 1u << 20));
+    cublasSetWorkspace(hv, ws, 1u << 20);
+    forwarded_case("TN m = 1536 with a 1 MiB workspace", shape(1, 0, 1536, 8, 1536, CUDA_R_32F), 1.0f,
+                   CUBLAS_GEMM_DEFAULT, R_SEQ);
+    cublasSetStream(hv, stream); /* the default workspace again */
+    Shape s = shape(1, 0, 1536, 8, 1536, CUDA_R_32F);
+    Data d = make_data(&s, 0.05, 1.0);
+    void *ov, *o12;
+    cublasStatus_t a, b;
+    const Counts c0 = counts(API_GEMMEX);
+    both(&s, &d, 1.0f, 0.0f, CUBLAS_GEMM_DEFAULT, &ov, &o12, &a, &b);
+    const Counts c1 = counts(API_GEMMEX);
+    CHECK(!rt_counters || delta(&c0, &c1, SERVED_SKINNY) == 1, "TN m = 1536 after cublasSetStream: not served");
+    CHECK(ndiff(ov, o12, d.cbytes, 4) == 0, "TN m = 1536 after cublasSetStream: not 12.9's bits");
+    free(ov);
+    free(o12);
+    free_data(&d);
+    cudaFree(ws);
+}
+
 /* beta = 0 never reads C: NaN in C does not reach the output (both paths). */
 static void beta_zero_case(int n)
 {
@@ -309,10 +341,21 @@ int main(void)
     cublasSetStream(hv, stream);
     c129.SetStream(h12, stream);
     open_runtime();
+    const char *tcv = getenv("VF_CUBLAS_BF16_TC");
+    const int tc_on = tcv && !strcmp(tcv, "1");
     skinny_cases();
+    beta_zero_case(8);
+    if (!tc_on) { /* the skinny path alone: what it forwards */
+        sequential_rule_cases();
+        if (failures) {
+            printf("%d checks failed\n", failures);
+            return 1;
+        }
+        printf("ok bf16-paths\n");
+        return 0;
+    }
     tc_cases();
     forwarded_cases();
-    beta_zero_case(8);
     beta_zero_case(64);
     failing_case();
     /* (The control that runs the internal GEMM through the caller's handle would read the host's 1.0

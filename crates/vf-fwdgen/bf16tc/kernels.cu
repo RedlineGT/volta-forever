@@ -12,6 +12,14 @@
 // does not matter), __uint_as_float, __float_as_uint. No module variable, no counter.
 #include "abi.h"
 
+// Controls (tests/gpu/forward-bf16.sh builds them apart, never into kernels.fatbin): each breaks one
+// property so that the test of that property can be seen to fail.
+#if defined(VF_KERNEL_CONTROL_MULADD)  // the chains as separate multiply and add
+#define CHAIN(a, b, acc) __fadd_rn(__fmul_rn((a), (b)), (acc))
+#else  // one fused multiply-add per term: the product is exact, one rounding per step
+#define CHAIN(a, b, acc) __fmaf_rn((a), (b), (acc))
+#endif
+
 static __device__ __forceinline__ unsigned umax32(unsigned a, unsigned b) { return a > b ? a : b; }
 static __device__ __forceinline__ int imin32(int a, int b) { return a < b ? a : b; }
 static __device__ __forceinline__ int imax32(int a, int b) { return a > b ? a : b; }
@@ -269,11 +277,19 @@ static __device__ __forceinline__ float rd_bias(const VfOut &o, int i)
                         : __ldg(reinterpret_cast<const float *>(o.bias) + i);
 }
 
-// v = alpha * acc already rounded; adds beta * C by one fused multiply-add (only when beta != 0),
-// then the bias.
+// v = alpha * acc already rounded; adds beta * C by one fused multiply-add, then the bias. When beta
+// is zero (+0 or -0) C is not read, and +0 is added instead, as cuBLAS 12.9 does: alpha * acc = -0
+// then becomes +0 (tests/gpu/forward/bf16-arith.c).
 static __device__ __forceinline__ float finalize(const VfOut &o, const Scal &sc, float v, int i, long long cidx)
 {
+#ifdef VF_KERNEL_CONTROL_EPI_SEPARATE  // beta * C rounded before it is added
+    if (sc.readc) v = __fadd_rn(v, __fmul_rn(sc.beta, rd_c(o, cidx)));
+#else
     if (sc.readc) v = __fmaf_rn(sc.beta, rd_c(o, cidx), v);
+#endif
+#ifndef VF_KERNEL_CONTROL_NO_ZERO_TERM  // the control leaves alpha * acc as it is when beta is zero
+    else v = __fadd_rn(v, 0.0f);
+#endif
     if (o.btype >= 0) v = __fadd_rn(v, rd_bias(o, i));
     return v;
 }
@@ -288,13 +304,17 @@ extern "C" __global__ void __launch_bounds__(128, 8) vf_bf16_epilogue(VfEpiArgs 
     const int i = blockIdx.x * 128 + threadIdx.x;
     if (i >= p.mc) return;
     const int ea = p.eA[i];
+#ifndef VF_KERNEL_CONTROL_EPI_ALL  // the control writes the elements of failed rows and columns too
     if (ea == VF_BF16_SENT) return;
+#endif
     const Scal sc = scalars(p.o);
     const int j0 = blockIdx.y * VF_EPI_J;
     const int j1 = imin32(j0 + VF_EPI_J, p.n);
     for (int j = j0; j < j1; ++j) {
         const int eb = p.eB[j];
+#ifndef VF_KERNEL_CONTROL_EPI_ALL
         if (eb == VF_BF16_SENT) continue;
+#endif
         const long long off = (long long)j * p.mc + i;
         float acc = 0.0f;  // +0 start: an all-zero sum is +0, as in a plain fp32 accumulation
         for (int s = 0; s < p.ns; ++s) acc = __fadd_rn(acc, p.cp[s * p.cpstride + off]);
@@ -407,7 +427,7 @@ static __device__ __forceinline__ void fallback_body(const VfFbArgs &p)
 #pragma unroll
                 for (int a = 0; a < TM; ++a)
 #pragma unroll
-                    for (int b = 0; b < TN; ++b) acc[a][b] = __fmaf_rn(av[a], bv[b], acc[a][b]);
+                    for (int b = 0; b < TN; ++b) acc[a][b] = CHAIN(av[a], bv[b], acc[a][b]);
             }
             __syncthreads();
         }
@@ -622,7 +642,7 @@ static __device__ __forceinline__ void fb_tile(const VfFbArgs &p, const Scal &sc
 #pragma unroll
             for (int a = 0; a < C::TM; ++a)
 #pragma unroll
-                for (int b = 0; b < C::TN; ++b) acc[a][b] = __fmaf_rn(av[a], bv[b], acc[a][b]);
+                for (int b = 0; b < C::TN; ++b) acc[a][b] = CHAIN(av[a], bv[b], acc[a][b]);
         }
         if (s + 1 < nsteps) sstore(cur ^ 1);
         __syncthreads();
@@ -743,10 +763,10 @@ static __device__ __forceinline__ void fb_tile_k(const VfFbArgs &p, const Scal &
 #pragma unroll
         for (int l = 0; l < C::BK / 4; ++l) {
             const float4 a = a4[l], b = b4[l];
-            acc = __fmaf_rn(a.x, b.x, acc);
-            acc = __fmaf_rn(a.y, b.y, acc);
-            acc = __fmaf_rn(a.z, b.z, acc);
-            acc = __fmaf_rn(a.w, b.w, acc);
+            acc = CHAIN(a.x, b.x, acc);
+            acc = CHAIN(a.y, b.y, acc);
+            acc = CHAIN(a.z, b.z, acc);
+            acc = CHAIN(a.w, b.w, acc);
         }
         if (s + 1 < nsteps) sstore(cur ^ 1);
         __syncthreads();
@@ -876,11 +896,17 @@ static __device__ __forceinline__ void skinny_body(const VfSkArgs &p)
         }
     };
     float acc = 0.0f;
+#ifdef VF_KERNEL_CONTROL_SPLITK  // two chains, over even and odd k-steps, added at the end
+    float acc2 = 0.0f;
+#endif
     const int nsteps = (p.k + BK - 1) / BK;
     gload(0);
     sstore(0);
     __syncthreads();
     for (int s = 0; s < nsteps; ++s) {
+#ifdef VF_KERNEL_CONTROL_SPLITK
+        { float t = acc; acc = acc2; acc2 = t; }
+#endif
         const int cur = s & 1;
         if (s + 1 < nsteps) gload(s + 1);
         const float4 *a4 = reinterpret_cast<const float4 *>(&As[cur][r][0]);
@@ -890,14 +916,17 @@ static __device__ __forceinline__ void skinny_body(const VfSkArgs &p)
 #pragma unroll
         for (int l4 = 0; l4 < BK / 4; ++l4) {
             const float4 a = a4[l4], b = b4[l4];
-            acc = __fmaf_rn(a.x, b.x, acc);
-            acc = __fmaf_rn(a.y, b.y, acc);
-            acc = __fmaf_rn(a.z, b.z, acc);
-            acc = __fmaf_rn(a.w, b.w, acc);
+            acc = CHAIN(a.x, b.x, acc);
+            acc = CHAIN(a.y, b.y, acc);
+            acc = CHAIN(a.z, b.z, acc);
+            acc = CHAIN(a.w, b.w, acc);
         }
         if (s + 1 < nsteps) sstore(cur ^ 1);
         __syncthreads();
     }
+#ifdef VF_KERNEL_CONTROL_SPLITK
+    acc = __fadd_rn(acc, acc2);
+#endif
     const int i = i0 + r;
     if (i < p.m && c < p.n) {
         const Scal sc = scalars(p.o);

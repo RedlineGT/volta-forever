@@ -39,6 +39,8 @@ pub const VARIANTS: &[Variant] = &[
             "cublasGemmEx_64",
             "cublasGemmStridedBatchedEx",
             "cublasGemmStridedBatchedEx_64",
+            "cublasSetStream_v2",
+            "cublasSetWorkspace_v2",
         ],
     },
     Variant {
@@ -788,12 +790,27 @@ mod tests {
         assert_eq!(got, PINNED_DEFAULT, "the default forwarders' sources changed");
     }
 
+    /// The entries above and the other functions the cuBLAS variant intercepts.
+    fn variant_entries() -> Vec<Entry> {
+        let mut e = entries();
+        for name in ["cublasSetStream_v2", "cublasSetWorkspace_v2"] {
+            e.push(Entry {
+                name: name.into(),
+                version: Some("libcublas.so.13".into()),
+                action: Action::Forward { target: name.into() },
+                adapted: None,
+                note: None,
+            });
+        }
+        e
+    }
+
     #[test]
     fn variant_intercepts_exactly_its_functions() {
         let spec = LIBS.iter().find(|l| l.key == "cublas").unwrap();
         let variant = variant_of("cublas").unwrap();
         let dir = temp("variant");
-        let n = write_variant_sources(spec, variant, &entries(), "libcublas.so.12", &vec![], &dir).unwrap();
+        let n = write_variant_sources(spec, variant, &variant_entries(), "libcublas.so.12", &vec![], &dir).unwrap();
         assert_eq!(n, variant.intercepts.len());
         assert_eq!(check_variant(spec, &dir), Vec::<String>::new());
         let asm = std::fs::read_to_string(dir.join("fwd.S")).unwrap();
@@ -804,7 +821,7 @@ mod tests {
         assert!(asm.contains("\ncublasStatusX:\n    endbr64\n    mov $"));
         assert!(c.contains("\"vf_bf16_cublasGemmEx_64\","));
         // A function that is not a plain forward cannot be intercepted.
-        let mut bad = entries();
+        let mut bad = variant_entries();
         bad[2].action = Action::ForwardStatus {
             target: "cublasGemmEx".into(),
             words: 0,

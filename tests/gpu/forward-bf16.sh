@@ -40,9 +40,18 @@ build() {  # build NAME : compile tests/gpu/forward/NAME.c against the CUDA 13.5
 run() {  # run NAME DIR [ENV...] : run with the variants of DIR first in the library path; output in $log
     local name=$1 dir=$2; shift 2
     log=$out/logs/forward-$name.log
-    env LD_LIBRARY_PATH="$proxy:$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 "$@" \
-        "$out/bin/$name" >"$log" 2>&1
+    if [ -n "${VF_BF16_SANITIZE:-}" ]; then
+        # NVIDIA's compute-sanitizer (12.9.2), without the proxy: the runtime's kernels and cuBLAS
+        # 12.9's are sm_70 machine code, which the sanitizer checks as they are.
+        env LD_LIBRARY_PATH="$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 "$@" \
+            "$T12/compute-sanitizer/compute-sanitizer" --tool "$VF_BF16_SANITIZE" --leak-check no --error-exitcode 99 \
+            "$out/bin/$name" >"$log" 2>&1
+    else
+        env LD_LIBRARY_PATH="$proxy:$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 "$@" \
+            "$out/bin/$name" >"$log" 2>&1
+    fi
     status=$?
+    cat "$log"
 }
 verdict() {  # verdict NAME : PASS when the program printed "ok NAME" and exited with 0
     if [ "$status" = 0 ] && grep -qx "ok $1" "$log"; then echo "PASS  $1"; else echo "FAIL  $1 (exit status $status; $log)"; failed=1; fi
@@ -50,7 +59,23 @@ verdict() {  # verdict NAME : PASS when the program printed "ok NAME" and exited
 want() { [ ${#cases[@]} -eq 0 ] && return 0; local c; for c in "${cases[@]}"; do [ "$c" = "$1" ] && return 0; done; return 1; }
 cases=("$@")
 
-if want bf16-paths; then
-    build bf16-paths && { run bf16-paths "$test_dir"; verdict bf16-paths; }
+# Fat binaries with a kernel control (VF_BF16_FATBIN=<file> makes the test runtime load one), when
+# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them.
+controls=()
+if [ -x "$T12/bin/nvcc" ]; then
+    for c in MULADD EPI_SEPARATE NO_ZERO_TERM EPI_ALL SPLITK; do
+        (cd "$rt" && "$T12/bin/nvcc" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
+            -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
+    done
+fi
+
+for t in bf16-paths bf16-arith; do
+    if want $t; then
+        build $t && { run $t "$test_dir"; verdict $t; }
+    fi
+done
+# The skinny path alone: what it forwards to 12.9 rather than serve (the tensor-core path off).
+if want bf16-paths-skinny; then
+    build bf16-paths && { run bf16-paths "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1; verdict bf16-paths; }
 fi
 exit $failed

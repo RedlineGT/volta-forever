@@ -187,6 +187,8 @@ typedef enum {
 cublasStatus_t cublasCreate_v2(cublasHandle_t *handle);
 cublasStatus_t cublasDestroy_v2(cublasHandle_t handle);
 cublasStatus_t cublasGetStream_v2(cublasHandle_t handle, cudaStream_t *streamId);
+cublasStatus_t cublasSetStream_v2(cublasHandle_t handle, cudaStream_t streamId);
+cublasStatus_t cublasSetWorkspace_v2(cublasHandle_t handle, void *workspace, size_t workspaceSizeInBytes);
 cublasStatus_t cublasGetPointerMode_v2(cublasHandle_t handle, cublasPointerMode_t *mode);
 cublasStatus_t cublasGetMathMode(cublasHandle_t handle, cublasMath_t *mode);
 cublasStatus_t cublasGemmEx(cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb, int m, int n,
