@@ -40,8 +40,8 @@ where it is not from the build of this release. `docs/` says how each figure was
   cuFFT is now told 7.5.
 - **The bf16 cuBLAS variants are opt-in, and not finished.** `VF_CUBLAS_BF16_SKINNY=1` and
   `VF_CUBLAS_BF16_TC=1` are off by default. The tensor-core path's results are not cuBLAS 12.9's
-  bits, and it makes bf16 training slower; there is no safe mode and no gate on k yet ([The bf16
-  cuBLAS variants](#the-bf16-cublas-variants)).
+  bits, and it makes bf16 training slower; it takes products with k from 1024 to 16384 only, and
+  `VF_SAFE=1` turns it off ([The bf16 cuBLAS variants](#the-bf16-cublas-variants)).
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
   cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
   NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:
@@ -400,9 +400,10 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   fast with it (prompts, generation at batch 8 and 32, an embedding encoder; Whisper 1.24 to 1.30,
   generation at batch 1 unchanged), and up to 1.9 times under `torch.compile`
   (`docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs":
-  one model of each kind, on one V100). Not in this release: a gate on k (the path takes every
-  product of its shapes up to k = 16384), and a safe mode that keeps every call at 12.9's bits
-  whatever `VF_CUBLAS_BF16_TC` says (`VF_SAFE`, which this release does not read).
+  one model of each kind, on one V100, measured before the gate on k: with it, these models'
+  products with 768 or 896 in-features, all but the second product of each MLP, go to the skinny
+  path or to 12.9). `VF_SAFE=1` keeps every call at 12.9's bits whatever `VF_CUBLAS_BF16_TC` says
+  (`INSTALL.md`).
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
   580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
