@@ -1,0 +1,36 @@
+.version 7.0
+.target sm_80
+.address_size 64
+// The member mask of redux.sync in a register set to all ones before labels that nothing branches
+// to (a compiler's labels for its line tables) and before a branch out of the block, and the
+// register written again afterwards, as a loop counter: the shape of Triton's code for its
+// reductions (a grouped GEMM of Triton 3.8 for sm_80). The mask that reaches each reduction is all
+// ones. Every lane stores the sum of 1..32 (0x210), the least (1), the exclusive or (0x20) and the
+// sum of the counter's values 0..9 (0x2d).
+.visible .entry k(.param .u64 output) .reqntid 32,1,1 {
+    .reg .b32 %lane, %input, %mask, %sum, %least, %parity, %count;
+    .reg .b64 %out;
+    .reg .pred %p;
+    ld.param.u64 %out, [output];
+    mov.u32 %lane, %laneid;
+    mad.wide.u32 %out, %lane, 16, %out;
+    add.u32 %input, %lane, 1;
+    mov.b32 %mask, -1;
+$L__tmp1:
+    redux.sync.add.s32 %sum, %input, %mask;
+    setp.eq.u32 %p, %sum, 0;
+    @%p bra $L__done;
+$L__tmp2:
+    redux.sync.min.u32 %least, %input, %mask;
+$L__tmp3:
+    redux.sync.xor.b32 %parity, %input, %mask;
+    mov.u32 %count, 0;
+$L__loop:
+    add.s32 %mask, %mask, 1;
+    add.u32 %count, %count, %mask;
+    setp.lt.s32 %p, %mask, 9;
+    @%p bra $L__loop;
+$L__done:
+    st.global.v4.b32 [%out], {%sum,%least,%parity,%count};
+    ret;
+}

@@ -1345,11 +1345,25 @@ fn instructions_of_later_targets_get_their_plain_equivalents() {
     assert_eq!(count(&lower(rewritten), "shfl.sync.bfly.b32"), 5);
     let earlier = "{\n\t.reg .b32 %r<4>;\n\tmov.u32 %r1, -1;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tret;\n}";
     assert_eq!(count(&lower(earlier), "shfl.sync.bfly.b32"), 5);
+    // As Triton writes it: the `mov` before labels that no statement names (labels of the line
+    // tables) and a branch out of the block, with the register written again later, in a loop
+    // that comes after the instructions. Nothing comes to them but by falling through from the
+    // `mov`, so the mask they read is all ones (until 2026-11-23 any label between ended what was
+    // known, and the later writes ended the register's being a constant of the function).
+    let reaching = "{\n\t.reg .b32 %r<4>;\n\t.reg .pred %p<2>;\n\tmov.b32 %r1, -1;\n$L__tmp1:\n\t\
+                    redux.sync.add.s32 %r2, %r3, %r1;\n\tsetp.eq.s32 %p1, %r2, 0;\n\t@%p1 bra $L__BB0_4;\n\
+                    $L__tmp2:\n\tredux.sync.min.u32 %r2, %r3, %r1;\n$L__BB0_2:\n\tadd.s32 %r1, %r1, 1;\n\t\
+                    setp.lt.s32 %p1, %r1, 9;\n\t@%p1 bra $L__BB0_2;\n$L__BB0_4:\n\tret;\n}";
+    assert_eq!(count(&lower(reaching), "shfl.sync.bfly.b32"), 10, "{reaching}");
     // Not when the register can hold something else where the instruction reads it: another
-    // statement writes it and a label lies between, the `mov` is guarded, or an inner scope
-    // declares a register of that name.
+    // statement writes it and a label that a branch names lies between (before or after the
+    // instruction in the text, or a label of a list of branch targets), the `mov` is guarded, an
+    // inner scope declares a register of that name, or the register is written between.
     for unknown in [
-        "{\n\t.reg .b32 %r<4>;\n\tmov.b32 %r1, -1;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tadd.s32 %r1, %r1, 1;\n\tret;\n}",
+        "{\n\t.reg .b32 %r<4>;\n\t.reg .pred %p1;\n\tmov.b32 %r1, -1;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tadd.s32 %r1, %r1, 1;\n\t@%p1 bra $L1;\n\tret;\n}",
+        "{\n\t.reg .b32 %r<4>;\n\t.reg .pred %p1;\n\tmov.b32 %r1, -1;\n\t@%p1 bra $L1;\n\tmov.b32 %r1, 5;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tret;\n}",
+        "{\n\t.reg .b32 %r<4>;\n\tmov.b32 %r1, -1;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tmov.b32 %r1, 3;\n$L2:\n\tbrx.idx %r1, $T;\n$T: .branchtargets $L1, $L2;\n\tret;\n}",
+        "{\n\t.reg .b32 %r<4>;\n\tmov.b32 %r1, -1;\n$L1:\n\tadd.s32 %r1, %r1, 1;\n$L2:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tret;\n}",
         "{\n\t.reg .b32 %r<4>;\n\t.reg .pred %p1;\n\t@%p1 mov.b32 %r1, -1;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tret;\n}",
         "{\n\t.reg .b32 %r<4>;\n\tmov.b32 %r1, -1;\n$L1:\n\t{\n\t.reg .b32 %r1;\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\t}\n\tret;\n}",
         "{\n\t.reg .b32 %r<4>;\n\tmov.b32 %r1, 0x7fffffff;\n$L1:\n\tredux.sync.add.s32 %r2, %r3, %r1;\n\tret;\n}",

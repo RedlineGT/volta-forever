@@ -44,6 +44,12 @@ pub(super) struct Plan<'a> {
     /// Compilers put the member mask of a warp instruction in such a register, often in an earlier
     /// block than the instruction.
     pub(super) ones: HashSet<&'a str>,
+    /// Labels that some statement of the function names (a branch, a list of branch targets) or
+    /// that a line directive names: the only labels where control can come from elsewhere than
+    /// the statement before. A label that nothing names (compilers put one before many statements,
+    /// for their line tables) is reached by falling through to it alone, and what was known of
+    /// the registers before it still holds after it.
+    pub(super) targets: HashSet<&'a str>,
     /// Unshadowed 16-bit registers with one unconditional constant definition.
     pub(super) constants16: HashMap<&'a str, u32>,
     /// Products of packed BF16 FMAs whose sums are exactly representable.
@@ -194,6 +200,17 @@ impl<'a> Plan<'a> {
             }
         }
         plan.ones = set_to_ones.into_iter().filter(|name| written_once(name)).collect();
+        let mut named: HashSet<&str> = HashSet::new();
+        let mut labels: Vec<&str> = Vec::new();
+        for item in items {
+            match &item.kind {
+                Kind::Label => labels.extend(scan::names(&text[item.range.clone()]).next()),
+                Kind::Statement { operands, .. } => named.extend(scan::names(&text[operands.clone()])),
+                Kind::Line => named.extend(scan::names(&text[item.range.clone()])),
+                Kind::Open | Kind::Close => {}
+            }
+        }
+        plan.targets = labels.into_iter().filter(|label| named.contains(label)).collect();
         plan.constants16 = constants16
             .into_iter()
             .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(16))
