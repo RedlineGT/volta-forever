@@ -18,7 +18,8 @@ machine (2 of 32,000 at p=0.99; 7 of 128,000 at p=0.9 over four rows).
 Environment:
   VF_PROXY must be set (the proxy's lib directory).
   PYTHONPATH must include vllm and torch sites.
-Prints PASS or FAIL per case, and a summary; the exit status is 1 when a case fails.
+Prints PASS or FAIL per case, and a summary; the exit status is 1 when a case fails. The
+comparison is checked first, on tensors made for it (`--comparison`: that alone, no GPU needed).
 """
 import importlib.util, os, subprocess, sys, tempfile, torch, math
 
@@ -206,7 +207,16 @@ def run_triton_topk_topp(logits_gpu, k_gpu, p_gpu, mask_value, vocab_size, on_cp
 
 
 def compare_results(gpu_logits, cpu_logits, label):
-    """Compare GPU and CPU results. Returns (pass, message)."""
+    """Compare GPU and CPU results, the whole tensors: the logits of every case are finite, so
+    what the kernel leaves is a logit as it was or the mask value, and a NaN on either side is a
+    failure. Returns (pass, message)."""
+    alive = int((cpu_logits > float('-inf')).sum().item())
+    if torch.equal(gpu_logits, cpu_logits):
+        return True, f'{label}: EXACT match ({alive} alive)'
+    nans = int(gpu_logits.isnan().sum().item()), int(cpu_logits.isnan().sum().item())
+    if any(nans):
+        return False, f'{label}: NaN in the result: gpu={nans[0]} cpu={nans[1]}'
+
     # Both should have the same set of non-masked positions
     gpu_alive = gpu_logits > float('-inf')
     cpu_alive = cpu_logits > float('-inf')
@@ -218,19 +228,31 @@ def compare_results(gpu_logits, cpu_logits, label):
         diff_positions = (gpu_alive != cpu_alive).sum().item()
         return False, f'{label}: alive set differs: gpu={gpu_count} cpu={cpu_count} diff_positions={diff_positions}'
 
-    # Where both are alive, compare values
+    # Where both are alive, the values differ
     both_alive = gpu_alive & cpu_alive
-    if both_alive.sum().item() == 0:
-        return True, f'{label}: both all-masked (trivially equal)'
-
-    gpu_vals = gpu_logits[both_alive]
-    cpu_vals = cpu_logits[both_alive]
-
-    if torch.equal(gpu_vals, cpu_vals):
-        return True, f'{label}: EXACT match ({both_alive.sum().item()} alive)'
-
-    max_diff = (gpu_vals - cpu_vals).abs().max().item()
+    max_diff = (gpu_logits[both_alive] - cpu_logits[both_alive]).abs().max().item()
     return False, f'{label}: values differ, max_diff={max_diff:.6e} ({both_alive.sum().item()} alive)'
+
+
+def comparison_checks():
+    """What compare_results must refuse, and take: a check that was never seen to fail has not
+    been shown to check. (Until 2026-11-23 it compared the values kept alone, and took a NaN for
+    a masked logit: [1, NaN] passed against [1, -inf].)"""
+    inf, nan = float('inf'), float('nan')
+    wrong = []
+    for gpu, cpu, same in [
+        ([1.0, -inf], [1.0, -inf], True),
+        ([-inf, -inf], [-inf, -inf], True),
+        ([1.0, nan], [1.0, -inf], False),
+        ([nan, -inf], [1.0, -inf], False),
+        ([1.0, nan], [1.0, nan], False),
+        ([1.0, 2.0], [1.0, -inf], False),
+        ([1.0, 2.5], [1.0, 2.0], False),
+    ]:
+        ok, msg = compare_results(torch.tensor([gpu]), torch.tensor([cpu]), f'{gpu} against {cpu}')
+        if ok != same:
+            wrong.append(f'{msg} (should {"pass" if same else "fail"})')
+    return wrong
 
 
 # Test cases: (batch_size, vocab_size, k, p, description)
@@ -315,6 +337,14 @@ def interpreted(path):
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == '--interpreted':
         return interpreted(sys.argv[2])
+    wrong = comparison_checks()
+    for msg in wrong:
+        print(f'FAIL: the comparison: {msg}')
+    if wrong:
+        return 1
+    if sys.argv[1:] == ['--comparison']:
+        print('PASS the comparison')
+        return 0
 
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, 'interpreted.pt')

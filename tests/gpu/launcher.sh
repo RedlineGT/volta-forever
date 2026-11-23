@@ -62,8 +62,8 @@ diff = (c_gpu.cpu() - c_cpu).abs().max().item()
 print("max matmul diff:", diff)
 # (The GPU and the CPU add the 256 products of an element in other orders: they are about 6e-5
 # apart at most, for elements of up to about 80. 1e-3 leaves a factor of 15 over that, and a
-# result off by 0.001 anywhere fails.)
-if diff > 1e-3:
+# result off by 0.001 anywhere fails, and so does a NaN.)
+if not diff <= 1e-3:
     print("FAIL: matmul difference too large")
     sys.exit(1)
 # Check /proc/self/maps for the forwarding cuBLAS.
