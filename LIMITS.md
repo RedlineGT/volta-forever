@@ -421,12 +421,14 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 - **One element's bits depend on the batch size, and on capture.** With the tensor-core path on, the
   same row of op(A) times the same column of op(B) has cuBLAS 12.9's bits when the product is narrow
   (n = 1, or within the skinny path's rule: n <= 16, or n < 32 when m k < 2^20) and the tensor-core
-  path's when it is wide (m k >= 2^20 or n >= 32, with k from 2048 to 16384) and made outside a graph
-  capture; captured, the same call has 12.9's bits again. `VF_SAFE=1` removes both: every result is
-  then 12.9's for that call, whatever n and whatever the capture. 12.9 itself gives an element the
-  same bits only from n = 2 on: its result at n = 1 differs (on 15 TN shapes of linear layers, column
-  0 at n = 1 differed from n = 2 to 512, which agreed), so with `VF_SAFE=1` results are invariant to
-  the batch size for n >= 2 only.
+  path's when it is wide (m k >= 2^20 or n >= 32, outside the skinny path's rule, with k from 2048 to
+  16384) and made outside a graph capture; captured, the same call has 12.9's bits again. `VF_SAFE=1`
+  removes what the variants add: it gives cuBLAS 12.9's bits for that call, whatever n and whatever the
+  capture. 12.9's own results depend on n at n = 1 and, on some shapes, up to n = 16. Measured with
+  12.9 alone on 18 TN shapes of linear layers (each column against the same column at n = 64): every
+  shape gave other bits at n = 1 (in 77 to 95 % of the elements); TN 384 x 1536 and 256 x 2048, where
+  12.9 runs another kernel up to n = 16, gave other bits in about 90 % of the elements at every n from
+  2 to 16 and the same bits from n = 17; the 16 others gave the same bits at every n from 2 to 63.
 - **The tensor-core path takes k >= 2048 only** (`docs/emulations.md`, "The tensor-core path's gate"):
   a model whose layers have fewer in-features (hidden size 896 or 1536, as Qwen2.5's 0.5B and 1.5B)
   gets it only on its wider layers, such as the MLP's down-projection (k = 4864 or 8960); its other

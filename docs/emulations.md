@@ -906,8 +906,10 @@ the mean error towards zero in units of u sum |a b| is at most the larger of 12.
 that of an RTX 5090's own accumulation on the same data (its native bias slope per family, measured
 once at k = 1024 to 2048, where that card does not split its sums; the constants are in the test).
 The error bound held from k = 384 on (at k = 256 one family reached 1.54 times it, the search 1.29);
-the bias bound needs k = 2048 for the search's worst configuration (0.76 times the bound at 2048,
-1.02 at 1536, 1.52 at 1024). One family, built against the 256-element slices (a product of 2^20 at
+the bias bound needs k = 2048 for the search's worst configuration: its bias was 0.95 times the bound
+at 2048 (-183.65 units against 192.7), 1.27 times it at 1536 and 1.90 at 1024 (0.76, 1.02 and 1.52
+times the RTX 5090's own bias, the bound being 0.8 times that): a thin margin at the gate. One family,
+built against the 256-element slices (a product of 2^20 at
 the start of every slice, then products of half to one ulp of it), exceeds the bias bound up to
 about k = 4096 (1.36 times at 2048): the test judges its bias from k = 4096, and
 `VF_ACCEPT_STRICT=1` removes that exception. Every call from the gate on must be served by the path
