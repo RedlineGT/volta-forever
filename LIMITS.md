@@ -347,7 +347,7 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   exactly to fp16 is computed by the fallback, which is slower: with every column failing at
   n = 480, a tensor-core call took 32 to 71 % longer than cuBLAS 12.9's on six shapes of linear
   layers, TN m x k = 1536 x 1536, 4608 x 1536, 1536 x 4608, 7344 x 1536, 9728 x 896 and 896 x 4864
-  (`tests/gpu/forward/bf16-cost.c`), against 2.1 to 2.9 times as fast when nothing fails.
+  (`tests/gpu/forward/bf16-cost.c`), against 1.7 to 2.8 times as fast when nothing fails.
 - **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
   layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
   the pool of the context keeps up to 64 MiB between eager calls.
