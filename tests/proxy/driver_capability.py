@@ -286,7 +286,7 @@ def run_runtimes(proxy, directory):
 def build(directory):
     data = Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data"
     cubin80 = Path(__file__).resolve().parents[2] / "tests/kernels/translate/k_ampere.sm80.cubin"
-    for name, source in (("mock.so", DRIVER), ("plain", CLIENT)):
+    for name, source in (("mock.so", DRIVER), ("plain", CLIENT), ("no-proc.so", NO_PROC)):
         subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-x", "c", "-",
                         "-o", str(directory / name)], input=source, text=True, check=True)
     for name in ("libcudart.so.12", "libcudart.so.13"):
@@ -376,9 +376,44 @@ def run_binary(proxy, directory):
     assert client.binary(api.cuFuncGetAttribute, c.byref(val)) == 0 and val.value == 90
 
 
+# What a process sees without /proc (a sandbox, a chroot): /proc/self/exe cannot be opened.
+NO_PROC = """
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <string.h>
+static int opened(const char *name, const char *path, int flags, va_list ap) {
+    int mode = (flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE ? va_arg(ap, int) : 0;
+    if (path && strcmp(path, "/proc/self/exe") == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    int (*real)(const char *, int, ...) = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, name);
+    return real(path, flags, mode);
+}
+int open(const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int fd = opened("open", path, flags, ap);
+    va_end(ap);
+    return fd;
+}
+int open64(const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int fd = opened("open64", path, flags, ap);
+    va_end(ap);
+    return fd;
+}
+"""
+
+
 def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
-    through PATH, before a change of directory)."""
+    through PATH, before a change of directory), and without /proc when it was started by its
+    path."""
     programs = directory / "bin"
     for name, override, told in (("main75", None, "7.5"), ("main75", "8.0", "7.5"),
                                  ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5")):
@@ -389,6 +424,10 @@ def run_main(proxy, directory, env):
                              ([f"./{name}", str(proxy), "/"], programs)):
             out = subprocess.run(command, cwd=cwd, env=settings, check=True, capture_output=True, text=True).stdout
             assert out == f"{told} 0\n", (command, cwd, override, out)
+        settings["LD_PRELOAD"] = str(directory / "no-proc.so")
+        out = subprocess.run([str(programs / name), str(proxy)], cwd=directory, env=settings, check=True,
+                             capture_output=True, text=True).stdout
+        assert out == f"{told} 0\n", ("without /proc", name, override, out)
 
 
 if __name__ == "__main__":

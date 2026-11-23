@@ -199,6 +199,15 @@ unsafe fn object(info: &libc::dl_phdr_info, address: usize, first: bool) -> Obje
     found
 }
 
+/// Whether the file at `path` can be opened for reading.
+fn readable(path: &CStr) -> bool {
+    // SAFETY: plain system calls on a path.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        fd >= 0 && libc::close(fd) == 0
+    }
+}
+
 /// A file mapped read-only.
 struct Mapped {
     start: *mut c_void,
@@ -381,11 +390,13 @@ fn caller(return_address: usize) -> Decision {
     let objects = objects(return_address);
     // For the main program the loader's name is `argv[0]`, which names no file when the program
     // was started by name through PATH, or once it has changed directory: its file is read
-    // through `/proc/self/exe`.
+    // through `/proc/self/exe`, when that can be opened (without `/proc`, in a sandbox or a
+    // chroot, the loader's name is read: it names the file when it is a path).
     let main = objects
         .first()
         .filter(|object| object.holds)
-        .and_then(|object| object.path.as_deref());
+        .and_then(|object| object.path.as_deref())
+        .filter(|&path| path != c"/proc/self/exe" || readable(path));
     let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
     let caller = classify(path);
     let mut limit = None;
