@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{LazyLock, Mutex};
 
 use vf_adapt::Embedded;
@@ -268,10 +269,24 @@ fn classify(path: &CStr) -> Caller {
 /// The limit that the code embedded in the file at `path` sets to what a caller that runs it is
 /// told (`vf_adapt::Policy::told_limit_in`), with the file.
 fn file_limit(path: &CStr, limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
-    let limit = *limits
-        .entry(path.to_owned())
-        .or_insert_with(|| Mapped::open(path).and_then(|file| config().policy.told_limit_in(file.bytes())));
+    let limit = *limits.entry(path.to_owned()).or_insert_with(|| {
+        let file = Mapped::open(path)?;
+        unpanicked(path, || config().policy.told_limit_in(file.bytes()))
+    });
     limit.map(|sm| (sm, path.to_owned()))
+}
+
+/// What `scan` answers of the file at `path`, or `None` (no limit: the answer without the scan)
+/// when it panics. The answer is given inside `extern "C"` functions of the driver's, where a
+/// panic would end the process; the files read are any the process loaded.
+fn unpanicked(path: &CStr, scan: impl FnOnce() -> Option<u32>) -> Option<u32> {
+    catch_unwind(AssertUnwindSafe(scan)).unwrap_or_else(|_| {
+        log::error(format_args!(
+            "internal error while reading the GPU code of {}; it sets no limit to the capability told",
+            path.to_string_lossy()
+        ));
+        None
+    })
 }
 
 /// The lower of two limits.
@@ -475,4 +490,15 @@ fn capability(decision: Decision) -> Option<(i32, i32)> {
         Caller::Other => return told,
     };
     told.or(Some(as_pair(sm)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scan_that_panics_sets_no_limit() {
+        assert_eq!(unpanicked(c"/lib/a.so", || Some(75)), Some(75));
+        assert_eq!(unpanicked(c"/lib/a.so", || panic!("an odd input")), None);
+    }
 }
