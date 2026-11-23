@@ -369,6 +369,53 @@ static void h4_one_runtime(void)
     v.DescDestroy(d);
 }
 
+/* ---- cuBLASLt arguments that the skinny path must leave to 12.9 (review F1, F2) ---- */
+static void lt_left_to_129(void)
+{
+    cublasLtHandle_t lt;
+    v.LtCreate(&lt);
+    cublasLtMatmulDesc_t d;
+    cublasLtMatrixLayout_t la, lb, lc;
+    v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    const int32_t tb = CUBLAS_OP_T;
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof tb);
+    v.LayoutCreate(&la, CUDA_R_16BF, 1536, 1920, 1536);
+    v.LayoutCreate(&lb, CUDA_R_16BF, 8, 1920, 8);
+    v.LayoutCreate(&lc, CUDA_R_32F, 1536, 8, 1536);
+    const float one = 1.0f, zero = 0.0f;
+    static const struct {
+        const char *what;
+        int32_t id, splitk; /* -1: no algorithm */
+        int null_c, null_ws, served;
+    } cases[] = {
+        {"no algorithm", -1, 0, 0, 0, 1},
+        {"algorithm id 16, one split of k (12.9's heuristic)", 16, 1, 0, 0, 1},
+        {"algorithm id 11", 11, 1, 0, 0, 0},
+        {"algorithm id 16, 4 splits of k", 16, 4, 0, 0, 0},
+        {"no C descriptor", -1, 0, 1, 0, 0},
+        {"no workspace, with a size of 32 MiB", -1, 0, 0, 1, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        cublasLtMatmulAlgo_t algo;
+        memset(&algo, 0, sizeof algo);
+        algo.data[0] = (uint64_t)cases[i].id;
+        algo.data[1] = (uint64_t)cases[i].splitk;
+        take();
+        v.LtMatmul(lt, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), cases[i].null_c ? NULL : lc, DEV(3), lc,
+                   cases[i].id < 0 ? NULL : &algo, NULL, cases[i].null_ws ? (size_t)32 << 20 : 0, S1);
+        take();
+        const int served = count("launch vf_bf16_skinny") == 1, forwarded = count("ltmatmul handle=") == 1;
+        if (cases[i].served)
+            CHECK(served && !forwarded, "cuBLASLt, %s: not served by the skinny path", cases[i].what);
+        else
+            CHECK(forwarded && !served, "cuBLASLt, %s: not left to 12.9", cases[i].what);
+    }
+    v.LayoutDestroy(la);
+    v.LayoutDestroy(lb);
+    v.LayoutDestroy(lc);
+    v.DescDestroy(d);
+}
+
 /* ---- H5: the internal GEMM on the runtime's own handle, with the stream read once ---- */
 static void h5_internal_gemm(void)
 {
@@ -528,6 +575,7 @@ int main(int argc, char **argv)
         h1_forwarded();
         h1_served();
         h4_one_runtime();
+        lt_left_to_129();
         h6_captured();
         h7_lt_allowlist();
         h5_internal_gemm();

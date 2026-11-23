@@ -59,9 +59,9 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_SKINNY_SMALL_MK (1LL << 20)
 #define VF_SKINNY_MAX_K 16384        /* skinny path: k at most this (G1, tests/gpu/forward/bf16-skinny.c) */
 #define VF_SEQ_MIN_WORKSPACE (4u << 20) /* below, 12.9's choice of kernel for op(B) = N changes (G1) */
-/* The cuBLAS the skinny path's rule was measured on: CUDA 12.9.2's libraries (cuBLAS 12.9.2.10), which
- * report 12.9.2 (cublasGetProperty, and 120902 from cublasLtGetVersion). With any other, the skinny
- * path serves nothing. */
+/* The cuBLAS the skinny path's rule was measured on: CUDA 12.9.2's libraries (measured on build
+ * 12.9.2.10, a number the libraries do not report), which report 12.9.2 (cublasGetProperty, and
+ * 120902 from cublasLtGetVersion). With any other, the skinny path serves nothing. */
 #define VF_SEQ_CUBLAS_MAJOR 12
 #define VF_SEQ_CUBLAS_MINOR 9
 #define VF_SEQ_CUBLAS_PATCH 2
@@ -157,6 +157,7 @@ static struct {
     FN(cublasLtCreate) LtCreate;
     FN(cublasLtDestroy) LtDestroy;
     FN(cublasLtMatmul) LtMatmul;
+    FN(cublasLtMatmulAlgoConfigGetAttribute) LtAlgoConfigGet;
     FN(cublasLtMatmulDescInit_internal) LtDescInit;
     FN(cublasLtMatmulDescCreate) LtDescCreate;
     FN(cublasLtMatmulDescDestroy) LtDescDestroy;
@@ -216,6 +217,7 @@ static int bind_libraries(void)
              BIND(b, cb.GemmEx64, "cublasGemmEx_64") && BIND(b, cb.GemmSB, "cublasGemmStridedBatchedEx") &&
              BIND(b, cb.GemmSB64, "cublasGemmStridedBatchedEx_64") && BIND(l, cb.LtCreate, "cublasLtCreate") &&
              BIND(l, cb.LtDestroy, "cublasLtDestroy") && BIND(l, cb.LtMatmul, "cublasLtMatmul") &&
+             BIND(l, cb.LtAlgoConfigGet, "cublasLtMatmulAlgoConfigGetAttribute") &&
              BIND(l, cb.LtDescInit, "cublasLtMatmulDescInit_internal") &&
              BIND(l, cb.LtDescCreate, "cublasLtMatmulDescCreate") &&
              BIND(l, cb.LtDescDestroy, "cublasLtMatmulDescDestroy") &&
@@ -1491,6 +1493,18 @@ static int read_layout(cublasLtMatrixLayout_t l, Layout *o)
     return 1;
 }
 
+/* The algorithm 12.9's heuristic gives on the skinny path's shapes: id 16, one split of k (0 is read
+ * as one). */
+static int lt_algo_is_sequential(const cublasLtMatmulAlgo_t *algo)
+{
+    int32_t id = -1, splitk = -1; /* both int32_t in cublasLt.h */
+    size_t w = 0;
+    if (cb.LtAlgoConfigGet(algo, CUBLASLT_ALGO_CONFIG_ID, &id, sizeof id, &w) != CUBLAS_STATUS_SUCCESS ||
+        cb.LtAlgoConfigGet(algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splitk, sizeof splitk, &w) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    return id == 16 && (splitk == 0 || splitk == 1);
+}
+
 EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMatmulDesc_t desc, const void *alpha,
                                              const void *A, cublasLtMatrixLayout_t Adesc, const void *B,
                                              cublasLtMatrixLayout_t Bdesc, const void *beta, const void *C,
@@ -1505,10 +1519,10 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     Layout la, lb, lc, ld;
     if (!g_lt_defaults_ok) goto forward;
     reason = R_ARGS;
-    if (!desc || !read_layout(Adesc, &la) || !read_layout(Bdesc, &lb) || !read_layout(Ddesc, &ld) ||
-        (Cdesc && !read_layout(Cdesc, &lc)))
+    /* No C descriptor: 12.9 does not accept it (it faults), so neither does this path. */
+    if (!desc || !Cdesc || !read_layout(Adesc, &la) || !read_layout(Bdesc, &lb) || !read_layout(Ddesc, &ld) ||
+        !read_layout(Cdesc, &lc))
         goto forward;
-    if (!Cdesc) lc = ld;
     int32_t compute = 0, scale = 0;
     reason = R_TYPES;
     if (!desc_read(desc, CUBLASLT_MATMUL_DESC_COMPUTE_TYPE, sizeof compute, &compute) ||
@@ -1561,12 +1575,19 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     if (!handle || !alpha || !beta || !A || !B || !D || la.ld < (int64_t)la.rows || lb.ld < (int64_t)lb.rows ||
         lc.ld < (int64_t)lc.rows || ld.ld < (int64_t)ld.rows)
         goto forward;
+    /* A size without a workspace: 12.9 returns CUBLAS_STATUS_INVALID_VALUE, so it is left to say so. */
+    if (!workspace && workspaceSizeInBytes) goto forward;
     const Shape shape = {ta, tb, (long long)m, (long long)n, (long long)k,
                          aligned16(A) && aligned16(B) && aligned16(D) && (!C || aligned16(C)) && la.ld % 8 == 0 &&
                              lb.ld % 8 == 0 && lc.ld % 8 == 0 && ld.ld % 8 == 0,
                          workspaceSizeInBytes >= VF_SEQ_MIN_WORKSPACE};
     path = choose_path(&shape, &reason);
     if (path == PATH_NONE) goto forward;
+    /* An explicit algorithm: 12.9 runs it, and only the one its heuristic picks on these shapes (id 16,
+     * without split-K) computes the sequential kernel's chain; any other goes to 12.9. The tensor-core
+     * path does not follow a cuBLASLt algorithm (docs/emulations.md, section 11). */
+    reason = R_ALGO;
+    if (algo && path == PATH_SKINNY && !CONTROL("algo") && !lt_algo_is_sequential(algo)) goto forward;
     Ctx *x = NULL;
     reason = context_check(handle, (CUstream)stream, api, &x);
     if (reason) goto forward;

@@ -177,6 +177,24 @@ static void layout_text(char *out, size_t n, cublasLtMatrixLayout_t l)
              (long long)get(o, 3), (long long)get(o, 4), (long long)get(o, 5), (long long)get(o, 6));
 }
 
+/* An algorithm of the stand-in: data[0] its id, data[1] its number of splits of k (host tests build them). */
+EXPORT cublasStatus_t cublasLtMatmulAlgoConfigGetAttribute(const cublasLtMatmulAlgo_t *algo,
+                                                          cublasLtMatmulAlgoConfigAttributes_t attr, void *buf,
+                                                          size_t size, size_t *written)
+{
+    if (!algo || !buf || size != 4) return CUBLAS_STATUS_INVALID_VALUE;
+    int32_t v;
+    if (attr == CUBLASLT_ALGO_CONFIG_ID)
+        v = (int32_t)algo->data[0];
+    else if (attr == CUBLASLT_ALGO_CONFIG_SPLITK_NUM)
+        v = (int32_t)algo->data[1];
+    else
+        return CUBLAS_STATUS_INVALID_VALUE;
+    memcpy(buf, &v, 4);
+    if (written) *written = 4;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 EXPORT cublasStatus_t cublasLtMatmul(cublasLtHandle_t h, cublasLtMatmulDesc_t d, const void *alpha, const void *A,
                                      cublasLtMatrixLayout_t la, const void *B, cublasLtMatrixLayout_t lb,
                                      const void *beta, const void *C, cublasLtMatrixLayout_t lc, void *D,

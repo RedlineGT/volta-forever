@@ -295,6 +295,13 @@ typedef enum {
     CUBLASLT_MATRIX_LAYOUT_BATCH_MODE = 8
 } cublasLtMatrixLayoutAttribute_t;
 
+typedef enum {
+    CUBLASLT_ALGO_CONFIG_ID = 0,
+    CUBLASLT_ALGO_CONFIG_TILE_ID = 1,
+    CUBLASLT_ALGO_CONFIG_SPLITK_NUM = 2,
+    CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME = 3
+} cublasLtMatmulAlgoConfigAttributes_t;
+
 size_t cublasLtGetVersion(void);
 cublasStatus_t cublasLtCreate(cublasLtHandle_t *lightHandle);
 cublasStatus_t cublasLtDestroy(cublasLtHandle_t lightHandle);
@@ -304,6 +311,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle, cublasLtMatmulDesc_t
                               cublasLtMatrixLayout_t Cdesc, void *D, cublasLtMatrixLayout_t Ddesc,
                               const cublasLtMatmulAlgo_t *algo, void *workspace, size_t workspaceSizeInBytes,
                               cudaStream_t stream);
+cublasStatus_t cublasLtMatmulAlgoConfigGetAttribute(const cublasLtMatmulAlgo_t *algo,
+                                                   cublasLtMatmulAlgoConfigAttributes_t attr, void *buf,
+                                                   size_t sizeInBytes, size_t *sizeWritten);
 cublasStatus_t cublasLtMatmulDescInit_internal(cublasLtMatmulDesc_t matmulDesc, size_t size,
                                                cublasComputeType_t computeType, cudaDataType_t scaleType);
 cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t *matmulDesc, cublasComputeType_t computeType,

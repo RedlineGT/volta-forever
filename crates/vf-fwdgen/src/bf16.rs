@@ -337,6 +337,7 @@ const ENUMS: &[(&str, &str, bool)] = &[
     ("cublasLtEpilogue_t", "cublasLt.h", false),
     ("cublasLtMatmulDescAttributes_t", "cublasLt.h", true),
     ("cublasLtMatrixLayoutAttribute_t", "cublasLt.h", true),
+    ("cublasLtMatmulAlgoConfigAttributes_t", "cublasLt.h", false),
 ];
 
 /// Structures passed by pointer or whose space the runtime provides: their sizes.
