@@ -8,6 +8,10 @@
 
 unsigned loads, unloads, preserved;
 uintptr_t next_handle;
+/* Handles loaded and not unloaded; a lookup takes `slow_lookup` milliseconds, and counts in
+   `used_unloaded` the lookups made with a handle that was unloaded before they ended. */
+static unsigned char live[1 << 16];
+unsigned slow_lookup, used_unloaded;
 unsigned force_name_fallback, invalid_function_names;
 enum { FUNCTION_TAG = 0x10000 };
 static unsigned only_good[256];
@@ -15,6 +19,7 @@ static void *loaded(void) {
     ++loads;
     uintptr_t handle = next_handle ? next_handle : loads;
     next_handle = 0;
+    live[handle % sizeof live] = 1;
     return (void *)handle;
 }
 
@@ -56,8 +61,8 @@ int cuModuleLoadData(void **mod, const void *image) {
     only_good[(uintptr_t)*mod] = 0;
     return 0;
 }
-int cuLibraryUnload(void *lib) { ++unloads; return 0; }
-int cuModuleUnload(void *mod) { ++unloads; return 0; }
+int cuLibraryUnload(void *lib) { ++unloads; live[(uintptr_t)lib % sizeof live] = 0; return 0; }
+int cuModuleUnload(void *mod) { ++unloads; live[(uintptr_t)mod % sizeof live] = 0; return 0; }
 int cuLibraryGetModule(void **mod, void *lib) {
     *mod = (void *)((uintptr_t)lib + 32);
     only_good[(uintptr_t)*mod] = only_good[(uintptr_t)lib];
@@ -85,6 +90,8 @@ int cuModuleEnumerateFunctions(void **out, unsigned cap, void *mod) {
     return rc;
 }
 int cuLibraryGetKernel(void **kernel, void *lib, const char *name) {
+    if (slow_lookup) usleep(slow_lookup * 1000);
+    if (!live[(uintptr_t)lib % sizeof live]) ++used_unloaded;
     if (strstr(name, "absent")) {
         *kernel = 0;
         return 500;

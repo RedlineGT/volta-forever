@@ -1154,6 +1154,8 @@ struct Enumeration {
     owner: *mut c_void,
     /// Library or module actually queried in the driver.
     handle: *mut c_void,
+    /// The materialized module of a deferred library, while `handle` is it.
+    _pinned: Option<lazy::Pinned>,
     library: bool,
     count: CountEntries,
     enumerate: EnumerateEntries,
@@ -1166,6 +1168,7 @@ impl Enumeration {
             Self {
                 owner: module,
                 handle: module,
+                _pinned: None,
                 library: false,
                 count: std::mem::transmute::<usize, CountEntries>(REALS[idx::cuModuleGetFunctionCount].load(Relaxed)),
                 enumerate: std::mem::transmute::<usize, EnumerateEntries>(
@@ -1177,17 +1180,20 @@ impl Enumeration {
     }
 
     unsafe fn library(owner: *mut c_void) -> Result<Self, CUresult> {
+        // (The materialized module of a deferred library is pinned while the enumeration lives.)
         // The full compiler can discover further refusals, so both the count and
         // enumeration must see the same materialized library.
-        let handle = if lazy::is_lazy(owner as usize) {
-            unsafe { lazy::materialize(owner as usize)? as *mut c_void }
+        let pinned = if lazy::is_lazy(owner as usize) {
+            Some(unsafe { lazy::materialize(owner as usize)? })
         } else {
-            owner
+            None
         };
+        let handle = pinned.as_ref().map_or(owner, |pinned| pinned.handle as *mut c_void);
         unsafe {
             Ok(Self {
                 owner,
                 handle,
+                _pinned: pinned,
                 library: true,
                 count: std::mem::transmute::<usize, CountEntries>(REALS[idx::cuLibraryGetKernelCount].load(Relaxed)),
                 enumerate: std::mem::transmute::<usize, EnumerateEntries>(
@@ -1353,7 +1359,7 @@ pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetModule].load(Relaxed)) };
-                let result = unsafe { real(module, mat as *mut c_void) };
+                let result = unsafe { real(module, mat.handle as *mut c_void) };
                 unsafe { share_kernels(result, module, handle) };
                 return result;
             }
@@ -1410,7 +1416,7 @@ pub unsafe extern "C" fn cuLibraryGetGlobal(
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut u64, *mut usize, *mut c_void, *const c_char) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetGlobal].load(Relaxed)) };
-                let result = unsafe { real(dptr, size, mat as *mut c_void, name) };
+                let result = unsafe { real(dptr, size, mat.handle as *mut c_void, name) };
                 if result == CUDA_SUCCESS {
                     fit::asked_for_data(handle);
                 }
@@ -1443,7 +1449,7 @@ pub unsafe extern "C" fn cuLibraryGetManaged(
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut u64, *mut usize, *mut c_void, *const c_char) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetManaged].load(Relaxed)) };
-                let result = unsafe { real(dptr, size, mat as *mut c_void, name) };
+                let result = unsafe { real(dptr, size, mat.handle as *mut c_void, name) };
                 if result == CUDA_SUCCESS {
                     fit::asked_for_data(handle);
                 }
@@ -1475,7 +1481,7 @@ pub unsafe extern "C" fn cuLibraryGetUnifiedFunction(
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetUnifiedFunction].load(Relaxed)) };
-                return unsafe { real(fptr, mat as *mut c_void, name) };
+                return unsafe { real(fptr, mat.handle as *mut c_void, name) };
             }
             Err(code) => return code,
         }
