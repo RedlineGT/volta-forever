@@ -170,6 +170,27 @@ done <<'TURNS'
 2 dd7fa33d cf83424e 6537527c 00000032
 37 858142b0 54074692 63b15f97 00000032
 TURNS
+# The same kernel with readers of the accumulators after the loop where not every lane runs: under
+# a branch that some lanes take, and in a loop whose number of turns depends on the lane (the pair
+# whose register they read must be dropped); at the join of such a branch right before an ldmatrix
+# (every lane gets there: that pair stays, with its conversions there). The words of each product
+# computed by itself (VF_PAIRS=0). (A lowering that took every place for one where the 32 lanes run
+# together fails the six with pairs, the GPU stopping the kernel: 2026-11-23.)
+while read -r case turns w0 w1 w2 w3; do
+    for pairs in 0 1; do
+        name=$case-$turns-$pairs
+        log=$out/logs/$name.log
+        VF_PAIRS=$pairs DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -i "$turns" "$G/ptx-cases/$case.ptx" k "$w0" "$w1" "$w2" "$w3" >"$log" 2>&1
+        check "$name" "^PASS k of .*: 32 of 32 lanes as expected"
+    done
+done <<'TURNS'
+pairs-divergent-branch 1 a556a958 d66347fa e3f42f26 0000000c
+pairs-divergent-branch 2 dd7fa33d cf83424e 5733154a 00000032
+pairs-divergent-branch 37 858142b0 54074692 0fe4e688 00000032
+pairs-divergent-loop 1 a556a958 d66347fa a3963f76 0000000c
+pairs-divergent-loop 2 dd7fa33d cf83424e 67688f20 00000032
+pairs-divergent-loop 37 858142b0 54074692 bddcf416 00000032
+TURNS
 # The same product with B by plain ldmatrix (summed on k 0..3, then 4..7) and by ldmatrix.trans
 # (even k, then odd k): 52, 53 and 78 of the 128 results differ in their bits. Why products with B
 # by ldmatrix.trans are not paired; a lowering that summed them in the halves of k would give 0.

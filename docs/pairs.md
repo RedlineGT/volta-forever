@@ -480,7 +480,11 @@ must leave the output as it is without pairs; a host model of the layouts that i
 values the lowering computes); `tests/gpu/run.sh`, `pairs-adversarial` (a loop of three pairs, B
 from one and from two `ldmatrix`, on subnormals, infinities, NaN, the largest half and cancelling
 turns: the words of each product by itself, with and without pairs, for 1, 2 and 37 turns; a build
-that only adds the two halves of k the other way round gives other words), `trans-order` (the same
+that only adds the two halves of k the other way round gives other words), `pairs-divergent-branch`
+and `pairs-divergent-loop` (the same kernel with readers after the loop under a branch that some
+lanes take, in a loop whose number of turns depends on the lane, and at the join of such a branch
+before an `ldmatrix`: the words of each product by itself; a lowering that takes every place for a
+whole one fails them), `trans-order` (the same
 product with B by plain `ldmatrix` and by `ldmatrix.trans`: 52 to 78 of its 128 results differ, which
 is why the second is not paired); the tensor-core cases of the suite, and Triton's dot and attention
 cases at capability 8.0 with `VF_PAIRS=0` and without.
