@@ -63,6 +63,12 @@ typedef enum CUstreamCaptureStatus_enum {
     CU_STREAM_CAPTURE_STATUS_INVALIDATED = 2
 } CUstreamCaptureStatus;
 
+typedef enum CUstreamCaptureMode_enum {
+    CU_STREAM_CAPTURE_MODE_GLOBAL = 0,
+    CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1,
+    CU_STREAM_CAPTURE_MODE_RELAXED = 2
+} CUstreamCaptureMode;
+
 typedef enum CUmemPool_attribute_enum {
     CU_MEMPOOL_ATTR_RELEASE_THRESHOLD = 4
 } CUmemPool_attribute;
@@ -113,6 +119,7 @@ CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx);
 CUresult cuStreamGetCaptureInfo_v3(CUstream hStream, CUstreamCaptureStatus *captureStatus_out, cuuint64_t *id_out,
                                    CUgraph *graph_out, const CUgraphNode **dependencies_out,
                                    const CUgraphEdgeData **edgeData_out, size_t *numDependencies_out);
+CUresult cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode);
 CUresult cuModuleLoadData(CUmodule *module, const void *image);
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name);
 CUresult cuFuncLoad(CUfunction function);
@@ -139,6 +146,12 @@ typedef enum cudaDataType_t {
     CUDA_R_16BF = 14
 } cudaDataType;
 typedef enum cudaDataType_t cudaDataType_t;
+
+typedef enum libraryPropertyType_t {
+    MAJOR_VERSION = 0,
+    MINOR_VERSION = 1,
+    PATCH_LEVEL = 2
+} libraryPropertyType;
 
 /* ---- cuBLAS (cublas_api.h) ---------------------------------------------------------------- */
 
@@ -184,6 +197,7 @@ typedef enum {
     CUBLAS_GEMM_DEFAULT_TENSOR_OP = 99
 } cublasGemmAlgo_t;
 
+cublasStatus_t cublasGetProperty(libraryPropertyType type, int *value);
 cublasStatus_t cublasCreate_v2(cublasHandle_t *handle);
 cublasStatus_t cublasDestroy_v2(cublasHandle_t handle);
 cublasStatus_t cublasGetStream_v2(cublasHandle_t handle, cudaStream_t *streamId);
@@ -296,6 +310,7 @@ typedef enum {
     CUBLASLT_MATRIX_LAYOUT_BATCH_MODE = 8
 } cublasLtMatrixLayoutAttribute_t;
 
+size_t cublasLtGetVersion(void);
 cublasStatus_t cublasLtCreate(cublasLtHandle_t *lightHandle);
 cublasStatus_t cublasLtDestroy(cublasLtHandle_t lightHandle);
 cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle, cublasLtMatmulDesc_t computeDesc, const void *alpha,

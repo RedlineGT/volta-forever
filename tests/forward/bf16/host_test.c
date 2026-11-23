@@ -145,7 +145,7 @@ static void launch_args(const char *l, void *out, size_t size)
 }
 
 /* ---- counters ---- */
-enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_K, R_HANDLE, R_CONTEXT, R_MATH,
+enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_HANDLE, R_CONTEXT, R_MATH,
        R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAP, R_ALLOC, R_LAUNCH, R_N };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 typedef struct {
@@ -241,7 +241,7 @@ static void h1_forwarded(void)
     g = gemm(1, 0, 1536, 512, 1536); g.alpha = 0.0f; expect_forwarded("alpha = 0", &g, R_ALPHA0);
     g = gemm(1, 0, 1536, 512, 1536); g.C = (void *)((const char *)g.A + 64); expect_forwarded("C overlaps A", &g, R_ALIAS);
     g = gemm(1, 0, 64, 40, 16392); expect_forwarded("k = 16392 on the tensor-core path", &g, R_K);            /* H3 */
-    g = gemm(1, 0, 64, 20, 512); expect_forwarded("m k < 2^20, n < 32, m < 128", &g, R_DOMAIN);                /* H3 */
+    g = gemm(1, 0, 64, 20, 512); expect_forwarded("TN m k < 2^20, n = 20, m < 448", &g, R_SEQ);                /* H3 */
     /* (m k < 2^20 and n < 32: the tensor-core path's gate does not take them) */
     g = gemm(1, 0, 384, 8, 1536); expect_forwarded("TN m = 384 (12.9: gemmSN)", &g, R_SEQ);
     g = gemm(1, 0, 512, 8, 1536); g.A = (const char *)g.A + 2; expect_forwarded("TN misaligned A", &g, R_SEQ);
@@ -562,13 +562,20 @@ int main(int argc, char **argv)
     } else if (!strcmp(mode, "skinny")) {
         G g = gemm(0, 1, 1536, 8, 16392);
         expect_forwarded("skinny alone, k = 16392", &g, R_DOMAIN);
+        g = gemm(0, 1, 16384, 8, 16);
+        expect_forwarded("skinny alone, NT m = 16384 k = 16 (slower than 12.9 there)", &g, R_DOMAIN);
+        g = gemm(0, 0, 64, 8, 1920);
+        expect_forwarded("skinny alone, NN m = 64", &g, R_DOMAIN);
         g = gemm(0, 1, 64, 8, 1920);
-        expect_forwarded("skinny alone, m = 64", &g, R_DOMAIN);
+        expect_skinny("skinny alone, NT m = 64 k = 1920", &g, "vf_bf16_skinny_g_8_16");
         g = gemm(1, 0, 1536, 8, 1536);
         v.SetWorkspace(H, DEV(9), 1u << 20);
         expect_forwarded("skinny alone, TN with a 1 MiB workspace", &g, R_SEQ);
         v.SetStream(H, S1);
         expect_skinny("skinny alone, TN after cublasSetStream", &g, "vf_bf16_skinny_8_16");
+    } else if (!strcmp(mode, "otherbuild")) { /* STUB_CUBLAS_VERSION set: not the cuBLAS of the rule */
+        G g = gemm(0, 1, 1536, 8, 1920);
+        expect_forwarded("skinny alone, another cuBLAS build", &g, R_BUILD);
     } else if (!strcmp(mode, "off")) {
         G g = gemm(0, 1, 1536, 8, 1920);
         take();

@@ -103,7 +103,7 @@ static void subnormal_products(void)
  * the separate product is inf. */
 static void overflow_brought_back(void)
 {
-    const int m = 128, n = 2, k = 16;
+    const int m = 128, n = 2, k = 64;
     uint16_t *A = calloc((size_t)m * k, 2), *B = calloc((size_t)n * k, 2);
     for (int i = 0; i < m; ++i) {
         A[i + 0 * (size_t)m] = bfv(-ldexpf(1, 52));

@@ -69,6 +69,12 @@ static void layout_defaults(Obj *o, cudaDataType type, uint64_t rows, uint64_t c
     put(o, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, 1);
 }
 
+EXPORT size_t cublasLtGetVersion(void)
+{
+    const char *v = getenv("STUB_CUBLAS_VERSION");
+    return v && *v ? (size_t)atoi(v) : 120902;
+}
+
 EXPORT cublasStatus_t cublasLtCreate(cublasLtHandle_t *h)
 {
     *h = (cublasLtHandle_t)malloc(16);

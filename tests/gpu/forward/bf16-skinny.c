@@ -220,6 +220,186 @@ static void kernels_mode(const char *path)
     printf("captured %lld configurations into %s\n", count, path);
 }
 
+/* ---- check: execute ---- */
+
+static float time_call(int variant, const Cfg *c, const void *A, long long lda, const void *B, long long ldb, void *C,
+                       long long ldc, int reps)
+{
+    const float one = 1.0f, zero = 0.0f;
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    float best = 1e30f;
+    for (int r = 0; r < reps; ++r) {
+        cudaEventRecord(e0, cap_stream);
+        if (variant)
+            cublasGemmEx(hv, c->ta ? CUBLAS_OP_T : CUBLAS_OP_N, c->tb ? CUBLAS_OP_T : CUBLAS_OP_N, c->m, c->n, c->k, &one,
+                         A, CUDA_R_16BF, (int)lda, B, CUDA_R_16BF, (int)ldb, &zero, C, c->ct ? CUDA_R_16BF : CUDA_R_32F,
+                         (int)ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        else
+            c129.GemmEx(h12_ws[c->ws], c->ta ? CUBLAS_OP_T : CUBLAS_OP_N, c->tb ? CUBLAS_OP_T : CUBLAS_OP_N, c->m, c->n, c->k,
+                        &one, A, CUDA_R_16BF, (int)lda, B, CUDA_R_16BF, (int)ldb, &zero, C,
+                        c->ct ? CUDA_R_16BF : CUDA_R_32F, (int)ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        cudaEventRecord(e1, cap_stream);
+        cudaEventSynchronize(e1);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, e0, e1);
+        if (ms < best) best = ms;
+    }
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+    return best * 1000.0f; /* microseconds */
+}
+
+/* Largest error of the rows sampled, in units of 2^-24 sum |a b| (fp64 reference). */
+static double sample_error(const Cfg *c, const uint16_t *hA, long long lda, const uint16_t *hB, long long ldb,
+                           const void *hC, long long ldc)
+{
+    double worst = 0;
+    const int rows = c->m < 48 ? c->m : 48;
+    for (int r = 0; r < rows; ++r) {
+        const int i = (int)((long long)r * c->m / rows);
+        for (int j = 0; j < c->n; ++j) {
+            double sum = 0, mag = 0;
+            for (int l = 0; l < c->k; ++l) {
+                const double p = (double)opel(hA, c->ta, lda, i, l) * (double)opel(hB, !c->tb, ldb, j, l);
+                sum += p;
+                mag += fabs(p);
+            }
+            const double got = c->ct ? bf2f(((const uint16_t *)hC)[i + (long long)j * ldc])
+                                     : ((const float *)hC)[i + (long long)j * ldc];
+            const double e = fabs(got - sum) / (mag > 0 ? mag * 0x1p-24 : 1.0);
+            if (e > worst) worst = e;
+        }
+    }
+    return worst;
+}
+
+/* Uniform values in (-scale, scale), fast enough for operands of 10^8 elements. */
+static uint16_t *bf16_uniform(size_t n, double scale)
+{
+    uint16_t *h = malloc(n * 2);
+    for (size_t i = 0; i < n; ++i) h[i] = f2bf((float)(((int32_t)rnd() / 2147483648.0) * scale));
+    return h;
+}
+
+static void check_one(FILE *f, const Cfg *c, const char *region)
+{
+    long long lda = (c->ta ? c->k : c->m) + c->ldpad, ldb = (c->tb ? c->n : c->k) + c->ldpad, ldc = c->m + c->ldpad;
+    const size_t na = (size_t)lda * (c->ta ? c->m : c->k), nb = (size_t)ldb * (c->tb ? c->k : c->n);
+    const size_t es = c->ct ? 2 : 4, cb = (size_t)ldc * c->n * es;
+    if (na * 2 > big_bytes / 2 || nb * 2 > big_bytes / 4 || 2 * cb > big_bytes / 4) return;
+    const int fast = !strcmp(region, "bounds") || na > (64u << 20);
+    uint16_t *hA = fast ? bf16_uniform(na, 0.1) : bf16_random(na, 0.05);
+    uint16_t *hB = fast ? bf16_uniform(nb, 2.0) : bf16_random(nb, 1.0);
+    void *A = big + c->aoff, *B = big + big_bytes / 2 + c->boff, *C1 = big + big_bytes / 2 + big_bytes / 4 + c->coff,
+         *C2 = (char *)C1 + cb + 256;
+    /* the variant's handle with the workspace of the configuration (cublasSetStream gives the default back) */
+    if (c->ws) cublasSetWorkspace(hv, ws_big, ws_size[c->ws]);
+    CU(cudaMemcpy(A, hA, na * 2, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(B, hB, nb * 2, cudaMemcpyHostToDevice));
+    const Counts k0 = counts(API_GEMMEX);
+    const float tv = time_call(1, c, A, lda, B, ldb, C1, ldc, 5);
+    const Counts k1 = counts(API_GEMMEX);
+    const float t12 = time_call(0, c, A, lda, B, ldb, C2, ldc, 5);
+    CU(cudaStreamSynchronize(cap_stream));
+    if (c->ws) cublasSetStream(hv, cap_stream);
+    void *o1 = from_device(C1, cb), *o2 = from_device(C2, cb);
+    const char *path = delta(&k0, &k1, SERVED_SKINNY) ? "skinny" : delta(&k0, &k1, SERVED_TC) ? "tc" : "forward";
+    char names[1024];
+    Cfg g = *c;
+    capture_129(&g, names, sizeof names);
+    const char *kernel = strstr(names, "gemmSN") ? "gemmSN" : strstr(names, "magma_sgemmEx") ? "magma" : "other";
+    const size_t diff = ndiff(o1, o2, cb, es);
+    const int sample = (long long)c->m * c->n * c->k <= (1LL << 31);
+    const double ev = sample ? sample_error(c, hA, lda, hB, ldb, o1, ldc) : -1;
+    const double e12 = sample ? sample_error(c, hA, lda, hB, ldb, o2, ldc) : -1;
+    fprintf(f, "%s\t%s%s\t%d\t%d\t%d\t%s\t%s\t%s\t%zu\t%.2f\t%.2f\t%.1f\t%.1f\t%d/%d/%d/%d/%s\n", region,
+            opname(c->ta), opname(c->tb), c->m, c->n, c->k, c->ct ? "bf16" : "fp32", path, kernel, diff, ev, e12, tv, t12,
+            c->aoff, c->boff, c->coff, c->ldpad, ws_name[c->ws]);
+    fflush(f);
+    free(hA);
+    free(hB);
+    free(o1);
+    free(o2);
+}
+
+static void check_mode(const char *path, const char *which)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) exit(1);
+    fprintf(f, "region\top\tm\tn\tk\tout\tpath\tkernel129\tdiffering\terr_variant\terr_129\tus_variant\tus_129\tvariant\n");
+    rng_state = 0xc0ffee;
+    /* 1. Bits, inside the rule's regions (both output types). */
+    const int rule = !which || !strcmp(which, "rule"), bounds = !which || !strcmp(which, "bounds");
+    /* 0. The rule's edges, alignments and workspaces: each just inside and just outside (forwarded:
+     * 12.9's bits trivially), both output types, n = 8 and 16. */
+    if (which && !strcmp(which, "edges")) {
+        static const int e[][9] = {
+            /* ta tb m k aoff boff coff ldpad ws */
+            {1, 0, 440, 1536, 0, 0, 0, 0, 0}, {1, 0, 448, 1536, 0, 0, 0, 0, 0}, {1, 0, 456, 1536, 0, 0, 0, 0, 0},
+            {1, 0, 16384, 1536, 0, 0, 0, 0, 0}, {1, 0, 16392, 1536, 0, 0, 0, 0, 0}, {1, 0, 1536, 248, 0, 0, 0, 0, 0},
+            {1, 0, 1536, 256, 0, 0, 0, 0, 0}, {1, 0, 1536, 4096, 0, 0, 0, 0, 0}, {1, 0, 1536, 4104, 0, 0, 0, 0, 0},
+            {0, 0, 120, 1536, 0, 0, 0, 0, 0}, {0, 0, 128, 1536, 0, 0, 0, 0, 0}, {0, 0, 9728, 1536, 0, 0, 0, 0, 0},
+            {0, 0, 9736, 1536, 0, 0, 0, 0, 0}, {0, 0, 1536, 888, 0, 0, 0, 0, 0}, {0, 0, 1536, 896, 0, 0, 0, 0, 0},
+            {0, 0, 1536, 16384, 0, 0, 0, 0, 0}, {0, 0, 1536, 16392, 0, 0, 0, 0, 0},
+            {1, 0, 1536, 1536, 2, 0, 0, 0, 0}, {1, 0, 1536, 1536, 0, 2, 0, 0, 0}, {1, 0, 1536, 1536, 0, 0, 4, 0, 0},
+            {1, 0, 1536, 1536, 0, 0, 0, 1, 0}, {1, 0, 1536, 1536, 0, 0, 0, 8, 0}, {1, 0, 1536, 1536, 0, 0, 0, 0, 1},
+            {1, 0, 1536, 1536, 0, 0, 0, 0, 8}, {1, 0, 1536, 1536, 0, 0, 0, 0, 9}, {1, 0, 1536, 1536, 0, 0, 0, 0, 3},
+            {1, 0, 1536, 1536, 0, 0, 0, 0, 4}, {1, 0, 1536, 1536, 0, 0, 0, 0, 2},
+            {0, 0, 1536, 1536, 2, 0, 0, 0, 0}, {0, 0, 1536, 1536, 0, 0, 0, 0, 9}, {0, 0, 1536, 1536, 0, 0, 0, 0, 4},
+            {0, 1, 1536, 1531, 2, 2, 4, 3, 1}, {1, 1, 1536, 1531, 2, 2, 4, 3, 1}, {0, 1, 777, 4096, 6, 0, 0, 5, 9},
+            {1, 1, 4608, 256, 0, 6, 8, 1, 0}, {0, 1, 4608, 248, 0, 0, 0, 0, 0}, {0, 1, 4616, 1536, 0, 0, 0, 0, 0},
+            {0, 1, 1536, 64, 0, 0, 0, 0, 0}, {0, 1, 1544, 64, 0, 0, 0, 0, 0}, {0, 1, 120, 64, 0, 0, 0, 0, 0},
+        };
+        for (size_t i = 0; i < sizeof e / sizeof e[0]; ++i)
+            for (int ct = 0; ct < 2; ++ct)
+                for (int n = 8; n <= 16; n += 8) {
+                    Cfg g = {e[i][0], e[i][1], e[i][2], n, e[i][3], ct, e[i][4], e[i][5], e[i][6], e[i][7], e[i][8], 0};
+                    check_one(f, &g, "edges");
+                }
+    }
+    const int tn_m[] = {448, 512, 1024, 1536, 3072, 4608, 7344, 16384}, tn_k[] = {256, 512, 1536, 3072, 4096};
+    const int nn_m[] = {128, 448, 1536, 4608, 9728}, nn_k[] = {896, 1536, 4096, 8192, 16384};
+    const int t_m[] = {128, 256, 777, 1536, 4608, 16384, 50257}, t_k[] = {16, 64, 256, 1531, 4096, 16384};
+    const int ns[] = {2, 3, 8, 13, 16, 24};
+    for (int ct = 0; ct < 2 * rule; ++ct)
+        for (int b = 0; b < 6; ++b) {
+            for (int a = 0; a < 8; ++a)
+                for (int c = 0; c < 5; ++c) {
+                    Cfg g = {1, 0, tn_m[a], ns[b], tn_k[c], ct, 0, 0, 0, 0, 0, 0};
+                    if (g.n > 16 && (long long)g.m * g.k >= (1LL << 20)) continue;
+                    check_one(f, &g, "rule-TN");
+                }
+            for (int a = 0; a < 5; ++a)
+                for (int c = 0; c < 5; ++c) {
+                    Cfg g = {0, 0, nn_m[a], ns[b], nn_k[c], ct, 0, 0, 0, 0, 0, 0};
+                    if (g.n > 16 && (long long)g.m * g.k >= (1LL << 20)) continue;
+                    check_one(f, &g, "rule-NN");
+                }
+            for (int t = 0; t < 2; ++t)
+                for (int a = 0; a < 7; ++a)
+                    for (int c = 0; c < 6; ++c) {
+                        Cfg g = {t, 1, t_m[a], ns[b], t_k[c], ct, 0, 0, 0, 0, 0, 0};
+                        if (g.n > 16 && (long long)g.m * g.k >= (1LL << 20)) continue;
+                        check_one(f, &g, t ? "rule-TT" : "rule-NT");
+                    }
+        }
+    /* 2. Bounds: small m and long k (time against 12.9), NT (element loads) and TN (16-byte loads), fp32
+     * out; run with VF_BF16_CONTROL=skinny-k,skinny-speed,seq-any so that the skinny path serves them. */
+    const int bm[] = {2, 8, 32, 64, 128, 256, 512, 1024}, bk[] = {256, 1024, 4096, 16384, 65536, 262144, 1048576};
+    const int bn[] = {2, 8, 16};
+    for (int op = 0; op < 2 * bounds; ++op)
+        for (int a = 0; a < 8; ++a)
+            for (int b = 0; b < 3; ++b)
+                for (int c = 0; c < 7; ++c) {
+                    Cfg g = {op, op ? 0 : 1, bm[a], bn[b], bk[c], 0, 0, 0, 0, 0, 0, 0};
+                    check_one(f, &g, "bounds");
+                }
+    fclose(f);
+    printf("checked into %s\n", path);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -245,7 +425,10 @@ int main(int argc, char **argv)
     if (cublasCreate(&hv)) return 1;
     open_runtime();
     if (!strcmp(argv[1], "kernels")) kernels_mode(argv[2]);
-    else {
+    else if (!strcmp(argv[1], "check")) {
+        cublasSetStream(hv, cap_stream);
+        check_mode(argv[2], argc > 3 ? argv[3] : NULL);
+    } else {
         printf("FAIL  unknown mode %s\n", argv[1]);
         return 2;
     }

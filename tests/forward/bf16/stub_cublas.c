@@ -32,6 +32,19 @@ EXPORT void stub_chaos(cublasHandle_t h, cudaStream_t s)
     ((Handle *)h)->chaos_stream = s;
 }
 
+/* The version reported: 12.9.2, or STUB_CUBLAS_VERSION (major*10000 + minor*100 + patch). */
+static int version(void)
+{
+    const char *v = getenv("STUB_CUBLAS_VERSION");
+    return v && *v ? atoi(v) : 120902;
+}
+EXPORT cublasStatus_t cublasGetProperty(libraryPropertyType t, int *value)
+{
+    const int v = version();
+    *value = t == MAJOR_VERSION ? v / 10000 : t == MINOR_VERSION ? v / 100 % 100 : v % 100;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 EXPORT cublasStatus_t cublasCreate_v2(cublasHandle_t *handle)
 {
     Handle *h = calloc(1, sizeof *h);

@@ -160,6 +160,16 @@ EXPORT CUresult cuStreamGetCaptureInfo_v3(CUstream s, CUstreamCaptureStatus *st,
     return CUDA_SUCCESS;
 }
 
+EXPORT CUresult cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode)
+{
+    static __thread CUstreamCaptureMode m = CU_STREAM_CAPTURE_MODE_GLOBAL;
+    const CUstreamCaptureMode old = m;
+    m = *mode;
+    *mode = old;
+    stub_event("capturemode %d", (int)m);
+    return CUDA_SUCCESS;
+}
+
 /* ---- modules ---- */
 typedef struct {
     char name[64];

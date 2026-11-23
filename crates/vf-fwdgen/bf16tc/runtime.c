@@ -56,8 +56,14 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_SKINNY_MAX_N 16           /* skinny path: n <= 16, or n < 32 when m * k < 2^20 */
 #define VF_SKINNY_SMALL_MK (1LL << 20)
 #define VF_SKINNY_MAX_K 16384        /* skinny path: k at most this (G1, tests/gpu/forward/bf16-skinny.c) */
-#define VF_SKINNY_MIN_M 128          /* skinny path: m at least this (G1) */
 #define VF_SEQ_MIN_WORKSPACE (4u << 20) /* below, 12.9's choice of kernel for op(B) = N changes (G1) */
+/* The cuBLAS the skinny path's rule was measured on: CUDA 12.9.2's libraries (cuBLAS 12.9.2.10), which
+ * report 12.9.2 (cublasGetProperty, and 120902 from cublasLtGetVersion). With any other, the skinny
+ * path serves nothing. */
+#define VF_SEQ_CUBLAS_MAJOR 12
+#define VF_SEQ_CUBLAS_MINOR 9
+#define VF_SEQ_CUBLAS_PATCH 2
+#define VF_SEQ_CUBLASLT_VERSION 120902
 #define VF_FB_TN_CTAS_PER_SM 2
 #define VF_FB_WIDE_CTAS_PER_SM 4
 #define VF_FB_NARROW_CTAS_PER_SM 2
@@ -70,6 +76,7 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 
 static struct {
     int tc, skinny, level;
+    int measured_build; /* the cuBLAS the skinny path's rule was measured on */
 } cfg;
 static int g_on; /* a switch is set and the CUDA 12.9 libraries are there */
 
@@ -132,6 +139,8 @@ static int injected(const char *step)
 
 #define FN(name) __typeof__(name) *
 static struct {
+    FN(cublasGetProperty) GetProperty;
+    FN(cublasLtGetVersion) LtGetVersion;
     FN(cublasCreate_v2) Create;
     FN(cublasDestroy_v2) Destroy;
     FN(cublasGetStream_v2) GetStream;
@@ -165,6 +174,7 @@ static struct {
     FN(cuDeviceTotalMem_v2) DeviceTotalMem;
     FN(cuStreamGetCtx) StreamGetCtx;
     FN(cuStreamGetCaptureInfo_v3) StreamGetCaptureInfo;
+    FN(cuThreadExchangeStreamCaptureMode) ThreadExchangeStreamCaptureMode;
     FN(cuModuleLoadData) ModuleLoadData;
     FN(cuModuleGetFunction) ModuleGetFunction;
     FN(cuFuncLoad) FuncLoad;
@@ -200,7 +210,8 @@ static int bind_libraries(void)
     void *b = open_library("VF_FWD_CUBLAS", "libcublas.so.12");
     void *l = open_library("VF_FWD_CUBLASLT", "libcublasLt.so.12");
     if (!b || !l) return 0;
-    int ok = BIND(b, cb.Create, "cublasCreate_v2") && BIND(b, cb.Destroy, "cublasDestroy_v2") &&
+    int ok = BIND(b, cb.GetProperty, "cublasGetProperty") && BIND(l, cb.LtGetVersion, "cublasLtGetVersion") &&
+             BIND(b, cb.Create, "cublasCreate_v2") && BIND(b, cb.Destroy, "cublasDestroy_v2") &&
              BIND(b, cb.GetStream, "cublasGetStream_v2") && BIND(b, cb.SetStream, "cublasSetStream_v2") &&
              BIND(b, cb.SetWorkspace, "cublasSetWorkspace_v2") && BIND(b, cb.GetPointerMode, "cublasGetPointerMode_v2") &&
              BIND(b, cb.GetMathMode, "cublasGetMathMode") && BIND(b, cb.GemmEx, "cublasGemmEx") &&
@@ -238,6 +249,7 @@ static void bind_driver(void)
                 BIND(d, cu.CtxGetDevice, "cuCtxGetDevice") && BIND(d, cu.DeviceGetAttribute, "cuDeviceGetAttribute") &&
                 BIND(d, cu.DeviceTotalMem, "cuDeviceTotalMem_v2") && BIND(d, cu.StreamGetCtx, "cuStreamGetCtx") &&
                 BIND(d, cu.StreamGetCaptureInfo, "cuStreamGetCaptureInfo_v3") &&
+                BIND(d, cu.ThreadExchangeStreamCaptureMode, "cuThreadExchangeStreamCaptureMode") &&
                 BIND(d, cu.ModuleLoadData, "cuModuleLoadData") &&
                 BIND(d, cu.ModuleGetFunction, "cuModuleGetFunction") && BIND(d, cu.FuncLoad, "cuFuncLoad") &&
                 BIND(d, cu.FuncGetAttribute, "cuFuncGetAttribute") && BIND(d, cu.LaunchKernel, "cuLaunchKernel") &&
@@ -274,6 +286,7 @@ enum {
     R_ARGS,    /* an operation, leading dimension or pointer that 12.9 is left to judge */
     R_DOMAIN,  /* outside the skinny path's domain and the tensor-core path's gate, or path off */
     R_SEQ,     /* in the skinny path's bounds, but 12.9 would not run its sequential kernel there */
+    R_BUILD,   /* in the skinny path's bounds, with another cuBLAS than the one its rule was measured on */
     R_K,       /* k beyond the tensor-core path's limit */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
@@ -291,6 +304,7 @@ enum {
 static const char *const reason_name[R_N] = {
     "not bf16 with fp32 accumulation", "explicit algorithm", "batch", "64-bit size", "shape",
     "arguments left to cuBLAS", "outside the paths' domains", "12.9 would not run its sequential kernel",
+    "another cuBLAS build",
     "k > 16384", "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
     "no chunking", "graph-memory cap", "allocation failed", "launch failed"};
@@ -334,6 +348,17 @@ static void init(void)
         say("every call is forwarded");
         return;
     }
+    int major = 0, minor = 0, patch = 0;
+    const size_t lt = cb.LtGetVersion();
+    cfg.measured_build = cb.GetProperty(MAJOR_VERSION, &major) == CUBLAS_STATUS_SUCCESS &&
+                         cb.GetProperty(MINOR_VERSION, &minor) == CUBLAS_STATUS_SUCCESS &&
+                         cb.GetProperty(PATCH_LEVEL, &patch) == CUBLAS_STATUS_SUCCESS && major == VF_SEQ_CUBLAS_MAJOR &&
+                         minor == VF_SEQ_CUBLAS_MINOR && patch == VF_SEQ_CUBLAS_PATCH &&
+                         lt == VF_SEQ_CUBLASLT_VERSION;
+    if (CONTROL("any-build")) cfg.measured_build = 1;
+    if (cfg.skinny && !cfg.measured_build)
+        say("cuBLAS %d.%d.%d (cuBLASLt %zu) is not the 12.9.2 that the skinny path was measured against: it serves "
+            "nothing", major, minor, patch, lt);
     g_on = 1;
     atexit(report);
 }
@@ -480,7 +505,18 @@ static void setup_context(Ctx *x)
     props.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     props.location.id = x->ordinal;
     cuuint64_t keep = VF_POOL_KEEP;
-    r = cu.MemPoolCreate(&x->pool, &props);
+#ifdef VF_BF16_TEST
+    /* Control: one pool per device, kept across contexts (what the review found stale after a reset). */
+    static CUmemoryPool device_pool[64];
+    if (CONTROL("pool-per-device") && x->ordinal < 64 && device_pool[x->ordinal]) {
+        x->pool = device_pool[x->ordinal];
+        r = CUDA_SUCCESS;
+    } else
+#endif
+        r = cu.MemPoolCreate(&x->pool, &props);
+#ifdef VF_BF16_TEST
+    if (r == CUDA_SUCCESS && x->ordinal < 64 && !device_pool[x->ordinal]) device_pool[x->ordinal] = x->pool;
+#endif
     if (r == CUDA_SUCCESS) r = cu.MemPoolSetAttribute(x->pool, CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &keep);
     if (r != CUDA_SUCCESS) {
         SAY(1, "device %d: no memory pool (%s); every call in this context is forwarded", x->ordinal, cu_error(r));
@@ -864,12 +900,18 @@ typedef struct {
 } Shape;
 
 /* The skinny path's bounds: n small enough for one CTA to hold every column, k bounded (the chain
- * is sequential), m large enough to fill the GPU. */
+ * is sequential), and the shapes where its kernel was measured faster than 12.9's (G1: time of both,
+ * over the shapes the rule below serves). With op(B) transposed its operands are read by elements:
+ * slower than 12.9 for large m, and for very short k at m above 1536; faster (1.13 to 8.5 times)
+ * in the region kept. TN and NN were faster throughout the regions of the rule (1.72 and 1.18
+ * times at least), NN measured from m = 128. */
 static int skinny_bounds(const Shape *s)
 {
     if (s->n < 2 || !(s->n <= VF_SKINNY_MAX_N || (s->n < 32 && s->m * s->k < VF_SKINNY_SMALL_MK))) return 0;
     if (s->k > VF_SKINNY_MAX_K && !CONTROL("skinny-k")) return 0;
-    if (s->m < VF_SKINNY_MIN_M && !CONTROL("skinny-m")) return 0;
+    if (CONTROL("skinny-speed")) return 1;
+    if (s->tb) return (s->k >= 256 && s->m <= 4608) || (s->k >= 64 && s->m >= 128 && s->m <= 1536);
+    if (!s->ta) return s->m >= 128;
     return 1;
 }
 
@@ -893,8 +935,8 @@ static int choose_path(const Shape *s, int *reason)
 {
     int not_sequential = 0;
     if (cfg.skinny && skinny_bounds(s)) {
-        if (sequential_kernel_129(s)) return PATH_SKINNY;
-        not_sequential = 1;
+        if (cfg.measured_build && sequential_kernel_129(s)) return PATH_SKINNY;
+        not_sequential = cfg.measured_build ? 1 : 2;
     }
     const long long m = s->m, n = s->n, k = s->k;
     if (cfg.tc && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
@@ -904,7 +946,7 @@ static int choose_path(const Shape *s, int *reason)
         }
         return PATH_TC;
     }
-    *reason = not_sequential ? R_SEQ : R_DOMAIN;
+    *reason = not_sequential == 2 ? R_BUILD : not_sequential ? R_SEQ : R_DOMAIN;
     return PATH_NONE;
 }
 
@@ -1138,7 +1180,15 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         return FWD;
     }
     CUdeviceptr base = 0;
-    CUresult r = INJECT("alloc") ? CUDA_ERROR_OUT_OF_MEMORY : cu.MemAllocFromPoolAsync(&base, p.total, x->pool, c->stream);
+    /* Control: the workspace on the legacy stream, which a capture cannot hold (G5 must fail). */
+    const CUstream alloc_stream = CONTROL("sync-alloc") ? CU_STREAM_LEGACY : c->stream;
+    /* An eager call's allocation may map memory, which a capture in global mode (this thread's, or
+     * another's) forbids: done in relaxed mode for this thread, as the driver lets a library do, and
+     * the mode given back. A captured call's allocation is a node of the graph. */
+    CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+    if (!capturing && !CONTROL("no-relaxed")) cu.ThreadExchangeStreamCaptureMode(&mode);
+    CUresult r = INJECT("alloc") ? CUDA_ERROR_OUT_OF_MEMORY : cu.MemAllocFromPoolAsync(&base, p.total, x->pool, alloc_stream);
+    if (!capturing && !CONTROL("no-relaxed")) cu.ThreadExchangeStreamCaptureMode(&mode);
     if (r != CUDA_SUCCESS || !base) {
         if (capturing) uncharge_capture(x, c->stream, capture);
         static atomic_int said;

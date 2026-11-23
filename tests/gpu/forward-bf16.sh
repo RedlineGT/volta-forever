@@ -69,11 +69,25 @@ if [ -x "$T12/bin/nvcc" ]; then
     done
 fi
 
-for t in bf16-paths bf16-arith; do
+for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve; do
     if want $t; then
         build $t && { run $t "$test_dir"; verdict $t; }
     fi
 done
+# G8: what the runtime is told, and how its kernels load, under the layer's settings: it must be told
+# the real 7.0 (its file holds sm_70 machine code) and load its module, or every call would forward.
+if want bf16-capability; then
+    if build bf16-arith; then
+        for e in "VF_CAPABILITY=8.0" "VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1" "VF_CAPABILITY=12.0" \
+                 "VF_CAPABILITY=12.0 VF_CAPABILITY_ALL=1" "VF_LAZY=0" "VF_ADAPT=0" "VF_TRANSLATE=0" \
+                 "CUDA_MODULE_LOADING=EAGER" "CUDA_MODULE_LOADING=LAZY"; do
+            # shellcheck disable=SC2086
+            run bf16-arith "$test_dir" $e >/dev/null
+            if [ "$status" = 0 ] && grep -qx "ok bf16-arith" "$log"; then echo "PASS  bf16-capability $e"
+            else echo "FAIL  bf16-capability $e ($log)"; failed=1; fi
+        done
+    fi
+fi
 # The skinny path alone: what it forwards to 12.9 rather than serve (the tensor-core path off).
 if want bf16-paths-skinny; then
     build bf16-paths && { run bf16-paths "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1; verdict bf16-paths; }
