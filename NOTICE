@@ -33,9 +33,13 @@ reverse engineering them to debug such modifications.
 ---------------------
 
 The archive contains no file of NVIDIA's. The forwarding libraries (forward/) are generated
-from lists of symbol names and contain no NVIDIA code. scripts/fetch-redist.py downloads the
-CUDA 12.9 libraries that a user needs from NVIDIA's own public redistributable archives, under
-NVIDIA's licence, onto the user's machine.
+from lists of symbol names and contain no NVIDIA code. forward/bf16tc/libvf_cublas_bf16.so, the
+runtime of the opt-in bf16 cuBLAS variants, holds sm_70 machine code that NVIDIA's CUDA 12.9.2
+compiler made from this project's source crates/vf-fwdgen/bf16tc/kernels.cu, which uses no
+routine of an NVIDIA library or header (crates/vf-fwdgen/bf16tc/kernels.manifest;
+scripts/build-bf16-kernels.sh rebuilds it to the same bytes). scripts/fetch-redist.py downloads
+the CUDA 12.9 libraries that a user needs from NVIDIA's own public redistributable archives,
+under NVIDIA's licence, onto the user's machine.
 
 3. Rust crates linked into the binaries
 ---------------------------------------
