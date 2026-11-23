@@ -72,8 +72,15 @@ run() {  # run NAME DIR ENV... -- ARGS... : the test program with LD_LIBRARY_PAT
 pass() {  # pass NAME WHAT : PASS when the program printed "ok" and exited with 0
     if [ "$status" = 0 ] && grep -q '^ok ' "$log"; then echo "PASS  $2"; else echo "FAIL  $2 (status $status, $log)"; failed=1; fi
 }
-fails() {  # fails NAME WHAT : PASS when the program failed (a control)
-    if [ "$status" != 0 ]; then echo "PASS  $2"; else echo "FAIL  $2: the test passed with the control (${log})"; failed=1; fi
+fails() {  # fails NAME WHAT CHECK : PASS when the program failed (a control) at the check that the control
+           # breaks: one of its "FAIL" lines contains CHECK, the beginning of that check's message
+    if [ "$status" = 0 ]; then
+        echo "FAIL  $2: the test passed with the control (${log})"; failed=1
+    elif grep '^FAIL ' "$log" | grep -qF -- "$3"; then
+        echo "PASS  $2 (failed at: $3)"
+    else
+        echo "FAIL  $2: the test failed (status $status), but not at the check the control breaks: $3 (${log})"; failed=1
+    fi
 }
 
 run all "$out/test" VF_CUBLAS_BF16_TC=1 -- all
@@ -98,23 +105,33 @@ else
     echo "FAIL  H9: status $status, said $said times ($log)"; failed=1
 fi
 
-echo "controls (each must make its test fail):"
-for c in algo tc-k split-states caller-handle-any capture-tc lt-drop; do
-    run control-$c "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_CONTROL=$c -- all
-    fails control-$c "control $c"
-done
-for c in skinny-k skinny-speed seq-any lt-scan-first; do
-    run control-$c "$out/test" VF_CUBLAS_BF16_SKINNY=1 VF_BF16_CONTROL=$c -- skinny
-    fails control-$c "control $c"
-done
-run control-any-build "$out/test" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901 VF_BF16_CONTROL=any-build -- otherbuild
-fails control-any-build "control any-build"
-for c in eager-setup setup-not-relaxed; do
-    run control-$c "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_CONTROL=$c -- lazy
-    fails control-$c "control $c"
-done
+echo "controls (each must make its test fail, at the check it breaks):"
+control() {  # control NAME MODE CHECK ENV... : run the test MODE with VF_BF16_CONTROL=NAME and ENV; it must fail at CHECK
+    local name=$1 mode=$2 check=$3; shift 3
+    run control-$name "$out/test" "$@" VF_BF16_CONTROL=$name -- $mode
+    fails control-$name "control $name" "$check"
+}
+control algo all "ALGO3_TENSOR_OP: not one call of 12.9's cublasGemmEx" VF_CUBLAS_BF16_TC=1
+control tc-k all "k = 16392 on the tensor-core path: not one call" VF_CUBLAS_BF16_TC=1
+control split-states all "a cuBLAS handle used as a cuBLASLt handle: not served" VF_CUBLAS_BF16_TC=1
+control caller-handle-any all "H5: the internal GEMM went" VF_CUBLAS_BF16_TC=1
+control capture-tc all "H6: a captured tensor-core call was not forwarded" VF_CUBLAS_BF16_TC=1
+control lt-drop all "H7: descriptor attribute" VF_CUBLAS_BF16_TC=1
+control skinny-k skinny "skinny alone, k = 16392: not one call" VF_CUBLAS_BF16_SKINNY=1
+control skinny-speed skinny "(slower than 12.9 there): not one call" VF_CUBLAS_BF16_SKINNY=1
+control seq-any skinny "skinny alone, TN with a 1 MiB workspace: not one call" VF_CUBLAS_BF16_SKINNY=1
+control lt-scan-first skinny "Lt reads: a call left to 12.9 for its workspace read" VF_CUBLAS_BF16_SKINNY=1
+control any-build otherbuild "skinny alone, another cuBLAS build: not one call" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901
+control eager-setup lazy "lazy: the runtime made something with the handle" VF_CUBLAS_BF16_TC=1
+control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1
+# The variant built with VF_BF16_CONTROL_ABORT aborts where it should say that the runtime is missing:
+# the process must end by SIGABRT (status 134) without "ok".
 run control-abort "$out/abort" VF_CUBLAS_BF16_TC=1 -- noruntime
-fails control-abort "control: abort when the runtime is missing"
+if [ "$status" = 134 ] && ! grep -q '^ok ' "$log"; then
+    echo "PASS  control: abort when the runtime is missing (SIGABRT)"
+else
+    echo "FAIL  control: abort when the runtime is missing: status $status, not 134 (${log})"; failed=1
+fi
 
 # What scripts/package.sh refuses, and the complete set of the variants packed: needs this tree's dist/
 # built (scripts/build.sh, scripts/build-forwarders.sh) after its last change; said and skipped otherwise.
