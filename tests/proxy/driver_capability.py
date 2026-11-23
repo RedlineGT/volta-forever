@@ -18,6 +18,7 @@ import time
 DRIVER = """
 #define _GNU_SOURCE
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 static const int sm[] = {70, 75, 80, 86};
 int cuDeviceGetAttribute(int *v, int a, int d) {
@@ -81,6 +82,9 @@ int cuLibraryLoadData(void **l, const void *image, int *o, void **v, unsigned n,
     return 0;
 }
 int cuLibraryUnload(void *l) { return 0; }
+/* The module of a library in the current context, one for each device; it has every function. */
+int cuLibraryGetModule(void **m, void *l) { *m = (void *)(uintptr_t)(0x4000 + 0x10 * (mock_device + 1)); return 0; }
+int cuModuleGetFunction(void **f, void *m, const char *name) { *f = (void *)((uintptr_t)m + 1); return 0; }
 int cuLinkAddData_v2(void *s, int type, void *data, size_t size, const char *name, unsigned n, int *o, void **v) {
     keep(data);
     return seen(data, size);
@@ -241,9 +245,11 @@ def given_code(api, mock, client, image):
         c.c_size_t.in_dll(mock, "mock_image_length").value = 0
         assert load() == 0
         length = c.c_size_t.in_dll(mock, "mock_image_length").value
+        # (What the V100 is given: a library also keeps the entries that it replaces, for later cards.)
         kinds = {struct.unpack_from("<H", header)[0] * 100 + struct.unpack_from("<I", header, 0x1C)[0]
                  for header, _ in entries(bytes((c.c_ubyte * length).in_dll(mock, "mock_image")))}
-        given.add({frozenset((270, 280)): "sm_75 code", frozenset((275, 170)): "sm_80 PTX"}.get(frozenset(kinds), kinds))
+        kinds = frozenset(kind for kind in kinds if kind % 100 <= 70)
+        given.add({frozenset((270,)): "sm_75 code", frozenset((170,)): "sm_80 PTX"}.get(kinds, kinds))
     assert len(given) == 1, given
     return given.pop()
 
@@ -496,6 +502,32 @@ def run_mixed(proxy, directory):
             seen = (c.c_char * 64).in_dll(mock, "mock_seen").value
             expected = b".target sm_70" if adapted else b"file" if name == "cuModuleLoad" else b".target sm_75"
             assert seen == expected, (name, ordinal, seen)
+    # A library is loaded for every GPU of the process: it is given the V100's code beside the other
+    # cards' own (until 2026-11-23, the V100's alone, and a later card lost even its own kernel); a
+    # module, loaded in a context on the V100, the V100's alone. A kernel of the library that cannot
+    # run on the V100 is refused in the module that the driver gives for the library in a context
+    # on the V100, and given in one on a later card, which runs its own code.
+    ampere = (directory / "ampere_only.fatbin").read_bytes()
+    data = c.create_string_buffer(ampere, len(ampere))
+
+    def kinds():
+        length = c.c_size_t.in_dll(mock, "mock_image_length").value
+        image = bytes((c.c_ubyte * length).in_dll(mock, "mock_image"))
+        return sorted((struct.unpack_from("<H", h)[0], struct.unpack_from("<I", h, 0x1C)[0]) for h, _ in entries(image))
+
+    device.value = 0
+    library = c.c_void_p()
+    assert api.cuLibraryLoadData(c.byref(library), data, None, None, 0, None, None, 0) == 0
+    assert kinds() == [(2, 70), (2, 80)], kinds()
+    assert api.cuModuleLoadData(c.byref(module), data) == 0
+    assert kinds() == [(2, 70)], kinds()
+    for ordinal, expected in ((0, 218), (2, 0), (0, 218)):
+        device.value = ordinal
+        alias, function = c.c_void_p(), c.c_void_p()
+        assert api.cuLibraryGetModule(c.byref(alias), library) == 0
+        assert api.cuModuleGetFunction(c.byref(function), alias, b"unsupported_atomic") == expected, ordinal
+        assert api.cuModuleGetFunction(c.byref(function), alias, b"memory_check") == 0
+    device.value = -1
 
 
 def run_binary(proxy, directory):

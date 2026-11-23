@@ -386,7 +386,7 @@ unsafe fn load_adapted(
 /// (without a context, a load fails anyway). In a machine that also has a later card, a context on
 /// that card is given the program's code as it is. (A library, `cuLibraryLoadData`, is loaded for
 /// every context of the process, the V100's included: its code is adapted, and a fat binary keeps
-/// the entries of the other cards.)
+/// the entries of the other cards beside what replaces them, `images::ForLibrary`.)
 fn context_needs_adapting() -> bool {
     let device = real!(cuCtxGetDevice: unsafe extern "C" fn(*mut c_int) -> CUresult);
     let mut ordinal = -1;
@@ -800,6 +800,7 @@ unsafe extern "C" fn library_load_data(
     library_count: c_uint,
 ) -> CUresult {
     let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
+    let _library = images::ForLibrary::load();
     let real = real!(cuLibraryLoadData: LibraryLoad<*const c_void>);
     let call = |code: *const c_void| unsafe {
         real(
@@ -1029,6 +1030,7 @@ unsafe extern "C" fn library_load_from_file(
     library_count: c_uint,
 ) -> CUresult {
     let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
+    let _library = images::ForLibrary::load();
     let real = real!(cuLibraryLoadFromFile: LibraryLoad<*const c_char>);
     let from_file = || unsafe {
         real(
@@ -1366,8 +1368,20 @@ unsafe fn share_kernels(result: CUresult, module: *mut *mut c_void, library: usi
         let module_handle = unsafe { *module } as usize;
         // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module_handle);
-        kernels::share(module_handle, library);
+        share_on_this_device(module_handle, library);
         fit::share_module(module_handle, library);
+    }
+}
+
+/// `module` is the module that the driver gave for `library` in the current context: what is
+/// known of the library's kernels holds for it when the context is on a GPU whose code is adapted.
+/// On a later card the driver takes the library's own entries, which a library keeps
+/// (`images::ForLibrary`): its kernels refused on the V100 run there, and are given.
+fn share_on_this_device(module: usize, library: usize) {
+    if context_needs_adapting() {
+        kernels::share(module, library);
+    } else {
+        kernels::forget(module);
     }
 }
 
@@ -1487,7 +1501,7 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
     if unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS {
         // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module as usize);
-        kernels::share(module as usize, owner);
+        share_on_this_device(module as usize, owner);
     }
     result
 }

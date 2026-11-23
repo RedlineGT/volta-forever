@@ -282,8 +282,12 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   result; no script of the repository does.
 - A machine with a V100 and a later GPU. Modules loaded into a context on the later card are
   given to the driver as the program gave them; this is tested with a stand-in for the driver
-  only. Libraries (`cuLibraryLoadData`) are adapted for the V100 in every context, so a kernel
-  refused for the V100 is refused on the later card too.
+  only. A library (`cuLibraryLoadData`) is loaded for every card: its fat binary keeps the entries
+  that are replaced for the V100 beside their replacements, and the later card takes its own. A
+  kernel refused for the V100 is given in the module that the driver gives for the library in a
+  context on the later card, and refused when it is taken from the library (`cuLibraryGetKernel`,
+  which is for every card). A library whose PTX is compiled kernel by kernel (deferred) gives the
+  later card the V100's PTX.
 - MPS (the Multi-Process Service)
 - Driver 580.196.07 and later drivers of the 580 branch (everything was run with 580.178.04)
 - Windows; ARM

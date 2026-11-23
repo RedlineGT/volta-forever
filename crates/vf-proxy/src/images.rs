@@ -656,7 +656,30 @@ pub fn policy() -> vf_adapt::Policy {
     if let Some(sm) = TOLD_SM.get() {
         policy.told_sm = Some(sm);
     }
+    policy.keep_sources = FOR_LIBRARY.get();
     policy
+}
+
+thread_local! {
+    /// The load this thread is making is a library's (`ForLibrary`).
+    static FOR_LIBRARY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While it lives, the images that this thread adapts are those of a library, which the driver
+/// loads for every GPU of the process: the entries replaced for the device are kept beside their
+/// replacements (`vf_adapt::Policy::keep_sources`).
+pub struct ForLibrary(bool);
+
+impl ForLibrary {
+    pub fn load() -> ForLibrary {
+        ForLibrary(FOR_LIBRARY.replace(true))
+    }
+}
+
+impl Drop for ForLibrary {
+    fn drop(&mut self) {
+        FOR_LIBRARY.set(self.0);
+    }
 }
 
 /// While it lives, the images that this thread adapts are adapted for a caller told `sm`

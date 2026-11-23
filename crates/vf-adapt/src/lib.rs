@@ -50,6 +50,12 @@ pub struct Policy {
     /// program's own that hold nothing, then with nothing kept in a register at all, kernels with
     /// tensor-core products included.
     pub borrow: u32,
+    /// For an image that the driver loads for every GPU of the process (a library,
+    /// `cuLibraryLoadData`): the entries of a fat binary that are rewritten or translated for the
+    /// device are kept beside what replaces them, so that a later card in the same machine is
+    /// still given its own code. The driver of the device takes the replacement (machine code for
+    /// it, or PTX it reaches); the later card, its entries as they were.
+    pub keep_sources: bool,
 }
 
 /// When machine code is translated.
@@ -136,6 +142,7 @@ impl Default for Policy {
             translate: Translate::WithoutPtx,
             pairs: true,
             borrow: vf_sass::translate::BORROW_DEFAULT,
+            keep_sources: false,
         }
     }
 }
@@ -580,6 +587,9 @@ impl Policy {
             match self.translate_cubin(&payload, source) {
                 Ok(translation) => {
                     all_refused = all_refused && translation.all_entries_refused(&payload);
+                    if self.keep_sources {
+                        entries.push(NewEntry::copy_of(entry));
+                    }
                     entries.push(NewEntry::replace(
                         entry,
                         translation.cubin,
@@ -848,6 +858,9 @@ impl Policy {
                 (payload, (u32::from(major), u32::from(minor)))
             };
             let (text, lowering) = self.lower_ptx(&text);
+            if self.keep_sources {
+                entries.push(NewEntry::copy_of(entry));
+            }
             tensor_rewritten += lowering.tensor_rewritten;
             tanh_expanded += lowering.tanh_expanded;
             trapped.extend(lowering.trapped);
@@ -1910,6 +1923,60 @@ mod tests {
         let fat = fatbin::parse(&bytes).unwrap();
         assert_eq!(fat.entries.len(), 1);
         assert_eq!(fat.entries[0].sm(), 70);
+    }
+
+    #[test]
+    fn a_library_keeps_the_entries_of_other_gpus_beside_their_replacements() {
+        let cubin = include_bytes!("../../../tests/kernels/translate/k_ampere.sm80.cubin");
+        let native = fatbin::parse(ELF70_ELF75_PTX70).unwrap().entries[0];
+        let ampere = fatbin::build(&[NewEntry::replace(&native, cubin.to_vec(), 80, (1, 7))]);
+        let ptx = fatbin::parse(ELF75_PTX75).unwrap().entries[1];
+        let ptx_80 = fatbin::build(&[NewEntry::replace(
+            &ptx,
+            b".version 9.5\n.target sm_80\n.address_size 64\n".to_vec(),
+            80,
+            (9, 5),
+        )]);
+        let kept = |image: &[u8]| -> Vec<(u16, u32)> {
+            fatbin::parse(image)
+                .unwrap()
+                .entries
+                .iter()
+                .map(|e| (e.kind(), e.sm()))
+                .collect()
+        };
+        let library = Policy {
+            keep_sources: true,
+            ..Policy::default()
+        };
+        for (image, alone, beside) in [
+            (&ampere, vec![(KIND_ELF, 70)], vec![(KIND_ELF, 80), (KIND_ELF, 70)]),
+            (&ptx_80, vec![(KIND_PTX, 70)], vec![(KIND_PTX, 80), (KIND_PTX, 70)]),
+            (
+                &fatbin::build(&[NewEntry::replace(&native, DEBUG_CUBIN.to_vec(), 80, (1, 7))]),
+                vec![(KIND_PTX, 70)],
+                vec![(KIND_ELF, 80), (KIND_PTX, 70)],
+            ),
+        ] {
+            let fat = fatbin::parse(image).unwrap();
+            // A module is loaded in the context of one GPU: the V100's code alone.
+            let module = Policy::default().adapt_fatbin(&fat).unwrap();
+            assert_eq!(kept(&module.image.unwrap()), alone);
+            // A library, for every GPU of the process: the V100's, and the other cards' as it was
+            // (until 2026-11-23 the V100's alone), the same outcome.
+            let adapted = library.adapt_fatbin(&fat).unwrap();
+            assert_eq!(adapted.outcome, Policy::default().adapt_fatbin(&fat).unwrap().outcome);
+            let image = adapted.image.unwrap();
+            assert_eq!(kept(&image), beside);
+            let fat_again = fatbin::parse(&image).unwrap();
+            assert_eq!(fat_again.entries[0].stored, fat.entries[0].stored);
+            // What the driver takes on the V100 is the replacement, and the second retry still
+            // finds the one PTX entry it reaches.
+            assert_eq!(
+                Policy::default().adapt_fatbin(&fat_again).unwrap().outcome,
+                Outcome::Native
+            );
+        }
     }
 
     #[test]
