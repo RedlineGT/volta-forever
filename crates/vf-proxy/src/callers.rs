@@ -19,11 +19,12 @@
 //!
 //! `VF_CAPABILITY` overrides the device answer for a direct client or code targeting later GPUs.
 //! The PTX taken from the program follows that setting (`vf_adapt::Policy::told_sm`), and so does
-//! what the caller is told, except where the program is given machine code of an earlier
-//! generation: the translation of its sm_75 code, which is what runs of a library such as
-//! PyTorch's, which has no PTX. Told 8.0, such a program launches its kernels for sm_80, which
-//! that code has not. A caller is told no later generation than the machine code that is given
-//! for its own embedded code, or for that of the libraries loaded with it as a dependency (a CUDA
+//! what the caller is told, except where the program is given code of an earlier generation: the
+//! translation of its sm_75 code, which is what runs of a library such as PyTorch's, which has no
+//! PTX, or its PTX for sm_75, when it has none for the generation asked. Told 8.0, such a program
+//! launches its kernels for sm_80, which that code has not. A caller is told no later generation
+//! than the code that is given for its own embedded code, or for that of the libraries loaded
+//! with it as a dependency (a CUDA
 //! runtime answers for the programs that use it; cuDNN's graph library for the library of its
 //! precompiled engines): 7.5 in this case (`vf_adapt::Policy::told_limit`), with a line at the
 //! default log level that says so. `VF_CAPABILITY_ALL=1` tells such a caller what `VF_CAPABILITY`
@@ -403,13 +404,13 @@ fn caller(return_address: usize) -> Decision {
             if config().capability_all {
                 log::warn(format_args!(
                     "{name} is told compute capability {major}.{minor}, as VF_CAPABILITY and VF_CAPABILITY_ALL ask, \
-                     although {whose} runs here as the translation of its machine code for sm_{sm}, in which the \
+                     although {whose} runs here from its code for sm_{sm}, in which the \
                      kernels that a program told {major}.{minor} chooses are not the real ones"
                 ))
             } else {
                 log::warn(format_args!(
                     "{name} is told compute capability {}.{}, not the {major}.{minor} that VF_CAPABILITY asks: {whose} \
-                     runs here as the translation of its machine code for sm_{sm}, in which the kernels that a \
+                     runs here from its code for sm_{sm}, in which the kernels that a \
                      program told {major}.{minor} chooses are not the real ones (VF_CAPABILITY_ALL=1 tells it \
                      {major}.{minor} all the same)",
                     sm / 10,

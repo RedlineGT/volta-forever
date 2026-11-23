@@ -224,15 +224,16 @@ def run(proxy, directory):
     # told 8.0, the program is given that PTX; told 7.5 because of other code of its file, the
     # sm_75 code, which is what it chooses kernels for.
     mock = c.CDLL(str(directory / "mock.so"))
-    for name, code_sm in (("keeps_lz4", None), ("told_by_other_code", 75)):
-        sm = limited(given, code_sm) or (given or 75)
+    for name, code_sm in (("keeps_lz4", 80), ("told_by_other_code", 75)):
+        sm = limited(given, code_sm) or 75
         client = c.CDLL(str(directory / name))
         probe(api, client, sm, sm)
         expected = "sm_80 PTX" if sm >= 80 else "sm_75 code"
         assert given_code(api, mock, client, (directory / "keeps.fatbin").read_bytes()) == expected, (name, sm)
         assert given_code(api, mock, client, (directory / "keeps_lz4.fatbin").read_bytes()) == expected, (name, sm)
-    # Machine code only, as PyTorch's (from sm_75) and SGLang's kernels (from sm_80): told no later
-    # generation than the code that runs, whatever VF_CAPABILITY asks.
+    # Machine code only, as PyTorch's (from sm_75) and SGLang's kernels (from sm_80), and PTX for
+    # sm_75 only (`turing`, below): told no later generation than the code that runs, whatever
+    # VF_CAPABILITY asks.
     for name, code_sm in (("turing_only", 75), ("ampere_only", 80)):
         sm = limited(given, code_sm) or code_sm
         probe(api, c.CDLL(str(directory / name)), sm, sm)
@@ -251,7 +252,7 @@ def run(proxy, directory):
     for name, sm, binary in (
         ("plain", given or (75 if launched else 70), 70 if launched else given or 70),
         ("volta", 70, 70),
-        ("turing", given or 75, max(70, given or 75)),
+        ("turing", limited(given, 75) or 75, max(70, limited(given, 75) or 75)),
         ("plain", given or (75 if launched else 70), 70 if launched else given or 70),
     ):
         path = directory / "reloaded.so"
@@ -275,7 +276,7 @@ def run_runtimes(proxy, directory):
     """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED)."""
     api = c.CDLL(str(proxy))
     given = asked()
-    for runtime, user, code_sm in (("libcudart.so.13", "user_turing.so", 75), ("libcudart.so.14", "user_ptx.so", None),
+    for runtime, user, code_sm in (("libcudart.so.13", "user_turing.so", 75), ("libcudart.so.14", "user_ptx.so", 75),
                                    ("libcudart.so.15", "user_ampere.so", 80)):
         c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
         sm = limited(given, code_sm) or 75
@@ -379,7 +380,7 @@ def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
     through PATH, before a change of directory)."""
     programs = directory / "bin"
-    for name, override, told in (("main75", None, "7.5"), ("main75", "8.0", "8.0"),
+    for name, override, told in (("main75", None, "7.5"), ("main75", "8.0", "7.5"),
                                  ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5")):
         settings = {**env, "VOLTA_FOREVER": "test", "PATH": f"{programs}:{os.environ['PATH']}"}
         if override:

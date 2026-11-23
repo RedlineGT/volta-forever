@@ -640,13 +640,12 @@ impl Policy {
         }
     }
 
-    /// The architecture of the machine code that `adapt_fatbin` translates for `fat`; `None` when it
-    /// takes PTX, code that runs on the device, or nothing. Read from the headers of the entries,
-    /// and from the cubins of a later target, compressed or not, for the PTX that they can retain
-    /// and that `translate_fatbin` then takes. (Where the translator refuses every function of the
-    /// sm_75 code, `translate_fatbin` takes the PTX that this code retains, when it has some: PTX
-    /// of the same architecture.)
-    pub fn translated_from(&self, fat: &FatBinary<'_>) -> Option<u32> {
+    /// The architecture of the code that `adapt_fatbin` gives for `fat`: of the PTX that it
+    /// retargets (an entry, or what the cubins of a later target retain, compressed or not) or of
+    /// the machine code that it translates; `None` when it takes code that runs on the device, or
+    /// nothing. (Where the translator refuses every function of the sm_75 code, `translate_fatbin`
+    /// takes the PTX that this code retains, when it has some: PTX of the same architecture.)
+    pub fn given_from(&self, fat: &FatBinary<'_>) -> Option<u32> {
         let machine = self.machine_source(fat);
         if self.translate == Translate::Force && machine.is_some() {
             return machine;
@@ -654,32 +653,43 @@ impl Policy {
         if fat.entries.iter().any(|entry| self.usable(entry)) {
             return None;
         }
-        if self.translate != Translate::First && self.source_of(fat, KIND_PTX).is_some() {
-            return None;
+        if self.translate == Translate::First && machine.is_some() {
+            return machine;
         }
-        if self.translate == Translate::WithoutPtx
-            && let Some(sm) = self.source_of(fat, KIND_ELF).filter(|&sm| sm >= 80)
-            && fat
-                .entries
+        if let Some(sm) = self.source_of(fat, KIND_PTX) {
+            return Some(sm);
+        }
+        // The cubins of `sm` all retain their PTX (`retarget_fatbin`).
+        let retain = |sm: u32| {
+            fat.entries
                 .iter()
                 .filter(|entry| entry.kind() == KIND_ELF && entry.sm() == sm)
                 .all(|entry| entry.payload().is_ok_and(|cubin| embedded_ptx(&cubin, sm).is_some()))
-        {
-            return None;
+        };
+        let retained = self.source_of(fat, KIND_ELF);
+        if machine.is_some() {
+            if self.translate == Translate::WithoutPtx
+                && let Some(sm) = retained.filter(|&sm| sm >= 80 && retain(sm))
+            {
+                return Some(sm);
+            }
+            return machine;
         }
-        machine
+        retained.filter(|&sm| self.retargetable(sm) && retain(sm))
     }
 
     /// The capability that a program whose code includes `fat` can be told, as an SM number, when
-    /// it cannot be told the one the user chose (`told_sm`): the architecture of the machine code
-    /// translated for it (`translated_from`), when the chosen one is of a later generation. A
-    /// program picks the variants of its kernels for the GPU it is told it runs on, and in the
-    /// machine code of an earlier architecture the variants for a later one are other code or
-    /// none: told 8.0, PyTorch launches attention kernels for sm_80 that in its sm_75 code print
-    /// an error and write nothing; told 9.0, kernels that stop the GPU with an assertion. Machine
-    /// code for the told generation is not taken in its place, because the translation of sm_80
-    /// code covers fewer instructions than that of sm_75 (it does not cover PyTorch's simplest
-    /// kernel). `None`: what the user chose can be told.
+    /// it cannot be told the one the user chose (`told_sm`): the architecture of the code given for
+    /// it (`given_from`), when the chosen one is of a later generation (and 7.5 for code of
+    /// Volta's generation). A program picks the variants of its kernels for the GPU it is told it
+    /// runs on, and in the code compiled for an earlier architecture, machine code or PTX, the
+    /// variants for a later one are other code or none (what `__CUDA_ARCH__` chose was chosen
+    /// when it was compiled): told 8.0, PyTorch launches attention kernels for sm_80 that in its
+    /// sm_75 code print an error and write nothing; told 9.0, kernels that stop the GPU with an
+    /// assertion. Machine code for the told generation is not taken in place of sm_75 machine code,
+    /// because the translation of sm_80 code covers fewer instructions than that of sm_75 (it does
+    /// not cover PyTorch's simplest kernel); PTX for the told generation is taken where there is
+    /// some (`source_of`). `None`: what the user chose can be told.
     ///
     /// A program told the limit is given, for every image it loads, the code for the limit: the
     /// images are adapted with `told_sm` set to it (the proxy's `callers::told_sm`), which takes
@@ -688,16 +698,23 @@ impl Policy {
     /// when the user asks for the limit.)
     pub fn told_limit(&self, fat: &FatBinary<'_>) -> Option<u32> {
         let told = self.told_sm?;
-        // `translated_from` is the machine code or nothing: what else it reads is not needed where
-        // the machine code does not limit what is told.
-        self.machine_source(fat).filter(|&sm| sm / 10 < told / 10)?;
-        self.translated_from(fat).filter(|&sm| sm / 10 < told / 10)
+        let earlier = |sm: &u32| sm / 10 < told / 10;
+        // `given_from` is one of these: where none is earlier, the cubins need not be read.
+        let candidates = [
+            self.source_of(fat, KIND_PTX),
+            self.machine_source(fat),
+            self.source_of(fat, KIND_ELF),
+        ];
+        if !candidates.iter().flatten().any(earlier) {
+            return None;
+        }
+        self.given_from(fat).filter(earlier).map(|sm| sm.max(TRANSLATED_FROM))
     }
 
     /// `told_limit` for the code embedded in `file` (a shared library, an executable): the lowest
     /// over its fat binaries.
     pub fn told_limit_in(&self, file: &[u8]) -> Option<u32> {
-        // Only Turing and Ampere code is translated: nothing limits what an earlier generation is told.
+        // Nothing limits what Volta's generation is told.
         if self.told_sm? / 10 <= TRANSLATED_FROM / 10 {
             return None;
         }
@@ -712,7 +729,7 @@ impl Policy {
             };
             lowest = self.told_limit(&fat).into_iter().chain(lowest).min();
             if lowest == Some(TRANSLATED_FROM) {
-                // Nothing earlier is translated: no other fat binary can lower it.
+                // The lowest limit: no other fat binary can lower it.
                 break;
             }
             offset = at + fat.len.max(4);
@@ -1530,7 +1547,7 @@ mod tests {
                 told_ampere.adapt_fatbin(&fat).unwrap().outcome,
                 Outcome::Retargeted { from_sm: 80, .. }
             ));
-            assert_eq!(told_ampere.translated_from(&fat), None);
+            assert_eq!(told_ampere.given_from(&fat), Some(80));
             assert_eq!(told_ampere.told_limit(&fat), None);
             let first = Policy {
                 translate: Translate::First,
@@ -1558,7 +1575,7 @@ mod tests {
         // Without that PTX, what the program is given is the translation of its sm_75 code: told
         // 8.0, it would launch its kernels for sm_80, which that code has not. It is told 7.5.
         assert_eq!(told_ampere.adapt_fatbin(&mixed).unwrap().outcome, translated_fixture(1));
-        assert_eq!(told_ampere.translated_from(&mixed), Some(75));
+        assert_eq!(told_ampere.given_from(&mixed), Some(75));
         assert_eq!(told_ampere.told_limit(&mixed), Some(75));
         assert_eq!(policy.told_limit(&mixed), None);
         let duplicate = fatbin::build(&[ampere(), ampere()]);
@@ -1629,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn a_program_is_told_no_later_generation_than_the_machine_code_it_is_given() {
+    fn a_program_is_told_no_later_generation_than_the_code_it_is_given() {
         let fixture = fatbin::parse(ELF75_PTX75).unwrap();
         let (turing, ptx) = (fixture.entries[0], fixture.entries[1]);
         let stripped_ampere = include_bytes!("../../../tests/kernels/translate/k_ampere.sm80.cubin");
@@ -1638,8 +1655,14 @@ mod tests {
         let multi = fatbin::build(&[NewEntry::copy_of(&turing), ampere()]);
         // As SGLang's kernels: machine code from sm_80 on.
         let from_ampere = fatbin::build(&[ampere()]);
-        // As llama.cpp: PTX.
+        // Machine code and PTX for sm_75 only.
         let with_ptx = fatbin::build(&[NewEntry::copy_of(&turing), NewEntry::copy_of(&ptx)]);
+        // As llama.cpp: PTX for sm_75, sm_80 and sm_90.
+        let ptx_for = |sm: u32| {
+            let text = format!(".version 9.5\n.target sm_{sm}\n.address_size 64\n");
+            NewEntry::replace(&ptx, text.into_bytes(), sm, (9, 5))
+        };
+        let llama = fatbin::build(&[ptx_for(75), ptx_for(80), ptx_for(90)]);
         let native = ELF70_ELF75_PTX70.to_vec();
         // Machine code for sm_75 and for sm_80, which keeps its PTX (`-lineinfo`), stored as it is
         // and compressed.
@@ -1659,41 +1682,43 @@ mod tests {
             };
             let fat = fatbin::parse(image).unwrap();
             let limit = policy.told_limit(&fat);
-            // The limit is the architecture of what is given, when it is machine code; without a
-            // limit, what is given is no machine code of an earlier generation than what is told.
+            // The limit is the architecture of what is given, machine code or PTX; without a limit,
+            // what is given is no code of an earlier generation than what is told.
             let outcome = policy.adapt_fatbin(&fat).unwrap().outcome;
+            let given = match outcome {
+                Outcome::Translated { from_sm, .. } | Outcome::Retargeted { from_sm, .. } => Some(from_sm),
+                _ => None,
+            };
             match (limit, told_sm) {
-                (Some(sm), _) => assert!(matches!(outcome, Outcome::Translated { from_sm, .. } if from_sm == sm)),
-                (None, Some(told)) => assert!(
-                    !matches!(outcome, Outcome::Translated { from_sm, .. } if from_sm / 10 < told / 10),
-                    "{outcome:?}"
-                ),
+                (Some(sm), _) => assert_eq!(given, Some(sm), "{outcome:?}"),
+                (None, Some(told)) => assert!(given.is_none_or(|sm| sm / 10 >= told / 10), "{outcome:?}"),
                 (None, None) => {}
             }
             limit
         };
         let default = Translate::WithoutPtx;
         for told in [None, Some(70), Some(75)] {
-            for image in [&multi, &from_ampere, &with_ptx, &native, &keeps, &keeps_packed] {
+            for image in [&multi, &from_ampere, &with_ptx, &llama, &native, &keeps, &keeps_packed] {
                 assert_eq!(limit(told, default, image), None);
             }
         }
         for told in [80, 86, 90, 120] {
             assert_eq!(limit(Some(told), default, &multi), Some(75), "{told}");
-            assert_eq!(limit(Some(told), default, &with_ptx), None, "{told}");
+            // Given its PTX for sm_75: what `__CUDA_ARCH__` chose there is for 7.5.
+            assert_eq!(limit(Some(told), default, &with_ptx), Some(75), "{told}");
             assert_eq!(limit(Some(told), default, &native), None, "{told}");
-            // Given the PTX of the sm_80 cubin, compressed or not.
-            assert_eq!(limit(Some(told), default, &keeps), None, "{told}");
-            assert_eq!(limit(Some(told), default, &keeps_packed), None, "{told}");
             // Machine code is not translated: nothing is given, and the driver says so.
             assert_eq!(limit(Some(told), Translate::Never, &multi), None, "{told}");
             // Machine code before PTX: what is given of this one is its sm_75 code.
             assert_eq!(limit(Some(told), Translate::First, &with_ptx), Some(75), "{told}");
             assert_eq!(limit(Some(told), Translate::Force, &with_ptx), Some(75), "{told}");
         }
-        // An sm_80 translation is code of the same generation as 8.6, not of 9.0 and later.
+        // An sm_80 translation is code of the same generation as 8.6, not of 9.0 and later; so is
+        // the PTX of an sm_80 cubin, compressed or not.
         for (told, expected) in [(80, None), (86, None), (90, Some(80)), (120, Some(80))] {
             assert_eq!(limit(Some(told), default, &from_ampere), expected, "{told}");
+            assert_eq!(limit(Some(told), default, &keeps), expected, "{told}");
+            assert_eq!(limit(Some(told), default, &keeps_packed), expected, "{told}");
             // Asked for, the machine code of the told generation is translated where there is some.
             assert_eq!(limit(Some(told), Translate::First, &multi), expected, "{told}");
         }
@@ -1702,8 +1727,12 @@ mod tests {
             told_sm: Some(90),
             ..Policy::default()
         };
+        // With PTX for the told generation, or the one before: the PTX for that one.
+        for (told, expected) in [(80, None), (86, None), (90, None), (120, Some(90))] {
+            assert_eq!(limit(Some(told), default, &llama), expected, "{told}");
+        }
         let mut file = b"\x7fELF....".to_vec();
-        for image in [&with_ptx, &from_ampere, &native] {
+        for image in [&llama, &from_ampere, &native] {
             file.extend_from_slice(image);
         }
         assert_eq!(policy.told_limit_in(&file), Some(80));
