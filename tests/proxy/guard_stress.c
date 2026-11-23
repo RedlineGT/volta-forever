@@ -33,6 +33,10 @@
  *             attached to once (cuCtxAttach): detached once, the kernel is still refused; detached
  *             again (destroyed), the handle of the module that went is the module that the driver
  *             makes for another library, whose kernel `bad` runs: it is launched.
+ *   storm     a function launched on the V100, 10,000 times in a row, then 10,000 times each after a
+ *             launch on a later GPU of the function of a library's kernel there, asked for before each
+ *             launch through the layer (cuKernelGetFunction), as a runtime may: the refusal asks the
+ *             driver what a handle is a few times only, not at every launch.
  *   nocontext the function of a library's refused kernel in context A, taken from the driver, asked
  *             about while no context is current, then while another is; then, in A, asked about and
  *             launched: refused there, whatever was concluded in the other contexts.
@@ -338,6 +342,35 @@ int main(int argc, char **argv) {
                  r3, reached, module_of_h == m ? "yes" : "no", r4);
         check(line,
               again == c && r3 == REFUSED && reached == 0 && module_of_h == m && r4 == 0 && *launched - launches == 1);
+    } else if (!strcmp(scenario, "storm")) {
+        void *v100, *later, *library, *m, *good, *f;
+        char line[300];
+        l_ctx_create(&v100, 0, 0);
+        if (l_lib_load(&library, PTX, NULL, NULL, 0, NULL, NULL, 0)) return 2;
+        d_lib_kernel(&good_kernel, library, "good");
+        l_load(&m, GOOD);
+        d_get_function(&good, m, "good");
+        for (int i = 0; i < 10; ++i) go(good);
+        unsigned long base = *identified;
+        int wrong = 0;
+        for (int i = 0; i < 10000; ++i) wrong |= go(good) != 0;
+        unsigned long alone = *identified - base;
+        l_ctx_create(&later, 0, 1);
+        base = *identified;
+        for (int i = 0; i < 10000; ++i) {
+            l_set_current(later);
+            wrong |= l_kernel_function(&f, good_kernel) != 0 || go(f) != 0;
+            l_set_current(v100);
+            wrong |= go(good) != 0;
+        }
+        // (The layer's cuKernelGetFunction itself asks the driver twice, for the library of the kernel
+        // and the module of the function, which it follows.)
+        unsigned long between = *identified - base - 2 * 10000;
+        snprintf(line, sizeof line,
+                 "storm: the refusal asked the driver what a handle is %lu times over 10,000 launches on the V100, "
+                 "%lu times over 10,000 more each after a launch on a later GPU",
+                 alone, between);
+        check(line, !wrong && alone == 0 && between <= 10);
     } else if (!strcmp(scenario, "greenstale")) {
         static const char LIB_RUNS[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
                                        ".visible .entry bad()\n{\n ret;\n}\n";

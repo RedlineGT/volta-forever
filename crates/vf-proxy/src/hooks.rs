@@ -1552,7 +1552,7 @@ fn share_on_this_device(module: usize, library: usize) {
     if context_needs_adapting() {
         kernels::share(module, library);
     } else {
-        kernels::forget(module);
+        kernels::not_shared(module);
     }
 }
 

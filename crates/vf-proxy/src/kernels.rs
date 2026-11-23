@@ -231,6 +231,17 @@ pub fn forget(handle: usize) {
     drop(take(handle));
 }
 
+/// `module`, the module of a library in a context on another GPU than this one, has none of the
+/// library's refusals (`share` is for a context on this GPU). A runtime may say it at every launch,
+/// through `cuKernelGetFunction`: when nothing was known of it, nothing changes, and no new
+/// generation begins.
+pub fn not_shared(module: usize) {
+    let mut known = known();
+    if known.remove(&module).is_some() {
+        changed(&known);
+    }
+}
+
 /// What `take` took of a module or library, for `restore`.
 pub struct Taken(Vec<(usize, Kernels)>);
 

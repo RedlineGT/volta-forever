@@ -25,7 +25,7 @@ status=0
 for scenario in modules contexts green; do
     "$out/guard_stress" "$proxy/libcuda.so.1" "$out/mock.so" $scenario "$threads" "$seconds" || status=1
 done
-for scenario in samename nocontext greenstale detach; do
+for scenario in samename nocontext greenstale detach storm; do
     "$out/guard_stress" "$proxy/libcuda.so.1" "$out/mock.so" $scenario || status=1
 done
 # The generation is read through the symbols of the layer, where it has them.
