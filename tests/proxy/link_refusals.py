@@ -7,6 +7,7 @@ link is gone. A stand-in driver (link_mock_driver.c) links into a fixed cubin an
 Run with python3 tests/proxy/link_refusals.py path/to/libcuda.so.1.
 """
 import ctypes as c
+import mmap
 import os
 from pathlib import Path
 import subprocess
@@ -17,6 +18,7 @@ PTX = (b".version 8.8\n.target sm_75\n.address_size 64\n"
        b".visible .entry bad()\n{\n barrier.cluster.arrive;\n ret;\n}\n"
        b".visible .entry good()\n{\n ret;\n}\n")
 INPUT_PTX = 1
+INPUT_FATBINARY = 2
 CUBIN = Path(__file__).resolve().parents[1] / "kernels" / "k_basic.128.sm70.cubin"
 
 
@@ -111,6 +113,25 @@ def check(proxy, mock):
     assert api.cuModuleUnload(first) == 0
     c.c_void_p.in_dll(backend, "while_freed").value = None
     assert lookup(api, second, b"bad") == (218, None)
+
+    # A fat binary given with its size is read within it, whatever its header says: one cut short,
+    # just before memory that cannot be read, is given to the linker as it is.
+    fat = (Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data/elf75-ptx75-zstd.fatbin").read_bytes()
+    page = mmap.PAGESIZE
+    guard = -(-len(fat) // page) * page
+    pages = mmap.mmap(-1, page + guard)
+    start = c.addressof(c.c_char.from_buffer(pages))
+    libc = c.CDLL(None)
+    libc.mprotect.argtypes = (c.c_void_p, c.c_size_t, c.c_int)
+    assert libc.mprotect(start + page, guard, 0) == 0
+    cut = 200
+    pages[page - cut:page] = fat[:cut]
+    state = c.c_void_p()
+    assert api.cuLinkCreate_v2(0, None, None, c.byref(state)) == 0
+    inputs = c.c_uint.in_dll(backend, "inputs").value
+    assert api.cuLinkAddData_v2(state, INPUT_FATBINARY, c.c_void_p(start + page - cut), cut, None, 0, None, None) == 0
+    assert c.c_uint.in_dll(backend, "inputs").value == inputs + 1
+    assert api.cuLinkDestroy(state) == 0
 
 
 if __name__ == "__main__":

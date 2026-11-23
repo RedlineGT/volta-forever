@@ -1514,7 +1514,8 @@ unsafe fn link_add_data(
     let replacement = match input {
         _ if !context_needs_adapting() => None,
         INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
-        INPUT_FATBINARY => unsafe { images::adapt(who, data, None) },
+        // (Read within the size given, when there is one.)
+        INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size).filter(|&size| size > 0)) },
         _ => None,
     };
     let Some(replacement) = replacement else {

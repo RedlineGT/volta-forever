@@ -821,6 +821,9 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
         return finish(who, "PTX text", policy.adapt_ptx(text), None, len.is_none(), None);
     }
     if magic == fatbin::WRAPPER_MAGIC {
+        if len.is_some_and(|len| len < std::mem::size_of::<Wrapper>()) {
+            return None;
+        }
         let wrapper = unsafe { ptr.cast::<Wrapper>().read_unaligned() };
         if wrapper.version == 2 && !wrapper.data.is_null() {
             return unsafe { adapt_linked(who, wrapper) };
@@ -840,7 +843,12 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
         );
     }
     if magic == fatbin::MAGIC {
-        return adapt_fatbin(who, bytes, unsafe { fatbin::parse_at(bytes) }, None);
+        // With a length, the container is read within it, whatever its header says.
+        let fat = match len {
+            Some(len) => fatbin::parse(unsafe { std::slice::from_raw_parts(bytes, len) }),
+            None => unsafe { fatbin::parse_at(bytes) },
+        };
+        return adapt_fatbin(who, bytes, fat, None);
     }
     if head == *b"\x7fELF" {
         if len.is_some_and(|len| len < 0x40) {
