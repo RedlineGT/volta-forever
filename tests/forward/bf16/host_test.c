@@ -5,6 +5,7 @@
  *   host_test all          H1 (forwarding and call sequences), H2, H3, H4, H5, H6, H7
  *   host_test skinny       the skinny path alone (VF_CUBLAS_BF16_SKINNY=1): its bounds
  *   host_test off          no switch: every call forwarded, nothing of the runtime loaded
+ *   host_test safe         VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: tensor-core calls forwarded, skinny calls served
  *   host_test lazy         nothing made with a handle; the module at the first call a path serves, the
  *                          tensor-core path's pool and cuBLASLt handle at its first call, in relaxed mode
  *   host_test inject STEP  a failure injected at STEP (VF_BF16_INJECT): forwarded, or status 13
@@ -811,6 +812,14 @@ int main(int argc, char **argv)
         take();
         CHECK(count("module load") == 0 && count("pool create") == 0 && count("ltcreate") == 0,
               "lazy: later calls made something again:\n%s", ev);
+    } else if (!strcmp(mode, "safe")) { /* VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: the tensor-core path serves nothing */
+        G g = gemm(1, 0, 1536, 512, 1536);
+        expect_forwarded("safe: a tensor-core call", &g, R_DOMAIN);
+        g = gemm(1, 0, 16384, 1024, 4096);
+        g.ldc = 16384;
+        expect_forwarded("safe: a large tensor-core call", &g, R_DOMAIN);
+        g = gemm(0, 1, 1536, 8, 1920);
+        expect_skinny("safe: a skinny call", &g, "vf_bf16_skinny_g_8_16");
     } else if (!strcmp(mode, "otherbuild")) { /* STUB_CUBLAS_VERSION set: not the cuBLAS of the rule */
         G g = gemm(0, 1, 1536, 8, 1920);
         expect_forwarded("skinny alone, another cuBLAS build", &g, R_BUILD);

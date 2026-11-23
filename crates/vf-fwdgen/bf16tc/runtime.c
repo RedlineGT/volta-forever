@@ -78,6 +78,7 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 
 static struct {
     int tc, skinny, level;
+    int safe;           /* VF_SAFE=1: the layer's conservative setting; the tensor-core path serves nothing */
     int measured_build; /* the cuBLAS the skinny path's rule was measured on */
 } cfg;
 static int g_on; /* a switch is set and the CUDA 12.9 libraries are there */
@@ -348,6 +349,15 @@ static void init(void)
     cfg.level = lv && *lv >= '0' && *lv <= '9' ? *lv - '0' : 1;
     cfg.tc = switch_value("VF_CUBLAS_BF16_TC", 0);
     cfg.skinny = switch_value("VF_CUBLAS_BF16_SKINNY", cfg.tc);
+    /* VF_SAFE=1 keeps the conservative paths: the tensor-core path, whose results differ from 12.9's,
+     * serves nothing whatever VF_CUBLAS_BF16_TC says; the skinny path, which gives 12.9's bits, stays. */
+    const char *safe = getenv("VF_SAFE");
+    cfg.safe = safe && *safe && strcmp(safe, "0") != 0 && !CONTROL("safe-ignored");
+    if (cfg.safe && strcmp(safe, "1") != 0) say("VF_SAFE=%s is neither 0 nor 1: taken as 1", safe);
+    if (cfg.safe && cfg.tc) {
+        say("VF_SAFE=1: the tensor-core path serves nothing, whatever VF_CUBLAS_BF16_TC says");
+        cfg.tc = 0;
+    }
     if (!cfg.tc && !cfg.skinny) return;
     if (!bind_libraries()) {
         say("every call is forwarded");

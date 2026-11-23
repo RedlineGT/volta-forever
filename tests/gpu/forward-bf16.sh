@@ -84,6 +84,10 @@ if want bf16-lazy; then
         done
     fi
 fi
+# VF_SAFE=1 with the tensor-core switch: the tensor-core path serves nothing, the skinny path serves.
+if want bf16-safe; then
+    build bf16-safe && { run bf16-safe "$test_dir" VF_SAFE=1; verdict bf16-safe; }
+fi
 # A language model's output layer (m = 151936): the skinny path alone forwards it; the tensor-core path
 # serves it outside a capture, chunked, and forwards it captured.
 if want bf16-lmhead; then
