@@ -215,12 +215,13 @@ libraries against a mock library.
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
-`graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `driver_capability.py` and
-`nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh`; `launcher.sh` under `dash`
-and under `bash --posix`; `tests/gpu/torch-workers.py`; `install.py` under `dash` and with
-`VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test kernels; then
-`install.sh` on five distributions. It does not run `link_refusals.py` and `nccl_remedy.py`
-(new in 0.1.3), nor `jitlink_objects.py`, which needs the CUDA 12.9.2 toolkit, nor
+`graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `driver_capability.py`,
+`link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py` and `nvml_capability.py` of
+`tests/proxy/`; `tests/forward/stack.sh`; `launcher.sh` under `dash` and under `bash --posix`;
+`tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
+and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
+kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py`, which
+needs the CUDA 12.9.2 toolkit, nor
 `tests/forward/package-refusals.sh`, which needs the forwarding libraries built from NVIDIA's
 toolkits (`scripts/fetch-all.sh redist`, `scripts/build-forwarders.sh`): it fetches neither.
 The tests on a GPU and the SASS tests over whole corpora are run by hand.
