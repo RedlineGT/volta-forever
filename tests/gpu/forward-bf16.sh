@@ -75,25 +75,32 @@ for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve b
         build $t && { run $t "$test_dir"; verdict $t; }
     fi
 done
-# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 2048
+# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 1024
 # against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), and
-# no call below the gate served, every call from the gate on served. Controls: the gate moved to 1536, 1024 and 256
-# (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the same) must fail at a call of that k; the
-# tensor-core path off must fail as not serving. VF_SAFE=1: no call served by the tensor-core path, every result
-# 12.9's. -fopenmp shortens its host side only.
+# no call below the gate served, every call from the gate on served. Controls, each of which must fail: the gate
+# moved to 512 and 256 (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the same), at a call of
+# that k; VF_ACCEPT_STRICT=1 (the bias of the two slice-aligned constructions judged from the gate too); the
+# tensor-core path off, as not serving. VF_SAFE=1: no call served by the tensor-core path, every result 12.9's.
+# -fopenmp shortens its host side only.
 if want bf16-accept; then
     if build bf16-accept -fopenmp; then
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=2048 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
         cp "$log" "$out/logs/forward-bf16-accept-main.log"
-        for g in 1536 1024 256; do
+        for g in 512 256; do
             run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_BF16_TC_MIN_K=$g VF_ACCEPT_GATE=$g >/dev/null
             cp "$log" "$out/logs/forward-bf16-accept-gate$g.log"
             if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* [NT][NT] [0-9]*x[0-9]*x$g " "$log"; then
                 echo "PASS  bf16-accept control: the gate at $g fails at k = $g"
             else echo "FAIL  bf16-accept control: the gate at $g did not fail at k = $g ($out/logs/forward-bf16-accept-gate$g.log)"; failed=1; fi
         done
+        # Control: the two documented exceptions removed (VF_ACCEPT_STRICT=1): a bias from the gate on must fail.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_STRICT=1 >/dev/null
+        cp "$log" "$out/logs/forward-bf16-accept-strict.log"
+        if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* TN 1024x128x[0-9]* fp32" "$log"; then
+            echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate)"
+        else echo "FAIL  bf16-accept control: VF_ACCEPT_STRICT=1 did not fail ($out/logs/forward-bf16-accept-strict.log)"; failed=1; fi
         # Control: the tensor-core path off, the gate expected: every call from the gate on must then fail as not served.
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=2048 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
         cp "$log" "$out/logs/forward-bf16-accept-tc-off.log"
         if [ "$status" != 0 ] && grep -q "^FAIL  .*: not served by the tensor-core path at k >= the gate" "$log"; then
             echo "PASS  bf16-accept control: with the tensor-core path off, the calls from the gate on are not served and it fails"

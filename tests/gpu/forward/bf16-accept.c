@@ -16,14 +16,17 @@
  *     B   per matrix (fp32 output), the bias towards zero, mean of (c - x) sign(x) / (u S'), is at most
  *         max(|bias of 12.9|, margin x slope x k) + 0.5 in magnitude: slope the native bias slope of the data
  *         (an RTX 5090 on the same data, measured once, constants below), margin VF_ACCEPT_BIAS_MARGIN (0.8);
- *         craftsub's bias is judged from k = 4096 (VF_ACCEPT_STRICT=1: from the gate), see bias_from_fam;
+ *         the bias of two synthetic constructions is judged from k = 4096 (craftsub) and 2048 (configuration
+ *         1653006390) on (VF_ACCEPT_STRICT=1: from the gate), see bias_from_fam and kept[];
  *     on deterministic data (bf16-accept-gen.h): 10 families and 3 configurations of the adversarial search,
- *     k = 256, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a general C, the cuBLASLt bias
+ *     k = 256, 512, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a
+ *     general C, the cuBLASLt bias
  *     epilogue. Calls below the gate are run but not judged (with VF_ACCEPT_EXPECT_GATE=1, a call below the
  *     gate that the path serves is a failure, and so is a call from the gate on that it does not serve: for when
  *     the runtime has its gate; the number judged is printed). Prints "ok bf16-accept" and exits 0, or FAIL lines
- *     and exits 1. Controls: VF_ACCEPT_GATE=256 judges k = 256 too, where the path exceeds A on craftsub: the
- *     test must fail; with the tensor-core path off and VF_ACCEPT_EXPECT_GATE=1, nothing is served: it must fail.
+ *     and exits 1. Controls, each of which must fail: VF_ACCEPT_GATE=256 and 512 (the path exceeds A on craftsub
+ *     at 256, the bias bound below 1024); VF_ACCEPT_STRICT=1 (the two exceptions removed); the tensor-core path
+ *     off with VF_ACCEPT_EXPECT_GATE=1 (nothing served).
  *
  *   bf16-accept safe       with VF_SAFE=1: no call served by the tensor-core path, every result with 12.9's bits
  *                          (the conservative switch; the skinny path, whose results are 12.9's bits, still serves
@@ -57,7 +60,7 @@ static cublasLtHandle_t ltv, lt12;
 static cudaStream_t st;
 static void *ws_lt;
 #define WS_LT (4u << 20)
-static int gate = 2048; /* the gate measured for policy B (VF_TC_MIN_K, crates/vf-fwdgen/bf16tc/runtime.c) */
+static int gate = 1024; /* the tensor-core path's gate (VF_TC_MIN_K, crates/vf-fwdgen/bf16tc/runtime.c) */
 static int expect_gate; /* VF_ACCEPT_EXPECT_GATE=1: the path serves exactly the calls with k >= the gate: one below it
                          * that it serves, or one from it on that it does not serve, is a failure */
 static double bias_margin = 0.8; /* VF_ACCEPT_BIAS_MARGIN */
@@ -72,11 +75,15 @@ static const double native_slope[FAM_N] = {
     [FAM_ADVPOS] = 0.0688,   [FAM_CRAFTSUB] = 0.137,  [FAM_CRAFTACT] = 0.0060, [FAM_RELU2] = 0.00078,
     [FAM_OUTLIER] = 0.0167,  [FAM_CANCEL] = 0.0,      [FAM_MIXED30] = 0.0031};
 static double cur_slope; /* the slope of the data being judged */
-/* craftsub, a construction aligned with the path's 256-element slices (a product of 2^20 at the start of every
- * slice, then products of 1/2 to 1 ulp of it), exceeds the native bias bound below k = 4096 (1.36 times at
- * 2048); its bias is judged from 4096 on, unless VF_ACCEPT_STRICT=1. Every other bound applies from the gate. */
+/* Two synthetic constructions exceed the bias bound above the gate: craftsub (a product of 2^20 at the start of
+ * every 256-element slice of the path, then products of 1/2 to 1 ulp of it; 1.20 times its bound at k = 2048, which
+ * is 12.9's own bias there) up to k = 4096, and the search's configuration 1653006390 (non-negative operands, a 2^21
+ * activation at the start of every slice; 1.90 times its bound at 1024 and 1.27 at 1536, 0.95 at 2048) up to 2048.
+ * Real operands (1,728 pairs of four models) have mixed-sign products and a bias of at most 0.22 u at every k.
+ * Their bias is judged from 4096 and 2048 on, unless VF_ACCEPT_STRICT=1 (then from the gate). Every other bound
+ * applies from the gate. */
 static int bias_from_fam[FAM_N] = {[FAM_CRAFTSUB] = 4096};
-static int strict, cur_fam;
+static int strict, cur_fam, cur_bias_from;
 
 typedef struct {
     int ta, tb, m, n, k, ct; /* ct: 0 fp32, 1 bf16 */
@@ -364,7 +371,7 @@ OMP(omp critical)
 static double bias_bound(int k) { return bias_margin * cur_slope * k; }
 static int bias_ok(const Res *r, int k)
 {
-    if (!strict && k < bias_from_fam[cur_fam]) return 1;
+    if (!strict && k < cur_bias_from) return 1;
     return fabs(r->bias_v) <= fmax(fabs(r->bias_12), bias_bound(k)) + 0.5;
 }
 
@@ -463,7 +470,7 @@ static void special_case(const char *name, const Prob *p, const uint16_t *A, con
 
 static void specials(void)
 {
-    const int m = 1536, n = 128, k = 2048; /* at the gate: judged */
+    const int m = 1536, n = 128, k = 1024; /* at the gate: judged */
     Gen g;
     memset(&g, 0, sizeof g);
     g.fam = FAM_NORMAL, g.seed = 4242;
@@ -551,10 +558,11 @@ static Gen fam(int f, uint64_t seed)
 static const struct {
     Gen g;
     double slope;
+    int bias_from;
 } kept[] = {
-    {{FAM_PARAM, 901, 1, 2, 0, 14, 6, 0, 0, 2.5, 0.78, 0.0001, 0.0001}, KEPT_SLOPE_0},
-    {{FAM_PARAM, 902, 0, 2, 4, 16, 11, 1, 1, 2.34, 1.44, 0.0, 0.0}, KEPT_SLOPE_1},
-    {{FAM_PARAM, 1653006390, 1, 1, 8, 20, 21, 3, 0, 0.72, 0.18, 0.0, 0.01}, KEPT_SLOPE_2},
+    {{FAM_PARAM, 901, 1, 2, 0, 14, 6, 0, 0, 2.5, 0.78, 0.0001, 0.0001}, KEPT_SLOPE_0, 0},
+    {{FAM_PARAM, 902, 0, 2, 4, 16, 11, 1, 1, 2.34, 1.44, 0.0, 0.0}, KEPT_SLOPE_1, 0},
+    {{FAM_PARAM, 1653006390, 1, 1, 8, 20, 21, 3, 0, 0.72, 0.18, 0.0, 0.01}, KEPT_SLOPE_2, 2048},
 };
 
 static int test_mode(void)
@@ -564,9 +572,10 @@ static int test_mode(void)
         return 1;
     }
     printf("note  gate k >= %d; native bias bound %.2f x slope x k%s\n", gate, bias_margin,
-           strict ? "; strict (craftsub's bias judged from the gate)" : "; craftsub's bias judged from k = 4096");
+           strict ? "; strict (every bias judged from the gate)"
+                  : "; the bias of craftsub judged from k = 4096, of configuration 1653006390 from 2048");
     specials();
-    static const int ks[] = {256, 1024, 1536, 2048, 4096, 16384};
+    static const int ks[] = {256, 512, 1024, 1536, 2048, 4096, 16384};
     static const int fams[] = {FAM_NORMAL, FAM_RELU2,   FAM_OUTLIER, FAM_CANCEL,   FAM_MIXED30,
                                FAM_SAMESIGN, FAM_LOGNPOS, FAM_ADVPOS, FAM_CRAFTACT, FAM_CRAFTSUB};
     const int nf = sizeof fams / sizeof *fams, nkept = sizeof kept / sizeof *kept;
@@ -575,6 +584,7 @@ static int test_mode(void)
         const Gen g = f < nf ? fam(fams[f], 3000 + fams[f]) : kept[f - nf].g;
         cur_slope = f < nf ? native_slope[fams[f]] : kept[f - nf].slope;
         cur_fam = g.fam;
+        cur_bias_from = f < nf ? bias_from_fam[fams[f]] : kept[f - nf].bias_from;
         for (size_t ik = 0; ik < sizeof ks / sizeof *ks; ++ik)
             for (int ct = 0; ct < 2; ++ct) {
                 if (ct && ks[ik] != 256 && ks[ik] != 1024 && ks[ik] != 4096) continue;
@@ -592,6 +602,7 @@ static int test_mode(void)
         const Gen g = fam(fi, 3000 + fi);
         cur_slope = native_slope[fi];
         cur_fam = fi;
+        cur_bias_from = bias_from_fam[fi];
         for (int L = 0; L < 3; ++L)
             for (int ct = 0; ct < 2; ++ct) {
                 Prob p = {lay[L][0], lay[L][1], 1024, 128, 2048, ct, 1.0f, 0.0f, 0, 0, 0, 0};

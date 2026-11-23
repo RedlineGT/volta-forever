@@ -1,6 +1,6 @@
 /* A language model's output layer, m = 151936 rows (Qwen2.5's vocabulary), on the GPU (the review's gap:
  * chunking at that size had only the host test): k = 896 (Qwen2.5-0.5B's hidden size) for the skinny path,
- * k = 2048 (Qwen2.5-3B's) for the tensor-core path, which takes k >= 2048 only. Run twice by
+ * k = 2048 (Qwen2.5-3B's) for the tensor-core path, which takes k >= 1024 only. Run twice by
  * tests/gpu/forward-bf16.sh:
  *   VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1   the skinny path alone forwards every such call (its rule:
  *                                                 TN up to m = 16384, NN 9728, NT and TT 4608), and each has

@@ -4,7 +4,7 @@
  * them (stub_*.c). tests/forward/bf16.sh builds everything and runs each mode in its own process:
  *   host_test all          H1 (forwarding and call sequences), H2, H3, H4, H5, H6, H7
  *   host_test rule         the paths' rule, a table of (n, m k, k) classes and the path or reason of each
- *   host_test release-gate the release runtime with VF_BF16_TC_MIN_K=1024: the variable is not read there
+ *   host_test release-gate the release runtime with VF_BF16_TC_MIN_K=512: the variable is not read there
  *   host_test skinny       the skinny path alone (VF_CUBLAS_BF16_SKINNY=1): its bounds
  *   host_test off          no switch: every call forwarded, nothing of the runtime loaded
  *   host_test safe         VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: tensor-core calls forwarded, skinny calls served
@@ -347,37 +347,41 @@ static void h1_served(void)
 
 /* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
  * path on. n = 1 goes to 12.9; the skinny path first (n <= 16, or n < 32 with m k < 2^20, where 12.9 runs its
- * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with 2048 <= k <= 16384; the rest to
- * 12.9, with its reason. Checked through the runtime's counters. A change of any boundary must change this
- * table (VF_BF16_TC_MIN_K=1536, a test build's way of moving the gate, makes it fail). ---- */
+ * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384; the rest
+ * to 12.9, with its reason. Checked through the runtime's counters. The rows at the gate are written from RULE_GATE
+ * (VF_TC_MIN_K, which the runtime must report): moving the gate means changing both, and a gate moved in the
+ * runtime alone (VF_BF16_TC_MIN_K=512, a test build's way) makes the table fail. ---- */
+#define RULE_GATE 1024
+
 static void tc_rule(void)
 {
     enum { SK = -1, TC = -2 };
-    static const struct {
+    const int G1 = RULE_GATE - 8; /* one step of k under the gate (k a multiple of 8) */
+    const struct {
         int ta, tb, m, n, k, want; /* SK, TC, or the reason it is forwarded for */
         const char *why;
     } rows[] = {
         {1, 0, 1536, 1, 4096, R_SHAPE, "n = 1"},
         {1, 0, 1536, 2, 1536, SK, "n = 2"},
-        {1, 0, 1536, 16, 4096, SK, "n = 16, k >= 2048: the skinny path first"},
+        {1, 0, 1536, 16, 4096, SK, "n = 16, k above the gate: the skinny path first"},
         {1, 0, 1536, 17, 4096, TC, "n = 17, m k >= 2^20"},
-        {1, 0, 1536, 17, 1536, R_SHORT_K, "n = 17, m k >= 2^20, k < 2048"},
+        {1, 0, 1536, 17, G1, R_SHORT_K, "n = 17, m k >= 2^20, k one step under the gate"},
         {1, 0, 504, 17, 2048, SK, "n = 17, m k < 2^20: the skinny path"},
         {1, 0, 504, 31, 2048, SK, "n = 31, m k < 2^20: the skinny path"},
         {1, 0, 504, 32, 2048, TC, "n = 32, m k < 2^20: wide"},
-        {1, 0, 504, 32, 2040, R_SHORT_K, "n = 32, m k < 2^20, k < 2048"},
+        {1, 0, 504, 32, G1, R_SHORT_K, "n = 32, m k < 2^20, k one step under the gate"},
         {1, 0, 512, 20, 2048, TC, "n = 20, m k = 2^20 (TN m = 512 is in the skinny path's rule only below n = 17)"},
         {1, 0, 384, 20, 2048, R_SEQ, "n = 20, m k < 2^20, TN m = 384 (12.9 runs gemmSN)"},
-        {1, 0, 1536, 64, 2040, R_SHORT_K, "k one step under the gate"},
-        {1, 0, 1536, 64, 2048, TC, "k = 2048"},
+        {1, 0, 1536, 64, G1, R_SHORT_K, "k one step under the gate"},
+        {1, 0, 1536, 64, RULE_GATE, TC, "k at the gate"},
         {1, 0, 1536, 64, 16384, TC, "k = 16384"},
         {1, 0, 64, 40, 16392, R_K, "k = 16392"},
         {1, 0, 1536, 8, 4104, TC, "TN n = 8, k = 4104 (beyond the skinny path's TN rule), m k >= 2^20"},
         {1, 0, 384, 8, 4096, TC, "TN n = 8, m = 384 (12.9 runs gemmSN), m k >= 2^20"},
-        {1, 0, 777, 8, 1536, R_SHORT_K, "TN n = 8, m = 777 (not in the skinny path's TN rule), m k >= 2^20, k < 2048"},
+        {1, 0, 1545, 8, G1, R_SHORT_K, "TN n = 8, m = 1545 (not in the skinny path's TN rule), m k >= 2^20, k under the gate"},
         {1, 0, 384, 8, 1536, R_SEQ, "TN n = 8, m = 384, m k < 2^20"},
         {0, 1, 1536, 8, 1920, SK, "NT n = 8"},
-        {0, 1, 1536, 64, 1920, R_SHORT_K, "NT n = 64, k < 2048"},
+        {0, 1, 1536, 64, G1, R_SHORT_K, "NT n = 64, k one step under the gate"},
         {0, 1, 1536, 64, 2048, TC, "NT n = 64, k = 2048"},
         {0, 0, 2048, 128, 2048, TC, "NN n = 128"},
         {0, 0, 2048, 8, 2048, SK, "NN n = 8"},
@@ -387,8 +391,8 @@ static void tc_rule(void)
     int (*min_k)(void) = NULL;
     void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
     if (rt) *(void **)&min_k = dlsym(rt, "vf_bf16_test_tc_min_k");
-    CHECK(min_k && min_k() == 2048, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's 2048",
-          min_k ? min_k() : -1);
+    CHECK(min_k && min_k() == RULE_GATE, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's %d",
+          min_k ? min_k() : -1, RULE_GATE);
     for (size_t r = 0; r < sizeof rows / sizeof *rows; ++r) {
         G g = gemm(rows[r].ta, rows[r].tb, rows[r].m, rows[r].n, rows[r].k);
         const Counts c0 = counts(API_GEMMEX);
@@ -821,19 +825,20 @@ int main(int argc, char **argv)
     } else if (!strcmp(mode, "rule")) {
         if (!rt_counters) printf("FAIL  not the test build of the runtime\n"), ++failures;
         tc_rule();
-    } else if (!strcmp(mode, "release-gate")) { /* the release runtime, VF_CUBLAS_BF16_TC=1, VF_BF16_TC_MIN_K=1024 */
-        G g = gemm(1, 0, 1536, 128, 1536);
+    } else if (!strcmp(mode, "release-gate")) { /* the release runtime, VF_CUBLAS_BF16_TC=1, VF_BF16_TC_MIN_K=512 */
+        G g = gemm(1, 0, 1536, 128, RULE_GATE - 256);
         take();
         cublasStatus_t st = call(&g);
         take();
         CHECK(st == 0 && count("gemmex ") == 1 && count("launch") == 0,
-              "release gate: TN 1536 x 128 x 1536 (k < 2048) not forwarded with VF_BF16_TC_MIN_K=1024 set");
-        g = gemm(1, 0, 1536, 128, 2048);
+              "release gate: TN 1536 x 128 x %d (k under the gate) not forwarded with VF_BF16_TC_MIN_K=512 set",
+              RULE_GATE - 256);
+        g = gemm(1, 0, 1536, 128, RULE_GATE);
         take();
         st = call(&g);
         take();
         CHECK(st == 0 && count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1,
-              "release gate: TN 1536 x 128 x 2048 not served by the tensor-core path");
+              "release gate: TN 1536 x 128 x %d (k at the gate) not served by the tensor-core path", RULE_GATE);
     } else if (!strcmp(mode, "skinny")) {
         G g = gemm(0, 1, 1536, 8, 16392);
         expect_forwarded("skinny alone, k = 16392", &g, R_DOMAIN);

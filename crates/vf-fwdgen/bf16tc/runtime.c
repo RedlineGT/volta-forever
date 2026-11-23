@@ -52,15 +52,16 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_TC_MAX_K 16384            /* the tensor-core path forwards a longer k (review 3.8) */
 #define VF_TC_GATE_MK (1LL << 20)    /* tensor-core path: m * k at least this, or n >= VF_TC_GATE_N */
 #define VF_TC_GATE_N 32
-/* The tensor-core path's shortest k, from the evaluation of its results against the exact product
- * (tests/gpu/forward/bf16-accept.c: 10 families of data and an adversarial search, k = 256 to 16384):
- * from k = 2048 on, each element's error is within the larger of 12.9's own error and the classical
- * fp32 bound (k - 1) u sum |a b| (only k = 256 was found beyond it), and the mean error towards zero
- * within 0.8 times that of an RTX 5090's own accumulation on the same data (the search's worst case:
- * 0.76 at k = 2048, 1.02 at 1536, 1.52 at 1024). One construction aligned with the 256-element
- * k-slices stays above that up to k = 4096. A shorter product goes to the skinny path (within its
- * rule) or to cuBLAS 12.9. */
-#define VF_TC_MIN_K 2048
+/* The tensor-core path's shortest k. On real operands (1,728 pairs of the linear layers of four models, k = 896
+ * to 12288, against the exact product) every element's error was within 0.045 times the bound of the acceptance
+ * test (the larger of 12.9's own error and the classical fp32 bound (k - 1) u sum |a b|) and every matrix's mean
+ * error towards zero within 0.22 u, from the lowest k measured; at the level of models, no gate from 4096 down to
+ * none could be told apart from cuBLAS 12.9. 1024 keeps the margin that the natural synthetic families of
+ * tests/gpu/forward/bf16-accept.c need: below it they exceed its bias bound (0.8 times an RTX 5090's own mean
+ * error on the same data). Two constructions aligned with the 256-element k-slices exceed that bound above the
+ * gate, and the test judges their bias from k = 2048 and 4096 (docs/emulations.md, "The tensor-core path's gate").
+ * A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
+#define VF_TC_MIN_K 1024
 #define VF_STR_(x) #x
 #define VF_STR(x) VF_STR_(x)
 #define VF_MIN_K 16                  /* shorter products are forwarded */

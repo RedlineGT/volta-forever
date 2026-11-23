@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The tensor-core path of the bf16 cuBLAS variants takes only products with k from 2048 to 16384 (`VF_TC_MIN_K`); a product with a smaller k goes to the skinny path when its rule takes it, else to cuBLAS 12.9 as it is (`docs/emulations.md`, section 11, "The tensor-core path's gate", says why).
+- The tensor-core path of the bf16 cuBLAS variants takes only products with k from 1024 to 16384 (`VF_TC_MIN_K`); a product with a smaller k goes to the skinny path when its rule takes it, else to cuBLAS 12.9 as it is (`docs/emulations.md`, section 11, "The tensor-core path's gate", says why).
 
 ### Added
 
@@ -12,7 +12,7 @@
 
 ### Tests
 
-- `tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh` (`bf16-accept`): the tensor-core path's acceptance test against the exact product, for every call it serves at k >= 2048 (12.9's classes and NaN bits, the same bits from two runs, a handle without workspace and a call of half the columns, an error bound and a bias bound), nothing served below the gate; it fails when the gate is moved to 1536, 1024 or 256, and with `VF_SAFE=1` it requires every result to be 12.9's.
+- `tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh` (`bf16-accept`): the tensor-core path's acceptance test against the exact product, for every call it serves at k >= 1024 (12.9's classes and NaN bits, the same bits from two runs, a handle without workspace and a call of half the columns, an error bound and a bias bound), nothing served below the gate and every call from there on served; it fails when the gate is moved to 512 or 256, with `VF_ACCEPT_STRICT=1` (its two documented exceptions removed) and with the path off, and with `VF_SAFE=1` it requires every result to be 12.9's.
 
 ## 0.1.4 (2026-11-23)
 
