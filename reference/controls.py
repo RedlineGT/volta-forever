@@ -229,6 +229,9 @@ registers than it has):
                 the first register put away is also declared the home of a uniform register
     room_no_back
                 the first load that brings a register back is replaced by a NOP
+    room_guarded_away
+                the first store that puts a register away is under a guard (P0): where P0 does
+                not hold, the register is not put away, and it is brought back all the same
     room_back_wrong_word
                 it brings the register back from the word after its own
     room_away_after_write
@@ -1162,6 +1165,7 @@ def patched(control):
         'room_reads_orig': {},
         'room_home_alive': {},
         'room_no_back': {},
+        'room_guarded_away': {},
         'room_back_wrong_word': {},
         'room_away_after_write': {},
         'room_same_word': {},
@@ -1204,7 +1208,7 @@ CONTROLS += FRAME_CONTROLS
 # and wherever the program moves its stack pointer in a way that is not followed.)
 BASE_CONTROLS = ['wrong_base_const', 'base_after_use_l3']
 # (Those of room made: only when VF_BORROW>=5 and a function has room.)
-ROOM_CONTROLS = ['room_reads_orig', 'room_home_alive', 'room_no_back', 'room_back_wrong_word', 'room_away_after_write', 'room_same_word', 'room_at_branch', 'room_depth_wrong', 'room_frame_short', 'room_missing_lives', 'room_no_back_wait', 'room_scratch_busy', 'copy_after_write',
+ROOM_CONTROLS = ['room_reads_orig', 'room_home_alive', 'room_no_back', 'room_guarded_away', 'room_back_wrong_word', 'room_away_after_write', 'room_same_word', 'room_at_branch', 'room_depth_wrong', 'room_frame_short', 'room_missing_lives', 'room_no_back_wait', 'room_scratch_busy', 'copy_after_write',
                  'room_back_first', 'room_back_before_store', 'room_away_after_load']
 CONTROLS += ROOM_CONTROLS
 # (Those of level-3 products: only when VF_BORROW>=7 and a function has products at level 3.)
@@ -1943,6 +1947,24 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                 section.data = bytes(data)
                 changed = True
                 break
+        if not changed:
+            return None, ''
+        out = container.write()
+    elif control == 'room_guarded_away':
+        # The first away (STL) under @P0.
+        container = elf.Elf(out)
+        plain = mc.assemble('stl__sImmOffset', Ra=1, Rb=2, Ra_offset=0)
+        under = mc.assemble('stl__sImmOffset', Ra=1, Rb=2, Ra_offset=0, Pg=0, Pg_not=0)
+        changed = False
+        for name, new_off, old_off, what in listing:
+            if what.startswith('room: R') and 'away' in what:
+                section = container.section('.text.' + name)
+                word = int.from_bytes(section.data[new_off:new_off + 16], 'little')
+                d70 = mc.decode(70, word)
+                if d70 is not None and d70.mnemonic == 'STL' and d70.ops.get('Pg', 7) == 7:
+                    section.data = section.data[:new_off] + (word ^ plain ^ under).to_bytes(16, 'little') + section.data[new_off + 16:]
+                    changed = True
+                    break
         if not changed:
             return None, ''
         out = container.write()

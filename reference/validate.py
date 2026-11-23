@@ -3041,6 +3041,11 @@ def check_room(mc, name, old, parts, tb, result_code, original_code,
                     say(new, old, w, 'P: away offset 0x%x, expected 0x%x (depth %d + 4*(%d+%d))' % (offset_val, expected_offset, depth, n_slots, k))
                 if rv != v:
                     say(new, old, w, 'P: stores R%d but should store R%d' % (rv, v))
+                # Under no guard: where it does not hold, the register would not be put away, and
+                # it is brought back all the same (a load under a guard is not the LDL above).
+                # (Until 2026-11-23 a guard here passed: rule V follows values, not lanes.)
+                if m.group(1):
+                    say(new, old, w, 'R: puts R%d away under a guard: where it does not hold, R%d is not put away and is brought back all the same' % (v, v))
                 # Check the STL says when it has read (read scoreboard).
                 word = int.from_bytes(result_code[new:new + 16], 'little')
                 rb_sb = (word >> READ_BARRIER) & 7

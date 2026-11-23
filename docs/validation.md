@@ -192,10 +192,12 @@ writes is put in the frame for the time of the sequence and brought back after i
 checks the register (not R0 or R1, not read or written by the original, not a home alive there,
 not one that holds a predicate), the instruction (not a branch, a call, a return, nor one that
 writes the stack pointer), the store before any write and the load after every read and write,
-each on a scoreboard that the next instruction waits for, each register in a word of its own,
-the same word both ways, and a frame large enough for the uniform values and the room. A
-register that the translator declares put away at an instruction may be written there while it
-holds something: the validator asks that its store and its load be there.
+each on a scoreboard that the next instruction waits for, each under no guard (where a guard of
+the store did not hold, the register would not be put away, and would be brought back all the
+same: until 2026-11-23 such a store passed), each register in a word of its own, the same word
+both ways, and a frame large enough for the uniform values and the room. A register that the
+translator declares put away at an instruction may be written there while it holds something:
+the validator asks that its store and its load be there.
 
 **What the frame's moves carry.** The rules of the two paragraphs above say what each load,
 each store, each register put away and each register brought back is by itself: the word, the
@@ -302,7 +304,7 @@ with the next instruction waiting, and the distances between the steps and after
 ## 3. Controls
 
 A check that never objects proves nothing. `reference/controls.py` makes the reference translator
-wrong on purpose, one way at a time, and counts what the validator finds in the result: 110
+wrong on purpose, one way at a time, and counts what the validator finds in the result: 111
 controls, each described at the head of that file. A control that changes translations and meets
 no objection anywhere is a hole in the validator, or a control that tests nothing.
 
