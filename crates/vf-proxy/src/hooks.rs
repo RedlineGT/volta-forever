@@ -2555,12 +2555,16 @@ unsafe fn node_allowed_v2(params: *const KernelNodeParamsV2, call: &str) -> bool
         return true;
     }
     let params = unsafe { &*params };
-    let handle = if params.first.function.is_null() {
-        params.kernel
-    } else {
-        params.first.function
-    };
-    guard::allows(handle, call)
+    if !params.first.function.is_null() {
+        return guard::allows(params.first.function, call);
+    }
+    // A library's kernel runs in the context that the node names, when it names one: on its device.
+    let device_of = real!(cuCtxGetDevice_v2: unsafe extern "C" fn(*mut c_int, *mut c_void) -> CUresult);
+    let mut device = -1;
+    if !params.context.is_null() && unsafe { device_of(&mut device, params.context) } == CUDA_SUCCESS {
+        return guard::allows_on(params.kernel, call, device);
+    }
+    guard::allows(params.kernel, call)
 }
 
 /// Whether a node may be given `params` (`CUgraphNodeParams`) in `call`.

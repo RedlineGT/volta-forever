@@ -158,6 +158,11 @@ CUresult cuCtxGetDevice(int *device) {
     *device = devices[current % 64];
     return 0;
 }
+CUresult cuCtxGetDevice_v2(int *device, void *context) {
+    if (!context) return cuCtxGetDevice(device);
+    *device = devices[(uintptr_t)context % 64];
+    return 0;
+}
 
 CUresult cuModuleLoadData(void **module, const void *image) {
     ++loads;

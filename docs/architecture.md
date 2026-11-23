@@ -465,7 +465,8 @@ The same holds for every launch of the driver's interface (the four above,
 kernel node of a graph made or changed with such a function or kernel (`cuGraphAddKernelNode`,
 `cuGraphKernelNodeSetParams`, `cuGraphExecKernelNodeSetParams`, both versions of each,
 `cuGraphAddNode`, `cuGraphNodeSetParams`, `cuGraphExecNodeSetParams`: a graph launches its
-kernels later, where nothing can be refused), for what is asked about it or set on it
+kernels later, where nothing can be refused; a node that names a library's kernel and a context
+is judged for the device of that context), for what is asked about it or set on it
 (`cuFuncGetAttribute`, `cuFuncSetAttribute`, `cuFuncSetCacheConfig`,
 `cuFuncSetSharedMemConfig`, `cuFuncGetParamInfo`, `cuFuncLoad`, the four of `cuKernel...`, the
 seven occupancy functions), and for `cuKernelGetFunction`, which also leaves NULL in the handle.

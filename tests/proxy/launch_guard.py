@@ -281,6 +281,15 @@ def library_case(run, lazy):
         run.allowed(bad_kernel.value, run.kernel_calls(bad_kernel.value, 1), "(a refused kernel on a later GPU)")
         assert run.api.cuCtxSetCurrent(run.context) == 0
         run.refused(bad_kernel.value, run.kernel_calls(bad_kernel.value), "(back on the V100)")
+        # A kernel node that names the kernel and a context runs in that context, whichever is current.
+        node = c.c_void_p()
+        for current, context, error in ((run.context, later, 0), (later, run.context, REFUSED)):
+            assert run.api.cuCtxSetCurrent(current) == 0
+            params = KernelNode(None, kernel=bad_kernel, context=context)
+            nodes = run.count("nodes")
+            got = run.api.cuGraphAddKernelNode_v2(c.byref(node), c.c_void_p(0x600000), None, 0, c.byref(params))
+            assert got == error and run.count("nodes") == nodes + (error == 0), (
+                f"a node of the refused kernel in {'the later GPU' if error == 0 else 'the V100'}'s context: {got}")
         assert run.api.cuCtxDestroy_v2(later) == 0
         assert run.api.cuCtxSetCurrent(run.context) == 0
     # The module of the library (the whole module of a deferred library), and its functions taken
