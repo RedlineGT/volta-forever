@@ -1943,12 +1943,14 @@ def waited_after(code, at, board):
     return False, at
 
 
-def schedule(mc, code, highest, sequences=frozenset(), borrowed=frozenset()):
+def schedule(mc, code, highest, sequences=frozenset(), borrowed=frozenset(), added=frozenset()):
     """What does not hold of the schedule of the translated `code` of a function whose original uses
     registers up to `highest`: (offset, what) for each, and how many late readers were looked at.
     `sequences`: the offsets of the instructions that stand for matrix instructions, whose late
     readers `sequence_schedule` looks at. `borrowed`: registers of the program (numbers <= highest)
-    that the translation uses for its own purposes."""
+    that the translation uses for its own purposes; `added`: the offsets of the instructions that
+    are not the program's own, unchanged (in those, a borrowed register is one of the
+    translation's: the kept copy of a scaled index at level 3, for one)."""
     words = [int.from_bytes(code[i:i + 16], 'little') for i in range(0, len(code) - 15, 16)]
     out, late = [], 0
     for k, w in enumerate(words):
@@ -1966,7 +1968,30 @@ def schedule(mc, code, highest, sequences=frozenset(), borrowed=frozenset()):
         d = mc.decode(70, w)
         if 16 * k in sequences:
             continue
-        if d is not None and d.kind in machine.LATE and any(letter == 'R' and register > highest for letter, register, role in d.reads):
+        # A register of the program that the translation borrows, read late by an instruction that
+        # is not the program's own: what next writes it, in the code that follows, comes after a
+        # wait for that read. (Until 2026-11-23 these were left out: at level 3 an STS at the kept
+        # copy of its scaled index, in a borrowed register that the next copy writes, could go
+        # without the wait, unseen; the control `nowait` changed two Triton cubins so and was
+        # objected to in neither. Not the rule below, the next instruction waiting: the homes of
+        # uniform registers are read late and written again only much later.)
+        if d is not None and d.kind in machine.LATE and 16 * k in added and not any(
+                letter == 'R' and register > highest for letter, register, role in d.reads):
+            mine = {register for letter, register, role in d.reads if letter == 'R' and register in borrowed}
+            boards = {sb for sb in ((w >> WRITE_BARRIER) & 7, (w >> READ_BARRIER) & 7) if sb != 7}
+            for j in range(k + 1, len(words)):
+                x = words[j]
+                if any(((x >> WAIT) & 63) >> sb & 1 for sb in boards):
+                    break
+                e = mc.decode(70, x)
+                if e is None or e.kind == 'BRU':
+                    break
+                if mine & {register for letter, register in e.writes if letter == 'R'}:
+                    late += 1
+                    out.append((16 * k, 'reads late a register that the translation borrows, and the instruction at 0x%x writes it before a wait until it has read' % (16 * j)))
+                    break
+        if d is not None and d.kind in machine.LATE and any(
+                letter == 'R' and register > highest for letter, register, role in d.reads):
             late += 1
             # (Instructions that do nothing and do not wait may come between, where the schedule
             # needed more time than a stall count holds.)
@@ -3372,6 +3397,7 @@ def main():
         # were gathered into, the offset in the result of the last shuffle that gathers).
         lanes_kept, gatherings = None, []
         has_level3_products = False
+        borrowed_by_loads = set()  # registers of the program that level-3 matrix loads borrow
         # Pairs on whole rows: {name of ROW_VALUES: register}; the whole-row loads {old offset:
         # (role, destination, {(fragment or pair, half): register}, also)}; the halves of pairs
         # [(old offset, accumulators x and y, register of A, register of B, B by rows)]; the
@@ -3917,6 +3943,8 @@ def main():
                         rn = int(r[1:])
                         if rn <= highest and rn >= 2:
                             borrowed_regs.add(rn)
+                            if load:
+                                borrowed_by_loads.add(r)
                     number = lambda n: int(bound[n][1:])
                     if not load:
                         ok = ok and number('x1') == number('x0') + 1 and all(number(n) % 2 == 0 for n in ('y0', 'y2', 'x0', 's0'))
@@ -4253,8 +4281,14 @@ def main():
         # At level 3, the lane, scratch, pool, and held registers are per-instruction and may
         # share the same register at different instructions, so the function-wide overlap check
         # is relaxed.
+        # The registers of the program that a matrix load at level 3 takes for its sequence are
+        # borrowed at that instruction alone, as the pool is at others: what each holds there is
+        # checked instruction by instruction (the whole-truth check of undeclared writes, and the
+        # borrow rules), not here. (Until 2026-11-23 a function with level-3 matrix loads and no
+        # product, a Triton tl.dot in float32 whose epilogue loads with LDSM and names 252
+        # registers, was objected to here for that alone.)
         if frame_bytes == 0 and not has_level3_products:
-            if (scratch | apart | row_registers) & (set(registers.values()) | pool | savers) or apart & scratch or row_registers & (scratch | apart):
+            if ((scratch - borrowed_by_loads) | apart | row_registers) & (set(registers.values()) | pool | savers) or apart & scratch or row_registers & (scratch | apart):
                 problems.append('%s: a register of the matrix sequences, the lane, what is kept of it or a row is used for something else too' % name[:40])
         if row_loads or halves or conversions:
             code = result.section('.text.' + name).data
@@ -4777,7 +4811,8 @@ def main():
                 if r not in room_made.get(at, ()):
                     problems.append('%s (from 0x%x): U: R%d is declared put away at this instruction, and nothing of its sequence puts it away' % (name[:40], at, r))
         # ---- schedule check (deferred from above: needs borrowed_regs) ----
-        wrong, late = schedule(mc, result_code, highest, sequences, borrowed_regs)
+        wrong, late = schedule(mc, result_code, highest, sequences, borrowed_regs,
+                               {new70 for new70, old75, what in listing if what != 'same'})
         kinds['(schedule) instructions that read late a register of the translation'] += late
         for at, what in wrong:
             problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))

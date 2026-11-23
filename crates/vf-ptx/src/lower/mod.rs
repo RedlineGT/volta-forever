@@ -467,7 +467,16 @@ pub fn body_in(
             }
             Kind::Label => {
                 body.chain_end_all();
+                // A label that no statement names is reached by falling through alone: the
+                // registers known to hold a mask of all lanes still hold it after it.
+                let named = scan::names(&text[item.range.clone()])
+                    .next()
+                    .is_none_or(|label| body.plan.targets.contains(label));
+                let ones = (!named).then(|| std::mem::take(&mut body.all_ones));
                 body.label();
+                if let Some(ones) = ones {
+                    body.all_ones = ones;
+                }
             }
             Kind::Line => {}
             Kind::Statement {

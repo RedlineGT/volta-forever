@@ -209,7 +209,11 @@ obtained by a shuffle from the lane that holds it, the offset of the thread's pa
 elements is added, and 4 bytes are loaded from shared memory. For the transposed form
 (`ldmatrix.trans`), each matrix needs two rows fetched by shuffles and two 2-byte loads,
 the two halves assembled. Other shapes and element types (`m16n16`, `m8n16`, `.b8`) are
-refused.
+refused. The address is a register, or, in the `.shared` form, a variable of shared memory
+(`[global_smem]`, `[global_smem+16]`, as Triton writes it for a layout conversion), whose
+address in the shared window then stands for every lane's row; the machine code `ptxas`
+makes of that (`LDSM [RZ]`) is refused by the machine-code translator, and the layer runs
+the PTX that the cubin keeps when there is one.
 
 A 16-byte load from shared memory faults on a V100 when its address is not a multiple of
 16. The PTX manual requires every address to be aligned
@@ -672,7 +676,7 @@ The reference vectors are in `tests/kernels/blackwell/ref_scaled/`.
 | `cvt.{rn,rz}.f16x2.f32` (pack two f32 to f16x2) | `cvt.rn.f16.f32` (or `.rz`) for each, then a shift and an `or` to pack, the first operand in the upper half. |
 | `cvt.{rn,rz}.bf16.f32`, `cvt.{rn,rz}.bf16x2.f32` | Integer arithmetic on the bits: the upper half of the f32, rounded to nearest even on the lower half for `.rn`, cut for `.rz`; a NaN gives `0x7fff`. For bf16x2, the first operand in the upper half. |
 | `cvt.rn.tf32.f32` | The 10-bit mantissa (zero the low 13 bits), ties to even: 9 instructions. |
-| `redux.sync.add.{s32,u32}`, `redux.sync.{min,max}.{s32,u32,f32}`, `redux.sync.{and,or,xor}.b32` | Unguarded, with a member mask of the whole warp (a constant, or a register set to all ones). A ballot identifies the lanes that have not exited. A full warp uses five butterfly shuffles. A partial warp gathers the input of each participating lane once, from the highest lane down: in the same order in every lane. Other forms are refused: a type the PTX ISA does not give the operation (`redux.sync.add.f32`, `redux.sync.and.u32`), `.abs`, a guard, another member mask. |
+| `redux.sync.add.{s32,u32}`, `redux.sync.{min,max}.{s32,u32,f32}`, `redux.sync.{and,or,xor}.b32` | Unguarded, with a member mask of the whole warp: a constant, or a register that holds all ones where the instruction reads it (the only statement of the function that writes it is an unguarded `mov` of all ones, or such a `mov` comes before the instruction with nothing between that writes the register or that a branch can reach: labels that no statement names, as compilers put for their line tables, do not count, a branch out does not). A ballot identifies the lanes that have not exited. A full warp uses five butterfly shuffles. A partial warp gathers the input of each participating lane once, from the highest lane down: in the same order in every lane. Other forms are refused: a type the PTX ISA does not give the operation (`redux.sync.add.f32`, `redux.sync.and.u32`), `.abs`, a guard, another member mask. |
 | `redux.sync.{min,max}.NaN.f32` | The same reduction, and a warp vote to propagate a NaN from any participating lane. |
 | `{min,max}{.ftz}.NaN.f32` | Compare two or three operands and propagate a NaN from any operand. |
 | `{min,max}{.ftz}.f32` with three operands | Two of the instruction with two operands. |

@@ -147,6 +147,9 @@ px ptx-reduction-exited-f32 "$G/ptx-cases/reduction-exited-f32.ptx" 80000000 000
 # least of -0 alone and the greatest of -1 alone are what they are. (Not run on later hardware:
 # redux.f32 is of sm_100a and sm_103a, not of the RTX 5090, whose sm_120 ptxas refuses it.)
 px ptx-reduction-one-lane-f32 "$G/ptx-cases/reduction-one-lane-f32.ptx" 7fffffff 7fffffff 80000000 bf800000
+# The member mask in a register set to all ones before labels that nothing branches to and before
+# a branch out, the register a loop counter afterwards (Triton's code): refused until 2026-11-23.
+px ptx-reduction-mask-reaching "$G/ptx-cases/reduction-mask-reaching.ptx" 210 1 20 2d
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
 px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
 # Built from the same sources with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
@@ -162,6 +165,11 @@ px cubin-embedded-separate-product-import "$G/ptx-cases/product-sum-assert.fmad-
 px cubin-embedded-fused-product "$G/ptx-cases/product-sum.fmad-true.sm80.cubin" a8800000 3f800001 3f7ffffe bf800000
 # CUDA 12.9 ptxas -lineinfo -arch=sm_75 predicates the HMMA; the PTX keeps its uniform branch.
 px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 41400000 41500000 41600000
+# ldmatrix at a variable of shared memory, no register in the address (Triton's [global_smem]): as
+# PTX, and as the sm_75 machine code that CUDA 12.9 ptxas -lineinfo makes of it (LDSM [RZ], which the
+# translator refuses: the layer runs the PTX kept in the cubin). Both refused until 2026-11-23.
+px ptx-ldmatrix-variable "$G/ptx-cases/ldmatrix-variable.ptx" a0b0c000 a0b0c003 a0b0c005 a0b0c006
+px cubin-ldmatrix-variable "$G/ptx-cases/ldmatrix-variable.sm75.cubin" a0b0c000 a0b0c003 a0b0c005 a0b0c006
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"
 # FP8: the conversions both ways, and the products, which run on the tensor cores as products of halves.
 tc fp8 "$G/k_fp8.135.sm89.ptx" "PTX for sm_89 retargeted \(1 module, 8 tensor-core instructions rewritten\)" "19 kernels, 0 wrong"

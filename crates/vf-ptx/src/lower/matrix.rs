@@ -211,6 +211,13 @@ impl<'a> Body<'a> {
             }
             Some(32) if shared => emit!(self, "mov.b32 {start}, {base};"),
             Some(32) => emit!(self, "cvta.to.shared.u32 {start}, {base};"),
+            // A name that is no register of the body, in the address of a `.shared` instruction: a
+            // variable of shared memory, as Triton writes `[global_smem]` (every lane gives the
+            // same row address), or a register declared outside the body; `mov` gives the address
+            // in the shared window of the one and the value of the other.
+            None if shared && !base.starts_with('%') && crate::scan::names(base).next() == Some(base) => {
+                emit!(self, "mov.u32 {start}, {base};")
+            }
             _ => return Err(unsupported("address register not recognised")),
         }
         if let Some(offset) = offset {

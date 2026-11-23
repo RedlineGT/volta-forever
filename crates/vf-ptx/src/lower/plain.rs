@@ -598,7 +598,10 @@ impl<'a> Body<'a> {
                 _ => matches!(kind, "u32" | "s32" | "f32"),
             }
         {
-            // The member mask names the whole warp. Some of its threads may have exited.
+            // The member mask names the whole warp: a constant, or a register that holds all ones
+            // here (set by the only statement of the function that writes it, or by a `mov` before
+            // this in the text with nothing between that writes it or that a branch names: see
+            // `Plan::targets`). Some of its threads may have exited.
             let [d, a, mask] = parts[..] else {
                 return Err(unsupported("operands not recognised"));
             };
