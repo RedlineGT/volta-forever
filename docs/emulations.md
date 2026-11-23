@@ -797,9 +797,10 @@ the handle. The skinny path therefore serves only where 12.9 was seen to run its
 (A workspace of none, 4 KiB, 64 KiB, 256 KiB, 1 MiB or 2 MiB changed 12.9's choice on 202, 202,
 100, 100, 158 and 158 of 1,120 configurations; 4, 8 and 32 MiB on none. cuBLAS gives a handle its
 default workspace when it is made and at every `cublasSetStream`; with `CUBLAS_WORKSPACE_CONFIG`
-set, the default does not count.) Within these regions the rule served 123,964 configurations of the
-grid and 18,961 random ones not on it, all where 12.9 ran its sequential kernel; it forwards every
-configuration where 12.9 ran `gemmSN` and some where it did not. Executed on 1,578 configurations in
+set, the default does not count.) Applied as coded, with the bounds below, the rule serves 101,595 of
+the 266,195 configurations (the grid and 18,961 random ones not on it), all where 12.9 ran its
+sequential kernel alone; it forwards every configuration where 12.9 ran `gemmSN` and some where it
+did not. Executed on 1,578 configurations in
 these regions, the path served 1,206 (the others lie outside its bounds, below), each with 12.9's
 bits in every element; at the rule's edges (each bound just inside and just outside), with operands
 at unaligned addresses, padded leading dimensions and each class of workspace (160 configurations,
@@ -831,11 +832,15 @@ zero). cuBLAS 12.9's fp16 GEMM with fp32 output then computes the product over f
 256 (a strided batch, on a cuBLASLt handle of the runtime's own, without workspace), and the
 epilogue sums the slices' partials in fp32 in slice order from +0, multiplies by 2^(e_i + f_j - 30)
 (exact), and applies alpha, beta and the bias as the skinny path does. The products are exact; the
-tensor cores add with truncation (section 1), so long sums of one sign come out low: over 21 shapes
-the worst error against fp64 was 24.6 units of 2^-24 sum |a b| for k <= 16384, with a mean bias of
--13 units, whatever kernel cuBLAS chose for a slice; the same arithmetic reached 32.8 units at
-k = 65536, so longer products are forwarded. An RTX 5090's own bf16 product gave 37.9 to 42.1 units
-on the same same-sign data at k = 1024.
+tensor cores add with truncation (section 1), so long sums of one sign can come out low: in the
+design's measurements of this arithmetic (before the runtime existed), over 21 shapes the worst error
+against fp64 was 24.6 units of 2^-24 sum |a b| for k <= 16384, with a mean bias of -13 units, whatever
+kernel cuBLAS chose for a slice; the same arithmetic reached 32.8 units at k = 65536, so longer
+products are forwarded, and an RTX 5090's own bf16 product gave 37.9 to 42.1 units on the same
+same-sign data at k = 1024. On this runtime, with both operands uniform in [0.5, 1), the largest
+error over 256 sampled elements was 5.7 units at TN 4096 x 256 x 16384, 3.6 at 7344 x 512 x 4096 and
+1.8 at 2048 x 64 x 1024, with no measurable bias (`tests/gpu/forward/bf16-cost.c`); the GPU tests hold
+every tensor-core result to 32 units.
 
 The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
 tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue: they are 12.9's

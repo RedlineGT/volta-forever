@@ -254,9 +254,9 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
 explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 for the tensor cores,
 tensor-core calls captured in a CUDA graph (`LIMITS.md`, "The bf16 cuBLAS variants", says why), and
-calls whose workspace cannot be allocated. An eager tensor-core
-call cost 18 to 46 microseconds of host time against about 7 for 12.9's, a skinny call about 3.5
-(measured with the runtime's prototype).
+calls whose workspace cannot be allocated. An eager tensor-core call (TN 1536 x 480 x 1536) cost
+16.5 microseconds of host time against 6.5 for 12.9's, a skinny call (TN 1536 x 8 x 1536) 2.4 against
+5.8 (`tests/gpu/forward/bf16-cost.c`, mean over 100 calls).
 The layer's workspace is not the program's: a framework's allocator does not see it. The variables do nothing without the
 launcher: by hand, put `forward/bf16tc` before `forward` and set the variable.
 
