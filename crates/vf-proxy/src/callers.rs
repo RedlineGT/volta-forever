@@ -879,6 +879,12 @@ pub fn told_sm(return_address: usize) -> Option<u32> {
     caller(return_address).limit
 }
 
+/// Whether the caller at `return_address` has code for this GPU of its own: it is told the real
+/// compute capability, and chooses that code here.
+pub fn has_own_code(return_address: usize) -> bool {
+    caller(return_address).caller == Caller::Native
+}
+
 /// The capability reported for a physical sm_70 device.
 pub fn device_capability(return_address: usize) -> Option<(i32, i32)> {
     capability(caller(return_address))

@@ -50,6 +50,12 @@ a PyTorch built for another CUDA.)
   the layer; the translator's map says what each instruction of a translation is for.
 - **Loops and single instructions**: test kernels written for the purpose, three runs, on a GPU
   held for the whole comparison.
+- **The clock**: after the GPU has been idle, it runs below its boost clock (at 1290, then
+  1425 MHz) for up to about ten seconds of work, and a kernel whose time follows the clock takes up
+  to 19 % longer meanwhile (cuBLAS 12.9's bf16 product with a bias, 1536 x 2 x 1536, through
+  PyTorch on 2026-11-23: 247.7 us at 1290 MHz, 212 us at 1530 MHz). Compare timings taken after
+  the clock has settled (the GPU kept busy until NVML reports 1530 MHz), or record the clock with
+  each.
 
 ## 2. PyTorch operations
 

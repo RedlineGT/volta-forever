@@ -238,6 +238,7 @@ pub fn write_status_source(spec: &LibSpec, dir: &Path) -> Result<(), String> {
 }
 
 pub fn build(spec: &LibSpec, entries: &[Entry], dir: &Path, new_include: &Path, out: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let target = out.join(spec.new_name);
     let tmp = out.join(format!(".{}.new", spec.new_name));
     let output = Command::new("gcc")

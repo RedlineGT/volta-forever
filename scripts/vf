@@ -38,6 +38,9 @@
 #   VF_JIT_LINEINFO=1
 #                  run-time CUDA compilers keep the PTX of what they build (setup_jit): for a
 #                  program told 8.0 or later (VF_CAPABILITY) that compiles kernels while it runs
+#   VF_CUBLAS_BF16_TC=1, VF_CUBLAS_BF16_SKINNY=1
+#                  libcublas.so.13 and libcublasLt.so.13 are the bf16 cuBLAS variants of
+#                  forward/bf16tc (bf16_select); refused when they are not installed
 # A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 set -eu
 
@@ -198,9 +201,124 @@ find_cuda12() {
     _cuda12_why=
 }
 
+# --- the bf16 cuBLAS variants ------------------------------------------------------
+# forward/bf16tc holds variants of the forwarding libraries of cuBLAS, with the same names, and
+# their runtime library. VF_CUBLAS_BF16_TC and VF_CUBLAS_BF16_SKINNY, which that runtime
+# reads, are each 0 or 1 (unset: 0). When either is 1, the two CUDA 13 names
+# libcublas.so.13 and libcublasLt.so.13 go to the variants in place of the forwarding libraries
+# of forward/, both or neither, never one: in the map (build_map) and on the library path, where
+# forward/bf16tc comes before forward/. The CUDA 12 entries stay as they are. The launcher
+# refuses to run, with a line that names what is missing, when one of the three files is not
+# there, when the variants would not be in the map (their CUDA 12.9.2 cuBLAS is not in the
+# directory that was found), or when an entry that comes before the launcher's gives one of the
+# two names another file: the program would run with other libraries than the ones asked for,
+# and nothing would say so. Another value is refused too. Both variables reach the program as
+# they are.
+
+bf16_dir=$fwd_dir/bf16tc
+bf16_files="libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so"
+
+# Before build_map. Sets $_bf16_said (the switches that are set, as NAME=VALUE, for vf doctor),
+# $_bf16_on (those that are 1) and $_bf16_sel (the verb after them in the messages: selects, or
+# select after two), $_bf16_absent and $_bf16_absent_n (the files of the variants that
+# are not there, and how many), $_bf16_use (1: the map takes the variants) and, when the launcher
+# refuses, $_bf16_refusal and $_bf16_doctor (what it says, and what vf doctor says).
+bf16_select() {
+    _bf16_said= _bf16_on= _bf16_absent= _bf16_absent_n=0 _bf16_use=0 _bf16_refusal= _bf16_doctor=
+    _bf16_sel=selects
+    for _var in VF_CUBLAS_BF16_TC VF_CUBLAS_BF16_SKINNY; do
+        eval "_isset=\${$_var+set} _val=\${$_var-}"
+        [ "$_isset" = set ] || continue
+        _bf16_said="${_bf16_said:+$_bf16_said and }$_var=$_val"
+        case $_val in
+            0) ;;
+            1)
+                # (The verb of the messages: one switch selects, two select.)
+                if [ -n "$_bf16_on" ]; then _bf16_sel=select; fi
+                _bf16_on="${_bf16_on:+$_bf16_on and }$_var=1" ;;
+            *)
+                if [ -z "$_bf16_refusal" ]; then
+                    _bf16_refusal="$_var is '$_val': the accepted values are 0 and 1 (unset: 0)"
+                    _bf16_doctor="MISSING a value of $_var that the launcher takes: it is '$_val', and the accepted values are 0 and 1 (unset: 0); the launcher refuses to run"
+                fi ;;
+        esac
+    done
+    for _f in $bf16_files; do
+        if [ ! -f "$bf16_dir/$_f" ]; then
+            _bf16_absent="$_bf16_absent $_f"
+            _bf16_absent_n=$((_bf16_absent_n + 1))
+        fi
+    done
+    if [ -n "$_bf16_refusal" ] || [ -z "$_bf16_on" ]; then
+        return 0
+    fi
+    if [ -n "$_bf16_absent" ]; then
+        _missing=
+        for _f in $_bf16_absent; do _missing="$_missing $bf16_dir/$_f"; done
+        _bf16_refusal="$_bf16_on $_bf16_sel the bf16 cuBLAS variants, which are not installed: missing$_missing"
+        _bf16_doctor="MISSING the bf16 cuBLAS variants that $_bf16_on $_bf16_sel:$_missing; the launcher refuses to run"
+        return 0
+    fi
+    _bf16_use=1
+}
+
+# After build_map. Sets $_bf16_mapped (1: both names have their variant in the map), or the
+# refusal when the variants are asked for and are not both there.
+bf16_check() {
+    _bf16_mapped=0
+    [ "$_bf16_use" = 1 ] || return 0
+    _lack=
+    for _name in libcublas.so.13 libcublasLt.so.13; do
+        case ":$_launcher_map:" in
+            *":$_name=$bf16_dir/$_name:"*) ;;
+            *) _lack="$_lack $_name" ;;
+        esac
+    done
+    if [ -z "$_lack" ]; then
+        _bf16_mapped=1
+    elif [ -n "$_bf16_unserved" ]; then
+        _bf16_refusal="$_bf16_on $_bf16_sel the bf16 cuBLAS variants, and the CUDA 12.9.2 cuBLAS that they forward to is not there: missing$_bf16_unserved (vf fetch downloads it)"
+        _bf16_doctor="MISSING the CUDA 12.9.2 cuBLAS that the bf16 variants forward to:$_bf16_unserved; the launcher refuses to run with $_bf16_on (vf fetch downloads it)"
+    else
+        _bf16_refusal="$_bf16_on $_bf16_sel the bf16 cuBLAS variants, and the report of the forwarding libraries, by which the launcher maps them, does not list:$_lack ($report)"
+        _bf16_doctor="MISSING$_lack in the report of the forwarding libraries ($report), by which the launcher maps the bf16 variants; the launcher refuses to run with $_bf16_on"
+    fi
+}
+
+# first_entry NAME MAP: sets $_first to the first entry of NAME in MAP (NAME=FILE, empty when
+# there is none), the one that the audit library takes.
+first_entry() {
+    _first=
+    set -f
+    _oifs=$IFS; IFS=:
+    for _entry in $2; do
+        case $_entry in
+            "$1="*) _first=$_entry; break ;;
+        esac
+    done
+    IFS=$_oifs
+    set +f
+}
+
+# After the whole map is joined ($_full_map), with the audit library. An entry of the user's
+# (VF_AUDIT_MAP, --map), or one left by eval "$(vf env)" without a switch, that gives one of
+# the two names another file comes before the launcher's.
+bf16_first() {
+    [ "$_bf16_mapped" = 1 ] && [ "$_with_audit" = 1 ] && [ -z "$_bf16_refusal" ] || return 0
+    for _name in libcublas.so.13 libcublasLt.so.13; do
+        first_entry "$_name" "$_full_map"
+        if [ "$_first" != "$_name=$bf16_dir/$_name" ]; then
+            _bf16_refusal="$_bf16_on $_bf16_sel the bf16 cuBLAS variants, and an entry that comes before the launcher's gives $_name another file: $_first (from VF_AUDIT_MAP or --map; eval \"\$(vf env)\" without the switch leaves its entries in VF_AUDIT_MAP)"
+            _bf16_doctor="MISSING the bf16 variant of $_name in the map: an entry of VF_AUDIT_MAP comes before the launcher's, $_first; the launcher refuses to run with $_bf16_on"
+            return 0
+        fi
+    done
+}
+
 # --- build the audit map -------------------------------------------------------
 # For every forwarding library that has something to forward to, two entries:
-#   name=forwarder           (CUDA 13 name -> the forwarding library)
+#   name=forwarder           (CUDA 13 name -> the forwarding library, or the bf16 variant of
+#                            libcublas.so.13 and libcublasLt.so.13 when $_bf16_use is 1)
 #   target=cuda12/target     (CUDA 12 original -> the file in the cuda12 directory)
 # A forwarding library whose CUDA 12.9.2 library is not in the directory that was found
 # (`vf fetch` downloads cuBLAS alone unless it is told --all) is left out, and its name goes
@@ -213,11 +331,14 @@ find_cuda12() {
 #   - the audit library reads VF_AUDIT_MAP before the map file, so user entries
 #     in VF_AUDIT_MAP keep priority;
 #   - the user's VF_AUDIT_MAP_FILE is kept as-is and read after.
-# Reads $_cuda12 (the directory, or empty). Sets $_launcher_map and $_unserved.
+# Reads $_cuda12 (the directory, or empty) and $_bf16_use. Sets $_launcher_map, $_unserved and
+# $_bf16_unserved (the CUDA 12.9.2 files that the variants of cuBLAS would forward to and that
+# are not there).
 
 build_map() {
     _launcher_map=
     _unserved=
+    _bf16_unserved=
     # DT_RPATH and absolute dlopen paths can otherwise select an application's bundled
     # CUDA 13 linker, which produces code for the advertised GPU instead of Volta.
     if [ -f "$lib_dir/libnvJitLink.so.13" ] && {
@@ -256,14 +377,22 @@ build_map() {
         esac
         # Last word.
         eval '_target=${'$#'}'
-        # The forwarder must exist.
-        [ -f "$fwd_dir/$_fwd" ] || continue
+        # The forwarder, or the variant of a cuBLAS one when the variants are asked for (both
+        # names: bf16_select). It must exist.
+        _fwd_file=$fwd_dir/$_fwd
+        case ${_bf16_use:-0}:$_fwd in
+            1:libcublas.so.13|1:libcublasLt.so.13) _fwd_file=$bf16_dir/$_fwd ;;
+        esac
+        [ -f "$_fwd_file" ] || continue
         if [ -n "$_cuda12" ] && [ ! -f "$_cuda12/$_target" ]; then
             _unserved="$_unserved $_fwd"
+            if [ "$_fwd_file" != "$fwd_dir/$_fwd" ]; then
+                _bf16_unserved="$_bf16_unserved $_cuda12/$_target"
+            fi
             continue
         fi
         # Entry: CUDA 13 name -> forwarder.
-        _entry="$_fwd=$fwd_dir/$_fwd"
+        _entry="$_fwd=$_fwd_file"
         if [ -n "$_launcher_map" ]; then _launcher_map="$_launcher_map:$_entry"; else _launcher_map=$_entry; fi
         # Entry: CUDA 12 target -> the file in the cuda12 directory.
         if [ -n "$_cuda12" ]; then
@@ -347,7 +476,11 @@ setup_env() {
             echo "vf: the CUDA 12.9.2 directory $_cuda12 ($_cuda12_why) has a ';' in its path, at which the loader splits LD_LIBRARY_PATH; name it by a path without one (a symbolic link to it)" >&2
             exit 2 ;;
     esac
+    # (What the launcher refuses of the bf16 cuBLAS variants, it refuses once the map is joined,
+    # below; vf doctor says it.)
+    bf16_select
     build_map
+    bf16_check
 
     _audit=$lib_dir/libvf_audit.so
     _with_audit=0
@@ -383,8 +516,13 @@ setup_env() {
     # libraries, then what was there. The directory of the forwarding libraries is left out
     # when some of them have nothing to forward to and the audit library is there to give
     # the program the others by their names (the map has them): on the path, one with nothing
-    # behind it would be found by its name in place of the program's own library.
+    # behind it would be found by its name in place of the program's own library. The bf16
+    # variants of cuBLAS, when the map has them, come before the forwarding libraries (both have
+    # something to forward to, or the launcher refuses), and their runtime library with them.
     _ldpath_new=$lib_dir
+    if [ "$_bf16_mapped" = 1 ]; then
+        _ldpath_new=$_ldpath_new:$bf16_dir
+    fi
     if [ -z "$_unserved" ] || [ "$_with_audit" = 0 ]; then
         _ldpath_new=$_ldpath_new:$fwd_dir
     fi
@@ -444,6 +582,11 @@ setup_env() {
     # entry that is there already is not added again: under itself (vf vf, or after
     # eval "$(vf env)") the launcher finds its own entries in VF_AUDIT_MAP.
     _full_map=$(path_prepend "${VF_AUDIT_MAP:-}" "$_user_map:$_launcher_map")
+    bf16_first
+    if [ -n "$_bf16_refusal" ] && [ "${_doctor:-0}" != 1 ]; then
+        echo "vf: $_bf16_refusal" >&2
+        exit 2
+    fi
 
     if [ "${VF_QUIET:-0}" != 1 ]; then
         if [ -z "$_cuda12" ]; then
@@ -475,6 +618,17 @@ cmd_env() {
         else
             printf 'unset LD_AUDIT\n'
         fi
+    fi
+    # The switches that select the bf16 cuBLAS variants, as they are, when the map and the path
+    # above have the variants: a program run in a shell that reads these lines gets those
+    # libraries with the switches that their runtime reads.
+    if [ "$_bf16_mapped" = 1 ]; then
+        for _var in VF_CUBLAS_BF16_TC VF_CUBLAS_BF16_SKINNY; do
+            eval "_isset=\${$_var+set} _val=\${$_var-}"
+            if [ "$_isset" = set ]; then
+                printf 'export %s=%s\n' "$_var" "$(quoted "$_val")"
+            fi
+        done
     fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
     printf 'export VOLTA_FOREVER_HOME=%s\n' "$(quoted "$home")"
@@ -742,6 +896,36 @@ cmd_doctor() {
         _ok=0
     fi
 
+    # The bf16 cuBLAS variants: whether the three files are there; and when a switch is set,
+    # the files that libcublas.so.13 and libcublasLt.so.13 will be (the first entry of each in
+    # the map, which the audit library takes), or why the launcher refuses to run.
+    if [ "$_bf16_absent_n" = 0 ]; then
+        echo "ok    bf16 cuBLAS variants in $bf16_dir (libcublas.so.13, libcublasLt.so.13, libvf_cublas_bf16.so)"
+    elif [ "$_bf16_absent_n" = 3 ]; then
+        echo "NOTICE no bf16 cuBLAS variants in $bf16_dir: VF_CUBLAS_BF16_TC=1 and VF_CUBLAS_BF16_SKINNY=1 are refused"
+    else
+        echo "NOTICE bf16 cuBLAS variants incomplete in $bf16_dir, missing:$_bf16_absent (VF_CUBLAS_BF16_TC=1 and VF_CUBLAS_BF16_SKINNY=1 are refused)"
+    fi
+    if [ -n "$_bf16_doctor" ]; then
+        echo "$_bf16_doctor"
+        _ok=0
+    elif [ -n "$_bf16_said" ]; then
+        _used=
+        for _name in libcublas.so.13 libcublasLt.so.13; do
+            first_entry "$_name" "$_full_map"
+            case $_first in
+                '') _first="the program's own" ;;
+                *=) _first="not found (an empty entry of the map)" ;;
+                *) _first=${_first#*=} ;;
+            esac
+            _used="${_used:+$_used, }$_name is $_first"
+        done
+        if [ "$_bf16_mapped" = 1 ]; then
+            _used="$_used, with $bf16_dir/libvf_cublas_bf16.so"
+        fi
+        echo "ok    $_bf16_said: $_used"
+    fi
+
     # Environment that run would set.
     echo "ok    LD_LIBRARY_PATH would be: $_ldpath"
     if [ -f "$_audit" ]; then
@@ -926,6 +1110,9 @@ Environment:
                  -lineinfo, CuTe DSL CUTE_DSL_LINEINFO=1), which the layer compiles for
                  the V100: for a program told 8.0 or later (VF_CAPABILITY) that compiles
                  kernels while it runs. Not for a build with -G (see INSTALL.md)
+  VF_CUBLAS_BF16_TC=1, VF_CUBLAS_BF16_SKINNY=1
+                 libcublas.so.13 and libcublasLt.so.13 are the bf16 cuBLAS variants of
+                 forward/bf16tc; refused when they are not installed (0 or 1; unset: 0)
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }

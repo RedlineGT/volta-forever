@@ -5,6 +5,8 @@
 # The archive holds what a user needs to run CUDA 13 programs on a V100 and nothing of NVIDIA's:
 #   lib/            the proxy (libcuda.so.1), the audit library, the nvJitLink adapter
 #   forward/        forwarding libraries: CUDA 13 names served by CUDA 12.9 (generated, no NVIDIA code)
+#   forward/bf16tc/ the bf16 cuBLAS variants (libcublas.so.13, libcublasLt.so.13) and their runtime
+#                   library libvf_cublas_bf16.so, when they were built
 #   bin/vf            the launcher (sets the environment and runs a program), with a link
 #                     bin/volta-forever to it
 #   bin/vf-translate  the offline tool (inspect, extract, adapt, translate)
@@ -20,8 +22,9 @@
 #
 # Refuses to run on a dirty tree (tracked files differ from HEAD) unless ALLOW_DIRTY=1.
 # Refuses to run when the built tree lacks one of the forwarding libraries that a whole run of
-# scripts/build-forwarders.sh makes (`vf-fwdgen list`), or when a binary or a forwarding library
-# is older than the sources.
+# scripts/build-forwarders.sh makes (`vf-fwdgen list`), when it holds some but not all of the three
+# files of the bf16 cuBLAS variants, or when a binary or a forwarding library is older than the
+# sources.
 # $DIST: the built tree to pack and where the archive goes (default: dist/ of this tree).
 # Prints what it packed and the checksums.
 # Output: volta-forever-<version>-linux-x86_64.tar.gz (what install.sh downloads), the same as
@@ -69,6 +72,23 @@ fi
 for lib in "${forwarders[@]}"; do
     bins+=("$out/forward/$lib")
 done
+# The bf16 cuBLAS variants (forward/bf16tc), when they were built: the three files, or none. The
+# launcher refuses VF_CUBLAS_BF16_TC=1 and VF_CUBLAS_BF16_SKINNY=1 unless all three are there.
+bf16_files=(libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so)
+bf16_there=()
+bf16_missing=()
+for lib in "${bf16_files[@]}"; do
+    if [ -f "$out/forward/bf16tc/$lib" ]; then bf16_there+=("$lib"); else bf16_missing+=("$lib"); fi
+done
+if [ "${#bf16_there[@]}" -gt 0 ] && [ "${#bf16_missing[@]}" -gt 0 ]; then
+    echo "error: $out/forward/bf16tc holds ${#bf16_there[@]} of the ${#bf16_files[@]} files of the bf16 cuBLAS variants: it lacks ${bf16_missing[*]} (build all three, or remove the directory)"
+    exit 2
+fi
+if [ "${#bf16_missing[@]}" -eq 0 ]; then
+    for lib in "${bf16_files[@]}"; do
+        bins+=("$out/forward/bf16tc/$lib")
+    done
+fi
 
 # Check staleness: the oldest binary or forwarding library must be newer than the sources.
 oldest_bin="${bins[0]}"
@@ -107,6 +127,13 @@ for lib in "${forwarders[@]}"; do
     cp "$out/forward/$lib" "$pkg/forward/"
 done
 cp "$out/forward/REPORT.txt" "$pkg/forward/"
+# forward/bf16tc/: the bf16 cuBLAS variants and their runtime library, when they were built
+if [ "${#bf16_missing[@]}" -eq 0 ]; then
+    mkdir -p "$pkg/forward/bf16tc"
+    for lib in "${bf16_files[@]}"; do
+        cp "$out/forward/bf16tc/$lib" "$pkg/forward/bf16tc/"
+    done
+fi
 
 # scripts/: what a user needs to fetch the CUDA 12.9 libraries
 cp "$root/scripts/fetch-redist.py" "$pkg/scripts/"
@@ -171,13 +198,33 @@ for f in "$pkg/forward/"*.so.*; do
         *) echo "ERROR: unexpected file in forward/: $fname"; fail=1 ;;
     esac
 done
-if [ "$(find "$pkg/forward" -name '*.so.*' -type f | wc -l)" != "${#forwarders[@]}" ]; then
+if [ "$(find "$pkg/forward" -maxdepth 1 -name '*.so.*' -type f | wc -l)" != "${#forwarders[@]}" ]; then
     echo "ERROR: forward/ does not hold the ${#forwarders[@]} forwarding libraries"
     fail=1
 fi
 
-# Forwarding libraries must need only libc.so.6
-for f in "$pkg/forward/"*.so.*; do
+# Check forward/bf16tc/: the three files of the bf16 cuBLAS variants and nothing else, or nothing
+if [ -e "$pkg/forward/bf16tc" ]; then
+    for f in "$pkg/forward/bf16tc/"*; do
+        fname=$(basename "$f")
+        case " ${bf16_files[*]} " in
+            *" $fname "*) ;;
+            *) echo "ERROR: unexpected file in forward/bf16tc/: $fname"; fail=1 ;;
+        esac
+    done
+    if [ "$(find "$pkg/forward/bf16tc" -type f | wc -l)" != "${#bf16_files[@]}" ]; then
+        echo "ERROR: forward/bf16tc/ does not hold the ${#bf16_files[@]} files of the bf16 cuBLAS variants"
+        fail=1
+    fi
+    # The runtime: its exports, the libraries it needs, and the kernels of kernels.manifest in it
+    if ! "$gen" check-bf16 "$pkg/forward/bf16tc"; then
+        echo "ERROR: forward/bf16tc/libvf_cublas_bf16.so does not pass vf-fwdgen check-bf16"
+        fail=1
+    fi
+fi
+
+# Forwarding libraries (the bf16 variants included) must need only libc.so.6
+for f in "$pkg/forward/"*.so.* "$pkg/forward/bf16tc/"libcublas*.so.*; do
     [ -f "$f" ] || continue
     extra=$(readelf -d "$f" 2>/dev/null | grep NEEDED | grep -v "libc.so.6" | head -1 || true)
     if [ -n "$extra" ]; then

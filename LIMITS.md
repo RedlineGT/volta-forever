@@ -70,6 +70,36 @@ kernels of its module load and run. The same holds for the image that the driver
 another input of the link that cannot run is not refused, and traps when it is launched; and
 inputs given with `cuLinkAddFile` are not adapted at all.
 
+**Eager loading (`CUDA_MODULE_LOADING=EAGER`).** The CUDA 13 runtime asks for each kernel by
+itself, and goes on without one that is refused, under eager loading as under lazy loading. The
+CUDA 12 runtime, which the CUDA 12.9 libraries that the layer forwards to carry inside them,
+takes the kernels of each of its fat binaries from the module of its library
+(`cuLibraryGetModule`, then `cuModuleGetFunction` for each); under eager loading it does so for
+every fat binary at its start, and gives up altogether at the first lookup that fails. NVIDIA's
+driver gives no module for an image without code for the GPU (209,
+`CUDA_ERROR_NO_BINARY_FOR_GPU`), and the runtime then does without that image. Under eager
+loading the layer gives no module either (its kernels stay given by `cuLibraryGetKernel`) for an
+image with a kernel that it refuses, and for an image that it made from one without code for
+the V100 when the caller has code for the V100 of its own, as the CUDA 12.9 libraries do, which
+choose that code here: the module would have every kernel of the image compiled at the start,
+for nothing (cuBLAS 12.9 and cuBLASLt have hundreds of such images, kernels for sm_80 and later;
+one took more than nine minutes to compile). So cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT,
+cuRAND and cuDNN 9.10 (its CUDA 12 build) start under eager loading as on NVIDIA's driver (until
+2026-11-23 the handles of the first four could not be created, and cuDNN 9.10's first operation
+failed: one of cuBLAS 12.9's images has ten grouped GEMM kernels for sm_80 that the layer does
+not translate). A program of the CUDA 12 runtime whose own fat binary has a refused kernel
+starts without the kernels of that fat binary under eager loading; under lazy loading it is
+given the others.
+
+What eager loading costs through the layer: every image of machine code that a runtime
+registered is translated, and every kernel of retargeted PTX that it asks for is compiled by the
+driver, at its start, and every refused kernel is named then on standard error. With the layer's
+cache off (`VF_PROXY_CACHE=0`), cuBLAS 12.9 started in 30 s (2 s without the layer); the start of
+PyTorch 2.14 (3,358 images of PyTorch, cuDNN, cuBLAS and the others adapted, 1,411 kernels
+named) had not ended after ten minutes, nor that of cuDNN 9.28 (its CUDA 13 build) after two, by
+which it had compiled 1,441 kernels one by one (2026-11-23). A later start takes what it can from
+the layer's cache and the driver's (`CUDA_CACHE_PATH`); that was not measured.
+
 **PyTorch 2.14.0.** Of the 23,693 functions for sm_75 in the 475 units of machine code of its
 library, 23,664 are translated (99.9 %) and 29 are refused: 10 for a branch through a uniform
 register, 6 for the instruction `I2IP`, 4 for a call whose return address is not given the
@@ -291,6 +321,66 @@ What that does not cover:
 ## CUDA graphs
 
 A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ server used CUDA graphs for both prefill and decode. A graph can report error 701 when it is instantiated or replayed if the translated kernel needs too many registers for the recorded block size. For translated machine code, `VF_BORROW=9 vf …` can preserve a source block size that would otherwise be lost. Shared-memory limits still apply. [SGLang measurements](docs/guides/benchmarks/sglang-default-operators.json) · [GPU validation](docs/validation.md#cuda-graph-replay)
+
+## The bf16 cuBLAS variants
+
+What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.md` and
+`docs/emulations.md` (section 11). Their limits:
+
+- **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
+  workspace would be an allocation node of the program's graph, and with one, measured on driver
+  580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
+  `VF_BF16_CONTROL=capture-tc`, which serves captured calls), a second instantiation of the graph is
+  refused, it cannot be embedded as a child graph or instantiated for device launch,
+  `cudaGraphExecUpdate` from a recapture is refused, and a graph captured into a conditional node's
+  body cannot be instantiated at all, while the same graph without the node works; the layer cannot
+  tell any of these apart when it is called. A program that replays its steps from graphs gains from
+  the tensor-core path only in what runs outside them: vLLM replays its decode steps and its prefill
+  chunks up to the largest captured size (512 and 2048 tokens for the two models measured), and with
+  `VF_CUBLAS_BF16_TC=1` its prefill was 6 % faster on one model and unchanged on the other. The skinny
+  path serves captured calls (one kernel node, nothing allocated). A replayed tensor-core call has
+  12.9's bits, which differ in their last bits from the same call made outside a capture: a program
+  that compares a graph's replay with an eager run of the same step sees it.
+- **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
+  explicit algorithms of `cublasGemmEx` and `cublasGemmStridedBatchedEx`, a `cublasLtMatmul`
+  algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
+  configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
+  pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with any attribute outside
+  the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no
+  workspace, or with a workspace that is not 256-byte aligned (12.9 refuses that), a bias epilogue
+  whose bias overlaps D, and every call of a context that is not a V100's. A legacy workspace set at
+  an address that is not 256-byte aligned counts as smaller than 4 MiB (with 4 MiB 16 bytes past an
+  aligned address, 12.9 ran its gemmSN kernel at TN 448 x 8 x 256). The tensor-core path does not follow
+  a `cublasLtMatmul` algorithm: it computes the product its own way, whatever the algorithm says.
+- **Speed that depends on the data.** A row of op(A) or a column of op(B) that does not convert
+  exactly to fp16 is computed by the fallback, which is slower: with every column failing at
+  n = 480, a tensor-core call took 32 to 71 % longer than cuBLAS 12.9's on six shapes of linear
+  layers, TN m x k = 1536 x 1536, 4608 x 1536, 1536 x 4608, 7344 x 1536, 9728 x 896 and 896 x 4864
+  (`tests/gpu/forward/bf16-cost.c`), against 1.7 to 2.8 times as fast when nothing fails.
+- **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
+  layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
+  the pool of the context keeps up to 64 MiB between eager calls.
+- **cuBLAS's workspace contract is unchanged.** A forwarded call uses the handle's workspace as 12.9
+  does: threads that share a handle and its workspace on different streams race in cuBLAS itself, as
+  they do without the layer (`tests/gpu/forward/bf16-threads.c` gives each calling thread a context
+  of its own; calls the layer serves use workspace of their own).
+- **The skinny path's rule** was measured with CUDA 12.9.2's cuBLAS (build 12.9.2.10) on one V100 and
+  one driver. The runtime checks that cuBLAS reports 12.9.2 (the build number cannot be read at run
+  time); with another cuBLAS the skinny path serves nothing.
+- **Contexts and processes.** A CUDA context gets the runtime's module at the first call either path
+  serves in it, and a memory pool and a cuBLASLt handle at the first call the tensor-core path serves
+  there; none is destroyed: a program that makes and destroys many contexts keeps one of each per
+  context where they were made (the pool up to 64 MiB). That first call can come late, when device
+  memory is nearly full: a module that fails to load then is not loaded again, and that context forwards
+  every call for the rest of the process, with one line at level 1 (a pool or cuBLASLt handle that
+  cannot be made: its tensor-core calls). A handle used from another context than its own is forwarded (by
+  the code; not tested on a GPU). Two V100s in one process, and a V100 beside another GPU, were not
+  run on real hardware: the host test, with a stand-in driver whose two devices have different compute
+  capabilities, shows the decision taken per context's device at each call, every call of the other
+  device's context forwarded. After a `fork`, a child that calls through the variants gets status 13
+  and then `cudaErrorInitializationError`, as a child that calls cuBLAS 12.9 directly does, and the
+  parent's next call is served with 12.9's bits (`tests/gpu/forward/bf16-default.c`, mode `fork`, run
+  by hand).
 
 ## Several GPUs and NCCL
 

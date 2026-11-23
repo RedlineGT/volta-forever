@@ -51,12 +51,35 @@ scripts of `tests/sass/`).
   what the native sm_70 build of the same source, the host models or the reference vectors of
   an RTX 5090 say. 126 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
-  (error 218 and a NULL handle, through a module, a library and the driver's linker), and
-  lookup tables asked for by name, answered as NVIDIA's driver answers them, except where the
-  layer refuses one (`tables.py`).
+  (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
+  with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
+  (`CUDA_MODULE_LOADING`), and lookup tables asked for by name, answered as NVIDIA's driver
+  answers them, except where the layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
-  functions through the forwarding library and gets the host's result (cuBLAS is exercised by
-  `run.sh`).
+  functions through the forwarding library and gets the host's result, five of them again under
+  `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
+- `forward-bf16.sh`: the opt-in bf16 cuBLAS variants on a V100, with a test build of their
+  runtime: the skinny path's results bit for bit against cuBLAS 12.9 where it serves, and the
+  inputs that tell a fused multiply-add chain, a multiply-and-add chain and the epilogue's orders
+  apart (`bf16-arith.c`); the tensor-core path within 32 units of 2^-24 sum |a b| of fp64,
+  deterministic; every forwarded call with 12.9's bits; what a program's graphs, capture modes,
+  threads and contexts see (`bf16-graphs.c`, `bf16-threads.c`, `bf16-life.c`, `bf16-reserve.c`;
+  a graph captured through the variant behaves step for step as with 12.9 alone and replays 12.9's
+  bits, with tensor-core-sized calls, forwarded, and with skinny ones, `bf16-graphs-skinny`, served
+  by kernel nodes of the runtime's module, which replay after every handle is destroyed);
+  cuBLASLt calls that keep 12.9's behaviour: an explicit algorithm other than 12.9's heuristic one,
+  and a workspace size without a workspace (`bf16-lt.c`); the tensor-core path's fallback in the TN
+  layout of linear layers, bit for bit against a host model (`bf16-fallback.c`); the runtime told
+  the real capability under the layer's settings, under both module loading modes
+  (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
+  the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); with
+  `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
+  skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
+  column, writes outside them, error and time per shape), and `bf16-cost.c` the one behind the
+  documented host times, fallback cost and same-sign error; both run by hand.
+- `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
+  their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
+  the design review), each control making its test fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL
@@ -160,13 +183,15 @@ source-tree layouts): environment variables, path order, map entries, user prior
 what is done when only some of the CUDA 12.9.2 libraries are there (a forwarding library with
 nothing to forward to is not used), argument passing, exit status, symlinks, its long name,
 `doctor`, `fetch` command line, the
-subcommands of the offline tool, help and error cases; and `vf venv` with the Python of the
+subcommands of the offline tool, help and error cases, the bf16 cuBLAS variants that
+`VF_CUBLAS_BF16_TC` and `VF_CUBLAS_BF16_SKINNY` select (both names mapped or none, what is
+refused, what `doctor` says); and `vf venv` with the Python of the
 machine: an environment whose Python runs through the launcher with no prefix (arguments,
 exit status, standard input, a child process), what it refuses, how it is turned off.
 
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
-| `launcher.sh` | 98 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
+| `launcher.sh` | 108 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
 | `install.py` | `install.sh` on local releases: an upgrade that keeps the CUDA 12.9.2 libraries and the `vf venv` environments of the release before, installs stopped half-way, two at once, what killed ones left, plain HTTP refused, redirections from HTTPS (through curl and through wget); under `dash`, or `bash --posix` with `VF_TEST_SHELL=bash` | seconds | dash, flock, python3 3.10 or later with `venv`; openssl for the redirections (skipped without it) |
 | `fetch-redist.py` | `scripts/fetch-redist.py` on local archives: retries after an interruption, concurrent fetches, runtime-only installs, the NCCL wheel, a failure or a signal half-way, a component killed while it is moved into place (the journal, which the next fetch completes), what an interrupted fetch left, a manifest over plain HTTP | seconds | python3, tar |
 
@@ -255,7 +280,7 @@ libraries against a mock library.
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
 | `stack.sh` | stack-word copying correctness | seconds | Cargo (`vf-fwdgen` crate) |
-| `package-refusals.sh` | what `scripts/package.sh` refuses to pack: a built tree with a forwarding library missing, with one older than the sources, with the report of a run for one library only | seconds | a built `dist/` (`scripts/build.sh`, `scripts/build-forwarders.sh`) |
+| `package-refusals.sh` | what `scripts/package.sh` refuses to pack: a built tree with a forwarding library missing, with one older than the sources, with the report of a run for one library only, with some but not all of the three files of the bf16 cuBLAS variants (`forward/bf16tc`); and that it packs the three in `forward/bf16tc` when they are all there | seconds | a built `dist/` (`scripts/build.sh`, `scripts/build-forwarders.sh`) |
 
 ### What the CI runs
 

@@ -67,7 +67,14 @@ not, and when. Two figures that are compared come from one session on one GPU.
 
 **Nothing of NVIDIA's in the repository.** No library, header, documentation or tool. The test
 kernels are this project's sources and what NVIDIA's compilers made of them; the forwarding
-libraries are generated on the user's machine from the toolkits that the user fetched.
+libraries are generated on the user's machine from the toolkits that the user fetched. One piece of
+compiler output goes into the release archive: `crates/vf-fwdgen/bf16tc/kernels.fatbin`, the sm_70
+machine code of the bf16 cuBLAS runtime, made by `scripts/build-bf16-kernels.sh` from
+`crates/vf-fwdgen/bf16tc/kernels.cu`. That source calls no routine of NVIDIA's libraries or headers
+(only the one-instruction intrinsics of the language), writes its own conversions, and rounds only
+through explicitly rounded operations; the script refuses PTX in the result and external functions
+in the intermediate PTX, and `--check` rebuilds it to the same bytes. Change the source, rebuild,
+and commit the source, `kernels.fatbin` and `kernels.manifest` together.
 
 ## Reporting a wrong result
 

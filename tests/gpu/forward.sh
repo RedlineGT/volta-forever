@@ -56,6 +56,19 @@ one npp "-lnppc -lnppisu -lnppidei -lnppial -lnppif -lnppim -lnppitc -lnppicc -l
 one nvjpeg "-lnvjpeg" nvjpeg
 one nvrtc "-lnvrtc -l:libcuda.so.1" nvrtc
 
+# The same programs under eager loading (CUDA_MODULE_LOADING=EAGER): the CUDA 12 runtime inside
+# each 12.9 library then takes every kernel of the library at its first call, and gives up at a
+# lookup that fails. cuBLASLt, cuSPARSE and cuSOLVER (through cuBLAS) have images without code for
+# the V100, some with kernels that the layer refuses; until 2026-11-23 their handles could not be
+# created under eager loading.
+for name in cufft curand cusparse cusolver cublaslt; do
+    log=$out/logs/forward-$name-eager.log
+    CUDA_MODULE_LOADING=EAGER LD_LIBRARY_PATH=$proxy:$fwd:$T12/lib:$T13/lib VF_LOG_LEVEL=2 "$out/bin/fwd_$name" >"$log" 2>&1
+    status=$?
+    if [ "$status" = 0 ] && grep -qx "ok $name" "$log"; then echo "PASS  $name under eager loading"
+    else echo "FAIL  $name under eager loading (exit status $status; $log)"; failed=1; fi
+done
+
 # First calls from 32 threads at once, in 50 processes: the 12.9 libraries are loaded once each.
 if gcc -O2 -Wall -I"$T13/include" -o "$out/bin/fwd_threads" "$src/threads.c" -L"$T13/lib" -Wl,-rpath-link,"$T13/lib" -lcublas -lcufft -lcurand -lpthread; then
     bad=0

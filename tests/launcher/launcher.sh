@@ -9,7 +9,9 @@
 # silencing, what is done when only some of the CUDA 12.9.2 libraries are there,
 # arguments with spaces and empty arguments, the exit status, env applied
 # twice, a symlinked launcher, doctor exit status, fetch command line, help and unknown
-# options. Prints PASS/FAIL per case; exits 1 on a failure.
+# options, the bf16 cuBLAS variants that VF_CUBLAS_BF16_TC and VF_CUBLAS_BF16_SKINNY
+# select (what is mapped, what is refused, what doctor says). Prints PASS/FAIL per case;
+# exits 1 on a failure.
 set -eu
 
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -1258,6 +1260,219 @@ case $_err/$_doc in
         fi ;;
     *) fail "$name" "env said: $_err; doctor said: $_doc" ;;
 esac
+
+# The bf16 cuBLAS variants (forward/bf16tc: libcublas.so.13 and libcublasLt.so.13, and their
+# runtime library libvf_cublas_bf16.so), which VF_CUBLAS_BF16_TC=1 or VF_CUBLAS_BF16_SKINNY=1
+# selects: both CUDA 13 names go to them, never one, in the map and on the library path, where
+# forward/bf16tc comes before forward; the CUDA 12 entries stay; the variables reach the program
+# as they are, and env prints them with the rest. Without a switch at 1 the map and the
+# environment are those of 0.1.3, variants installed or not. The launcher refuses to run
+# (status 2), with a line that names what is missing, when one of the three files is not there,
+# when the CUDA 12.9.2 cuBLAS is not, or when an entry that comes before its own gives a cuBLAS
+# name another file; and a value other than 0 or 1. (The files are empty stand-ins: the
+# launcher looks at their names only.)
+bfi=$tmp/bf16
+mk_archive "$bfi" cuda12
+bvf=$bfi/bin/vf
+bL=$bfi/lib bF=$bfi/forward bB=$bfi/forward/bf16tc bC=$bfi/cuda-12.9.2/lib
+# The map and the library path of 0.1.3, and those with the variants.
+map0="libnvJitLink.so.13=$bL/libnvJitLink.so.13:libcublas.so.13=$bF/libcublas.so.13:libcublas.so.12=$bC/libcublas.so.12:libcublasLt.so.13=$bF/libcublasLt.so.13:libcublasLt.so.12=$bC/libcublasLt.so.12:libcufft.so.12=$bF/libcufft.so.12:libcufft.so.11=$bC/libcufft.so.11"
+path0=$bL:$bF:$bC
+map1="libnvJitLink.so.13=$bL/libnvJitLink.so.13:libcublas.so.13=$bB/libcublas.so.13:libcublas.so.12=$bC/libcublas.so.12:libcublasLt.so.13=$bB/libcublasLt.so.13:libcublasLt.so.12=$bC/libcublasLt.so.12:libcufft.so.12=$bF/libcufft.so.12:libcufft.so.11=$bC/libcufft.so.11"
+path1=$bL:$bB:$bF:$bC
+# bfclean COMMAND...: COMMAND without the lists that the launcher extends and without the
+# switches, whatever the environment of the test holds. envvar TEXT VAR: VAR as the lines TEXT
+# of vf env set it ("unset" when they do not). mk_bf16 DIR FILE...: those files of the variants
+# in DIR. bf16_refused DIR WANTED ASSIGNMENT: the launcher of DIR, given the assignment, refuses
+# to run a command and to print the environment (status 2, nothing printed), with a line that
+# has WANTED; else $_why says what it did.
+bfclean() {
+    env -u LD_LIBRARY_PATH -u LD_AUDIT -u VF_AUDIT_MAP -u VF_CUBLAS_BF16_TC -u VF_CUBLAS_BF16_SKINNY "$@"
+}
+envvar() {
+    (unset "$2"; eval "$1"; eval 'printf "%s" "${'"$2"'-unset}"')
+}
+mk_bf16() {
+    _d=$1; shift
+    mkdir -p "$_d/forward/bf16tc"
+    for _f do : >"$_d/forward/bf16tc/$_f"; done
+}
+bf16_refused() {
+    _st=0
+    _err=$(bfclean "$3" "$1/bin/vf" sh -c 'echo the-command-ran' 2>&1) || _st=$?
+    _st2=0
+    _out=$(bfclean "$3" "$1/bin/vf" env 2>/dev/null) || _st2=$?
+    case "$_st:$_st2:$_err" in
+        *the-command-ran*) _why="the command ran" ;;
+        2:2:*"$2"*) if [ -z "$_out" ]; then _why=; else _why="env printed: $_out"; fi ;;
+        *) _why="status $_st (env $_st2), said: $_err" ;;
+    esac
+    [ -z "$_why" ]
+}
+# (What a command run through the launcher sees: the path, the map, the two switches.)
+seen='printf "%s|%s|%s|%s" "$LD_LIBRARY_PATH" "${VF_AUDIT_MAP-unset}" "${VF_CUBLAS_BF16_TC-unset}" "${VF_CUBLAS_BF16_SKINNY-unset}"'
+
+name="bf16-none"
+e0=$(bfclean "$bvf" env) || true
+mk_bf16 "$bfi" libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so
+e1=$(bfclean "$bvf" env) || true
+e2=$(bfclean VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=0 "$bvf" env) || true
+r1=$(bfclean "$bvf" sh -c "$seen") || true
+r2=$(bfclean VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=0 "$bvf" sh -c "$seen") || true
+if [ "$(envvar "$e0" VF_AUDIT_MAP)" = "$map0" ] && [ "$(envvar "$e0" LD_LIBRARY_PATH)" = "$path0" ] \
+    && [ "$e1" = "$e0" ] && [ "$e2" = "$e0" ] \
+    && [ "$r1" = "$path0|$map0|unset|unset" ] && [ "$r2" = "$path0|$map0|0|0" ]; then
+    pass "$name"
+else
+    fail "$name" "env: $e0; with the variants: $e1; with the switches at 0: $e2; run: $r1; at 0: $r2"
+fi
+
+# (And with the switch: run with --no-audit, where the path alone finds them, and under itself.)
+name="bf16-tc"
+e=$(bfclean VF_CUBLAS_BF16_TC=1 "$bvf" env) || true
+r=$(bfclean VF_CUBLAS_BF16_TC=1 "$bvf" sh -c "$seen") || true
+rn=$(bfclean VF_CUBLAS_BF16_TC=1 "$bvf" --no-audit sh -c "$seen") || true
+rr=$(bfclean VF_CUBLAS_BF16_TC=1 "$bvf" "$bvf" sh -c "$seen") || true
+if [ "$(envvar "$e" VF_AUDIT_MAP)" = "$map1" ] && [ "$(envvar "$e" LD_LIBRARY_PATH)" = "$path1" ] \
+    && [ "$(envvar "$e" VF_CUBLAS_BF16_TC)" = 1 ] && [ "$(envvar "$e" VF_CUBLAS_BF16_SKINNY)" = unset ] \
+    && [ "$r" = "$path1|$map1|1|unset" ] && [ "$rn" = "$path1|unset|1|unset" ] && [ "$rr" = "$r" ]; then
+    pass "$name"
+else
+    fail "$name" "env: $e; run: $r; --no-audit: $rn; under itself: $rr"
+fi
+
+name="bf16-skinny"
+e=$(bfclean VF_CUBLAS_BF16_SKINNY=1 "$bvf" env) || true
+r=$(bfclean VF_CUBLAS_BF16_SKINNY=1 "$bvf" sh -c "$seen") || true
+r0=$(bfclean VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 "$bvf" sh -c "$seen") || true
+r11=$(bfclean VF_CUBLAS_BF16_TC=1 VF_CUBLAS_BF16_SKINNY=1 "$bvf" sh -c "$seen") || true
+if [ "$(envvar "$e" VF_AUDIT_MAP)" = "$map1" ] && [ "$(envvar "$e" LD_LIBRARY_PATH)" = "$path1" ] \
+    && [ "$(envvar "$e" VF_CUBLAS_BF16_SKINNY)" = 1 ] && [ "$(envvar "$e" VF_CUBLAS_BF16_TC)" = unset ] \
+    && [ "$r" = "$path1|$map1|unset|1" ] && [ "$r0" = "$path1|$map1|0|1" ] && [ "$r11" = "$path1|$map1|1|1" ]; then
+    pass "$name"
+else
+    fail "$name" "env: $e; run: $r; with TC=0: $r0; with TC=1: $r11"
+fi
+
+# With cuBLAS alone among the CUDA 12.9.2 libraries (vf fetch without --all), forward is left off
+# the path (3b, above), and forward/bf16tc is on it all the same.
+name="bf16-cublas-only"
+bpo=$tmp/bf16-cublas-only
+mk_archive "$bpo" cublas-only
+mk_bf16 "$bpo" libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so
+r=$(bfclean VF_CUBLAS_BF16_TC=1 "$bpo/bin/vf" sh -c "$seen") || true
+bpB=$bpo/forward/bf16tc bpC=$bpo/cuda-12.9.2/lib
+if [ "$r" = "$bpo/lib:$bpB:$bpC|libcublas.so.13=$bpB/libcublas.so.13:libcublas.so.12=$bpC/libcublas.so.12:libcublasLt.so.13=$bpB/libcublasLt.so.13:libcublasLt.so.12=$bpC/libcublasLt.so.12|1|unset" ]; then
+    pass "$name"
+else
+    fail "$name" "run: $r"
+fi
+
+name="bf16-runtime-missing"
+bnr=$tmp/bf16-no-runtime
+mk_archive "$bnr" cuda12
+mk_bf16 "$bnr" libcublas.so.13 libcublasLt.so.13
+if bf16_refused "$bnr" "missing $bnr/forward/bf16tc/libvf_cublas_bf16.so" VF_CUBLAS_BF16_TC=1 \
+    && bf16_refused "$bnr" "missing $bnr/forward/bf16tc/libvf_cublas_bf16.so" VF_CUBLAS_BF16_SKINNY=1; then
+    pass "$name"
+else
+    fail "$name" "$_why"
+fi
+
+name="bf16-variant-missing"
+_why=
+for lack in libcublasLt.so.13 libcublas.so.13; do
+    case $lack in
+        libcublasLt.so.13) have=libcublas.so.13 ;;
+        *) have=libcublasLt.so.13 ;;
+    esac
+    bnv=$tmp/bf16-without-$lack
+    mk_archive "$bnv" cuda12
+    mk_bf16 "$bnv" "$have" libvf_cublas_bf16.so
+    bf16_refused "$bnv" "missing $bnv/forward/bf16tc/$lack" VF_CUBLAS_BF16_TC=1 || break
+done
+if [ -z "$_why" ]; then pass "$name"; else fail "$name" "without $lack: $_why"; fi
+
+# (Without the switch the same installation runs, as before: the program keeps its own cuBLAS.)
+name="bf16-cublas12-missing"
+bnc=$tmp/bf16-no-cublaslt12
+mk_archive "$bnc" cuda12
+mk_bf16 "$bnc" libcublas.so.13 libcublasLt.so.13 libvf_cublas_bf16.so
+mv "$bnc/cuda-12.9.2/lib/libcublasLt.so.12" "$bnc/cuda-12.9.2/libcublasLt.so.12.aside"
+_st0=0
+bfclean "$bnc/bin/vf" true || _st0=$?
+if bf16_refused "$bnc" "missing $bnc/cuda-12.9.2/lib/libcublasLt.so.12" VF_CUBLAS_BF16_SKINNY=1 && [ "$_st0" = 0 ]; then
+    pass "$name"
+else
+    fail "$name" "${_why:-without the switch, status $_st0}"
+fi
+
+name="bf16-invalid"
+_why=
+for value in yes 2 '' ' 1' 01; do
+    bf16_refused "$bfi" "VF_CUBLAS_BF16_TC is '$value': the accepted values are 0 and 1" "VF_CUBLAS_BF16_TC=$value" || break
+done
+if [ -z "$_why" ]; then
+    value=on
+    bf16_refused "$bfi" "VF_CUBLAS_BF16_SKINNY is 'on': the accepted values are 0 and 1" VF_CUBLAS_BF16_SKINNY=on || true
+fi
+if [ -z "$_why" ]; then pass "$name"; else fail "$name" "value '$value': $_why"; fi
+
+# An entry before the launcher's that gives a cuBLAS name another file: what eval "$(vf env)"
+# without the switch leaves in VF_AUDIT_MAP, an entry of a --map file. (Under itself with the
+# switch, bf16-tc above, the launcher finds its own entries there, and runs.)
+name="bf16-map-before"
+_st=0
+_err=$(eval "$(bfclean "$bvf" env)"; unset LD_AUDIT VF_CUBLAS_BF16_SKINNY; VF_CUBLAS_BF16_TC=1 "$bvf" sh -c 'echo the-command-ran' 2>&1) || _st=$?
+printf 'libcublasLt.so.13=/my/libcublasLt.so.13\n' >"$tmp/cublaslt.map"
+_st2=0
+_err2=$(bfclean VF_CUBLAS_BF16_TC=1 "$bvf" --map "$tmp/cublaslt.map" sh -c 'echo the-command-ran' 2>&1) || _st2=$?
+case "$_st:$_err/$_st2:$_err2" in
+    *the-command-ran*) fail "$name" "the command ran: $_err / $_err2" ;;
+    2:*"libcublas.so.13=$bF/libcublas.so.13"*/2:*"libcublasLt.so.13=/my/libcublasLt.so.13"*) pass "$name" ;;
+    *) fail "$name" "status $_st, said: $_err; with --map, status $_st2, said: $_err2" ;;
+esac
+
+# vf doctor says whether the variants are installed (the three files, or which are missing), and
+# with a switch set, which files libcublas.so.13 and libcublasLt.so.13 will be, or why the
+# launcher refuses (then its status is 1).
+name="bf16-doctor"
+bnd=$tmp/bf16-doctor
+mk_archive "$bnd" cuda12
+bdB=$bnd/forward/bf16tc
+_s0=0; _d0=$(bfclean "$bnd/bin/vf" doctor 2>&1) || _s0=$?
+mk_bf16 "$bnd" libcublas.so.13 libcublasLt.so.13
+_s1=0; _d1=$(bfclean "$bnd/bin/vf" doctor 2>&1) || _s1=$?
+_s2=0; _d2=$(bfclean VF_CUBLAS_BF16_TC=1 "$bnd/bin/vf" doctor 2>&1) || _s2=$?
+mk_bf16 "$bnd" libvf_cublas_bf16.so
+_s3=0; _d3=$(bfclean VF_CUBLAS_BF16_SKINNY=1 "$bnd/bin/vf" doctor 2>&1) || _s3=$?
+_s4=0; _d4=$(bfclean VF_CUBLAS_BF16_TC=0 "$bnd/bin/vf" doctor 2>&1) || _s4=$?
+_why=
+case $_d0 in
+    *"NOTICE no bf16 cuBLAS variants in $bdB:"*) ;;
+    *) _why="without them: $_d0" ;;
+esac
+case $_d1 in
+    *"NOTICE bf16 cuBLAS variants incomplete in $bdB, missing: libvf_cublas_bf16.so"*) ;;
+    *) _why="without the runtime: $_d1" ;;
+esac
+case $_d2 in
+    *"MISSING the bf16 cuBLAS variants that VF_CUBLAS_BF16_TC=1 selects: $bdB/libvf_cublas_bf16.so"*) ;;
+    *) _why="with VF_CUBLAS_BF16_TC=1, without the runtime: $_d2" ;;
+esac
+case $_d3 in
+    *"ok    bf16 cuBLAS variants in $bdB "*"ok    VF_CUBLAS_BF16_SKINNY=1: libcublas.so.13 is $bdB/libcublas.so.13, libcublasLt.so.13 is $bdB/libcublasLt.so.13, with $bdB/libvf_cublas_bf16.so"*"LD_LIBRARY_PATH would be: $bnd/lib:$bdB:$bnd/forward:"*) ;;
+    *) _why="with VF_CUBLAS_BF16_SKINNY=1: $_d3" ;;
+esac
+case $_d4 in
+    *"ok    VF_CUBLAS_BF16_TC=0: libcublas.so.13 is $bnd/forward/libcublas.so.13, libcublasLt.so.13 is $bnd/forward/libcublasLt.so.13"*) ;;
+    *) _why="with VF_CUBLAS_BF16_TC=0: $_d4" ;;
+esac
+if [ -z "$_why" ] && [ "$_s0:$_s1:$_s2:$_s3:$_s4" = "0:0:1:0:0" ]; then
+    pass "$name"
+else
+    fail "$name" "${_why:-status without them, without the runtime, with the switch, with all, at 0: $_s0:$_s1:$_s2:$_s3:$_s4}"
+fi
 
 # --- done -----------------------------------------------------------------------
 
