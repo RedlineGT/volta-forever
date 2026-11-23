@@ -337,6 +337,11 @@ def stage_nccl_runtime(wheel, stage, version):
     stage = Path(stage)
     (stage / "lib").mkdir()
     with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+        missing = [member for member, _ in files if member not in names]
+        if missing:
+            sys.exit(f"{wheel}: the NCCL wheel has no {' and no '.join(missing)}: it is not the "
+                     f"nvidia-nccl-cu12 {version} that this fetch takes")
         for member, dest in files:
             with archive.open(member) as src, (stage / dest).open("xb") as dst:
                 shutil.copyfileobj(src, dst, length=1 << 20)

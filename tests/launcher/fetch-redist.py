@@ -191,8 +191,11 @@ class FetchTest(unittest.TestCase):
                 "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
             }}
             (self.root / "manifest.json").write_text(json.dumps(self.manifest))
-            self.finish(self.launch("--runtime", "--only", "libnccl"), success=complete)
+            output = self.finish(self.launch("--runtime", "--only", "libnccl"), success=complete)
             if not complete:
+                # (A message, not a KeyError and its traceback, as until 2026-11-23.)
+                self.assertIn("the NCCL wheel has no nvidia/nccl/lib/libnccl.so.2", output)
+                self.assertNotIn("Traceback", output)
                 self.assertFalse((self.tree / "lib/libnccl.so.2").exists())
                 self.assertFalse((self.tree / "COMPONENTS.tsv").exists())
         self.assertEqual((self.tree / "lib/libnccl.so.2").read_bytes(), b"NCCL runtime")
