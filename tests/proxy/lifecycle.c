@@ -16,8 +16,9 @@
 //     dropped with its context too.
 //   - lazy_lock: a library restored from the layer's cache, whose kernel's code is not in the
 //     cache, is adapted when the program asks for the kernel; meanwhile a kernel of another
-//     library is given at once (the lock of all lazy libraries was held over the adaptation), and
-//     another thread that asks for the same kernel gets the same, once.
+//     library is given at once (the lock of all lazy libraries was held over the adaptation),
+//     another thread that asks for the same kernel gets the same, once, and one that asks for
+//     another kernel of the library gets it from the same adaptation (the library is adapted once).
 //   - cache_temporaries: a write to the layer's cache that fails (a limit on the size of files)
 //     leaves no temporary file; the first use of the cache removes a temporary file that a write
 //     left an hour before, not one of now.
@@ -410,6 +411,17 @@ static int file_has(const char *path, const char *text) {
     return found;
 }
 
+// The number of lines of the file at `path` that have `text` in them.
+static int lines_with(const char *path, const char *text) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[4096];
+    int found = 0;
+    while (fgets(line, sizeof line, f)) found += strstr(line, text) != NULL;
+    fclose(f);
+    return found;
+}
+
 static int lazy_lock(const char *proxy, const char *dir) {
     char cache[4096], log[4096];
     snprintf(cache, sizeof cache, "%s/cache", dir);
@@ -432,8 +444,8 @@ static int lazy_lock(const char *proxy, const char *dir) {
     if (cuLibraryGetKernel(&kernel, other, "good")) return 2;
 
     struct lookup slow = { .library = first, .name = "k7" }, same = { .library = first, .name = "k7" },
-                  fast = { .library = other, .name = "good" };
-    pthread_t thread, again;
+                  fast = { .library = other, .name = "good" }, next = { .library = first, .name = "k9" };
+    pthread_t thread, again, another;
     if (pthread_create(&thread, NULL, lookup_thread, &slow)) return 2;
     int adapting = 0;
     for (int i = 0; i < 10000 && !adapting && !slow.end; i++) {
@@ -442,8 +454,10 @@ static int lazy_lock(const char *proxy, const char *dir) {
     }
     lookup_thread(&fast);
     if (pthread_create(&again, NULL, lookup_thread, &same)) return 2;
+    if (pthread_create(&another, NULL, lookup_thread, &next)) return 2;
     pthread_join(thread, NULL);
     pthread_join(again, NULL);
+    pthread_join(another, NULL);
     if (!adapting) { fprintf(stderr, "lazy_lock: the library was not adapted on demand\n"); return 2; }
     double took = slow.end - slow.start, waited = fast.end - fast.start;
     char what[128];
@@ -452,6 +466,10 @@ static int lazy_lock(const char *proxy, const char *dir) {
     check("lazy_other_library_during_adaptation", !slow.result && !fast.result && waited < took / 4, what);
     snprintf(what, sizeof what, "error %d, kernel %p (want 0, %p)", same.result, same.kernel, slow.kernel);
     check("lazy_same_kernel_during_adaptation", !same.result && same.kernel == slow.kernel, what);
+    // Another kernel of the same library asked for meanwhile: given, from the same adaptation.
+    int adaptations = lines_with(log, "not cached, adapting original on demand");
+    snprintf(what, sizeof what, "error %d; %d adaptations of the library (want 0; 1)", next.result, adaptations);
+    check("lazy_other_kernel_during_adaptation", !next.result && next.kernel && adaptations == 1, what);
     return 0;
 }
 

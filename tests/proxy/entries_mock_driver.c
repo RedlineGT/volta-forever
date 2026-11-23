@@ -18,9 +18,12 @@ static void *loaded(void) {
     return (void *)handle;
 }
 
-/* The compiler takes this long (milliseconds) to refuse. */
-unsigned refusal_delay;
+/* The compiler takes this long (milliseconds) to refuse, and to compile PTX that holds 77777; the
+   number of loads of PTX that holds 55555. */
+unsigned refusal_delay, slow_compile, loads_of_55555;
 static int compile(const char *text, int *jo, void **jv, unsigned jc) {
+    if (slow_compile && strstr(text, "77777")) usleep(slow_compile * 1000);
+    loads_of_55555 += strstr(text, "55555") != 0;
     const char *hit = strstr(text, "12345");
     if (!hit) return 0;
     if (refusal_delay) usleep(refusal_delay * 1000);
