@@ -10,6 +10,7 @@ import ctypes as c
 import mmap
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,18 @@ def check(proxy, mock):
     assert api.cuLinkDestroy(state) == 0
     assert c.c_uint.in_dll(backend, "destroyed").value == 1
     assert lookup(api, load(api, copy), b"bad") == (218, None)
+    # And in a fat binary of the program's own, as the machine code for this GPU.
+    native = (Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data/elf70-elf75-ptx70-lz4.fatbin")
+    header = bytearray(native.read_bytes()[16:16 + 64])
+    stored = output + bytes(-len(output) % 8)
+    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<Q", header, 0x28, struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000)
+    struct.pack_into("<Q", header, 0x38, 0)
+    assert struct.unpack_from("<HI", header, 0)[0] == 2 and struct.unpack_from("<I", header, 0x1C)[0] == 70
+    body = bytes(header) + stored
+    wrapped = struct.pack("<IHHQ", 0xBA55ED50, 1, 16, len(body)) + body
+    assert lookup(api, load(api, wrapped), b"bad") == (218, None)
+    assert lookup(api, load(api, wrapped), b"good")[0] == 0
 
     # Other bytes are another image, and a link with nothing refused, given the handle of the link
     # that is gone, gives nothing to its image.

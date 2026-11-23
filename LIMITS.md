@@ -94,6 +94,9 @@ could match the declared input and return lists. It distinguishes ordinary 32-bi
 possible. A kernel is refused if one of those paths reaches a trapped function.
 When linking separate device objects, an indirect call specified only by a prototype
 can still be refused if any linked object contains a trapped device function.
+The image that the driver's linker makes (`cuLinkComplete`) is known by its bytes, as it is or
+inside a fat binary, for the life of the process only: saved to a file and loaded in another
+process, its kernels that trap are given to the program, and launched, end its context.
 
 ## Kernels launched from a second translation
 

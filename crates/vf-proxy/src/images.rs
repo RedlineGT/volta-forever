@@ -407,6 +407,35 @@ unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Repl
     Some(replacement)
 }
 
+/// What is known of the image that a link made, when the machine code of `fat` that the driver
+/// takes on this GPU is that image: a program can put it in a fat binary of its own.
+fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
+    if links().outputs.is_empty() {
+        return None;
+    }
+    let policy = &config().policy;
+    let mut found: Option<Found> = None;
+    for entry in fat
+        .entries
+        .iter()
+        .filter(|e| e.kind() == fatbin::KIND_ELF && policy.usable(e))
+    {
+        let Ok(cubin) = entry.payload() else {
+            continue;
+        };
+        let Some(length) = fatbin::cubin_len(&cubin).filter(|&length| length <= cubin.len()) else {
+            continue;
+        };
+        let key = (length, digest(&cubin[..length]));
+        if let Some(known) = links().outputs.get(&key) {
+            let found = found.get_or_insert_with(Found::default);
+            found.refused.extend(known.refused.iter().cloned());
+            found.emulated.extend(known.emulated.iter().cloned());
+        }
+    }
+    found
+}
+
 fn report(who: &str, what: &str, outcome: &Outcome) {
     match outcome {
         Outcome::Native => log::trace(format_args!("{who}: {what} with code for this GPU")),
@@ -634,10 +663,29 @@ fn adapt_fatbin(
     let result = fat.and_then(|fat| {
         // SAFETY: `fat` was read from `at`, and is `fat.len` bytes there.
         let original = unsafe { std::slice::from_raw_parts(at, fat.len) };
-        Ok((original, adapt_container(who, original, &fat)?))
+        let adapted = adapt_container(who, original, &fat)?;
+        let linked = matches!(adapted.outcome, Outcome::Native)
+            .then(|| linked_in(&fat))
+            .flatten();
+        Ok((original, adapted, linked))
     });
     match result {
-        Ok((original, adapted)) => finish(who, "fat binary", adapted, wrapper, false, Some(original)),
+        Ok((original, _, Some(found))) => {
+            if let Some(first) = found.refused.first() {
+                log::info(format_args!(
+                    "{who}: fat binary with a cubin made by the driver's linker, in which {} kernels cannot run on \
+                     this GPU (the first is {}: {}); they are refused if the program asks for them",
+                    found.refused.len(),
+                    first.kernel,
+                    first.reason
+                ));
+            }
+            let mut replacement = Replacement::new(original.to_vec(), wrapper);
+            replacement.refused = found.refused;
+            replacement.emulated = found.emulated;
+            Some(replacement)
+        }
+        Ok((original, adapted, None)) => finish(who, "fat binary", adapted, wrapper, false, Some(original)),
         Err(e) => {
             log::warn(format_args!("{who}: {e}; loaded as is"));
             None
