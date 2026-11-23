@@ -236,6 +236,9 @@ static int bind_libraries(void)
 
 static pthread_once_t g_cuda_once = PTHREAD_ONCE_INIT;
 static int g_cuda_ok;
+#ifdef VF_BF16_TEST
+static CUresult (*test_module_unload)(CUmodule); /* the control "unload-module" only */
+#endif
 
 /* The driver, once a handle exists (cuBLAS has loaded it). By name: under the launcher, the audit
  * library gives the layer's libcuda.so.1, which tells this file the real capability because the
@@ -261,6 +264,9 @@ static void bind_driver(void)
                 BIND(d, cu.MemFreeAsync, "cuMemFreeAsync") && BIND(d, cu.MemsetD32Async, "cuMemsetD32Async") &&
                 BIND(d, cu.GetErrorName, "cuGetErrorName");
     if (!g_cuda_ok) say("a function is missing from libcuda.so.1; every call is forwarded");
+#ifdef VF_BF16_TEST
+    *(void **)&test_module_unload = dlsym(d, "cuModuleUnload");
+#endif
 }
 #undef BIND
 
@@ -665,6 +671,18 @@ static void handle_remove(const void *h)
         for (size_t j = i; j + 1 < n; ++j) put_entry(t, j, t->e[j + 1].key, t->e[j + 1].ctx);
         __atomic_store_n(&t->n, n - 1, __ATOMIC_RELAXED);
         write_end();
+#ifdef VF_BF16_TEST
+        /* Control: the context's module unloaded with its last handle, which the module must outlive (a
+         * graph may hold kernel nodes of it: tests/gpu/forward/bf16-life.c must fail). */
+        Ctx *x = old->ctx;
+        int left = 0;
+        for (size_t j = 0; j + 1 < n; ++j) left += t->e[j].ctx->ctx == x;
+        if (CONTROL("unload-module") && !left && x->ok && test_module_unload) {
+            x->ok = 0;
+            test_module_unload(x->mod);
+            say("test build: the module of the context unloaded with its last handle (control unload-module)");
+        }
+#endif
         free(old);
     }
     pthread_mutex_unlock(&g_h_mu);

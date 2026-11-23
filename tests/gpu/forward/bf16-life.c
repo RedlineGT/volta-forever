@@ -3,7 +3,9 @@
  * runtime's module, replayed after every handle of the variants is destroyed (the module lives as long
  * as its context); cudaDeviceReset with live handles, then a new handle and a call served in the new
  * context, with the bits it had before. Two V100s in one process and a V100 beside another GPU need
- * devices this test is not given (it says so). Prints "ok bf16-life". */
+ * devices this test is not given (it says so). Prints "ok bf16-life". The control unload-module of the
+ * test runtime (the module unloaded with the last handle) must make it fail: on driver 580 the replay
+ * of the skinny call's graph then dies in cuGraphLaunch (SIGSEGV), after the line that announces it. */
 #include "bf16-common.h"
 
 static const int M = 1536, N = 256, K = 1536;
@@ -36,8 +38,8 @@ int main(void)
     hB = bf16_random((size_t)N * K, 1.0);
     cudaStream_t s;
     CU(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
-    cublasHandle_t h;
-    if (cublasCreate(&h)) return 1;
+    cublasHandle_t h, keep; /* keep: a second handle, destroyed with the last one below */
+    if (cublasCreate(&h) || cublasCreate(&keep)) return 1;
     open_runtime();
     cublasSetStream(h, s);
     int served;
@@ -97,7 +99,10 @@ int main(void)
         const Counts c1 = counts(API_GEMMEX);
         CHECK(!rt_counters || delta(&c0, &c1, SERVED_SKINNY) == 1, "the captured skinny-sized call is not served");
         CU(cudaGraphInstantiate(&es, gs, 0));
-        cublasDestroy(hs); /* no handle of the variants left */
+        cublasDestroy(hs);
+        cublasDestroy(keep); /* no handle of the variants left */
+        printf("replaying the captured skinny call after every handle of the variants is destroyed\n");
+        fflush(stdout);
         CU(cudaGraphLaunch(es, s));
         const cudaError_t ss = cudaStreamSynchronize(s);
         CHECK(ss == cudaSuccess, "skinny replay after every handle's destruction: %s", cudaGetErrorName(ss));
