@@ -43,7 +43,7 @@ All eight engines ran **Qwen3.5-35B-A3B** on a Tesla V100-SXM2-32GB with **MTP a
 | Engine (Ubuntu guide) | Tested model / quantization | CUDA 12 prefill | CUDA 12 decode | CUDA 13 + VF prefill | CUDA 13 + VF decode |
 |---|---|---:|---:|---:|---:|
 | [vLLM](docs/guides/vllm.md) | QuantTrio AWQ W4A16 | 1,443.33¹ | 76.09¹ | 1,449.98 | 80.23 |
-| [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | Can't run | Can't run | 2,016.06 | 77.33 |
+| [SGLang](docs/guides/sglang.md) | QuantTrio AWQ W4A16 | Can't run | Can't run | 2,010.01 | 79.55 |
 | [llama.cpp](docs/guides/llamacpp.md) | Unsloth GGUF UD-Q4_K_M | 494.57 | 101.27 | 1,089.57 | 101.11 |
 | [FreeToken](docs/guides/freetoken.md) | Unsloth GGUF UD-Q4_K_M | Can't run | Can't run | 905.68 | 108.75 |
 | [Strata](docs/guides/strata.md) | Unsloth GGUF UD-Q4_K_M | 1,968.80 | 105.19 | 2,000.00 | 109.13 |

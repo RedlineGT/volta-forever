@@ -96,11 +96,11 @@ After one warm-up, each request processed 227 uncached input tokens and generate
 
 | Server on the same V100 and AWQ checkpoint | Median prefill (tokens/s) | Median decode (tokens/s) |
 |---|---:|---:|
-| SGLang with the command above | **2,016.06** | **77.33** |
-| SGLang with FlashInfer’s default CuTe normalization | 1,988.55 | 74.62 |
+| SGLang with the command above | **2,010.01** | **79.55** |
+| SGLang with FlashInfer’s default CuTe normalization | 2,000.45 | 76.69 |
 | Native 1Cat-vLLM | 1,427.41 | 76.13 |
 
-Each prompt fit in a single CUDA graph. The server answered Paris and returned the expected city and notebook details for Kyoto, Lyon and Lima. [Phase timers and answers](./benchmarks/sglang-default-operators.json) · [Native reference](./benchmarks/vllm-expert-tiles.json)
+Each prompt fit in a single CUDA graph. The server answered Paris and returned the expected city and notebook details for Kyoto, Lyon and Lima. The two SGLang rows come from one session. In another session, with empty caches, the command above measured 1,997.08 and 79.41. Two more passes of the client on each server stayed within 0.4% of these prefill rates and 0.04% of these decode rates. [Phase timers and answers](./benchmarks/sglang-vf-0.1.3.json) · [Native reference](./benchmarks/vllm-expert-tiles.json)
 
 ## 6. Additional notes
 
@@ -110,11 +110,11 @@ SGLang selects its AWQ Marlin experts from PyTorch’s capability, which must be
 
 With `VF_CAPABILITY_ALL=1`, PyTorch chooses kernels for 8.0 that VF can only give it as translations of their `sm_75` code. Two kinds compute wrong results while the program goes on: PyTorch’s own attention leaves its output unwritten (with `--attention-backend torch_native` the server answers with HTTP 200 and wrong text from the first token), and cuDNN’s convolutions can return zeros (VF prints `kernel … cannot run on this GPU and is not given to the program`, and cuDNN reports success). Keep `--attention-backend triton`. Do not use `torch_native` or cuDNN convolutions with `VF_CAPABILITY_ALL=1`, and do not set it for other PyTorch programs.
 
-The run used VF main at `1740d8f`, SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. [Tested VF source](https://github.com/nbald/volta-forever/commit/1740d8fc1f6291b5838112b2d17d7d9e10dd787c)
+The runs in the table used VF 0.1.3 before its release (`096f93d`), SGLang 0.5.23, PyTorch 2.14.1+cu130, CUDA 13.5 and the NVIDIA 580.178.04 driver. VF translates the stock wheel’s Ampere kernels for expert routing and reduction, and FlashInfer’s default CuTe normalization kernels, for the V100. No kernel was refused. [Tested VF source](https://github.com/nbald/volta-forever/commit/096f93d80e399ec343b636f453580d1371c4b5eb) With VF main at `1740d8f`, on the same V100, the two SGLang rows measured 2,016.06 / 77.33 and 1,988.55 / 74.62. [Earlier phase timers](./benchmarks/sglang-default-operators.json)
 
 The launch command selects FlashInfer’s CUDA normalization on V100. To reproduce the CuTe result, unset `FLASHINFER_USE_CUDA_NORM` before starting the server. Both runs use the wheel’s default expert router.
 
-The optional JIT router with FlashInfer’s CUDA normalization measured 2,002.22 prefill and 77.20 decode tokens/s in the same virtual environment. [Installation and comparison](./benchmarks/sglang-fresh-venv.json)
+With VF at `d9f8083`, the optional JIT router with FlashInfer’s CUDA normalization measured 2,002.22 prefill and 77.20 decode tokens/s in the same virtual environment. [Installation and comparison](./benchmarks/sglang-fresh-venv.json)
 
 For tensor parallelism, fetch the CUDA 12 build of NCCL and add `--tp 2` to the server command in section 4. (Any use of several GPUs from PyTorch needs that build, `torch.distributed` and `torch.nn.DataParallel` too: [Several GPUs and NCCL](../../LIMITS.md#several-gpus-and-nccl).) SGLang 0.5.23 could not parse the GPU UUIDs in `CUDA_VISIBLE_DEVICES` for its optional custom all-reduce. The two workers used the automatically selected CUDA 12 NCCL 2.32.6 transport over NVLink (P2P IPC). On two V100s, the same AWQ checkpoint answered Paris and all four benchmark prompts, with medians of **2819.81 prefill tokens/s** and **86.37 decode steps/s**. The client uses the longest cumulative GPU duration across the ranks for each whole phase. Its separate median time to first visible text was **95.34 ms**. Four V100s passed the separate NCCL reduction test. The four-GPU SGLang startup stopped before generation. [Per-rank durations, client timings and replies](./benchmarks/sglang-tensor-parallel.json) · [Upstream issue and other multi-GPU results](https://github.com/nbald/volta-forever/issues/2)
 
