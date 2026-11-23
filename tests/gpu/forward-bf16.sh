@@ -102,6 +102,8 @@ if want bf16-graphs-skinny; then
 fi
 # G8: what the runtime is told, and how its kernels load, under the layer's settings: it must be told
 # the real 7.0 (its file holds sm_70 machine code) and load its module, or every call would forward.
+# Both module loading modes are required to pass: under CUDA_MODULE_LOADING=EAGER the layer gives no
+# module for a library it cannot serve whole, so cuBLAS 12.9's cublasCreate gets past its sm_80 images.
 if want bf16-capability; then
     if build bf16-arith; then
         for e in "VF_CAPABILITY=8.0" "VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1" "VF_CAPABILITY=12.0" \
@@ -109,15 +111,6 @@ if want bf16-capability; then
                  "CUDA_MODULE_LOADING=EAGER" "CUDA_MODULE_LOADING=LAZY"; do
             # shellcheck disable=SC2086
             run bf16-arith "$test_dir" $e >/dev/null
-            if [ "$e" = "CUDA_MODULE_LOADING=EAGER" ]; then
-                # Expected to fail, for a reason outside these variants: with eager loading, cuBLAS 12.9's
-                # cublasCreate fails through the layer (the layer refuses one of its sm_80 kernels; the
-                # default forwarders fail the same way, without any switch).
-                if [ "$status" = 0 ] && grep -qx "ok bf16-arith" "$log"; then
-                    echo "PASS  bf16-capability $e (expected to fail: the layer's eager-loading defect is fixed?)"
-                else echo "XFAIL bf16-capability $e: cublasCreate fails under eager loading through the layer ($log)"; fi
-                continue
-            fi
             if [ "$status" = 0 ] && grep -qx "ok bf16-arith" "$log"; then echo "PASS  bf16-capability $e"
             else echo "FAIL  bf16-capability $e ($log)"; failed=1; fi
         done

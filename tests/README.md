@@ -70,8 +70,8 @@ scripts of `tests/sass/`).
   cuBLASLt calls that keep 12.9's behaviour: an explicit algorithm other than 12.9's heuristic one,
   and a workspace size without a workspace (`bf16-lt.c`); the tensor-core path's fallback in the TN
   layout of linear layers, bit for bit against a host model (`bf16-fallback.c`); the runtime told
-  the real capability under the layer's settings (with `CUDA_MODULE_LOADING=EAGER` expected to fail
-  for a reason outside the variants: the layer refuses one of cuBLAS 12.9's sm_80 kernels there);
+  the real capability under the layer's settings, under both module loading modes
+  (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
