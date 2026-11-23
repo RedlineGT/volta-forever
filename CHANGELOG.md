@@ -1,5 +1,27 @@
 # Changes
 
+## Unreleased
+
+### Fixed
+
+- A kernel that requires its block size (PTX `.reqntid`; Triton writes it for every kernel) whose usual translation took more registers than that block allows on a V100 was given anyway, and Triton stopped before launching it (`OutOfResources: threads, Required: 512, Hardware limit: 384`). Such a kernel is now translated within that block's registers, or, when no translation fits, refused for its registers so that the PTX its cubin keeps runs.
+- A kernel whose `redux.sync` takes its member mask from a register set to all ones before labels of the line tables and written again later (Triton's code for sm_80) was refused; the mask is now taken from the `mov` that reaches the instruction.
+- Triton kernels with `ldmatrix` at a variable of shared memory (`[global_smem]`, in some of its reductions and grouped GEMMs) were refused on both routes; the PTX route now runs them (the machine code of it, `LDSM [RZ]`, stays refused and the PTX kept in the cubin runs instead).
+- Strata's CUDA 13 engine on a two-GPU layer split no longer stops on its first request (issue #3): a kernel of a library that the layer compiles lazily, and that only reads lookup tables of its module (initialized data of internal linkage whose address no function stores, passes, compares or gives back), is compiled alone with a copy of them instead of with the whole module, which the driver compiled inside the engine's first graph capture. While such a copy is loaded, the program is not given that table by name (`cuLibraryGetGlobal`, `cuModuleGetGlobal` on a module of the library, and with them `cudaMemcpyToSymbol`, `cudaMemcpyFromSymbol` and `cudaGetSymbolAddress`): error 801 (`CUDA_ERROR_NOT_SUPPORTED`), where NVIDIA's driver gives it, and a line says why. A table asked for before such a kernel is given.
+
+### Changed
+
+- PTX: an asynchronous copy whose amount register is chosen between nothing and the whole size (Triton's pipelined loads) is one predicated load instead of a byte loop behind a branch: Triton's pipelined fp16 GEMMs at capability 8.0 run 1.3-1.6x faster on a V100, with the same results.
+- PTX: two FP16 tensor-core products with f32 accumulators that share their A, both operands loaded by plain `ldmatrix`, are computed together on Volta's tensor cores (half the instructions). The results are the same bits as before: Triton's 1-stage fp16 GEMMs at capability 8.0 run 1.3-1.5x faster on a V100, and up to 10x where the old code spilled. `VF_PAIRS=0` now turns this off as well as the machine-code pairs.
+- The documents say what the Triton campaign shows: `README.md` and `LIMITS.md` describe Triton's machine code as validated on a corpus (3,516 configurations of 20 kernels and 241 cases of vLLM's and SGLang's kernels, on a V100 and by the independent validator), not on every kernel a program may make.
+
+### Tests
+
+- `tests/gpu/triton.sh`, a differential test of Triton's kernels (translated machine code and retargeted PTX against Triton's interpreter, and against each other), and the corpus behind it (3,516 generated cases, 241 cases of vLLM's and SGLang's kernels).
+- `tests/gpu/run.sh`: cases for the pairs of the PTX lowering (`pairs-adversarial`, `pairs-divergent-branch`, `pairs-divergent-loop`, `trans-order`), the copy of a chosen amount (`chosen-copy`), the required block size (`cubin-required-block-within`, `cubin-required-block-over`), `redux.sync` with a mask that reaches it (`ptx-reduction-mask-reaching`), `ldmatrix` at a variable (`ptx-ldmatrix-variable`, `cubin-ldmatrix-variable`), and lookup tables asked for by name, through NVIDIA's driver and through the layer (`tables-*`, `tests/gpu/tables.py`); `tests/proxy/readonly_tables.py` checks the tables that a kernel compiled alone copies.
+- Validator: late reads of registers the translation borrows are checked; matrix loads at level 3 are not objected to for the whole function any more.
+- Validator: `data_overwritten` no longer objects to a write under the complement of a store's guard, on the same predicate, which nothing between them writes (`ptxas` writes so: 1,270 objections in 14 cubins of the held-out corpus), and follows the register on for the lanes where the store ran; rule D takes a register put away at the instruction (room) for the lane of a product at level 3 (1,443 objections in 12 cubins); a register put away under a guard is objected to (it passed). Five controls more (`complement_rewritten`, `complement_same`, `room_guarded_away`, `room_lane_unsaid`, `room_lane_first`), and `tests/sass/controls.sh` takes two more cubins of the held-out corpus. `tests/sass/heldout-validate.sh` ends with status 1 when a translation has problems. With these rules: the held-out corpus at 0 problems in 3,105 of its 3,108 cubins (the other three are read by neither translator), PyTorch's 475 and Triton's 4,308 and 334 cubins at 0.
+
 ## 0.1.3 (2026-11-23)
 
 ### Fixed

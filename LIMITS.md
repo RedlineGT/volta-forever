@@ -8,12 +8,17 @@ where it is not from the build of this release. `docs/` says how each figure was
 
 ## The limits of 0.1.3 to know first
 
-- **Triton's machine code is validated only on the cubins at hand.** Kernels that Triton makes
-  while a program runs, and that run from their sm_75 machine code (the default for a program
-  told 7.5), were checked by the independent validator on the 346 sm_75 Triton cubins of this
-  site's runs: 346 at 0 problems (2026-11-23), once a translation that stored wrong values in
-  Triton's fp32 `tl.dot` kernels was fixed. The kernels that Triton makes for other programs,
-  shapes and settings were not looked at (`docs/validation.md`, sections 4 and 8).
+- **Triton's machine code is validated on a corpus, not kernel by kernel.** Kernels that Triton
+  makes while a program runs, and that run from their sm_75 machine code (the default for a
+  program told 7.5), were run on a V100 in 3,516 configurations of 20 kernels and 241 cases of
+  vLLM's and SGLang's kernels (`tests/gpu/triton.sh` runs 180 of them): every one that Triton
+  compiles gives what Triton's interpreter computes where it computes it (bit for bit, or within
+  the error the case states) and what the PTX of the same kernel gives, and the independent
+  validator finds no problem in their 4,308 cubins nor in the 334 of this site's runs
+  (2026-11-23, with the changes made after 0.1.3: `CHANGELOG.md`, "Unreleased"). A translation
+  that stored wrong values in Triton's fp32 `tl.dot` kernels was fixed in 0.1.3. The kernels that
+  Triton makes for other programs, shapes and settings were not looked at (`docs/validation.md`,
+  sections 4, 6 and 8).
 - **The translation of sm_80 machine code is not independently validated**: the validator reads
   sm_75 code only ("Cubins for sm_80 and later", below; `docs/validation.md`, section 8).
 - **A cubin that the layer's nvJitLink links, loaded without the layer, keeps its kernels that

@@ -16,13 +16,16 @@ Run unmodified CUDA 13 applications on a Tesla V100 with a simple two-letter com
 > itself is what is missing, ask the agent to fix it here and to send a pull request: that is
 > how the project grows. [Reporting a wrong result](CONTRIBUTING.md#reporting-a-wrong-result)
 
-> **Triton's machine code is less validated.** Kernels that Triton generates at run time and that
-> run from their machine code (the default for a program told 7.5) are less widely validated than
-> PyTorch's own: 0.1.3 fixes a wrong-result defect found there ([CHANGELOG](CHANGELOG.md)), and the
-> validator now checks for it, but only PyTorch's code is validated in full with this release (the held-out corpus was last
-> validated on 2026-11-22, before this fix).
-> Compare results with a reference and [report differences](CONTRIBUTING.md#reporting-a-wrong-result).
-> A wider Triton validation campaign is planned for the next release.
+> **Triton's machine code is validated on a corpus, not kernel by kernel.** Triton generates its
+> kernels while a program runs, for that program's shapes and settings, and for a program told 7.5
+> (the default) they run from their machine code. 0.1.3 fixes a wrong-result defect found there
+> ([CHANGELOG](CHANGELOG.md)). Since then, of 3,516 configurations of 20 Triton kernels and 241
+> cases of vLLM's and SGLang's Triton kernels, every one that Triton compiles gave on a V100 what
+> Triton's interpreter computes, where it computes it, and what its own PTX gives, and the
+> independent validator found no problem in the 4,308 cubins of the first
+> ([validation](docs/validation.md)). A kernel that a program makes with other shapes or settings
+> was checked by neither: compare results with a reference and
+> [report differences](CONTRIBUTING.md#reporting-a-wrong-result).
 
 ## Quick start
 
