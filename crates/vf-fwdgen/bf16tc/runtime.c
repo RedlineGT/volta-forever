@@ -383,13 +383,16 @@ enum { SK_8_16, SK_8_32, SK_16_8, SK_16_16, SK_32_4, SK_32_8, SK_N };
 static const int sk_ncp[SK_N] = {8, 8, 16, 16, 32, 32}, sk_rb[SK_N] = {16, 32, 8, 16, 4, 8};
 static const char *const sk_name[SK_N] = {"8_16", "8_32", "16_8", "16_16", "32_4", "32_8"};
 
-/* One per CUDA context in which a handle was created, made then, never freed (a context's ID is
- * never reused in a process). Its module is never unloaded: graphs may outlive the handles. */
+/* One per CUDA context in which a handle was created, never freed (a context's ID is never reused in
+ * a process). Nothing of it is made with the handle: what a path needs is made at the first call that
+ * path would serve in the context (ready()), and the module is then never unloaded, since graphs may
+ * outlive the handles. */
 typedef struct Ctx {
     struct Ctx *next;
     unsigned long long id;
     CUcontext ctx;
-    int ok; /* the kernels, the pool and the internal handle are there, on a V100 */
+    atomic_int kernels; /* the module and its functions, on a V100: 0 not tried yet, 1 there, -1 not */
+    atomic_int tc;      /* the tensor-core path's memory pool and cuBLASLt handle: 0, 1 or -1 likewise */
     int ordinal, sms;
     CUmodule mod;
     CUfunction scale, epilogue, fb_wide, fb_narrow, fb_tn, skinny[2][SK_N]; /* skinny[fast][shape] */
@@ -397,9 +400,13 @@ typedef struct Ctx {
     cublasLtHandle_t lt; /* the internal fp16 GEMM's, never the caller's */
 } Ctx;
 
-static Ctx g_no_ctx;         /* a handle whose context has no state: every call forwarded */
+static Ctx g_no_ctx = {.kernels = -1, .tc = -1}; /* a handle whose context has no state: every call forwarded */
 static Ctx *g_ctxs;          /* list, appended under g_ctx_mu */
 static pthread_mutex_t g_ctx_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_setup_mu = PTHREAD_MUTEX_INITIALIZER; /* what ready() makes, once per context */
+#ifdef VF_BF16_TEST
+static atomic_int test_modules, test_pools, test_lt_handles; /* made by the runtime (vf_bf16_test_state) */
+#endif
 
 static int load_function(Ctx *x, CUfunction *f, const char *name, int threads, int dynamic_smem, int max_smem)
 {
@@ -422,8 +429,8 @@ static int load_function(Ctx *x, CUfunction *f, const char *name, int threads, i
     return 1;
 }
 
-/* Made with the context current, when a handle is created in it. */
-static void setup_context(Ctx *x)
+/* The module and its functions, with the context current (the call's); kernels set to 1 or -1. */
+static void setup_kernels(Ctx *x)
 {
     CUdevice d;
     int major = 0, minor = 0, max_smem = 0;
@@ -432,11 +439,11 @@ static void setup_context(Ctx *x)
         cu.DeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, d) != CUDA_SUCCESS ||
         cu.DeviceGetAttribute(&x->sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, d) != CUDA_SUCCESS ||
         cu.DeviceGetAttribute(&max_smem, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, d) != CUDA_SUCCESS)
-        return;
+        goto fail;
     x->ordinal = (int)d;
     if (major != 7 || minor != 0) {
         SAY(2, "device %d has compute capability %d.%d: its calls are forwarded", x->ordinal, major, minor);
-        return;
+        goto fail;
     }
     const void *image = vf_bf16_fatbin;
 #ifdef VF_BF16_TEST
@@ -461,20 +468,36 @@ static void setup_context(Ctx *x)
     if (r != CUDA_SUCCESS) {
         SAY(1, "device %d: the kernels did not load (%s); every call in this context is forwarded", x->ordinal,
             cu_error(r));
-        return;
+        goto fail;
     }
+#ifdef VF_BF16_TEST
+    atomic_fetch_add(&test_modules, 1);
+#endif
     if (!load_function(x, &x->scale, "vf_bf16_scale", 256, 0, max_smem) ||
         !load_function(x, &x->epilogue, "vf_bf16_epilogue", VF_EPI_ROWS, 0, max_smem) ||
         !load_function(x, &x->fb_wide, "vf_bf16_fallback_wide", 256, 0, max_smem) ||
         !load_function(x, &x->fb_narrow, "vf_bf16_fallback_narrow", 256, 0, max_smem) ||
         !load_function(x, &x->fb_tn, "vf_bf16_fallback_tn", 256, VF_BF16_FB_TN_SMEM, max_smem))
-        return;
+        goto fail;
     for (int i = 0; i < SK_N; ++i)
         for (int fast = 0; fast < 2; ++fast) {
             char name[48];
             snprintf(name, sizeof name, fast ? "vf_bf16_skinny_%s" : "vf_bf16_skinny_g_%s", sk_name[i]);
-            if (!load_function(x, &x->skinny[fast][i], name, sk_ncp[i] * sk_rb[i], 0, max_smem)) return;
+            if (!load_function(x, &x->skinny[fast][i], name, sk_ncp[i] * sk_rb[i], 0, max_smem)) goto fail;
         }
+    atomic_store_explicit(&x->kernels, 1, memory_order_release);
+    static atomic_int said;
+    if (!atomic_exchange(&said, 1))
+        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (outside graph captures)",
+            cfg.skinny ? "on" : "off", cfg.tc ? "on" : "off");
+    return;
+fail:
+    atomic_store_explicit(&x->kernels, -1, memory_order_release);
+}
+
+/* The tensor-core path's memory pool and cuBLASLt handle (the kernels there); tc set to 1 or -1. */
+static void setup_tc(Ctx *x)
+{
     CUmemPoolProps props;
     memset(&props, 0, sizeof props);
     props.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -482,6 +505,7 @@ static void setup_context(Ctx *x)
     props.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     props.location.id = x->ordinal;
     cuuint64_t keep = VF_POOL_KEEP;
+    CUresult r;
 #ifdef VF_BF16_TEST
     /* Control: one pool per device, kept across contexts (what the review found stale after a reset). */
     static CUmemoryPool device_pool[64];
@@ -494,21 +518,52 @@ static void setup_context(Ctx *x)
 #ifdef VF_BF16_TEST
     if (r == CUDA_SUCCESS && x->ordinal < 64 && !device_pool[x->ordinal]) device_pool[x->ordinal] = x->pool;
 #endif
+#ifdef VF_BF16_TEST
+    if (r == CUDA_SUCCESS) atomic_fetch_add(&test_pools, 1);
+#endif
     if (r == CUDA_SUCCESS) r = cu.MemPoolSetAttribute(x->pool, CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &keep);
     if (r != CUDA_SUCCESS) {
-        SAY(1, "device %d: no memory pool (%s); every call in this context is forwarded", x->ordinal, cu_error(r));
+        SAY(1, "device %d: no memory pool (%s); tensor-core calls in this context are forwarded", x->ordinal,
+            cu_error(r));
+        atomic_store_explicit(&x->tc, -1, memory_order_release);
         return;
     }
-    const cublasStatus_t s = cb.LtCreate(&x->lt);
-    if (s != CUBLAS_STATUS_SUCCESS) {
-        SAY(1, "device %d: cublasLtCreate returned %d; every call in this context is forwarded", x->ordinal, (int)s);
+    const cublasStatus_t st = cb.LtCreate(&x->lt);
+#ifdef VF_BF16_TEST
+    if (st == CUBLAS_STATUS_SUCCESS) atomic_fetch_add(&test_lt_handles, 1);
+#endif
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        SAY(1, "device %d: cublasLtCreate returned %d; tensor-core calls in this context are forwarded", x->ordinal,
+            (int)st);
+        atomic_store_explicit(&x->tc, -1, memory_order_release);
         return;
     }
-    x->ok = 1;
-    static atomic_int said;
-    if (!atomic_exchange(&said, 1))
-        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (outside graph captures)",
-            cfg.skinny ? "on" : "off", cfg.tc ? "on" : "off");
+    atomic_store_explicit(&x->tc, 1, memory_order_release);
+}
+
+/* What a path needs in the call's context, made at the first call that path would serve there (the
+ * context is current: context_check said so): the module for both paths, and for the tensor-core path
+ * its memory pool and cuBLASLt handle. That call may come inside a graph capture, this thread's or
+ * another thread's in global mode, where loading a module or creating a pool or a handle would be an
+ * unsafe call: all of it is done in relaxed capture mode for this thread, and the thread's mode given
+ * back. 1 when what the path needs is there. */
+static int ready(Ctx *x, int tc)
+{
+    const int k = atomic_load_explicit(&x->kernels, memory_order_acquire);
+    const int t = tc ? atomic_load_explicit(&x->tc, memory_order_acquire) : 1;
+    if (k > 0 && t > 0) return 1;
+    if (k < 0 || t < 0) return 0;
+    CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+    const int relaxed = !CONTROL("setup-not-relaxed") && cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
+    pthread_mutex_lock(&g_setup_mu);
+    if (atomic_load_explicit(&x->kernels, memory_order_acquire) == 0) setup_kernels(x);
+    if (tc && atomic_load_explicit(&x->kernels, memory_order_acquire) > 0 &&
+        atomic_load_explicit(&x->tc, memory_order_acquire) == 0)
+        setup_tc(x);
+    pthread_mutex_unlock(&g_setup_mu);
+    if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode); /* the thread's mode given back */
+    return atomic_load_explicit(&x->kernels, memory_order_acquire) > 0 &&
+           (!tc || atomic_load_explicit(&x->tc, memory_order_acquire) > 0);
 }
 
 /* The state of the current context, made if it is new. */
@@ -525,11 +580,11 @@ static Ctx *current_context(void)
     if (!x && (x = calloc(1, sizeof *x))) {
         x->id = id;
         x->ctx = c;
-        setup_context(x);
         x->next = g_ctxs;
         g_ctxs = x;
     }
     pthread_mutex_unlock(&g_ctx_mu);
+    if (x && CONTROL("eager-setup")) ready(x, 1); /* control: everything made with the handle, as before */
     return x ? x : &g_no_ctx;
 }
 
@@ -677,8 +732,8 @@ static void handle_remove(const void *h)
         Ctx *x = old->ctx;
         int left = 0;
         for (size_t j = 0; j + 1 < n; ++j) left += t->e[j].ctx->ctx == x;
-        if (CONTROL("unload-module") && !left && x->ok && test_module_unload) {
-            x->ok = 0;
+        if (CONTROL("unload-module") && !left && atomic_load(&x->kernels) > 0 && test_module_unload) {
+            atomic_store(&x->kernels, -1);
             test_module_unload(x->mod);
             say("test build: the module of the context unloaded with its last handle (control unload-module)");
         }
@@ -816,6 +871,10 @@ static CUresult launch(Ctx *x, CUfunction f, unsigned gx, unsigned gy, unsigned 
 
 static cublasStatus_t run_skinny(const Call *c, int *reason)
 {
+    if (!ready(c->x, 0)) { /* the first call the path would serve in this context loads the module */
+        *reason = R_CONTEXT;
+        return FWD;
+    }
     VfSkArgs a;
     memset(&a, 0, sizeof a);
     const int a_contig = c->opA == 1, b_contig = c->opB == 0;
@@ -1046,6 +1105,11 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         *reason = R_CAPTURED;
         return FWD;
     }
+    /* The first call the path would serve in this context makes its module, pool and cuBLASLt handle. */
+    if (!ready(x, 1)) {
+        *reason = R_CONTEXT;
+        return FWD;
+    }
     CUdeviceptr base = 0;
     /* Control: the workspace on the legacy stream, which a capture cannot hold (G5 must fail). */
     const CUstream alloc_stream = CONTROL("sync-alloc") ? CU_STREAM_LEGACY : c->stream;
@@ -1222,7 +1286,7 @@ static int context_check(const void *handle, CUstream stream, int api, Ctx **out
     if (!h) return R_HANDLE;
     if (api == API_LT && !h->lt && CONTROL("split-states")) return R_HANDLE; /* as two runtimes would */
     Ctx *x = h->ctx;
-    if (!x->ok) return R_CONTEXT;
+    if (atomic_load_explicit(&x->kernels, memory_order_acquire) < 0) return R_CONTEXT;
     CUcontext cur = NULL, sctx = NULL;
     unsigned long long id = 0;
     if (cu.CtxGetCurrent(&cur) != CUDA_SUCCESS || cur != x->ctx || cu.CtxGetId(cur, &id) != CUDA_SUCCESS ||
@@ -1277,7 +1341,7 @@ static cublasStatus_t legacy(int api, cublasHandle_t handle, cublasOperation_t t
     cudaStream_t stream = NULL;
     Ctx *x = hs->ctx;
     reason = R_CONTEXT;
-    if (!x->ok || cb.GetStream(handle, &stream) != CUBLAS_STATUS_SUCCESS) goto forward;
+    if (cb.GetStream(handle, &stream) != CUBLAS_STATUS_SUCCESS) goto forward;
     reason = context_check(handle, (CUstream)stream, api, &x);
     if (reason) goto forward;
     reason = R_MATH;
@@ -1733,6 +1797,32 @@ forward:
 }
 
 #ifdef VF_BF16_TEST
+/* Test builds: what the runtime has made. out[0] and out[1]: the current context's kernels and its
+ * tensor-core pool and handle (0 not tried yet, 1 there, -1 not; 0 too for a context it has no state
+ * of); out[2], out[3], out[4]: the modules, memory pools and cuBLASLt handles it has made in the
+ * process. Returns the number of values written. */
+EXPORT int vf_bf16_test_state(int *out, int n)
+{
+    if (n < 5) return 0;
+    out[0] = out[1] = 0;
+    CUcontext c = NULL;
+    unsigned long long id = 0;
+    pthread_once(&g_cuda_once, bind_driver);
+    if (g_cuda_ok && cu.CtxGetCurrent(&c) == CUDA_SUCCESS && c && cu.CtxGetId(c, &id) == CUDA_SUCCESS) {
+        pthread_mutex_lock(&g_ctx_mu);
+        for (Ctx *x = g_ctxs; x; x = x->next)
+            if (x->id == id) {
+                out[0] = atomic_load(&x->kernels);
+                out[1] = atomic_load(&x->tc);
+            }
+        pthread_mutex_unlock(&g_ctx_mu);
+    }
+    out[2] = atomic_load(&test_modules);
+    out[3] = atomic_load(&test_pools);
+    out[4] = atomic_load(&test_lt_handles);
+    return 5;
+}
+
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded
  * by reason). Returns the number of values written. */
 EXPORT int vf_bf16_test_counters(int api, unsigned long long *out, int n)

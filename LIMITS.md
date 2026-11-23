@@ -359,9 +359,10 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 - **The skinny path's rule** was measured with CUDA 12.9.2's cuBLAS (build 12.9.2.10) on one V100 and
   one driver. The runtime checks that cuBLAS reports 12.9.2 (the build number cannot be read at run
   time); with another cuBLAS the skinny path serves nothing.
-- **Contexts and processes.** Each CUDA context gets its own memory pool, cuBLASLt handle and module,
-  which are never destroyed: a program that makes and destroys many contexts keeps one of each per
-  context (the pool up to 64 MiB). A handle used from another context than its own is forwarded (by
+- **Contexts and processes.** A CUDA context gets the runtime's module at the first call either path
+  serves in it, and a memory pool and a cuBLASLt handle at the first call the tensor-core path serves
+  there; none is destroyed: a program that makes and destroys many contexts keeps one of each per
+  context where they were made (the pool up to 64 MiB). A handle used from another context than its own is forwarded (by
   the code; not tested on a GPU). Two V100s in one process, and a V100 beside another GPU, were not
   run on real hardware: the host test, with a stand-in driver whose two devices have different compute
   capabilities, shows the decision taken per context's device at each call, every call of the other

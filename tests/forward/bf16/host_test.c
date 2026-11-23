@@ -5,6 +5,8 @@
  *   host_test all          H1 (forwarding and call sequences), H2, H3, H4, H5, H6, H7
  *   host_test skinny       the skinny path alone (VF_CUBLAS_BF16_SKINNY=1): its bounds
  *   host_test off          no switch: every call forwarded, nothing of the runtime loaded
+ *   host_test lazy         nothing made with a handle; the module at the first call a path serves, the
+ *                          tensor-core path's pool and cuBLASLt handle at its first call, in relaxed mode
  *   host_test inject STEP  a failure injected at STEP (VF_BF16_INJECT): forwarded, or status 13
  *   host_test noruntime    the runtime missing: forwarded, said once, no abort (H9)
  * Prints "ok <mode>" when every check passes. */
@@ -704,6 +706,53 @@ int main(int argc, char **argv)
         v.SetStream(H, S1);
         expect_skinny("skinny alone, TN after cublasSetStream", &g, "vf_bf16_skinny_8_16");
         lt_reads();
+    } else if (!strcmp(mode, "lazy")) { /* VF_CUBLAS_BF16_TC=1: what the runtime makes, and when */
+        take(); /* every event since the process started: cublasCreate and cublasSetStream */
+        CHECK(count("module load") == 0 && count("pool create") == 0 && count("ltcreate") == 0,
+              "lazy: the runtime made something with the handle:\n%s", ev);
+        /* a captured tensor-core call first: forwarded, and nothing made */
+        CUstream cs = (CUstream)0x6101;
+        stub_set_stream(cs, 0, 77, (CUgraph)0x6001);
+        v.SetStream(H, cs);
+        G g = gemm(1, 0, 1536, 512, 1536);
+        take();
+        call(&g);
+        take();
+        CHECK(count("gemmex ") == 1 && count("module load") == 0 && count("pool create") == 0 && count("ltcreate") == 0,
+              "lazy: a captured tensor-core call made something:\n%s", ev);
+        /* the first skinny call, captured (the stand-in's thread is in global mode): the module alone, loaded in
+         * relaxed capture mode, the thread's mode given back before the launch */
+        G k = gemm(0, 1, 1536, 8, 1920);
+        take();
+        call(&k);
+        take();
+        const char *pr = strstr(ev, "capturemode 2\n"), *pm = strstr(ev, "module load"), *pb = pm ? strstr(pm, "capturemode 0") : NULL,
+                   *pl = strstr(ev, "launch vf_bf16_skinny");
+        CHECK(count("module load") == 1 && count("pool create") == 0 && count("ltcreate") == 0 && pr && pm && pb && pl &&
+                  pr < pm && pm < pb && pb < pl,
+              "lazy: the first skinny call did not load the module alone, in relaxed capture mode, before its launch:\n%s",
+              ev);
+        /* the first eager tensor-core call: the pool and the cuBLASLt handle, in relaxed capture mode, before the
+         * workspace's allocation */
+        v.SetStream(H, S1);
+        take();
+        call(&g);
+        take();
+        const char *ppool = strstr(ev, "pool create"), *plt = strstr(ev, "ltcreate"), *palloc = strstr(ev, "alloc ");
+        const char *pr2 = ppool ? NULL : strstr(ev, "capturemode 2\n");
+        for (const char *q = ev; ppool && (q = strstr(q, "capturemode 2\n")) && q < ppool; ++q) pr2 = q;
+        const char *pb2 = plt ? strstr(plt, "capturemode 0") : NULL;
+        CHECK(count("pool create") == 1 && count("ltcreate") == 1 && count("module load") == 0 && pr2 && pr2 < ppool &&
+                  ppool < plt && pb2 && palloc && pb2 < palloc && count("gemmex ") == 0,
+              "lazy: the first tensor-core call did not make the pool and the cuBLASLt handle, in relaxed capture mode, "
+              "before its workspace:\n%s", ev);
+        /* a second call: nothing more */
+        take();
+        call(&g);
+        call(&k);
+        take();
+        CHECK(count("module load") == 0 && count("pool create") == 0 && count("ltcreate") == 0,
+              "lazy: later calls made something again:\n%s", ev);
     } else if (!strcmp(mode, "otherbuild")) { /* STUB_CUBLAS_VERSION set: not the cuBLAS of the rule */
         G g = gemm(0, 1, 1536, 8, 1920);
         expect_forwarded("skinny alone, another cuBLAS build", &g, R_BUILD);

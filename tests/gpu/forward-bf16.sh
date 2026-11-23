@@ -74,6 +74,16 @@ for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve b
         build $t && { run $t "$test_dir"; verdict $t; }
     fi
 done
+# Lazy setup: one process per case, the first served call of the process's context in each.
+if want bf16-lazy; then
+    if build bf16-lazy; then
+        for m in global threadlocal other-thread tc; do
+            run bf16-lazy "$test_dir" VF_BF16_LAZY=$m
+            if [ "$status" = 0 ] && grep -qx "ok bf16-lazy" "$log"; then echo "PASS  bf16-lazy $m"
+            else echo "FAIL  bf16-lazy $m (exit status $status; $log)"; failed=1; fi
+        done
+    fi
+fi
 # G3 with the skinny path: its captured calls are kernel nodes of the runtime's module.
 if want bf16-graphs-skinny; then
     build bf16-graphs && { run bf16-graphs "$test_dir" VF_BF16_GRAPHS_N=8; verdict bf16-graphs; }

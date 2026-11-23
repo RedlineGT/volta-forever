@@ -84,6 +84,8 @@ run otherbuild "$out/test" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901 --
 pass otherbuild "the skinny path with another cuBLAS than the 12.9.2 its rule was measured on: everything forwarded"
 run off "$out/test" -- off
 pass off "H1: no switch, everything forwarded and the runtime not loaded"
+run lazy "$out/test" VF_CUBLAS_BF16_TC=1 -- lazy
+pass lazy "lazy setup: nothing made with a handle; the module at the first served call, the tensor-core path's pool and cuBLASLt handle at its first call, in relaxed capture mode"
 for step in module alloc scale gemm16 epilogue fallback; do
     run inject-$step "$out/test" VF_CUBLAS_BF16_TC=1 -- inject $step
     pass inject-$step "H1: a failure injected at $step"
@@ -107,6 +109,10 @@ for c in skinny-k skinny-speed seq-any lt-scan-first; do
 done
 run control-any-build "$out/test" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901 VF_BF16_CONTROL=any-build -- otherbuild
 fails control-any-build "control any-build"
+for c in eager-setup setup-not-relaxed; do
+    run control-$c "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_CONTROL=$c -- lazy
+    fails control-$c "control $c"
+done
 run control-abort "$out/abort" VF_CUBLAS_BF16_TC=1 -- noruntime
 fails control-abort "control: abort when the runtime is missing"
 

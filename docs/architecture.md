@@ -570,11 +570,14 @@ when one of the three files is missing; without the launcher the variables do no
   `cublasHandle_t` may be used as a `cublasLtHandle_t`), read without a lock under a sequence
   counter; each gives the state of the context it was made in (`cuCtxGetId`) and, for a legacy
   handle, whether its workspace is cuBLAS's default or at least 4 MiB.
-- **Per context**, made when the first handle is made in it, never freed while the process lives: the
+- **Per context**, nothing is made when a handle is created. The first call that a path would serve in
+  a context makes what that path needs there, never freed while the process lives: for both paths the
   module of the checked-in fat binary (`crates/vf-fwdgen/bf16tc/kernels.fatbin`, sm_70 machine code)
-  with every function loaded (`cuFuncLoad`) and its launch configuration checked, a memory pool, and a
-  cuBLASLt handle of the runtime's own for the internal fp16 GEMM. A context that is not a V100's, or
-  whose kernels do not load, forwards every call. The runtime's file holds sm_70 machine code, so the
+  with every function loaded (`cuFuncLoad`) and its launch configuration checked; for the tensor-core
+  path, at its own first call, a memory pool and a cuBLASLt handle of the runtime's own for the internal
+  fp16 GEMM. That call may come inside a graph capture, so all of this is made in relaxed capture mode
+  for the calling thread, and its mode is given back. A context that is not a V100's, or whose kernels
+  do not load, forwards every call from then on. The runtime's file holds sm_70 machine code, so the
   proxy tells it the real capability whatever `VF_CAPABILITY` says (section 4).
 - **A call.** Every decision that can forward it is taken before anything is enqueued: the types, an
   explicit algorithm (forwarded), the sizes, the handle's context against the current one and the
