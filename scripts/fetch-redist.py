@@ -16,8 +16,9 @@ TREE_DIR   merged tree (bin/, include/, lib/, nvvm/ ...), like /usr/local/cuda
 --discard  remove each archive once it is unpacked; what TREE_DIR/COMPONENTS.tsv records
            as unpacked is then not downloaded again
 --allow-http
-           take a MANIFEST given by an http:// URL (refused otherwise: the manifest holds the
-           SHA-256 that the archives are checked against, and over plain HTTP whoever is on
+           take a MANIFEST given by an http:// URL, and follow a redirection from HTTPS to
+           HTTP (refused otherwise, for the manifest and for every download: the manifest holds
+           the SHA-256 that the archives are checked against, and over plain HTTP whoever is on
            the way can change both)
 
 Needs: Python 3, GNU tar. Uses aria2c when available; falls back to Python's own
@@ -66,22 +67,66 @@ def _has_aria2c():
     return shutil.which("aria2c") is not None
 
 
-def download(url, dest_dir, dest_name, expected_sha256, lock_fds):
+def redirection_refused(origin, target, allow_http):
+    """Why a redirection from the URL origin to the URL target is not followed, or None: from
+    HTTPS to HTTPS only, or also to HTTP with allow_http; from HTTP to HTTP or HTTPS; never to
+    another scheme. (What comes over plain HTTP, whoever is on the way can change: a manifest,
+    and with it the SHA-256 that the archives are checked against.)"""
+    from urllib.parse import urlsplit
+    scheme = urlsplit(target).scheme.lower()
+    if scheme == "https" or (scheme == "http" and (allow_http or urlsplit(origin).scheme.lower() == "http")):
+        return None
+    return f"{origin}: the redirection to {target} is refused" + (
+        " (--allow-http takes plain HTTP)" if scheme == "http" else "")
+
+
+def urlopen(url, allow_http):
+    """urllib's urlopen, whose redirections are only those that redirection_refused lets through:
+    another ends the program."""
+    import urllib.request
+
+    class Redirections(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            refused = redirection_refused(req.full_url, newurl, allow_http)
+            if refused:
+                raise SystemExit(refused)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    return urllib.request.build_opener(Redirections).open(url)
+
+
+def download(url, dest_dir, dest_name, expected_sha256, lock_fds, allow_http=False):
     """Download url to dest_dir/dest_name, verify SHA-256. Returns the path."""
     dest = os.path.join(dest_dir, dest_name)
     if _has_aria2c():
-        subprocess.run(
-            ["aria2c", "-q", "-x", "8", "-s", "8", "--allow-overwrite=true",
-             "--auto-file-renaming=false", "-d", dest_dir, "-o", dest_name, url],
-            check=True, pass_fds=lock_fds,
-        )
+        # aria2c cannot be told which redirections to follow: those it followed are read from its
+        # log, and an archive that came by one that is refused is removed, and the program ends.
+        log = os.path.join(dest_dir, f".dl-{dest_name}.log")
+        try:
+            subprocess.run(
+                ["aria2c", "-q", "-x", "8", "-s", "8", "--allow-overwrite=true",
+                 "--auto-file-renaming=false", f"--log={log}", "--log-level=notice",
+                 "-d", dest_dir, "-o", dest_name, url],
+                check=True, pass_fds=lock_fds,
+            )
+            with open(log, errors="replace") as lines:
+                targets = [line.split("Redirecting to ", 1)[1].strip() for line in lines if "Redirecting to " in line]
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(log)
+        origin = url
+        for target in targets:
+            refused = redirection_refused(origin, target, allow_http)
+            if refused:
+                os.unlink(dest)
+                sys.exit(refused)
+            origin = target
     else:
         # Fall back to Python's urllib: download to a temporary file, rename on success.
-        import urllib.request
         tmp_fd, tmp_path = tempfile.mkstemp(dir=dest_dir, prefix=".dl-")
         try:
             with os.fdopen(tmp_fd, "wb") as tmp_f:
-                with urllib.request.urlopen(url) as resp:
+                with urlopen(url, allow_http) as resp:
                     while True:
                         chunk = resp.read(1 << 22)
                         if not chunk:
@@ -103,8 +148,7 @@ def load_manifest(path_or_url, allow_http=False):
         sys.exit(f"{path_or_url}: a manifest over plain HTTP is refused, since it holds the SHA-256 "
                  "that the archives are checked against (--allow-http takes it)")
     if path_or_url.startswith("https://") or path_or_url.startswith("http://"):
-        import urllib.request
-        with urllib.request.urlopen(path_or_url) as resp:
+        with urlopen(path_or_url, allow_http) as resp:
             return json.loads(resp.read())
     return json.load(open(path_or_url))
 
@@ -130,7 +174,8 @@ def main():
     ap.add_argument("--runtime", action="store_true")
     ap.add_argument("--discard", action="store_true")
     ap.add_argument("--with-nccl", action="store_true", help="include NVIDIA's CUDA 12 NCCL runtime wheel among selectable components")
-    ap.add_argument("--allow-http", action="store_true", help="take a manifest given by an http:// URL")
+    ap.add_argument("--allow-http", action="store_true",
+                    help="take a manifest given by an http:// URL, and redirections from HTTPS to HTTP")
     a = ap.parse_args()
     if a.with_nccl and not a.runtime:
         ap.error("--with-nccl requires --runtime")
@@ -270,7 +315,7 @@ def install_components(a, rows, lock_fds):
             continue
         if not (os.path.exists(dest) and sha256(dest) == entry["sha256"]):
             print(f"get  {name} {version} ({int(entry['size']) / 1e6:.1f} MB)", flush=True)
-            download(url, a.dl_dir, os.path.basename(dest), expected, lock_fds)
+            download(url, a.dl_dir, os.path.basename(dest), expected, lock_fds, a.allow_http)
         else:
             print(f"have {name} {version}", flush=True)
         # Unpacked in a directory of the tree, then moved into place: a failure on the way (a

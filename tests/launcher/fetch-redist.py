@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -71,13 +72,13 @@ class FetchTest(unittest.TestCase):
         }}
         (self.root / "manifest.json").write_text(json.dumps(self.manifest))
 
-    def launch(self, *options, interrupt=None, manifest=None):
+    def launch(self, *options, interrupt=None, manifest=None, base=None):
         command, env = [sys.executable, str(SCRIPT)], {**os.environ, "PATH": str(self.commands)}
         if interrupt:
             command[1:1] = ["-c", INTERRUPTED]
             env["VF_TEST_SIGNAL"] = interrupt
         return subprocess.Popen(
-            [*command, self.root.as_uri(), manifest or str(self.root / "manifest.json"),
+            [*command, base or self.root.as_uri(), manifest or str(self.root / "manifest.json"),
              str(self.cache), str(self.tree), "--discard", *options],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True,
@@ -242,6 +243,91 @@ class FetchTest(unittest.TestCase):
             self.finish(self.launch("--runtime", "--allow-http", manifest=url))
         self.assertEqual(asked, ["/manifest.json"])
         self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+
+    def serve(self, tls=False, moved_to=None):
+        """A server of self.root on 127.0.0.1 (with TLS, by a certificate that the fetches are
+        given to trust); /moved/X redirects to moved_to + X. Returns its URL and the paths asked."""
+        root, asked = str(self.root), []
+
+        class Server(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=root, **kwargs)
+
+            def do_GET(self):
+                asked.append(self.path)
+                if moved_to and self.path.startswith("/moved/"):
+                    self.send_response(302)
+                    self.send_header("Location", moved_to + self.path[len("/moved/"):])
+                    self.end_headers()
+                    return
+                super().do_GET()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Server)
+        if tls:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(self.certificate, self.key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"{'https' if tls else 'http'}://127.0.0.1:{server.server_port}", asked
+
+    @unittest.skipUnless(shutil.which("openssl"), "needs openssl to make a certificate")
+    def test_redirections_from_https(self):
+        # From HTTPS, a redirection to plain HTTP is refused, for the manifest and for an archive,
+        # unless --allow-http, before anything is asked over HTTP. (Until 2026-11-23 urllib
+        # followed it.)
+        self.certificate, self.key = self.root / "certificate.pem", self.root / "key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                        "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+                        "-keyout", str(self.key), "-out", str(self.certificate)],
+                       check=True, capture_output=True)
+        self.component("a")
+        plain, plain_asked = self.serve()
+        secure, secure_asked = self.serve(tls=True, moved_to=plain + "/")
+        with mock.patch.dict(os.environ, no_proxy="*", SSL_CERT_FILE=str(self.certificate)):
+            # (The server is trusted: what is served over HTTPS without a redirection is taken.)
+            self.finish(self.launch("--runtime", manifest=secure + "/manifest.json", base=secure))
+            shutil.rmtree(self.tree)
+            shutil.rmtree(self.cache)
+            for manifest, base in [(secure + "/moved/manifest.json", secure), (None, secure + "/moved")]:
+                plain_asked.clear()
+                output = self.finish(self.launch("--runtime", manifest=manifest, base=base), success=False)
+                self.assertIn("is refused (--allow-http takes plain HTTP)", output)
+                self.assertEqual(plain_asked, [])
+                self.assertFalse((self.tree / "lib/a.so").exists())
+                self.finish(self.launch("--runtime", "--allow-http", manifest=manifest, base=base))
+                self.assertNotEqual(plain_asked, [])
+                self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
+                shutil.rmtree(self.tree)
+                shutil.rmtree(self.cache)
+        self.assertIn("/moved/manifest.json", secure_asked)
+        self.assertIn("/moved/a.tar", secure_asked)
+
+    def test_redirections_that_aria2c_followed(self):
+        # aria2c cannot be told not to follow a redirection: one that it followed from HTTPS to
+        # HTTP refuses the archive afterwards, unless --allow-http. (A stand-in for aria2c, which
+        # copies the archive and writes the line of its log of a redirection.)
+        archive = self.component("a")
+        for target, allowed in [("https://mirror.invalid/a.tar", True), ("http://mirror.invalid/a.tar", False)]:
+            aria2c = self.commands / "aria2c"
+            aria2c.write_text(
+                "#!/bin/sh\nfor arg; do case $arg in --log=*) log=${arg#--log=} ;; esac; done\n"
+                'while [ $# -gt 1 ]; do case $1 in -d) dir=$2 ;; -o) name=$2 ;; esac; shift; done\n'
+                f'{shutil.which("cp")} "{archive}" "$dir/$name"\n'
+                f'echo "2026-11-23 [NOTICE] [HttpResponse.cc:168] CUID#7 - Redirecting to {target}" > "$log"\n')
+            aria2c.chmod(0o755)
+            for options in [(), ("--allow-http",)]:
+                output = self.finish(self.launch("--runtime", *options, base="https://origin.invalid"),
+                                     success=allowed or bool(options))
+                if not (allowed or options):
+                    self.assertIn(f"https://origin.invalid/a.tar: the redirection to {target} is refused", output)
+                    self.assertEqual(list(self.cache.iterdir()), [self.cache / ".vf-fetch.lock"])
+                shutil.rmtree(self.tree, ignore_errors=True)
+                shutil.rmtree(self.cache, ignore_errors=True)
 
     def test_concurrent_installs(self):
         self.component("a")
