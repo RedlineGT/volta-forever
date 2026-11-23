@@ -101,7 +101,7 @@ for c in algo tc-k split-states caller-handle-any capture-tc lt-drop; do
     run control-$c "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_CONTROL=$c -- all
     fails control-$c "control $c"
 done
-for c in skinny-k skinny-speed seq-any; do
+for c in skinny-k skinny-speed seq-any lt-scan-first; do
     run control-$c "$out/test" VF_CUBLAS_BF16_SKINNY=1 VF_BF16_CONTROL=$c -- skinny
     fails control-$c "control $c"
 done

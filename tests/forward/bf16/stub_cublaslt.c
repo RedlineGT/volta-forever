@@ -129,9 +129,13 @@ EXPORT cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t d, cub
 {
     return set_attr(find(d, 0, 0), (int)a, buf, size, desc_size, 40);
 }
+/* Attribute reads (descriptors and layouts), counted: what a call costs before it is decided. */
+static int lt_gets;
+EXPORT int stub_lt_gets(void) { return __atomic_load_n(&lt_gets, __ATOMIC_RELAXED); }
 EXPORT cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t d, cublasLtMatmulDescAttributes_t a, void *buf,
                                                      size_t size, size_t *written)
 {
+    __atomic_fetch_add(&lt_gets, 1, __ATOMIC_RELAXED);
     return get_attr(find(d, 0, 0), (int)a, buf, size, written, desc_size, 40);
 }
 EXPORT cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t *l, cudaDataType t, uint64_t r, uint64_t c,
@@ -163,6 +167,7 @@ EXPORT cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t l,
 EXPORT cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t l, cublasLtMatrixLayoutAttribute_t a,
                                                        void *buf, size_t size, size_t *written)
 {
+    __atomic_fetch_add(&lt_gets, 1, __ATOMIC_RELAXED);
     return get_attr(find(l, 0, 1), (int)a, buf, size, written, layout_size, 9);
 }
 

@@ -1492,13 +1492,9 @@ typedef struct {
     int others_default, batch_default;
 } Layout;
 
-static int read_layout(cublasLtMatrixLayout_t l, Layout *o)
+/* A layout's other attributes, each against a fresh layout's: its batch count, and the rest. */
+static void layout_rest(cublasLtMatrixLayout_t l, Layout *o)
 {
-    if (!l || !layout_read(l, CUBLASLT_MATRIX_LAYOUT_TYPE, sizeof o->type, &o->type) ||
-        !layout_read(l, CUBLASLT_MATRIX_LAYOUT_ROWS, sizeof o->rows, &o->rows) ||
-        !layout_read(l, CUBLASLT_MATRIX_LAYOUT_COLS, sizeof o->cols, &o->cols) ||
-        !layout_read(l, CUBLASLT_MATRIX_LAYOUT_LD, sizeof o->ld, &o->ld))
-        return 0;
     o->others_default = o->batch_default = 1;
     for (int i = 0; i < NLAYOUT; ++i) {
         const int a = layout_attrs[i];
@@ -1509,6 +1505,20 @@ static int read_layout(cublasLtMatrixLayout_t l, Layout *o)
             o->batch_default = 0;
         else
             o->others_default = 0;
+    }
+}
+
+/* Every descriptor attribute outside the supported set at a fresh descriptor's value. */
+static int desc_rest_default(cublasLtMatmulDesc_t desc)
+{
+    for (int i = 0; i < NDESC; ++i) {
+        const int a = desc_attrs[i];
+        if (a == CUBLASLT_MATMUL_DESC_COMPUTE_TYPE || a == CUBLASLT_MATMUL_DESC_SCALE_TYPE ||
+            a == CUBLASLT_MATMUL_DESC_POINTER_MODE || a == CUBLASLT_MATMUL_DESC_TRANSA ||
+            a == CUBLASLT_MATMUL_DESC_TRANSB || a == CUBLASLT_MATMUL_DESC_EPILOGUE ||
+            a == CUBLASLT_MATMUL_DESC_BIAS_POINTER || a == CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE)
+            continue;
+        if (!desc_default(desc, i)) return 0;
     }
     return 1;
 }
@@ -1561,59 +1571,80 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     int reason = R_LTATTR, path = PATH_NONE;
     Layout la, lb, lc, ld;
     if (!g_lt_defaults_ok) goto forward;
+    /* The cheapest reasons to forward come first, and every attribute is read only when the call is not
+     * decided without it. A call that no path can take costs at most the 11 reads up to the decision on
+     * its best case (the types of the scales and of A, B and D, D's rows and columns, both operations,
+     * A's rows and columns); an fp32 product 3, any n >= 32 with the tensor-core path off 7. The other
+     * attributes of what decides a path (9 reads), then the whole allowlist (52 more), only for a call
+     * that a path would take. */
     reason = R_ARGS;
     /* No C descriptor: 12.9 does not accept it (it faults), so neither does this path. */
-    if (!desc || !Cdesc || !read_layout(Adesc, &la) || !read_layout(Bdesc, &lb) || !read_layout(Ddesc, &ld) ||
-        !read_layout(Cdesc, &lc))
-        goto forward;
+    if (!desc || !Adesc || !Bdesc || !Cdesc || !Ddesc) goto forward;
+    if (CONTROL("lt-scan-first")) { /* every attribute read before any decision (the host test counts reads) */
+        layout_rest(Adesc, &la);
+        layout_rest(Bdesc, &lb);
+        layout_rest(Cdesc, &lc);
+        layout_rest(Ddesc, &ld);
+        (void)desc_rest_default(desc);
+    }
     int32_t compute = 0, scale = 0;
     reason = R_TYPES;
     if (!desc_read(desc, CUBLASLT_MATMUL_DESC_COMPUTE_TYPE, sizeof compute, &compute) ||
-        !desc_read(desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, sizeof scale, &scale) || compute != CUBLAS_COMPUTE_32F ||
-        scale != CUDA_R_32F || la.type != CUDA_R_16BF || lb.type != CUDA_R_16BF ||
-        (ld.type != CUDA_R_16BF && ld.type != CUDA_R_32F) || lc.type != ld.type)
+        compute != CUBLAS_COMPUTE_32F || !desc_read(desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, sizeof scale, &scale) ||
+        scale != CUDA_R_32F || !layout_read(Adesc, CUBLASLT_MATRIX_LAYOUT_TYPE, sizeof la.type, &la.type) ||
+        la.type != CUDA_R_16BF || !layout_read(Bdesc, CUBLASLT_MATRIX_LAYOUT_TYPE, sizeof lb.type, &lb.type) ||
+        lb.type != CUDA_R_16BF || !layout_read(Ddesc, CUBLASLT_MATRIX_LAYOUT_TYPE, sizeof ld.type, &ld.type) ||
+        (ld.type != CUDA_R_16BF && ld.type != CUDA_R_32F))
         goto forward;
     atomic_fetch_add_explicit(&st_bf16[api], 1, memory_order_relaxed);
-    reason = R_BATCH;
-    if (!la.batch_default || !lb.batch_default || !lc.batch_default || !ld.batch_default) goto forward;
-    reason = R_LTATTR;
-    if (!la.others_default || !lb.others_default || !lc.others_default || !ld.others_default) goto forward;
+    reason = R_ARGS;
+    if (!layout_read(Ddesc, CUBLASLT_MATRIX_LAYOUT_ROWS, sizeof ld.rows, &ld.rows) ||
+        !layout_read(Ddesc, CUBLASLT_MATRIX_LAYOUT_COLS, sizeof ld.cols, &ld.cols))
+        goto forward;
+    const uint64_t m = ld.rows, n = ld.cols;
+    reason = R_RANGE;
+    if (m > INT_MAX || n > INT_MAX) goto forward;
+    reason = R_SHAPE;
+    if (m < 1 || n < 2) goto forward;
+    reason = R_DOMAIN; /* n >= 32: wider than the skinny path's widest, and the tensor-core path is off */
+    if (!cfg.tc && n >= 32) goto forward;
     int32_t transa = 0, transb = 0, pmode = 0, btype = -1;
     uint32_t epilogue = 0;
     const void *bias = NULL;
-    for (int i = 0; i < NDESC; ++i) {
-        const int a = desc_attrs[i];
-        if (a == CUBLASLT_MATMUL_DESC_COMPUTE_TYPE || a == CUBLASLT_MATMUL_DESC_SCALE_TYPE ||
-            a == CUBLASLT_MATMUL_DESC_POINTER_MODE || a == CUBLASLT_MATMUL_DESC_TRANSA ||
-            a == CUBLASLT_MATMUL_DESC_TRANSB || a == CUBLASLT_MATMUL_DESC_EPILOGUE ||
-            a == CUBLASLT_MATMUL_DESC_BIAS_POINTER || a == CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE)
-            continue;
-        if (!desc_default(desc, i)) goto forward;
-    }
-    if (!desc_read(desc, CUBLASLT_MATMUL_DESC_TRANSA, sizeof transa, &transa) ||
-        !desc_read(desc, CUBLASLT_MATMUL_DESC_TRANSB, sizeof transb, &transb) ||
-        !desc_read(desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, sizeof pmode, &pmode) ||
-        !desc_read(desc, CUBLASLT_MATMUL_DESC_EPILOGUE, sizeof epilogue, &epilogue) ||
-        !desc_read(desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, sizeof bias, &bias) ||
-        !desc_read(desc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, sizeof btype, &btype))
-        goto forward;
-    if (epilogue != CUBLASLT_EPILOGUE_DEFAULT && epilogue != CUBLASLT_EPILOGUE_BIAS) goto forward;
-    if (epilogue == CUBLASLT_EPILOGUE_BIAS && (!bias || (btype != -1 && btype != ld.type))) goto forward;
-    reason = R_POINTER;
-    if (pmode != CUBLASLT_POINTER_MODE_HOST && pmode != CUBLASLT_POINTER_MODE_DEVICE) goto forward;
     reason = R_ARGS;
-    if (!op_ok(transa) || !op_ok(transb)) goto forward;
+    if (!desc_read(desc, CUBLASLT_MATMUL_DESC_TRANSA, sizeof transa, &transa) || !op_ok(transa) ||
+        !desc_read(desc, CUBLASLT_MATMUL_DESC_TRANSB, sizeof transb, &transb) || !op_ok(transb) ||
+        !layout_read(Adesc, CUBLASLT_MATRIX_LAYOUT_ROWS, sizeof la.rows, &la.rows) ||
+        !layout_read(Adesc, CUBLASLT_MATRIX_LAYOUT_COLS, sizeof la.cols, &la.cols))
+        goto forward;
     const int ta = transa != CUBLAS_OP_N, tb = transb != CUBLAS_OP_N;
-    const uint64_t m = ld.rows, n = ld.cols, k = ta ? la.rows : la.cols;
-    if ((ta ? la.cols : la.rows) != m || (tb ? lb.rows : lb.cols) != n || (tb ? lb.cols : lb.rows) != k ||
-        lc.rows != m || lc.cols != n)
-        goto forward;
+    const uint64_t k = ta ? la.rows : la.cols;
+    if ((ta ? la.cols : la.rows) != m) goto forward;
     reason = R_RANGE;
-    if (m > INT_MAX || n > INT_MAX || k > INT_MAX || la.ld > INT_MAX || lb.ld > INT_MAX || lc.ld > INT_MAX ||
-        ld.ld > INT_MAX)
-        goto forward;
+    if (k > INT_MAX) goto forward;
     reason = R_SHAPE;
-    if (m < 1 || n < 2 || k < VF_MIN_K) goto forward;
+    if (k < VF_MIN_K) goto forward;
+    /* The decision at its best case (every operand aligned: the alignment can only take a path away). */
+    const Shape best = {ta, tb, (long long)m, (long long)n, (long long)k, 1, workspaceSizeInBytes >= VF_SEQ_MIN_WORKSPACE};
+    if (choose_path(&best, &reason) == PATH_NONE) goto forward;
+    /* The rest of what decides a path. */
+    reason = R_ARGS;
+    if (!layout_read(Adesc, CUBLASLT_MATRIX_LAYOUT_LD, sizeof la.ld, &la.ld) ||
+        !layout_read(Bdesc, CUBLASLT_MATRIX_LAYOUT_ROWS, sizeof lb.rows, &lb.rows) ||
+        !layout_read(Bdesc, CUBLASLT_MATRIX_LAYOUT_COLS, sizeof lb.cols, &lb.cols) ||
+        !layout_read(Bdesc, CUBLASLT_MATRIX_LAYOUT_LD, sizeof lb.ld, &lb.ld) ||
+        !layout_read(Cdesc, CUBLASLT_MATRIX_LAYOUT_TYPE, sizeof lc.type, &lc.type) ||
+        !layout_read(Cdesc, CUBLASLT_MATRIX_LAYOUT_ROWS, sizeof lc.rows, &lc.rows) ||
+        !layout_read(Cdesc, CUBLASLT_MATRIX_LAYOUT_COLS, sizeof lc.cols, &lc.cols) ||
+        !layout_read(Cdesc, CUBLASLT_MATRIX_LAYOUT_LD, sizeof lc.ld, &lc.ld) ||
+        !layout_read(Ddesc, CUBLASLT_MATRIX_LAYOUT_LD, sizeof ld.ld, &ld.ld))
+        goto forward;
+    reason = R_TYPES;
+    if (lc.type != ld.type) goto forward;
+    reason = R_ARGS;
+    if ((tb ? lb.rows : lb.cols) != n || (tb ? lb.cols : lb.rows) != k || lc.rows != m || lc.cols != n) goto forward;
+    reason = R_RANGE;
+    if (la.ld > INT_MAX || lb.ld > INT_MAX || lc.ld > INT_MAX || ld.ld > INT_MAX) goto forward;
     reason = R_ARGS;
     if (!handle || !alpha || !beta || !A || !B || !D || la.ld < (int64_t)la.rows || lb.ld < (int64_t)lb.rows ||
         lc.ld < (int64_t)lc.rows || ld.ld < (int64_t)ld.rows)
@@ -1626,6 +1657,24 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
                          workspaceSizeInBytes >= VF_SEQ_MIN_WORKSPACE};
     path = choose_path(&shape, &reason);
     if (path == PATH_NONE) goto forward;
+    /* A path would take the call: every other attribute must be at its default (the allowlist). */
+    layout_rest(Adesc, &la);
+    layout_rest(Bdesc, &lb);
+    layout_rest(Cdesc, &lc);
+    layout_rest(Ddesc, &ld);
+    reason = R_BATCH;
+    if (!la.batch_default || !lb.batch_default || !lc.batch_default || !ld.batch_default) goto forward;
+    reason = R_LTATTR;
+    if (!la.others_default || !lb.others_default || !lc.others_default || !ld.others_default ||
+        !desc_rest_default(desc) || !desc_read(desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, sizeof pmode, &pmode) ||
+        !desc_read(desc, CUBLASLT_MATMUL_DESC_EPILOGUE, sizeof epilogue, &epilogue) ||
+        !desc_read(desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, sizeof bias, &bias) ||
+        !desc_read(desc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, sizeof btype, &btype))
+        goto forward;
+    if (epilogue != CUBLASLT_EPILOGUE_DEFAULT && epilogue != CUBLASLT_EPILOGUE_BIAS) goto forward;
+    if (epilogue == CUBLASLT_EPILOGUE_BIAS && (!bias || (btype != -1 && btype != ld.type))) goto forward;
+    reason = R_POINTER;
+    if (pmode != CUBLASLT_POINTER_MODE_HOST && pmode != CUBLASLT_POINTER_MODE_DEVICE) goto forward;
     /* An explicit algorithm: 12.9 runs it, and only the one its heuristic picks on these shapes (id 16 as
      * cublasLtMatmulAlgoInit leaves it, k not split) computes the sequential kernel's chain; any other goes
      * to 12.9. The tensor-core path does not follow a cuBLASLt algorithm (docs/emulations.md, section 11). */

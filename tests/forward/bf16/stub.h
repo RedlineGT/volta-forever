@@ -22,4 +22,6 @@ void stub_set_stream(CUstream s, int ctx_index, unsigned long long capture, CUgr
 /* libcublas.so.12 stand-in: right after the next pointer-mode query of handle h, another "thread" sets
  * its stream to s and its pointer mode to device. */
 void stub_chaos(cublasHandle_t h, cudaStream_t s);
+/* libcublasLt.so.12 stand-in: descriptor and layout attribute reads so far. */
+int stub_lt_gets(void);
 #endif

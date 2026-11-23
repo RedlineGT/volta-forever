@@ -464,6 +464,67 @@ static void lt_left_to_129(void)
     v.DescDestroy(d);
 }
 
+/* ---- what a cuBLASLt call that no path takes costs before it is forwarded: the attributes read up to
+ * its decision, not the whole allowlist ---- */
+static int lt_call_reads(cublasLtMatmulDesc_t d, cublasLtMatrixLayout_t la, cublasLtMatrixLayout_t lb,
+                         cublasLtMatrixLayout_t lc, size_t ws, int *forwarded, int *served)
+{
+    const float one = 1.0f, zero = 0.0f;
+    const int r0 = stub_lt_gets();
+    take();
+    v.LtMatmul((cublasLtHandle_t)H, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), lc, DEV(3), lc, NULL, DEV(9), ws, S1);
+    take();
+    *forwarded = count("ltmatmul handle=") == 1;
+    *served = count("launch vf_bf16_skinny") == 1;
+    return stub_lt_gets() - r0;
+}
+static void lt_reads(void)
+{
+    cublasLtMatmulDesc_t d, d32;
+    cublasLtMatrixLayout_t la, lb, lc, lb64, lc64, la32, lb32, lc32;
+    v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    const int32_t ta = CUBLAS_OP_T;
+    const uint32_t e = CUBLASLT_EPILOGUE_BIAS;
+    const void *bias = DEV(5);
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof ta);
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_EPILOGUE, &e, sizeof e);
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof bias);
+    v.LayoutCreate(&la, CUDA_R_16BF, 1536, 1536, 1536);
+    v.LayoutCreate(&lb, CUDA_R_16BF, 1536, 8, 1536);
+    v.LayoutCreate(&lc, CUDA_R_16BF, 1536, 8, 1536);
+    v.LayoutCreate(&lb64, CUDA_R_16BF, 1536, 64, 1536);
+    v.LayoutCreate(&lc64, CUDA_R_16BF, 1536, 64, 1536);
+    v.DescCreate(&d32, CUBLAS_COMPUTE_32F, CUDA_R_32F); /* an fp32 product */
+    v.DescSet(d32, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof ta);
+    v.LayoutCreate(&la32, CUDA_R_32F, 1536, 1536, 1536);
+    v.LayoutCreate(&lb32, CUDA_R_32F, 1536, 8, 1536);
+    v.LayoutCreate(&lc32, CUDA_R_32F, 1536, 8, 1536);
+    int fwd = 0, srv = 0;
+    /* the first call of the process also reads a fresh descriptor's and layout's defaults, once */
+    lt_call_reads(d, la, lb, lc, 1u << 20, &fwd, &srv);
+    /* PyTorch's F.linear with a bias at n = 8 (its cuBLAS handle as the cuBLASLt handle, C = D, a 1 MiB
+     * workspace): 12.9 would not run its sequential kernel for TN with that workspace */
+    int reads = lt_call_reads(d, la, lb, lc, 1u << 20, &fwd, &srv);
+    CHECK(fwd && reads <= 11, "Lt reads: a call left to 12.9 for its workspace read %d attributes, not at most 11", reads);
+    /* n = 64 with only the skinny path on: wider than it takes */
+    reads = lt_call_reads(d, la, lb64, lc64, 1u << 20, &fwd, &srv);
+    CHECK(fwd && reads <= 7, "Lt reads: an n = 64 call with the skinny path alone read %d attributes, not at most 7", reads);
+    /* an fp32 product */
+    reads = lt_call_reads(d32, la32, lb32, lc32, 1u << 20, &fwd, &srv);
+    CHECK(fwd && reads <= 3, "Lt reads: an fp32 call read %d attributes, not at most 3", reads);
+    /* the bias call with a 4 MiB workspace is served: every attribute is read */
+    const int all = lt_call_reads(d, la, lb, lc, 4u << 20, &fwd, &srv);
+    CHECK(srv && !fwd && all >= 60, "Lt reads: the served call read %d attributes (the allowlist has more than 60)", all);
+    printf("note  attribute reads per cuBLASLt call: left to 12.9 for its workspace %d, n = 64 with the skinny path "
+           "alone %d, fp32 %d, served %d\n", lt_call_reads(d, la, lb, lc, 1u << 20, &fwd, &srv),
+           lt_call_reads(d, la, lb64, lc64, 1u << 20, &fwd, &srv), lt_call_reads(d32, la32, lb32, lc32, 1u << 20, &fwd, &srv),
+           all);
+    cublasLtMatrixLayout_t ls[] = {la, lb, lc, lb64, lc64, la32, lb32, lc32};
+    for (size_t i = 0; i < sizeof ls / sizeof *ls; ++i) v.LayoutDestroy(ls[i]);
+    v.DescDestroy(d);
+    v.DescDestroy(d32);
+}
+
 /* ---- H5: the internal GEMM on the runtime's own handle, with the stream read once ---- */
 static void h5_internal_gemm(void)
 {
@@ -642,6 +703,7 @@ int main(int argc, char **argv)
         expect_forwarded("skinny alone, TN with a 1 MiB workspace", &g, R_SEQ);
         v.SetStream(H, S1);
         expect_skinny("skinny alone, TN after cublasSetStream", &g, "vf_bf16_skinny_8_16");
+        lt_reads();
     } else if (!strcmp(mode, "otherbuild")) { /* STUB_CUBLAS_VERSION set: not the cuBLAS of the rule */
         G g = gemm(0, 1, 1536, 8, 1920);
         expect_forwarded("skinny alone, another cuBLAS build", &g, R_BUILD);
