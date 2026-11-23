@@ -122,30 +122,7 @@ stop_server() {
     kill -9 "$pid" $children 2>/dev/null
     wait "$pid" 2>/dev/null
 }
-refused() {
-    # What the layer says when it does not give a kernel to the program.
-    echo "$1" | grep -m1 'cannot run on this GPU' | cut -c1-300
-}
-verdict() {
-    # verdict STAGE OUTPUT WORD: PASS when the program's verdict is WORD, else REFUSED or FAIL. The
-    # verdict is what follows `verdict: ` on the last line of the output that starts so: what
-    # else the program, its libraries and its kernels printed is not looked at for it. With
-    # ALL_MATCH for WORD, a text that leaves the CPU's only where the CPU itself had a near tie
-    # (greedy_compare.py) passes too, and says so.
-    local said
-    said=$(echo "$2" | sed -n 's/^verdict: //p' | tail -1)
-    if [ "$said" = "$3" ]; then
-        echo "PASS stage-$1"
-    elif [ "$3" = ALL_MATCH ] && [[ "$said" =~ ^MATCH_BUT_NEAR_TIES\ [0-9]+$ ]]; then
-        echo "PASS stage-$1 (with ${said#MATCH_BUT_NEAR_TIES } near tie(s): see the lines above)"
-    elif [ -n "$(refused "$2")" ]; then
-        echo "REFUSED stage-$1: $(refused "$2")"; failed=1
-    elif echo "$2" | grep -q '^RAN OUT OF TIME$'; then
-        echo "FAIL stage-$1: ran out of time (\$VF_ENGINE_WAIT is $engine_wait s)"; failed=1
-    else
-        echo "FAIL stage-$1"; echo "$2" | tail -30; failed=1
-    fi
-}
+source "$W/tests/gpu/verdict.sh"
 
 echo "attention backend: $backend; $("${py[@]}" -c 'import importlib.metadata as m; print("SGLang", m.version("sglang"), "PyTorch", m.version("torch"), "FlashInfer", m.version("flashinfer-python"))' 2>/dev/null || echo "versions not read")"
 ref=$run/ref-f32.json
@@ -159,9 +136,10 @@ fi
 if want a; then
     echo ""
     echo "=== stage a: transformers, float32, on the GPU through the layer ==="
-    gpu_out=$(MODEL="$model" DTYPE=float32 MAX_TOKENS=50 REF_FILE="$ref" "${py[@]}" "$W/tests/gpu/vllm-gpu.py" 2>&1) || true
+    gpu_out=$(MODEL="$model" DTYPE=float32 MAX_TOKENS=50 REF_FILE="$ref" "${py[@]}" "$W/tests/gpu/vllm-gpu.py" 2>&1)
+    status=$?
     echo "$gpu_out" | grep -E "prompt [0-9]|tok/s|ALL_MATCH|DIFFER"
-    verdict a "$gpu_out" ALL_MATCH
+    verdict a "$gpu_out" ALL_MATCH "$status"
 fi
 
 # ---------- stage b: a kernel compiled by Triton ----------
@@ -187,10 +165,11 @@ fi
 if want c; then
     echo ""
     echo "=== stage c: SGLang's engine, greedy, float16, attention by $backend, against the CPU ==="
-    gen_out=$(MODEL="$model" REF_FILE="$ref" ATTENTION_BACKEND="$backend" timeout "$engine_wait" \
-        "${py[@]}" "$W/tests/gpu/sglang-generate.py" 2>&1; [ $? = 124 ] && echo "RAN OUT OF TIME") || true
+    gen_out=$(MODEL="$model" REF_FILE="$ref" ATTENTION_BACKEND="$backend" timeout -k 60 "$engine_wait" \
+        "${py[@]}" "$W/tests/gpu/sglang-generate.py" 2>&1)
+    status=$?
     echo "$gen_out" | grep -E "prompt [0-9]|engine:|reference:|tok/s|engine created|^sglang " | cut -c1-200
-    verdict c "$gen_out" ALL_MATCH
+    verdict c "$gen_out" ALL_MATCH "$status"
 fi
 
 # ---------- stage d: SGLang's HTTP server ----------
@@ -210,15 +189,16 @@ if want d; then
         sleep 1
     done
     if [ -n "$up" ]; then
-        server_out=$(PORT=$port REF_FILE="$ref" python3 -I "$W/tests/gpu/sglang-request.py" 2>&1) || true
+        server_out=$(PORT=$port REF_FILE="$ref" python3 -I "$W/tests/gpu/sglang-request.py" 2>&1)
+        status=$?
         echo "$server_out" | cut -c1-200
         # (A refusal is in the server's log, not in what the client was answered.)
         verdict d "$server_out
-$(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH
+$(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH "$status"
     else
         echo "the server did not come up; the end of its log ($run/server.log):"
         verdict d "$(tail -30 "$run/server.log")
-$(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH
+$(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH 1
     fi
     stop_server $server
 fi

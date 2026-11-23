@@ -130,30 +130,7 @@ stop_server() {
     kill -9 "$pid" $children 2>/dev/null
     wait "$pid" 2>/dev/null
 }
-refused() {
-    # What the layer says when it does not give a kernel to the program.
-    echo "$1" | grep -m1 'cannot run on this GPU' | cut -c1-300
-}
-verdict() {
-    # verdict STAGE OUTPUT WORD: PASS when the program's verdict is WORD, else REFUSED or FAIL. The
-    # verdict is what follows `verdict: ` on the last line of the output that starts so: what
-    # else the program, its libraries and its kernels printed is not looked at for it. With
-    # ALL_MATCH for WORD, a text that leaves the CPU's only where the CPU itself had a near tie
-    # (greedy_compare.py) passes too, and says so.
-    local said
-    said=$(echo "$2" | sed -n 's/^verdict: //p' | tail -1)
-    if [ "$said" = "$3" ]; then
-        echo "PASS stage-$1"
-    elif [ "$3" = ALL_MATCH ] && [[ "$said" =~ ^MATCH_BUT_NEAR_TIES\ [0-9]+$ ]]; then
-        echo "PASS stage-$1 (with ${said#MATCH_BUT_NEAR_TIES } near tie(s): see the lines above)"
-    elif [ -n "$(refused "$2")" ]; then
-        echo "REFUSED stage-$1: $(refused "$2")"; failed=1
-    elif echo "$2" | grep -q '^RAN OUT OF TIME$'; then
-        echo "FAIL stage-$1: ran out of time (\$VF_ENGINE_WAIT is $engine_wait s)"; failed=1
-    else
-        echo "FAIL stage-$1"; echo "$2" | tail -30; failed=1
-    fi
-}
+source "$W/tests/gpu/verdict.sh"
 
 # ---------- the CPU's answers ----------
 # (Plain greedy for a to c: what the engines do at a temperature of 0. With the penalty of the
@@ -170,9 +147,10 @@ fi
 if want a; then
     echo ""
     echo "=== stage a: transformers, float32, on the GPU through the layer ==="
-    gpu_out=$(MODEL="$model" DTYPE=float32 MAX_TOKENS=50 REF_FILE="$ref" "${py[@]}" "$W/tests/gpu/vllm-gpu.py" 2>&1) || true
+    gpu_out=$(MODEL="$model" DTYPE=float32 MAX_TOKENS=50 REF_FILE="$ref" "${py[@]}" "$W/tests/gpu/vllm-gpu.py" 2>&1)
+    status=$?
     echo "$gpu_out" | grep -E "prompt [0-9]|tok/s|ALL_MATCH|DIFFER"
-    verdict a "$gpu_out" ALL_MATCH
+    verdict a "$gpu_out" ALL_MATCH "$status"
 fi
 
 # ---------- stage b: a kernel compiled by Triton ----------
@@ -199,9 +177,10 @@ if want c; then
     echo ""
     echo "=== stage c: vLLM's engine, greedy, float16, against the CPU ==="
     vllm_out=$(MODEL="$model" DTYPE=float16 MAX_TOKENS=50 TEMPERATURE=0 REF_FILE="$ref" \
-        timeout "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1; [ $? = 124 ] && echo "RAN OUT OF TIME") || true
+        timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1)
+    status=$?
     echo "$vllm_out" | grep -E "prompt [0-9]|MATCH|NEAR TIE|DIFFER|tok/s|^FAIL" | cut -c1-200
-    verdict c "$vllm_out" ALL_MATCH
+    verdict c "$vllm_out" ALL_MATCH "$status"
 fi
 
 # ---------- stage c2: vLLM's engine, sampling ----------
@@ -209,9 +188,10 @@ if want c2; then
     echo ""
     echo "=== stage c2: vLLM's engine, sampling (top_k=50, top_p=0.9, seed=42) ==="
     vllm_sample=$(MODEL="$model" DTYPE=float16 MAX_TOKENS=50 TEMPERATURE=0.8 TOP_K=50 TOP_P=0.9 SEED=42 \
-        timeout "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1; [ $? = 124 ] && echo "RAN OUT OF TIME") || true
+        timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1)
+    status=$?
     echo "$vllm_sample" | grep -E "prompt [0-9]|WITHIN|OUTSIDE|tok/s|^FAIL" | cut -c1-200
-    verdict c2 "$vllm_sample" ALL_WITHIN
+    verdict c2 "$vllm_sample" ALL_WITHIN "$status"
 fi
 
 # ---------- stage d: vLLM's HTTP server ----------
@@ -234,15 +214,16 @@ if want d; then
         sleep 1
     done
     if [ -n "$up" ]; then
-        server_out=$(PORT=$port REF_FILE="$refp" python3 -I "$W/tests/gpu/vllm-request.py" 2>&1) || true
+        server_out=$(PORT=$port REF_FILE="$refp" python3 -I "$W/tests/gpu/vllm-request.py" 2>&1)
+        status=$?
         echo "$server_out" | cut -c1-200
         grep -m1 -i "default sampling parameters" "$run/server.log" | sed 's/^.*[Dd]efault sampling/the server: default sampling/' | cut -c1-220
         # (A refusal is in the server's log, not in what the client was answered.)
         verdict d "$server_out
-$(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH
+$(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH "$status"
     else
         echo "the server did not come up; the end of its log ($run/server.log):"
-        verdict d "$(tail -30 "$run/server.log")" ALL_MATCH
+        verdict d "$(tail -30 "$run/server.log")" ALL_MATCH 1
     fi
     stop_server $server
 fi
