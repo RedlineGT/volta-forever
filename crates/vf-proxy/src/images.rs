@@ -59,7 +59,9 @@ pub struct Replacement {
 }
 
 // SAFETY: the wrapper points at owned, immutable data. Its fourth word is either the program
-// file name (v1), or an immutable array and objects owned by this replacement (v2).
+// file name (v1), or an immutable array and objects owned by this replacement (v2), or the
+// program's own array (v2, of which the replacement is a copy of the first fat binary: the
+// runtime keeps it while the image is registered).
 unsafe impl Send for Replacement {}
 // Shared references are published only after the metadata is registered. The image, wrapper and
 // relocation inputs remain immutable, just as they must for concurrent lookups by the driver.
@@ -741,6 +743,18 @@ unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
     let primary = unsafe { fatbin::parse_at(wrapper.data) }.ok()?;
     let linked = unsafe { std::slice::from_raw_parts(wrapper.data, primary.len) };
     let adapted = policy.adapt_fatbin(&primary).ok()?;
+    // The driver takes the first fat binary when it has code for this GPU: that code can be an
+    // image that a link made, of which something is known (`linked_in`), as for a version-1
+    // wrapper (`adapt_fatbin`).
+    if matches!(adapted.outcome, Outcome::Native)
+        && let Some(found) = linked_in(&primary)
+    {
+        say_known(who, "linked fat binary with a cubin made by a linker", &found);
+        let mut replacement = Replacement::new(linked.to_vec(), Some(wrapper));
+        replacement.refused = found.refused;
+        replacement.emulated = found.emulated;
+        return Some(replacement);
+    }
     if adapted.image.is_some() || matches!(adapted.outcome, Outcome::Native) {
         // This is the complete, already linked program.
         return finish(who, "linked fat binary", adapted, None, false, Some(linked));
@@ -783,6 +797,14 @@ unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
             _ => Vec::new(),
         };
         object_traps.push(traps);
+        // A relocatable fat binary with code for this GPU, of which a link made the image.
+        if matches!(lowering.outcome, Outcome::Native)
+            && let Some(found) = linked_in(&fat)
+        {
+            say_known(who, "relocatable fat binary with a cubin made by a linker", &found);
+            refused.extend(found.refused);
+            emulated.extend(found.emulated);
+        }
         match finish(who, "relocatable fat binary", lowering, None, false, Some(source)) {
             Some(replaced) => {
                 origin = origin.or(replaced.origin);
@@ -793,7 +815,9 @@ unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
             None => objects.push(source.into()),
         }
     }
-    let origin = origin?;
+    // Nothing adapted: the program's image is loaded as it is, unless something is known of an
+    // image that a link made in it.
+    let origin = origin.or_else(|| (!refused.is_empty() || !emulated.is_empty()).then_some(kernels::Origin::Native))?;
     if check_external_calls {
         let mut graph = vf_ptx::deps::LinkedDependencies::default();
         for (object, traps) in objects.iter().zip(&object_traps) {

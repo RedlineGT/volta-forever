@@ -67,7 +67,7 @@ def wrappers(fat):
     data = c.create_string_buffer(fat, len(fat))
     members = (c.c_void_p * 1)(None)
     made = []
-    for version, extra in ((1, None),):
+    for version, extra in ((1, None), (2, c.addressof(members))):
         made.append(Wrapper(WRAPPER_MAGIC, version, c.addressof(data), extra))
     return made, (data, members)
 
@@ -159,6 +159,25 @@ def check(proxy, mock):
     wrapped = struct.pack("<IHHQ", 0xBA55ED50, 1, 16, len(body)) + body
     assert lookup(api, load(api, wrapped), b"bad") == (218, None)
     assert lookup(api, load(api, wrapped), b"good")[0] == 0
+    # The same behind a wrapper of the CUDA runtime, of version 1 and of version 2 (until
+    # 2026-11-23 version 2 gave bad), and as the relocatable fat binary of a version-2 wrapper whose
+    # first fat binary has nothing for this GPU (an entry said to be for sm_90).
+    held, keep = wrappers(wrapped)
+    for wrapper in held:
+        for loader in (api.cuModuleLoadData, api.cuModuleLoadFatBinary):
+            module = c.c_void_p()
+            assert loader(c.byref(module), c.byref(wrapper)) == 0
+            assert lookup(api, module, b"bad") == (218, None), (wrapper.version, loader)
+            assert lookup(api, module, b"good")[0] == 0
+    elsewhere = bytearray(wrapped)
+    struct.pack_into("<I", elsewhere, 16 + 0x1C, 90)
+    first = c.create_string_buffer(bytes(elsewhere), len(elsewhere))
+    members = (c.c_void_p * 2)(c.addressof(keep[0]), None)
+    wrapper = Wrapper(WRAPPER_MAGIC, 2, c.addressof(first), c.addressof(members))
+    module = c.c_void_p()
+    assert api.cuModuleLoadFatBinary(c.byref(module), c.byref(wrapper)) == 0
+    assert lookup(api, module, b"bad") == (218, None)
+    assert lookup(api, module, b"good")[0] == 0
 
     # Other bytes are another image, and a link with nothing refused, given the handle of the link
     # that is gone, gives nothing to its image.
