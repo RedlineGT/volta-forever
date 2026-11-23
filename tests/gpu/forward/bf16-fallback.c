@@ -36,20 +36,22 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
 {
     const int lda = k, ldb = k;
     uint16_t *hA = bf16_random((size_t)m * k, 0.05), *hB = bf16_random((size_t)n * k, 1.0);
-    /* tiny: rows of op(A) near 2^-80 and columns of op(B) near 2^-60 (one element of 2^-100 makes each
-     * column fail the check), so that their products, near 2^-140, are fp32 subnormals that a
-     * separate multiply would round: a chain of fused multiply-adds and one of multiplies and adds
-     * then differ in those elements. */
+    /* tiny: rows of op(A) of both signs near 2^-70..2^-75 and columns of op(B) near 2^-66..2^-71 (one
+     * element of 2^-110 makes each column fail the check), as in bf16-arith.c: their products, below
+     * 2^-126, are fp32 subnormals that a separate multiply rounds to the subnormal grid, and with mixed
+     * signs the sum stays small enough for that rounding to show: a chain of fused multiply-adds and
+     * one of multiplies and adds then differ in those elements. */
     const int tiny_rows[] = {5, 600, 1200}, tiny_cols[] = {7, 100, 250};
     char *tinyrow = calloc((size_t)m, 1), *tinycol = calloc((size_t)n, 1);
     for (int t = 0; tiny && t < 3; ++t) {
         const int i = tiny_rows[t] % m, j = tiny_cols[t] % n;
         tinyrow[i] = tinycol[j] = 1;
         for (int l = 0; l < k; ++l) {
-            hA[(size_t)l + (size_t)i * lda] = f2bf(ldexpf(1.0f + (float)(rnd() & 127) / 128.0f, -80));
-            hB[(size_t)l + (size_t)j * ldb] = f2bf(ldexpf(1.0f + (float)(rnd() & 127) / 128.0f, -60));
+            const float sa = (rnd() & 1) ? -1.0f : 1.0f, sb = (rnd() & 1) ? -1.0f : 1.0f;
+            hA[(size_t)l + (size_t)i * lda] = f2bf(sa * ldexpf(1.0f + (float)(rnd() % 128) / 128.0f, -70 - (int)(rnd() % 6)));
+            hB[(size_t)l + (size_t)j * ldb] = f2bf(sb * ldexpf(1.0f + (float)(rnd() % 128) / 128.0f, -66 - (int)(rnd() % 6)));
         }
-        hB[(size_t)(k / 2) + (size_t)j * ldb] = f2bf(ldexpf(1.0f, -100));
+        hB[(size_t)(k / 2) + (size_t)j * ldb] = f2bf(ldexpf(1.0f, -110));
     }
     const float bad = bad_kind == 0 ? 1e-30f : bad_kind == 1 ? INFINITY : NAN;
     char *colbad = calloc((size_t)n, 1), *rowbad = calloc((size_t)m, 1);
