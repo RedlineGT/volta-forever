@@ -480,6 +480,24 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   products are computed by each thread with successive `fma` in float32, where the hardware
   keeps a wider sum and cuts it at the end: about 20 % of random bf16 results differ from an
   RTX 5090's by 1 or 2 units of the last place.
+- **The last bits of a Triton FP16 product can depend on `num_stages`** (Triton told 8.0, whose
+  `tl.dot` reaches the layer as PTX). A product whose two operands come straight from plain
+  `ldmatrix` is added on the halves of k (two by two on one A where they pair, with the same
+  bits), one whose operands are gathered from other threads on the even, then the odd k
+  (`docs/emulations.md`, "Operands loaded from shared memory"). In a pipelined kernel
+  (`num_stages` 2 or more) the operands of the first products of each turn of the loop are
+  register copies of what the turn before loaded, which the layer gathers; with one stage none
+  are. With B stored K x N (`ldmatrix.trans`), every product adds the even, then the odd k,
+  whatever the stages. Both orders are valid sums
+  of the same terms, by Volta's instruction four terms at a time; neither is wrong. Measured on
+  2026-11-23 on one V100, Triton 3.8 through the layer, float16 inputs and outputs, float32
+  accumulators, on 2048 x 7344 x 1536, 256 x 151936 x 1536 and 4096 x 4096 x 4096, with and
+  without `VF_PAIRS`: with B stored N x K (K contiguous, as a linear layer's weight), the three
+  1-stage configurations (tiles 128 x 128 x 32 with 8 or 4 warps, 64 x 128 x 32) gave one result,
+  which was cuBLAS 12.9's bit for bit; the two 3-stage ones (128 x 128 x 32, 64 x 64 x 32)
+  another, and 128 x 128 x 64 with 2 stages a third, each differing from cuBLAS's in 0.09 to
+  0.15 % of the outputs, by at most 0.03125. With B stored K x N, all six configurations gave the
+  same bits (0.16 to 0.20 % of the outputs off cuBLAS's).
 - **Conversions of the 4-bit and 8-bit formats**: identical to an RTX 5090's on every value of
   the formats.
 - **Block-scaled products**: see the table above.
