@@ -347,35 +347,43 @@ fn own_files(path: &CStr, caller: Caller) -> Vec<CString> {
     files
 }
 
-/// The limit that the code of the libraries loaded with the caller as a dependency (named in
-/// their `DT_NEEDED`) sets to what it is told, and the library that sets it: a CUDA runtime
-/// answers for the programs that use it. Their files are read once each. A library loaded after
-/// the caller first asks is not seen.
+/// The limit that the code of the libraries loaded with the caller as a dependency sets to what
+/// it is told, and the library that sets it: those that name it in their `DT_NEEDED`, and those
+/// that name one of these, and so on (a CUDA runtime answers for the programs that use it, also
+/// through a library of their own that has no GPU code). Their files are read once each. A
+/// library loaded after the caller first asks is not seen.
 fn dependents_limit(objects: &[Object], unloads: u64) -> Option<(u32, CString)> {
-    let caller = objects.iter().find(|object| object.holds)?;
-    let file_name = caller.path.as_ref().map(|path| {
-        path.to_bytes()
-            .rsplit(|&b| b == b'/')
-            .next()
-            .unwrap_or_default()
-            .to_vec()
-    });
-    let names: Vec<&[u8]> = caller
-        .soname
-        .iter()
-        .chain(file_name.iter())
-        .map(Vec::as_slice)
-        .collect();
+    let names_of = |object: &Object| {
+        let file_name = object.path.as_ref().map(|path| {
+            path.to_bytes()
+                .rsplit(|&b| b == b'/')
+                .next()
+                .unwrap_or_default()
+                .to_vec()
+        });
+        object.soname.iter().cloned().chain(file_name).collect::<Vec<_>>()
+    };
+    let caller = objects.iter().position(|object| object.holds)?;
+    let mut names = names_of(&objects[caller]);
+    let mut seen = vec![false; objects.len()];
+    seen[caller] = true;
     let mut lowest: Option<(u32, CString)> = None;
-    for object in objects.iter().filter(|object| !object.holds) {
-        let Some(path) = &object.path else {
-            continue;
-        };
-        if object.needed.iter().any(|needed| names.contains(&needed.as_slice())) {
-            lowest = lower(lowest, file_limit(path, unloads));
+    loop {
+        let mut more = false;
+        for (at, object) in objects.iter().enumerate() {
+            if seen[at] || !object.needed.iter().any(|needed| names.contains(needed)) {
+                continue;
+            }
+            (seen[at], more) = (true, true);
+            if let Some(path) = &object.path {
+                lowest = lower(lowest, file_limit(path, unloads));
+            }
+            names.extend(names_of(object));
+        }
+        if !more {
+            return lowest;
         }
     }
-    lowest
 }
 
 /// What limits the answer matters only when the user asks for a later generation than Turing's.

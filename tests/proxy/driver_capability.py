@@ -279,7 +279,7 @@ def run_runtimes(proxy, directory):
     api = c.CDLL(str(proxy))
     given = asked()
     for runtime, user, code_sm in (("libcudart.so.13", "user_turing.so", 75), ("libcudart.so.14", "user_ptx.so", 75),
-                                   ("libcudart.so.15", "user_ampere.so", 80)):
+                                   ("libcudart.so.15", "user_ampere.so", 80), ("libcudart.so.16", "user_chain.so", 75)):
         c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
         sm = limited(given, code_sm) or 75
         probe(api, c.CDLL(str(directory / "runtimes" / runtime)), sm, sm)
@@ -324,6 +324,17 @@ def build(directory):
                         "-Wl,--no-as-needed", f"-l:{runtime}", "-Wl,-rpath,$ORIGIN"],
                        input="int user(void) { return 0; }\n", text=True, check=True)
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", runtimes / user], check=True)
+    # A library with machine code for sm_75 that uses a runtime through a library of its own, which
+    # has no GPU code.
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-Wl,-soname,libcudart.so.16", "-x", "c", "-",
+                    "-o", str(runtimes / "libcudart.so.16")], input=CLIENT, text=True, check=True)
+    for name, needed, fixture in (("helper.so", "libcudart.so.16", None),
+                                  ("user_chain.so", "helper.so", directory / "turing_only.fatbin")):
+        subprocess.run(["cc", "-shared", "-fPIC", "-x", "c", "-", "-o", str(runtimes / name), f"-Wl,-soname,{name}",
+                        "-L", str(runtimes), "-Wl,--no-as-needed", f"-l:{needed}", "-Wl,-rpath,$ORIGIN"],
+                       input=f"int {name.split('.')[0]}(void) {{ return 0; }}\n", text=True, check=True)
+        if fixture:
+            subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", runtimes / name], check=True)
     (directory / "bin").mkdir()
     (directory / "elsewhere").mkdir()
     subprocess.run(["cc", "-O0", "-x", "c", "-", "-o", str(directory / "main"), "-ldl"], input=MAIN, text=True,
