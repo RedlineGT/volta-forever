@@ -992,6 +992,15 @@ static int capture_of(CUstream s, unsigned long long *id, CUgraph *graph)
     return 1;
 }
 
+/* The workspace back to the pool, in relaxed capture mode for an eager call (as its allocation). */
+static void free_workspace(CUdeviceptr base, CUstream stream, int capturing)
+{
+    CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+    const int relaxed = !capturing && !CONTROL("no-relaxed") && cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
+    cu.MemFreeAsync(base, stream);
+    if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
+}
+
 static cublasStatus_t run_tc(const Call *c, int *reason)
 {
     Plan p;
@@ -1022,9 +1031,9 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
      * another's) forbids: done in relaxed mode for this thread, as the driver lets a library do, and
      * the mode given back. A captured call's allocation is a node of the graph. */
     CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
-    if (!capturing && !CONTROL("no-relaxed")) cu.ThreadExchangeStreamCaptureMode(&mode);
+    const int relaxed = !capturing && !CONTROL("no-relaxed") && cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
     CUresult r = INJECT("alloc") ? CUDA_ERROR_OUT_OF_MEMORY : cu.MemAllocFromPoolAsync(&base, p.total, x->pool, alloc_stream);
-    if (!capturing && !CONTROL("no-relaxed")) cu.ThreadExchangeStreamCaptureMode(&mode);
+    if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode); /* the thread's mode given back, whatever happened */
     if (r != CUDA_SUCCESS || !base) {
         static atomic_int said;
         if (!atomic_exchange(&said, 1))
@@ -1152,10 +1161,10 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
             if (r != CUDA_SUCCESS) goto fail;
         }
     }
-    cu.MemFreeAsync(base, c->stream);
+    free_workspace(base, c->stream, capturing);
     return CUBLAS_STATUS_SUCCESS;
 fail:
-    cu.MemFreeAsync(base, c->stream);
+    free_workspace(base, c->stream, capturing);
     {
         static atomic_int said;
         if (!atomic_exchange(&said, 1))

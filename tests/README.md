@@ -58,6 +58,18 @@ scripts of `tests/sass/`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result, five of them again under
   `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
+- `forward-bf16.sh`: the opt-in bf16 cuBLAS variants on a V100, with a test build of their
+  runtime: the skinny path's results bit for bit against cuBLAS 12.9 where it serves, and the
+  inputs that tell a fused multiply-add chain, a multiply-and-add chain and the epilogue's orders
+  apart (`bf16-arith.c`); the tensor-core path within 32 units of 2^-24 sum |a b| of fp64,
+  deterministic; every forwarded call with 12.9's bits; what a program's graphs, capture modes,
+  threads and contexts see (`bf16-graphs.c`, `bf16-threads.c`, `bf16-life.c`, `bf16-reserve.c`);
+  the runtime told the real capability under the layer's settings; with `VF_BF16_SANITIZE` set,
+  under compute-sanitizer. `bf16-skinny.c` is the measurement behind the skinny path's rule and
+  bounds (12.9's kernel per configuration; path, bits, error and time per shape).
+- `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
+  their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
+  the design review), each control making its test fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL
