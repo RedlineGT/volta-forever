@@ -19,7 +19,8 @@ Run unmodified CUDA 13 applications on a Tesla V100 with a simple two-letter com
 > **Triton's machine code is less validated.** Kernels that Triton generates at run time and that
 > run from their machine code (the default for a program told 7.5) are less widely validated than
 > PyTorch's own: 0.1.3 fixes a wrong-result defect found there ([CHANGELOG](CHANGELOG.md)), and the
-> validator now checks for it, but only PyTorch's code and the held-out corpus are validated in full.
+> validator now checks for it, but only PyTorch's code is validated in full with this release (the held-out corpus was last
+> validated on 2026-11-22, before this fix).
 > Compare results with a reference and [report differences](CONTRIBUTING.md#reporting-a-wrong-result).
 > A wider Triton validation campaign is planned for the next release.
 
