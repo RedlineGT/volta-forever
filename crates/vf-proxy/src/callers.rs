@@ -78,7 +78,14 @@ struct Cache {
     limits: HashMap<CString, Option<u32>>,
 }
 
+/// Held only to read or write the cache: not over a walk of the loader's list (`dl_iterate_phdr`
+/// takes the loader's lock, and a thread that holds that can ask what the GPU is from a callback),
+/// nor over the reading of files.
 static CALLERS: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
+
+fn callers() -> std::sync::MutexGuard<'static, Cache> {
+    CALLERS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// glibc's unload counter changes even if another DSO takes the exact same address and filename.
 fn unload_count() -> u64 {
@@ -276,11 +283,23 @@ fn classify(path: &CStr) -> Caller {
 }
 
 /// The limit that the code embedded in the file at `path` sets to what a caller that runs it is
-/// told (`vf_adapt::Policy::told_limit_in`), with the file.
-fn file_limit(path: &CStr, limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
-    let limit = *limits.entry(path.to_owned()).or_insert_with(|| {
-        let file = Mapped::open(path)?;
-        unpanicked(path, || config().policy.told_limit_in(file.bytes()))
+/// told (`vf_adapt::Policy::told_limit_in`), with the file. Each file is read once while the
+/// loader's count of unloads is `unloads`.
+fn file_limit(path: &CStr, unloads: u64) -> Option<(u32, CString)> {
+    let known = {
+        let cache = callers();
+        (cache.unloads == unloads)
+            .then(|| cache.limits.get(path).copied())
+            .flatten()
+    };
+    let limit = known.unwrap_or_else(|| {
+        let limit =
+            Mapped::open(path).and_then(|file| unpanicked(path, || config().policy.told_limit_in(file.bytes())));
+        let mut cache = callers();
+        if cache.unloads == unloads {
+            cache.limits.insert(path.to_owned(), limit);
+        }
+        limit
     });
     limit.map(|sm| (sm, path.to_owned()))
 }
@@ -332,7 +351,7 @@ fn own_files(path: &CStr, caller: Caller) -> Vec<CString> {
 /// their `DT_NEEDED`) sets to what it is told, and the library that sets it: a CUDA runtime
 /// answers for the programs that use it. Their files are read once each. A library loaded after
 /// the caller first asks is not seen.
-fn dependents_limit(objects: &[Object], limits: &mut HashMap<CString, Option<u32>>) -> Option<(u32, CString)> {
+fn dependents_limit(objects: &[Object], unloads: u64) -> Option<(u32, CString)> {
     let caller = objects.iter().find(|object| object.holds)?;
     let file_name = caller.path.as_ref().map(|path| {
         path.to_bytes()
@@ -353,7 +372,7 @@ fn dependents_limit(objects: &[Object], limits: &mut HashMap<CString, Option<u32
             continue;
         };
         if object.needed.iter().any(|needed| names.contains(&needed.as_slice())) {
-            lowest = lower(lowest, file_limit(path, limits));
+            lowest = lower(lowest, file_limit(path, unloads));
         }
     }
     lowest
@@ -377,16 +396,19 @@ fn caller(return_address: usize) -> Decision {
         };
     }
     let unloads = unload_count();
-    let mut cache = CALLERS.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.unloads != unloads {
-        cache.by_base.clear();
-        cache.limits.clear();
-        cache.unloads = unloads;
-    }
     let base = info.dli_fbase as usize;
-    if let Some(decision) = cache.by_base.get(&base) {
-        return *decision;
+    {
+        let mut cache = callers();
+        if cache.unloads != unloads {
+            cache.by_base.clear();
+            cache.limits.clear();
+            cache.unloads = unloads;
+        }
+        if let Some(decision) = cache.by_base.get(&base) {
+            return *decision;
+        }
     }
+    // Outside the lock (see `CALLERS`).
     let objects = objects(return_address);
     // For the main program the loader's name is `argv[0]`, which names no file when the program
     // was started by name through PATH, or once it has changed directory: its file is read
@@ -402,14 +424,24 @@ fn caller(return_address: usize) -> Decision {
     let mut limit = None;
     if limits_apply() && caller != Caller::Native {
         for file in own_files(path, caller) {
-            limit = lower(limit, file_limit(&file, &mut cache.limits));
+            limit = lower(limit, file_limit(&file, unloads));
         }
-        limit = lower(limit, dependents_limit(&objects, &mut cache.limits));
+        limit = lower(limit, dependents_limit(&objects, unloads));
     }
     let decision = Decision {
         caller,
         limit: limit.as_ref().map(|(sm, _)| *sm),
     };
+    {
+        let mut cache = callers();
+        if cache.unloads == unloads {
+            // (Another thread may have decided meanwhile, and said it.)
+            if let Some(decided) = cache.by_base.get(&base) {
+                return *decided;
+            }
+            cache.by_base.insert(base, decision);
+        }
+    }
     let name = match main {
         Some(path) if path == c"/proc/self/exe" => std::fs::read_link("/proc/self/exe").map_or_else(
             |_| path.to_string_lossy().into_owned(),
@@ -457,7 +489,6 @@ fn caller(return_address: usize) -> Decision {
         )),
         (Caller::Other, None, _) => log::info(format_args!("{name} is told the real compute capability")),
     }
-    cache.by_base.insert(base, decision);
     decision
 }
 

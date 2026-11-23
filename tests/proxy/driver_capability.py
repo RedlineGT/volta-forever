@@ -11,6 +11,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 
 DRIVER = """
@@ -286,7 +288,7 @@ def run_runtimes(proxy, directory):
 def build(directory):
     data = Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data"
     cubin80 = Path(__file__).resolve().parents[2] / "tests/kernels/translate/k_ampere.sm80.cubin"
-    for name, source in (("mock.so", DRIVER), ("plain", CLIENT), ("no-proc.so", NO_PROC)):
+    for name, source in (("mock.so", DRIVER), ("plain", CLIENT), ("no-proc.so", NO_PROC), ("loader.so", LOADER)):
         subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-x", "c", "-",
                         "-o", str(directory / name)], input=source, text=True, check=True)
     for name in ("libcudart.so.12", "libcudart.so.13"):
@@ -410,6 +412,63 @@ int open64(const char *path, int flags, ...) {
 """
 
 
+# A thread can ask what the GPU is from a callback of dl_iterate_phdr, which holds the loader's lock.
+# This preload makes the second walk of the list of a thread that armed it start 400 ms late (the
+# layer's walk of the objects of the process, after the one that counts the unloads).
+LOADER = """
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <link.h>
+#include <unistd.h>
+typedef int (*each_t)(struct dl_phdr_info *, size_t, void *);
+static int (*real)(each_t, void *);
+static __thread int armed, walks;
+void arm_delay(void) { armed = 1; walks = 0; }
+int dl_iterate_phdr(each_t each, void *data) {
+    if (!real) real = (int (*)(each_t, void *))dlsym(RTLD_NEXT, "dl_iterate_phdr");
+    if (armed && ++walks == 2) {
+        armed = 0;
+        usleep(400000);
+    }
+    return real(each, data);
+}
+static int (*asked)(int *, int *, int);
+static int ask(struct dl_phdr_info *info, size_t size, void *data) {
+    int major, minor;
+    *(int *)data = asked(&major, &minor, 0);
+    return 1;
+}
+int ask_in_a_walk(int (*query)(int *, int *, int)) {
+    int result = -1;
+    asked = query;
+    dl_iterate_phdr(ask, &result);
+    return result;
+}
+"""
+
+
+def run_loader(proxy, directory):
+    """A thread asks what the GPU is from a callback of dl_iterate_phdr, while another, which asked
+    first, walks the loader's list for its own answer: both are answered."""
+    api = c.CDLL(str(proxy))
+    loader = c.CDLL(str(directory / "loader.so"))
+    shutil.copyfile(directory / "plain", directory / "first-asker.so")
+    first = c.CDLL(str(directory / "first-asker.so"))
+    answers = []
+
+    def ask_first():
+        loader.arm_delay()
+        a, b = c.c_int(), c.c_int()
+        answers.append(first.both(api.cuDeviceComputeCapability, c.byref(a), c.byref(b), 0))
+
+    thread = threading.Thread(target=ask_first)
+    thread.start()
+    time.sleep(0.1)
+    answers.append(loader.ask_in_a_walk(api.cuDeviceComputeCapability))
+    thread.join()
+    assert answers == [0, 0], answers
+
+
 def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
     through PATH, before a change of directory), and without /proc when it was started by its
@@ -440,6 +499,8 @@ if __name__ == "__main__":
         run_mixed(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 4 and sys.argv[3] == "--binary":
         run_binary(proxy, Path(sys.argv[2]))
+    elif len(sys.argv) == 4 and sys.argv[3] == "--loader":
+        run_loader(proxy, Path(sys.argv[2]))
     elif len(sys.argv) == 3:
         run(proxy, Path(sys.argv[2]))
     else:
@@ -475,6 +536,8 @@ if __name__ == "__main__":
                            env={**env, "VOLTA_FOREVER": "test", "VF_PROXY_CACHE": "0"}, check=True)
             subprocess.run([sys.executable, __file__, proxy, directory, "--binary"],
                            env={**env, "VOLTA_FOREVER": "test", "VF_CAPABILITY": "9.0"}, check=True)
+            subprocess.run([sys.executable, __file__, proxy, directory, "--loader"], timeout=30, check=True,
+                           env={**env, "VOLTA_FOREVER": "test", "LD_PRELOAD": str(directory / "loader.so")})
         print("PASS direct, native and CUDA runtime callers, mixed devices, kernel binaries, reloaded DSOs, "
               "machine code that limits what its callers are told, the code given for what they are told, "
               "values of VF_CAPABILITY that are not used, main programs however they were started, modules "
