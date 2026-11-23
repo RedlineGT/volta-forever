@@ -5,7 +5,7 @@
 #   tests/sass/controls.sh OUT [CUBIN...]
 #
 # Without CUBIN: the sm_75 cubins of tests/kernels; some of PyTorch's when they are where `TORCH`
-# says (tests/sass/compare.sh), and five of the held-out corpus when it is where `HELDOUT` says
+# says (tests/sass/compare.sh), and six of the held-out corpus when it is where `HELDOUT` says
 # (the directory given to tests/sass/heldout-extract.sh): the ones named below have what the
 # controls take away. Five passes, because a control needs a translation that has what it takes
 # away:
@@ -54,9 +54,10 @@ if [ $# -eq 0 ]; then
     done
     # (Marks of register reuse that name a batch; relocations on code; within a kernel's own
     # count, a register that holds two uniform predicates in turn, and one that is the home of
-    # two uniform registers in turn; what a store reads written under the complement of its guard.)
+    # two uniform registers in turn; what a store reads written under the complement of its guard;
+    # the lane of a product at level 3 read into a register put away there.)
     for n in cudnn-libcudnn_engines_precompiled/0086 cuda135-libcufft/9552 cu13-libcublasLt/0066 cu13-libcusparse/0046 \
-            nccl-libnccl/0129; do
+            nccl-libnccl/0129 cudnn-libcudnn_engines_precompiled/0854; do
         [ -f "$HELDOUT/$n.sm_75.cubin" ] && set -- "$@" "$HELDOUT/$n.sm_75.cubin"
     done
 fi

@@ -3523,11 +3523,21 @@ def main():
                         if rn_lane <= highest and rn_lane >= 2:
                             borrowed_regs.add(rn_lane)
                             # A register of the program: declared taken at the instruction (a pool
-                            # of MAP.lives), as for what the sequence computes into. ('lane' is put
-                            # around the instruction: the check of undeclared writes below leaves
-                            # it out. Until 2026-11-23 its declaration was not looked at.)
+                            # of MAP.lives) or put away there (a room line), as for what the
+                            # sequence computes into. ('lane' is put around the instruction: the
+                            # check of undeclared writes below leaves it out. Until 2026-11-23 its
+                            # declaration was not looked at.) Taken, it must hold nothing there
+                            # (rule 1 of borrowed registers); put away, the sequence must put it
+                            # away and bring it back (rule U the other way round, below), each
+                            # once, from one word, under no guard, on scoreboards that what
+                            # follows waits for (rule R), and it must end with what it held, the
+                            # store before the lane is read into it (rule V). (Until 2026-11-23 a
+                            # room line was not taken: the lane of a product at level 3 in a
+                            # register put away there was objected to, 1,443 times in 12 cubins
+                            # of the held-out corpus, cuDNN's and vLLM's.)
                             if not any(first <= rn_lane < first + width and old in offsets
-                                       for width, first, offsets in borrow_pools.get(name, [])):
+                                       for width, first, offsets in borrow_pools.get(name, [])) \
+                                    and not any(r == rn_lane and old in offsets for r, offsets in borrow_rooms.get(name, [])):
                                 say(at, old, 'lane', 'D: the lane goes into a register of the program that is not declared taken at the instruction')
                     kinds['(level3) per-instruction lane reads'] += 1
                 parts = parts[1:]

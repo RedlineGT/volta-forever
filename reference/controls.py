@@ -181,6 +181,11 @@ level 3):
     missing_pool_line
                 the last register of the program that the translator says it took at an
                 instruction is not said
+    room_lane_unsaid
+                where the lane is read into a register of the program that the translator says
+                it took at the instruction, the declarations say that it puts that register away
+                there instead, and nothing puts it away (the translation is as it was: what the
+                validator is told is wrong)
     no_attr_raise
                 the attributes of the function are the original's, not raised by the frame
     no_borrow_wait_l3
@@ -232,6 +237,10 @@ registers than it has):
     room_guarded_away
                 the first store that puts a register away is under a guard (P0): where P0 does
                 not hold, the register is not put away, and it is brought back all the same
+    room_lane_first
+                where the lane is read into a register put away at the instruction, it is read
+                before the stores that put registers away, which wait for it: the register is put
+                away with the lane in it, and brought back so
     room_back_wrong_word
                 it brings the register back from the word after its own
     room_away_after_write
@@ -1150,6 +1159,7 @@ def patched(control):
         'wrong_base_const': {'frame_top': frame_top_wrong_const},
         'base_after_use_l3': {'schedule': schedule_base_late},
         'missing_pool_line': {},
+        'room_lane_unsaid': {},
         'no_c3_wait': {},
         'store_before_l3': {'schedule': schedule_store_before},
         'store_other_l3': {'to_memory': to_memory_other},
@@ -1166,6 +1176,7 @@ def patched(control):
         'room_home_alive': {},
         'room_no_back': {},
         'room_guarded_away': {},
+        'room_lane_first': {},
         'room_back_wrong_word': {},
         'room_away_after_write': {},
         'room_same_word': {},
@@ -1200,7 +1211,7 @@ CONTROLS += PAIR_CONTROLS
 BORROW_CONTROLS = ['alive_pair', 'alive_home', 'no_borrow_wait', 'no_late_borrow', 'written_pair', 'shared_home', 'overlap_pool', 'short_home', 'pool_in_home_unsaid']
 CONTROLS += BORROW_CONTROLS
 # (Those of level 3: only when VF_BORROW>=2 and a function uses the frame.)
-FRAME_CONTROLS = ['no_lane_l3', 'odd_pair_l3', 'no_r1_lower', 'wrong_r1_lower', 'wrong_slot_load', 'no_store_l3', 'held_busy_l3', 'unkept_holder_l3', 'shared_holder_l3', 'home_unsaid', 'guarded_store_l3', 'no_old_load_l3', 'no_load_wait', 'store_no_read_sb', 'wrong_base_const', 'missing_pool_line', 'no_attr_raise', 'no_borrow_wait_l3', 'no_c3_wait',
+FRAME_CONTROLS = ['no_lane_l3', 'odd_pair_l3', 'no_r1_lower', 'wrong_r1_lower', 'wrong_slot_load', 'no_store_l3', 'held_busy_l3', 'unkept_holder_l3', 'shared_holder_l3', 'home_unsaid', 'guarded_store_l3', 'no_old_load_l3', 'no_load_wait', 'store_no_read_sb', 'wrong_base_const', 'missing_pool_line', 'room_lane_unsaid', 'no_attr_raise', 'no_borrow_wait_l3', 'no_c3_wait',
                   'store_before_l3', 'store_other_l3', 'stray_store_l3', 'standin_home_l3', 'standin_operand_l3', 'standin_shared_l3',
                   'base_after_use_l3', 'up_standin_l3', 'up_wrong_word_l3', 'up_no_store_l3', 'up_unwaited_l3']
 CONTROLS += FRAME_CONTROLS
@@ -1208,7 +1219,7 @@ CONTROLS += FRAME_CONTROLS
 # and wherever the program moves its stack pointer in a way that is not followed.)
 BASE_CONTROLS = ['wrong_base_const', 'base_after_use_l3']
 # (Those of room made: only when VF_BORROW>=5 and a function has room.)
-ROOM_CONTROLS = ['room_reads_orig', 'room_home_alive', 'room_no_back', 'room_guarded_away', 'room_back_wrong_word', 'room_away_after_write', 'room_same_word', 'room_at_branch', 'room_depth_wrong', 'room_frame_short', 'room_missing_lives', 'room_no_back_wait', 'room_scratch_busy', 'copy_after_write',
+ROOM_CONTROLS = ['room_reads_orig', 'room_home_alive', 'room_no_back', 'room_guarded_away', 'room_lane_first', 'room_back_wrong_word', 'room_away_after_write', 'room_same_word', 'room_at_branch', 'room_depth_wrong', 'room_frame_short', 'room_missing_lives', 'room_no_back_wait', 'room_scratch_busy', 'copy_after_write',
                  'room_back_first', 'room_back_before_store', 'room_away_after_load']
 CONTROLS += ROOM_CONTROLS
 # (Those of level-3 products: only when VF_BORROW>=7 and a function has products at level 3.)
@@ -1879,6 +1890,28 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                 break
         else:
             return None, ''
+    elif control == 'room_lane_unsaid':
+        # The first lane read into a register of a pool line at an instruction: that register is
+        # declared put away there (a room line) instead of taken.
+        container, changed = elf.Elf(out), False
+        for name, new_off, old_off, what in listing:
+            if what != 'lane' or old_off == 0:
+                continue
+            word = int.from_bytes(container.section('.text.' + name).data[new_off:new_off + 16], 'little')
+            d70 = mc.decode(70, word)
+            r = d70.ops.get('Rd') if d70 is not None and d70.mnemonic == 'S2R' else None
+            k = next((k for k, row in enumerate(lives or []) if len(row) >= 5 and row[0] == name and row[3] == 'pool'
+                      and old_off in row[4] and r is not None and row[2] <= r < row[2] + row[1]), None)
+            if k is None:
+                continue
+            _, width, first, _, offsets = lives[k]
+            lives[k:k + 1] = ([(name, r - first, first, 'pool', offsets)] if r > first else []) + \
+                ([(name, first + width - r - 1, r + 1, 'pool', offsets)] if r + 1 < first + width else []) + \
+                [(name, 1, r, 'room', [old_off])]
+            changed = True
+            break
+        if not changed:
+            return None, ''
     # ---- room controls (VF_BORROW>=5, room made) ----
     elif control == 'room_reads_orig':
         # A register put away that the original instruction reads: replace the first room: away's
@@ -1965,6 +1998,52 @@ def run(mc, control, path, out_dir, untouched, validated=True):
                     section.data = section.data[:new_off] + (word ^ plain ^ under).to_bytes(16, 'little') + section.data[new_off + 16:]
                     changed = True
                     break
+        if not changed:
+            return None, ''
+        out = container.write()
+    elif control == 'room_lane_first':
+        # At the first instruction whose lane is read into a register put away there, right
+        # after the stores that put registers away: the S2R before them, with the waits of the
+        # first of them, which waits for the S2R; what followed the S2R waits for the last store.
+        container, changed = elf.Elf(out), False
+        rooms = {(row[0], row[2], at) for row in lives or [] if len(row) >= 5 and row[3] == 'room' for at in row[4]}
+        by_old = collections.defaultdict(list)
+        for k, (name, new_off, old_off, what) in enumerate(listing):
+            by_old[(name, old_off)].append((new_off, what, k))
+        for (name, old_off), parts in sorted(by_old.items()):
+            parts.sort()
+            lane = next(((n, k) for n, w, k in parts if w == 'lane'), None)
+            if lane is None:
+                continue
+            section = container.section('.text.' + name)
+            data = bytearray(section.data)
+            p = lane[0]
+            d70 = mc.decode(70, int.from_bytes(data[p:p + 16], 'little'))
+            if d70 is None or d70.mnemonic != 'S2R' or (name, d70.ops.get('Rd'), old_off) not in rooms:
+                continue
+            block = [(n, w, k) for n, w, k in parts if n < p]
+            aways = [(n, w, k) for n, w, k in block if w.startswith('room: R') and w.endswith(' away')]
+            if not aways or 'room: R%d away' % d70.ops['Rd'] not in [w for n, w, k in aways]:
+                continue
+            a0 = aways[0][0]
+            rows = [(n, w, k) for n, w, k in parts if a0 <= n <= p]
+            if [n for n, w, k in rows] != list(range(a0, p + 16, 16)) or rows[:-1] != [x for x in aways if x[0] >= a0]:
+                continue
+            words = [int.from_bytes(data[n:n + 16], 'little') for n in range(a0, p + 16, 16)]
+            board, last = (words[-1] >> WRITE_BARRIER) & 7, (words[-2] >> READ_BARRIER) & 7
+            s2r = (words[-1] & ~(63 << WAIT)) | (words[0] & (63 << WAIT))
+            first = (words[0] & ~(63 << WAIT)) | (1 << (WAIT + board))
+            for n, word in zip(range(a0, p + 16, 16), [s2r, first] + words[1:-1]):
+                data[n:n + 16] = word.to_bytes(16, 'little')
+            if last != 7 and p + 32 <= len(data):
+                after = int.from_bytes(data[p + 16:p + 32], 'little') | 1 << (WAIT + last)
+                data[p + 16:p + 32] = after.to_bytes(16, 'little')
+            whats = ['lane'] + [w for n, w, k in rows[:-1]]
+            for (n, w, k), what in zip(rows, whats):
+                listing[k] = (name, n, old_off, what)
+            section.data = bytes(data)
+            changed = True
+            break
         if not changed:
             return None, ''
         out = container.write()

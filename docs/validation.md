@@ -132,7 +132,11 @@ that holds a predicate, as one taken for the time of an instruction, or as one p
 A register written and not declared is a problem. (The register into which a matrix sequence
 that takes everything at the instruction reads the lane too: until 2026-11-23 it was left out
 with what is put around an instruction, and `missing_pool_line` passed unnoticed in
-`k_stored.135.sm75.cubin`, where the lane goes into a register of the program.)
+`k_stored.135.sm75.cubin`, where the lane goes into a register of the program. It is declared
+taken there, or put away there, as the rules of room below ask: the store before the lane is
+read into it, the load after. The first form of this check took the first declaration only,
+and objected 1,443 times in 12 cubins of the held-out corpus to the lane of products put in
+registers put away; the controls `room_lane_unsaid` and `room_lane_first` are for the second.)
 
 **Free.** A declared register must hold nothing of the program where it is taken, by the
 validator's own lives of registers: dead on the way in, dead on the way out, and neither read
@@ -304,7 +308,7 @@ with the next instruction waiting, and the distances between the steps and after
 ## 3. Controls
 
 A check that never objects proves nothing. `reference/controls.py` makes the reference translator
-wrong on purpose, one way at a time, and counts what the validator finds in the result: 111
+wrong on purpose, one way at a time, and counts what the validator finds in the result: 113
 controls, each described at the head of that file. A control that changes translations and meets
 no objection anywhere is a hole in the validator, or a control that tests nothing.
 
