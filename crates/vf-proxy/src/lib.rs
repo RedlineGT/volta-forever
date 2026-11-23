@@ -41,7 +41,9 @@
 //!   the number of calls per function and the kernels launched most often (adds an atomic increment
 //!   to each driver call, and a name lookup to each launch);
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
-//!   refuses (kernel name, grid, block, shared memory, launch attributes).
+//!   refuses (kernel name, grid, block, shared memory, launch attributes);
+//! - `VF_SUMMARY=FILE`: the report at exit also written to `FILE.PID`, and rewritten while the
+//!   process runs (`summary`).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -63,6 +65,7 @@ mod lazy;
 mod log;
 pub mod marker;
 mod profile;
+mod summary;
 
 pub use generated::{HOOKED, NAMES, NSYM, idx};
 
@@ -214,6 +217,7 @@ extern "C" fn init() {
     LOADED_IN.store(std::process::id(), Relaxed);
     let config = config();
     log::open();
+    summary::start();
     if let Err(problem) = vf_adapt::requested_capability() {
         log::warn(format_args!("{problem}"));
     }
@@ -292,10 +296,31 @@ extern "C" fn fini() {
         return;
     }
     profile::write();
-    kernels::summary();
-    fit::summary();
+    let lines = report_lines();
+    for (level, line) in &lines {
+        log::line(*level, format_args!("{line}"));
+    }
+    summary::finish(&lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>());
+}
+
+/// The lines of the report at exit (`summary`).
+fn report() -> Vec<String> {
+    report_lines().into_iter().map(|(_, line)| line).collect()
+}
+
+/// The report at exit, line by line, with the level at which each is logged: the kernels with
+/// emulated instructions given to the program, the second translations, and with `VF_STATS` the
+/// calls and launches counted (asked for: logged at every level).
+fn report_lines() -> Vec<(u8, String)> {
+    let mut lines = Vec::new();
+    if let Some(line) = kernels::summary_line() {
+        lines.push((1, line));
+    }
+    if let Some(line) = fit::summary_line() {
+        lines.push((2, line));
+    }
     if !config().stats {
-        return;
+        return lines;
     }
     let mut calls: Vec<(usize, &CStr)> = COUNTS
         .iter()
@@ -308,7 +333,7 @@ extern "C" fn fini() {
         .iter()
         .map(|(n, name)| format!("{}={n}", name.to_string_lossy()))
         .collect();
-    log::error(format_args!("calls: {}", line.join(" "))); // asked for: printed at every level
+    lines.push((0, format!("calls: {}", line.join(" "))));
     if let Some(launches) = hooks::launches() {
         let total: u64 = launches.iter().map(|(_, n)| n).sum();
         let line: Vec<String> = launches
@@ -316,12 +341,16 @@ extern "C" fn fini() {
             .take(20)
             .map(|(name, n)| format!("{name}={n}"))
             .collect();
-        log::error(format_args!(
-            "launches: {total} of {} kernels, the most launched: {}",
-            launches.len(),
-            line.join(" ")
+        lines.push((
+            0,
+            format!(
+                "launches: {total} of {} kernels, the most launched: {}",
+                launches.len(),
+                line.join(" ")
+            ),
         ));
     }
+    lines
 }
 
 #[used]

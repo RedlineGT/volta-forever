@@ -358,11 +358,9 @@ pub fn is_adapted(handle: usize) -> bool {
     known().contains_key(&handle)
 }
 
-/// When the process ends: the totals of what was announced.
-pub fn summary() {
-    if let Some(line) = ANNOUNCER.summary(config().emulation_warnings) {
-        log::warn(format_args!("{line}"));
-    }
+/// For the report at exit: the totals of what was announced.
+pub fn summary_line() -> Option<String> {
+    ANNOUNCER.summary(config().emulation_warnings)
 }
 
 #[cfg(test)]

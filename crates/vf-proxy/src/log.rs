@@ -34,6 +34,11 @@ fn write(level: u8, args: Arguments<'_>) {
     };
 }
 
+/// A line at `level` (0 to 3, as below).
+pub fn line(level: u8, args: Arguments<'_>) {
+    write(level, args);
+}
+
 /// The library cannot work.
 pub fn error(args: Arguments<'_>) {
     write(0, args);

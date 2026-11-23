@@ -38,6 +38,7 @@ jobs:
           python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
           python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
           python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
+          python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
       - name: The audit library's answer to NVML, against a stand-in
         run: python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
       - name: The stack handling of the forwarding libraries, against a mock library

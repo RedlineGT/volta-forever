@@ -457,14 +457,16 @@ in section 1). The ones of the test scripts are in `tests/README.md`; `docs/arch
 | `VF_REAL_LIBCUDA` | auto | Path to NVIDIA's real `libcuda.so.1` when it cannot be found by itself (by default: the library of the loaded kernel module's version in the system's library directories) |
 | `VF_STATS` | `0` | `1`: route every driver function through the layer and print call counts and the most launched kernels at exit |
 | `VF_PROFILE` | off | `FILE`: write a per-kernel profile to `FILE.PID` at exit. Every launch is then synchronised on its stream: a profile is not a benchmark. Each kernel keeps the counts of its first 64 distinct grid, block and shared-memory sizes. Only the process that loaded the layer writes it, and the `VF_STATS` report: a child made by `fork()` (a daemon, a pre-fork worker) writes neither, even when it does all the CUDA work |
+| `VF_SUMMARY` | off | `FILE`: the report at exit (the kernels with emulated instructions given to the program, the second translations, the counts of `VF_STATS`) is also written to `FILE.PID`, and rewritten while the process runs, every `VF_SUMMARY_INTERVAL` seconds when it changed: a process killed without exiting (some servers end their workers with SIGKILL) leaves the report as it was at most that long before. The file is replaced whole, and its first line says whether the process had exited. One thread writes it; none is started without the variable. Only the process that loaded the layer writes it, as the other reports at exit |
+| `VF_SUMMARY_INTERVAL` | `30` | Seconds between two writes of `VF_SUMMARY`'s file while the process runs (at least 1) |
 | `VF_TIMING` | `0` | `1`: print the time of each stage for every module and kernel |
 | `VF_TRACE_LAUNCH` | `0` | `1`: route kernel launches through the layer and log those that the driver refuses (kernel, grid, block, shared memory, launch attributes) |
 | `VF_TRANSLATE_DUMP` | off | `DIR` (which must exist): write every cubin given to the translator there as it was received, as `PID-NUMBER.sm_SM.cubin`, to translate and validate it apart (`reference/validate.py`) |
 | `VF_BORROW_SAY` | off | Set: the translator says on standard error, for each function, what registers it borrowed (as `reference/translate.py` does) |
 
 The reports at exit (`VF_STATS`, `VF_PROFILE`, the summaries of emulated instructions and of
-second translations) are printed by the process that loaded the layer, not by a child that it
-made with `fork()`.
+second translations, and `VF_SUMMARY`'s file) are printed by the process that loaded the layer,
+not by a child that it made with `fork()`.
 
 **Audit library (`libvf_audit.so`):**
 
