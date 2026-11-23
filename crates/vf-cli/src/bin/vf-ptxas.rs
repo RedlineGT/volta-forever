@@ -292,7 +292,11 @@ fn run(args: Vec<OsString>) -> Result<ExitCode, String> {
 }
 
 fn main() -> ExitCode {
-    match run(std::env::args_os().skip(1).collect()) {
+    let mut args = std::env::args_os();
+    if let (Some(argv0), Ok(exe)) = (args.next(), std::env::current_exe()) {
+        runfiles::used(Path::new(&argv0), &exe);
+    }
+    match run(args.collect()) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("vf-ptxas: {error}");
@@ -398,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn runfiles_views_that_nothing_will_use_again_are_removed() {
+    fn runfiles_views_that_cannot_work_are_removed_and_no_other() {
         let tmp = std::process::Command::new("mktemp").arg("-d").output().unwrap();
         assert!(tmp.status.success());
         let dir = Path::new(std::str::from_utf8(&tmp.stdout).unwrap().trim())
@@ -417,7 +421,11 @@ mod tests {
             let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 60 * 60);
             File::open(path).unwrap().set_modified(when).unwrap();
         };
-        // Views of three applications, made two days ago; one is used today.
+        let recently = |path: &Path| {
+            fs::metadata(path).unwrap().modified().unwrap().elapsed().unwrap() < std::time::Duration::from_secs(3600)
+        };
+        // Views of three applications, made two days ago; one is asked for again today, and the
+        // assembler is started through another (its engine compiles).
         let (kept, changed, recent) = (app("kept.runfiles"), app("changed.runfiles"), app("recent.runfiles"));
         let kept_view = runfiles::view(&kept, &compiler, &cache).unwrap();
         let changed_view = runfiles::view(&changed, &compiler, &cache).unwrap();
@@ -426,15 +434,31 @@ mod tests {
             days_ago(view, 2);
         }
         assert_eq!(runfiles::view(&recent, &compiler, &cache).unwrap(), recent_view);
-        // Two of them change; a view of runfiles that are gone; what a process that ended left,
-        // and what one that runs (this one) is making.
+        assert!(recently(&recent_view));
+        runfiles::used(&changed_view.join("cuda/bin/ptxas"), &compiler);
+        assert!(recently(&changed_view));
+        // Not through a view, or not to this assembler: nothing is used.
+        runfiles::used(&changed.join("cuda/bin/ptxas"), &compiler);
+        runfiles::used(&kept_view.join("cuda/bin/nvlink"), &compiler);
+        runfiles::used(&kept_view.join("cuda/bin/ptxas"), &dir.join("another"));
+        assert!(!recently(&kept_view));
+        days_ago(&changed_view, 2);
+        // Two of them change; a view of runfiles that are gone; one of an assembler that is gone
+        // (a release removed); what a process that ended left, and what one that runs (this one)
+        // is making.
         fs::write(changed.join("cuda/bin/nvcc"), "compiler driver").unwrap();
         fs::write(recent.join("cuda/bin/nvcc"), "compiler driver").unwrap();
         let gone = cache.join("0123456789abcdef");
         fs::create_dir(&gone).unwrap();
         std::os::unix::fs::symlink(dir.join("gone.runfiles/cuda/bin/nvcc"), gone.join("nvcc")).unwrap();
         days_ago(&gone, 2);
-        // The view of the first, as a version that named views otherwise would have made it.
+        let removed = cache.join("00112233445566ff");
+        fs::create_dir_all(removed.join("cuda/bin")).unwrap();
+        std::os::unix::fs::symlink(dir.join("removed/vf-ptxas"), removed.join("cuda/bin/ptxas")).unwrap();
+        std::os::unix::fs::symlink(kept.join("cuda/bin/nvlink"), removed.join("cuda/bin/nvlink")).unwrap();
+        days_ago(&removed, 2);
+        // The view of the first, as a version that named views otherwise made it, and which an
+        // engine started by that version may hold: it works, and is left.
         let renamed = cache.join("fedcba9876543210");
         fs::create_dir_all(renamed.join("cuda/bin")).unwrap();
         std::os::unix::fs::symlink(&compiler, renamed.join("cuda/bin/ptxas")).unwrap();
@@ -446,7 +470,9 @@ mod tests {
         );
         fs::create_dir(&ended).unwrap();
         fs::create_dir(&running).unwrap();
-        // A new view: the stale ones go, with what they hold and nothing it points to.
+        // A new view: what cannot work goes, with what it holds and nothing it points to. A view
+        // that works stays, also when its runfiles changed since (an engine started before holds
+        // it).
         let changed_now = runfiles::view(&changed, &compiler, &cache).unwrap();
         assert_ne!(changed_now, changed_view);
         for (path, there) in [
@@ -454,14 +480,16 @@ mod tests {
             (&recent_view, true),
             (&running, true),
             (&changed_now, true),
-            (&changed_view, false),
+            (&changed_view, true),
+            (&renamed, true),
             (&gone, false),
-            (&renamed, false),
+            (&removed, false),
             (&ended, false),
         ] {
             assert_eq!(path.exists(), there, "{}", path.display());
         }
         assert_eq!(fs::read_to_string(changed.join("cuda/bin/ptxas")).unwrap(), "NVIDIA");
+        assert_eq!(fs::read_to_string(kept.join("cuda/bin/nvlink")).unwrap(), "linker");
         assert_eq!(fs::read_to_string(&compiler).unwrap(), "VF");
         fs::remove_dir_all(dir).unwrap();
     }
