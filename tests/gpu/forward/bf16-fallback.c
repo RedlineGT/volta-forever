@@ -65,7 +65,9 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
         rowbad[i] = 1;
         hA[(size_t)((r * 3) % k) + (size_t)i * lda] = f2bf(bad);
     }
-    const float alpha = 0.7f, beta = bf16_out ? 0.0f : 0.3f;
+    /* With subnormal products, alpha 1 and beta 0 in fp32 output: the sum itself, which a beta * C of
+     * ordinary size, or a rounding to bf16, would hide. */
+    const float alpha = tiny ? 1.0f : 0.7f, beta = (bf16_out || tiny) ? 0.0f : 0.3f;
     const size_t es = bf16_out ? 2 : 4, cb = (size_t)m * n * es;
     void *hC0 = malloc(cb);
     if (bf16_out) {
@@ -157,7 +159,7 @@ int main(void)
     one_case(4608, 64, 1536, 8, 16, 0, 1, 0);
     one_case(896, 512, 4864, 32, 5, 0, 0, 0);
     one_case(1536, 320, 1536, 9, 0, 0, 0, 1);
-    one_case(1536, 320, 1536, 9, 0, 0, 1, 1);
+    one_case(4608, 64, 1536, 5, 0, 0, 0, 1);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;
