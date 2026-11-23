@@ -4,11 +4,11 @@
 
 ### Added
 
-- `VF_SAFE=1`, safe mode: the layer keeps its conservative paths. The switches whose results are not bit-identical to the default's are not used, whatever their own variables say (`VF_BF16_TC_GROUPS=1`, `VF_BF16_TC_TILES=1`, `VF_BF16_COLUMN=tree`, `VF_BF16_ROW=tree`, `VF_TRANSLATE=first` and `force`), in `libcuda.so.1`, the nvJitLink adapter, `vf ptxas` and `vf adapt`, and one line at level 1 says what was turned off. Only the exact value `1` turns it on; it is read once in a process. The capability told, and what gives the default's bits (the `ordered` modes, the pairs of the PTX lowering), are unchanged. The proxy's cache keeps what is made with it and without it apart. The launcher passes it on as it is. `INSTALL.md` describes it, `LIMITS.md` ("Safe mode") says what it does not do.
+- `VF_SAFE=1`, safe mode: the layer keeps its conservative paths. The switches whose results are not bit-identical to the default's are not used, whatever their own variables say (`VF_BF16_TC_GROUPS=1`, `VF_BF16_TC_TILES=1`, `VF_BF16_COLUMN=tree`, `VF_BF16_ROW=tree`, `VF_TRANSLATE=first` and `force`), in `libcuda.so.1`, the nvJitLink adapter, `vf ptxas` and `vf adapt`, and one line at level 1 says what was turned off. Only the exact value `1` turns it on; it is read once in a process. The capability told, and what gives the default's bits (the `ordered` modes, the pairs of the PTX lowering), are unchanged. The proxy's cache keeps what is made with it and without it apart. The launcher passes it on as it is, `vf env` prints it, `vf doctor` says what it turns off, and `safe_mode` in `scripts/vf` is where the launcher decides it. `INSTALL.md` describes it, `LIMITS.md` ("Safe mode") says what it does not do.
 
 ### Tests
 
-- `tests/proxy/safe_mode.py` (in the CI): each switch that safe mode turns off, against a stand-in for the driver that keeps every image, the values that leave it off, and the cache keys; `tests/gpu/run.sh`: `bf16-group-rounding` (bf16 products whose terms round up one at a time, which the tensor cores truncate) and the `safe-*` cases, the default's words with `VF_SAFE=1` and a switch.
+- `tests/proxy/safe_mode.py` (in the CI): each switch that safe mode turns off, against a stand-in for the driver that keeps every image, the values that leave it off, and the cache keys; `tests/launcher/launcher.sh`: what `vf env`, `vf doctor` and a command see of it; `tests/gpu/run.sh`: `bf16-group-rounding` (bf16 products whose terms round up one at a time, which the tensor cores truncate) and the `safe-*` cases, the default's words with `VF_SAFE=1` and a switch.
 
 ## Unreleased
 

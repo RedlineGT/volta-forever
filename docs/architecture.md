@@ -696,7 +696,7 @@ whose results are not bit-identical to the default's (`INSTALL.md` lists them):
 `vf_adapt::Policy::make_safe`, in every part that adapts code (the proxy, the nvJitLink adapter,
 `vf ptxas`, `vf adapt`), and the runtime of the bf16 cuBLAS variants for its tensor-core path. The
 policy keeps it (`Policy::safe`), so the cache of section 3 keeps what is made with it and without
-it apart.
+it apart. The launcher decides it in one function, `safe_mode`.
 
 ### Cache
 

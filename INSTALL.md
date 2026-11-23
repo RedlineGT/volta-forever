@@ -508,6 +508,7 @@ that loaded it, not by a child made with `fork()`.
 | `VF_JIT_LINEINFO` | unset | `1`: `NVCC_APPEND_FLAGS` gains `-lineinfo` and `CUTE_DSL_LINEINFO=1` is set, so that compilers run by the program keep the PTX of what they build, for a program told 8.0 or later ("What the launcher sets", above) |
 | `VF_CUBLAS_BF16_TC` | `0` | `1`: `libcublas.so.13` and `libcublasLt.so.13` are the bf16 cuBLAS variants of `forward/bf16tc`, whose runtime library reads the variable. The launcher refuses to run when they are not installed ("The bf16 cuBLAS variants", above). `0` or `1` |
 | `VF_CUBLAS_BF16_SKINNY` | `0` | `1`: selects the same variants, whose runtime library reads this variable too; the same refusals. `0` or `1` |
+| `VF_SAFE` | unset | Safe mode (the proxy's table, above): passed on as it is, and the libraries that the bf16 switches select are the same with it. `vf env` prints it when it is `1`; `vf doctor` says that it is on and which of the switches that are set it turns off, or that a value other than `0` and `1` leaves it off |
 
 ## What the first run costs
 

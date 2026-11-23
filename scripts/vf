@@ -41,6 +41,8 @@
 #   VF_CUBLAS_BF16_TC=1, VF_CUBLAS_BF16_SKINNY=1
 #                  libcublas.so.13 and libcublasLt.so.13 are the bf16 cuBLAS variants of
 #                  forward/bf16tc (bf16_select); refused when they are not installed
+#   VF_SAFE=1      (exactly 1) safe mode: the layer and the bf16 cuBLAS variants keep their
+#                  conservative paths; decided here by safe_mode
 # A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 set -eu
 
@@ -103,6 +105,21 @@ get_version() {
     else
         echo "unknown"
     fi
+}
+
+# --- safe mode -------------------------------------------------------------------
+# VF_SAFE=1: the layer (libcuda.so.1, the nvJitLink adapter) and the bf16 cuBLAS variants keep
+# their conservative paths, those whose results are bit-identical to what they give by default
+# (INSTALL.md). Only the exact value 1 turns it on: unset, empty, 0, true, " 1" and every other
+# value leave it off, as the layer and the variants read it. The variable reaches the program as it
+# is; vf env prints it when it is on (a shell that reads those lines runs its programs in safe mode
+# too) and vf doctor says what it turns off. This function is the one place where the launcher
+# decides whether safe mode is on (status 0): what the launcher turns on by choice for speed, and
+# whose results are not bit-identical to what the program gets without it, is to ask it first and
+# stay off when it answers yes. (Nothing that the launcher turns on today is such: VF_JIT_LINEINFO
+# makes compilers keep line tables and PTX, with the same machine code.)
+safe_mode() {
+    [ "${VF_SAFE-}" = 1 ]
 }
 
 # --- the release that an environment made by vf venv runs ------------------------
@@ -630,6 +647,11 @@ cmd_env() {
             fi
         done
     fi
+    # Safe mode, when it is on: with the switches above, a shell that reads these lines would
+    # otherwise run its programs with what safe mode turns off.
+    if safe_mode; then
+        printf 'export VF_SAFE=%s\n' "$(quoted 1)"
+    fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
     printf 'export VOLTA_FOREVER_HOME=%s\n' "$(quoted "$home")"
     setup_jit
@@ -936,6 +958,27 @@ cmd_doctor() {
     fi
     venv_release
     [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
+    # Safe mode: on, with the switches set that it turns off (in the layer: the bf16 products on
+    # the tensor cores and in tree order, another form of the program; in the bf16 cuBLAS variants:
+    # their tensor-core path); or a value of VF_SAFE that leaves it off.
+    if safe_mode; then
+        _safe_off=
+        for _var in VF_BF16_TC_GROUPS VF_BF16_TC_TILES VF_BF16_COLUMN VF_BF16_ROW VF_TRANSLATE VF_CUBLAS_BF16_TC; do
+            eval "_val=\${$_var-}"
+            case $_var=$_val in
+                VF_BF16_TC_GROUPS=1 | VF_BF16_TC_TILES=1 | VF_BF16_COLUMN=tree | VF_BF16_ROW=tree | \
+                    VF_TRANSLATE=first | VF_TRANSLATE=force | VF_CUBLAS_BF16_TC=1)
+                    _safe_off="${_safe_off:+$_safe_off, }$_var=$_val" ;;
+            esac
+        done
+        if [ -n "$_safe_off" ]; then
+            echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths; not used: $_safe_off"
+        else
+            echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths (no switch that safe mode turns off is set)"
+        fi
+    elif [ -n "${VF_SAFE+set}" ] && [ "$VF_SAFE" != 0 ]; then
+        echo "NOTICE VF_SAFE is '$VF_SAFE', not 1: safe mode is off (only the exact value 1 turns it on)"
+    fi
     # (Told 8.0 or later, a program that compiles CUDA while it runs builds machine code for
     # sm_80 or later, of which the layer can translate little.)
     case ${VF_CAPABILITY:-} in
@@ -1113,6 +1156,9 @@ Environment:
   VF_CUBLAS_BF16_TC=1, VF_CUBLAS_BF16_SKINNY=1
                  libcublas.so.13 and libcublasLt.so.13 are the bf16 cuBLAS variants of
                  forward/bf16tc; refused when they are not installed (0 or 1; unset: 0)
+  VF_SAFE=1      safe mode (exactly 1): the layer and the bf16 cuBLAS variants keep their
+                 conservative paths, whose results are bit-identical to their default's
+                 (see INSTALL.md); vf doctor says what it turns off
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }

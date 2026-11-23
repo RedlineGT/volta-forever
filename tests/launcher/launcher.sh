@@ -10,8 +10,9 @@
 # arguments with spaces and empty arguments, the exit status, env applied
 # twice, a symlinked launcher, doctor exit status, fetch command line, help and unknown
 # options, the bf16 cuBLAS variants that VF_CUBLAS_BF16_TC and VF_CUBLAS_BF16_SKINNY
-# select (what is mapped, what is refused, what doctor says). Prints PASS/FAIL per case;
-# exits 1 on a failure.
+# select (what is mapped, what is refused, what doctor says), and safe mode (VF_SAFE: what env
+# prints, what doctor says, what reaches a command). Prints PASS/FAIL per case; exits 1 on a
+# failure.
 set -eu
 
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -1040,6 +1041,11 @@ if python3 -c 'import sys, venv; sys.exit(0 if hasattr(sys, "orig_argv") else 1)
     got=$("$ve/bin/python" -c 'import subprocess, sys; print(subprocess.run([sys.executable, "-c", "import os; print(os.environ.get(\"VOLTA_FOREVER\"))"], capture_output=True, text=True).stdout.strip())')
     if [ "$got" = "0.1.0" ]; then pass "$name"; else fail "$name" "a child Python saw: $got"; fi
 
+    # Safe mode reaches a Python started again through the launcher, as it is.
+    name="venv-safe-mode"
+    got=$(VF_SAFE=1 "$ve/bin/python" -c 'import os; print(os.environ.get("VF_SAFE"), os.environ.get("VOLTA_FOREVER"))')
+    if [ "$got" = "1 0.1.0" ]; then pass "$name"; else fail "$name" "its Python saw: $got"; fi
+
     name="venv-off-for-one-command"
     got=$(VF_VENV=0 "$ve/bin/python" -c 'import os; print(os.environ.get("VOLTA_FOREVER"))')
     if [ "$got" = None ]; then pass "$name"; else fail "$name" "with VF_VENV=0: $got"; fi
@@ -1473,6 +1479,85 @@ if [ -z "$_why" ] && [ "$_s0:$_s1:$_s2:$_s3:$_s4" = "0:0:1:0:0" ]; then
 else
     fail "$name" "${_why:-status without them, without the runtime, with the switch, with all, at 0: $_s0:$_s1:$_s2:$_s3:$_s4}"
 fi
+
+# Safe mode (VF_SAFE), which safe_mode decides: only the exact value 1 turns it on. The variable
+# reaches the command as it is; vf env prints it when it is on, and nothing of it otherwise; vf
+# doctor says that it is on and which of the switches that are set it turns off (not the ordered
+# modes, which give the default's bits), or that a value leaves it off. The libraries that the
+# bf16 switches select are the same with it as without it: the variants' runtime reads it itself.
+sclean() {
+    env -u VF_SAFE -u VF_BF16_TC_GROUPS -u VF_BF16_TC_TILES -u VF_BF16_COLUMN -u VF_BF16_ROW -u VF_TRANSLATE \
+        -u LD_LIBRARY_PATH -u LD_AUDIT -u VF_AUDIT_MAP -u VF_CUBLAS_BF16_TC -u VF_CUBLAS_BF16_SKINNY "$@"
+}
+name="safe-run"
+r1=$(sclean VF_SAFE=1 "$vf" sh -c 'printf "%s" "${VF_SAFE-unset}"') || true
+r2=$(sclean VF_SAFE=' 1' "$vf" sh -c 'printf "%s" "${VF_SAFE-unset}"') || true
+r3=$(sclean "$vf" sh -c 'printf "%s" "${VF_SAFE-unset}"') || true
+if [ "$r1" = 1 ] && [ "$r2" = " 1" ] && [ "$r3" = unset ]; then
+    pass "$name"
+else
+    fail "$name" "the command saw: '$r1', '$r2', '$r3'"
+fi
+
+name="safe-env"
+_why=
+e1=$(sclean VF_SAFE=1 "$vf" env) || true
+case $e1 in
+    *"export VF_SAFE='1'"*) [ "$(envvar "$e1" VF_SAFE)" = 1 ] || _why="read back: $(envvar "$e1" VF_SAFE)" ;;
+    *) _why="with VF_SAFE=1: $e1" ;;
+esac
+for _v in unset '' 0 true yes ' 1' '1 ' 01; do
+    if [ "$_v" = unset ]; then _e=$(sclean "$vf" env) || true; else _e=$(sclean VF_SAFE="$_v" "$vf" env) || true; fi
+    case $_e in
+        *VF_SAFE*) _why="${_why:+$_why; }with VF_SAFE '$_v': $_e" ;;
+    esac
+done
+if [ -z "$_why" ]; then pass "$name"; else fail "$name" "$_why"; fi
+
+name="safe-doctor"
+_why=
+_s0=0; _d0=$(sclean "$arch_ok/bin/vf" doctor 2>&1) || _s0=$?
+_s1=0; _d1=$(sclean VF_SAFE=1 "$arch_ok/bin/vf" doctor 2>&1) || _s1=$?
+_s2=0; _d2=$(sclean VF_SAFE=1 VF_BF16_TC_GROUPS=1 VF_BF16_TC_TILES=0 VF_BF16_COLUMN=ordered VF_BF16_ROW=tree VF_TRANSLATE=force \
+    "$arch_ok/bin/vf" doctor 2>&1) || _s2=$?
+_s3=0; _d3=$(sclean VF_SAFE=true VF_BF16_TC_GROUPS=1 "$arch_ok/bin/vf" doctor 2>&1) || _s3=$?
+_s4=0; _d4=$(sclean VF_SAFE=0 VF_BF16_TC_GROUPS=1 "$arch_ok/bin/vf" doctor 2>&1) || _s4=$?
+case $_d0 in *VF_SAFE*) _why="without it: $_d0" ;; esac
+case $_d1 in
+    *"ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths (no switch that safe mode turns off is set)"*) ;;
+    *) _why="with VF_SAFE=1: $_d1" ;;
+esac
+case $_d2 in
+    *"ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths; not used: VF_BF16_TC_GROUPS=1, VF_BF16_ROW=tree, VF_TRANSLATE=force"*) ;;
+    *) _why="with switches: $_d2" ;;
+esac
+case $_d3 in
+    *"NOTICE VF_SAFE is 'true', not 1: safe mode is off (only the exact value 1 turns it on)"*) ;;
+    *) _why="with VF_SAFE=true: $_d3" ;;
+esac
+case $_d4 in *VF_SAFE*) _why="with VF_SAFE=0: $_d4" ;; esac
+if [ -z "$_why" ] && [ "$_s0:$_s1:$_s2:$_s3:$_s4" = "0:0:0:0:0" ]; then
+    pass "$name"
+else
+    fail "$name" "${_why:-status: $_s0:$_s1:$_s2:$_s3:$_s4}"
+fi
+
+# (The installation with the bf16 variants, above.)
+name="safe-bf16-unchanged"
+_why=
+e=$(sclean VF_CUBLAS_BF16_TC=1 "$bvf" env) || true
+es=$(sclean VF_SAFE=1 VF_CUBLAS_BF16_TC=1 "$bvf" env) || true
+r=$(sclean VF_CUBLAS_BF16_TC=1 "$bvf" sh -c "$seen") || true
+rs=$(sclean VF_SAFE=1 VF_CUBLAS_BF16_TC=1 "$bvf" sh -c "$seen") || true
+[ "$(printf '%s\n' "$es" | grep -v '^export VF_SAFE=')" = "$e" ] || _why="env: $e; with VF_SAFE=1: $es"
+[ "$(envvar "$es" VF_SAFE)" = 1 ] || _why="${_why:+$_why; }env with VF_SAFE=1 does not set it: $es"
+[ "$rs" = "$r" ] && [ "$r" = "$path1|$map1|1|unset" ] || _why="${_why:+$_why; }run: $r; with VF_SAFE=1: $rs"
+_s=0; _d=$(sclean VF_SAFE=1 VF_CUBLAS_BF16_TC=1 "$bvf" doctor 2>&1) || _s=$?
+case $_d in
+    *"ok    VF_CUBLAS_BF16_TC=1: libcublas.so.13 is $bB/libcublas.so.13"*"ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths; not used: VF_CUBLAS_BF16_TC=1"*) ;;
+    *) _why="${_why:+$_why; }doctor: $_d" ;;
+esac
+if [ -z "$_why" ] && [ "$_s" = 0 ]; then pass "$name"; else fail "$name" "${_why:-doctor status $_s}"; fi
 
 # --- done -----------------------------------------------------------------------
 
