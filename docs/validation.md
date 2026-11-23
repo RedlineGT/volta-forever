@@ -552,10 +552,21 @@ before the sequence of a matrix load was changed and the rule `data_overwritten`
 
 **Triton.** The 346 sm_75 cubins that Triton made at run time in this site's runs, as found in
 their caches (2026-11-23, with the translator and the rules of 0.1.3): **346 of 346 at 0
-problems** (307,059 instructions of 334 functions). These are the only Triton kernels checked:
-Triton makes other kernels for other programs, shapes and settings, and those were not looked
-at. In 12 of these cubins, all variants of one `tl.dot` kernel, the rule `data_overwritten`
-objects to the translation of 0.1.2 and earlier.
+problems** (307,059 instructions of 334 functions). In 12 of these cubins, all variants of one
+`tl.dot` kernel, the rule `data_overwritten` objects to the translation of 0.1.2 and earlier.
+Then (2026-11-23, after 0.1.3) the cubins that Triton made for the corpus of section 6
+("Triton"): **4,308 distinct cubins** of 20 kernels in 3,516 configurations, and the caches of
+this site again (334 distinct cubins). The two translators give the same bytes for all of them
+(`compare.sh`); the translator refuses 112 functions of the first (84 reductions whose layout
+conversion is an `LDSM` at an address without register, `LDSM [RZ]`; 22 for registers; 6 for
+`UP2UR` with an immediate) and 7 of the second (6 for registers, one for `STL` with a uniform
+register), and the layer runs the PTX kept in those cubins instead. The validator: 334 of 334 at 0
+problems (278,681 instructions of 327 functions), and **4,308 of 4,308 at 0 problems** (2,876,544
+instructions of 4,196 functions) once a check of the whole function was told that the registers
+a matrix load at level 3 borrows are borrowed at its instruction alone: it objected for that
+alone to two cubins, one `tl.dot` in float32 with 252 registers in two precisions, whose
+translation was right on the V100 and is checked instruction by instruction by the rules that
+check every borrowed register.
 
 This corpus showed two faults that PyTorch's code could not, the first time it was translated:
 marks of register reuse that came to name a batch when the schedule was lengthened (225
@@ -787,6 +798,73 @@ byte, cubins of PyTorch's corpus of section 4. The other 35, of one function eac
 of the wheel's other libraries, which the extraction of that corpus does not reach: translated
 by the reference translator and validated, 76,763 instructions, 0 problems. On every cubin of
 the dump the two translators give the same bytes (section 7).
+
+### Triton
+
+Triton makes its kernels while the program runs; told 7.5 (the default), it makes sm_75 machine
+code, which the layer translates. Its code has instruction sequences that PyTorch's has not (the
+defect of 0.1.2 in matrix loads was found in it, after the battery above had passed).
+`tests/gpu/triton-diff.py` runs the kernels of `tests/gpu/triton_corpus.py`, a generator of 3,516
+cases of 20 Triton kernels (2026-11-23): element-wise operations in the twelve types (integers of
+8 to 64 bits signed and unsigned, float16, bfloat16, float32, float64) on small integers, normal
+values, values with infinities, NaN, zeros and subnormals, and every bit pattern; conversions
+between every pair of types, with the rounding toward zero and bit casts; reductions (sum,
+maximum, minimum, arg-maximum, exclusive or, custom combinations) along each axis of tiles of
+eight shapes and 1 to 16 warps; scans (cumulative sums and products, a maximum, a linear
+recurrence); sorts, top-k, flips, gathers, histograms, transpositions, joins, interleavings;
+`tl.dot` in float16, bfloat16, float32 (`ieee`, `tf32`, `tf32x3`) and float64 with 17 tile shapes,
+1 to 8 warps, 1 to 4 stages, operands transposed or not, sizes that are and are not multiples of
+the tiles, three epilogues; flash attention; masked, gathered, scattered, strided and reversed
+memory, cache hints, block pointers, addresses beyond 2**31 elements; atomics (add, maximum,
+minimum, and, or, exclusive or, exchange, compare-and-swap in a lock) with four orderings and two
+scopes; loops with trip counts read from memory and loops that end with the data; grids up to
+200,000 blocks and 65,535 in y; random numbers; inline PTX; 143 functions of libdevice. Each case
+runs on the GPU through the translated machine code (5 runs on the same inputs, which must give the
+same bits) and through the PTX that Triton made the same kernel from, retargeted by the layer
+(the same compiled kernel and launcher, its module loaded from the PTX): the two must give the same
+bits, and both what Triton's interpreter computes on the CPU, bit for bit (inputs that make sums
+exact in any order) or within the error the case states (approximate functions, float32 division,
+sums of 16-bit floats, which Triton rounds to their type).
+
+On a Tesla V100-SXM2-32GB, driver 580.178.04, with the tree of 2026-11-23 (`fix/triton`): **no
+case gives another result through the layer than through the other route or than its reference
+allows, and none differs between its runs**, at the default and with `VF_BORROW=5` (what the
+second translation at launch translates with), `VF_BORROW=1` and, for the products,
+`VF_PAIRS=0`: the four give the same bits for every case. 86 cases are not compiled by Triton for
+sm_75 (an int8 product, `div_rn` or `clamp` of integers, a rounding of float32 to bfloat16 toward
+zero, a block too large for the shared memory); one, a sort of 16 warps, is not launched by Triton
+because the translation takes 137 registers where its cubin requires blocks of 512 threads (a V100
+allows 384 then: Triton reads that limit from the loaded kernel and stops before the launch, so the
+second translation at launch never comes; the kernel takes 128 registers on sm_75, all its blocks
+allow, and every level of the translator needs more);
+397 have no reference (the interpreter has no libdevice and no exchange of floats; subnormal
+inputs, which Triton's instructions flush and numpy does not) and are compared between their runs
+and the routes only, and 58 (98 with `VF_BORROW=1`) are refused as machine code and run as the
+PTX the cubin keeps. The interpreter differs from Triton's code in places that the cases leave out
+or compare otherwise (its bfloat16 conversion truncates, its conversion toward zero makes NaN of
+what overflows, its sums of 16-bit floats are wider); Triton's own conversion to 8-bit floats for
+sm_75 rounds halves away from zero and makes -0 of a float32 NaN, through both routes alike.
+
+The kernels that vLLM 0.34 and SGLang 0.5.23 ship, launched by `tests/gpu/triton_vendor.py`
+(`--vendor`, in the Python of each engine) with the shapes of small and 7B-70B models and with
+lengths that are not multiples of the blocks, single tokens, and the largest values: 151 cases of
+74 of vLLM's 1,012 `@triton.jit` functions (47 more reached as their helpers: fused MoE in its
+plain, GPTQ/AWQ and int8 forms, unified, paged, prefix-prefill and decode attention, merging of
+attention states, the KV-cache writer, sampling and rejection sampling, penalties, LoRA, Mamba and
+SSD, the gated delta rule, AWQ, scaled products and quantization, the model runner's batch
+kernels, batch-invariant operations, mrope) and 90 cases of 49 of SGLang's 1,034 (8 more as
+helpers: decode, extend and prefill attention, MoE, its router, alignment and reductions, sampling,
+KV-cache copies, norms, activations, the gated delta rule, Mamba, quantization, LoRA, EAGLE), each
+5 times through each route (2026-11-23): vLLM 135 PASS, 10 PASS-PTX, 6 not compiled for sm_75 or
+too large for the shared memory; SGLang 83 PASS, 5 PASS-PTX, 1 not compiled, and one not launched:
+`fused_moe_router_cudacore_kernel` for 128 experts, 16 warps, whose translation (as the sort
+above) takes more registers than blocks of 512 threads allow; its PTX route gives the reference.
+No case differs between its runs or between the routes.
+
+The test can fail: with the translator of 0.1.2, three of the float32 and bfloat16 `tl.dot` cases
+give lane numbers for accumulators, other ones in each run, and three more stop with a misaligned
+address (the fault seen when 0.1.3 was prepared). `tests/gpu/triton.sh` runs 179 of the cases,
+among them those three, in four minutes.
 
 ### The second translation at launch
 
@@ -1086,10 +1164,12 @@ emits, and neither of those checks ran them.
 
 **Triton's machine code.** Triton makes its kernels while the program runs, for its shapes and
 settings; told 7.5 (the default), it gives them as sm_75 machine code, which the layer
-translates. The validator has checked the 346 Triton cubins of this site's runs (section 4), not
-the kernels that Triton makes for other programs, shapes or settings. Until 2026-11-23 the
+translates. The corpus of section 6 ("Triton") is 3,516 configurations of 20 kernels written for
+the test and 241 cases of 123 kernels of vLLM and SGLang (of their 2,046 `@triton.jit`
+functions); the validator has checked the 4,308 cubins of the first and the 334 of this site's runs
+(section 4). Other programs, shapes and settings make other kernels, which neither saw. Until 2026-11-23 the
 translation of variants of one `tl.dot` kernel stored wrong values on a V100, and the validator
-found nothing. A wider validation of Triton's code is planned for the next release.
+found nothing.
 
 **Kernels that nothing runs.** The battery and the programs launch the kernels that their cases
 ask for; the others of the 23,664 functions translated in PyTorch's library are checked by the
