@@ -172,6 +172,25 @@ pub fn last_detach(context: usize) -> bool {
     }
 }
 
+/// `context` is to be destroyed whatever its attaches (`cuCtxDestroy`, `cuGreenCtxDestroy`): they
+/// are taken away before the driver's call, while no other context can have its address, and given
+/// back to `restore_attaches` if it was not destroyed. (Else the next context at its address would
+/// be taken to need more detaches than it does, and its last one taken for one that is not.)
+pub fn take_attaches(context: usize) -> Option<usize> {
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&context)
+}
+
+/// The driver did not destroy `context`, whose attaches `take_attaches` took: they are counted again.
+pub fn restore_attaches(context: usize, attaches: Option<usize>) {
+    if let Some(attaches) = attaches {
+        ATTACHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(context)
+            .or_insert(attaches);
+    }
+}
+
 /// The driver gave `context` as the primary context of `device`.
 pub fn primary_retained(device: c_int, context: usize) {
     primary().insert(device, context);

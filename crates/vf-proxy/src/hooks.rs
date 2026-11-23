@@ -2896,9 +2896,12 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuCtxDestroy: ContextDestroy);
     let modules = contexts::of(context as usize);
+    let attaches = contexts::take_attaches(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
         contexts::destroyed(modules);
+    } else {
+        contexts::restore_attaches(context as usize, attaches);
     }
     result
 }
@@ -2908,9 +2911,12 @@ pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuCtxDestroy_v2: ContextDestroy);
     let modules = contexts::of(context as usize);
+    let attaches = contexts::take_attaches(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
         contexts::destroyed(modules);
+    } else {
+        contexts::restore_attaches(context as usize, attaches);
     }
     result
 }
@@ -2952,10 +2958,17 @@ pub unsafe extern "C" fn cuGreenCtxDestroy(green: *mut c_void) -> CUresult {
     // (No context: no module loaded in it.)
     let known = unsafe { from_green(&mut context, green) } == CUDA_SUCCESS && !context.is_null();
     let modules = contexts::of(if known { context as usize } else { 0 });
+    let attaches = if known {
+        contexts::take_attaches(context as usize)
+    } else {
+        None
+    };
     let real = real!(cuGreenCtxDestroy: ContextDestroy);
     let result = unsafe { real(green) };
     if result == CUDA_SUCCESS {
         contexts::destroyed(modules);
+    } else if known {
+        contexts::restore_attaches(context as usize, attaches);
     }
     result
 }

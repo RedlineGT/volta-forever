@@ -60,7 +60,7 @@ static uintptr_t obj_counter = 0x10000, fn_counter = 0x100000, ctx_counter = 0x9
 static _Thread_local uintptr_t current;
 static struct {
     uintptr_t ctx;
-    int device, live;
+    int device, live, uses;
 } ctxs[1024];
 
 static int find_object(void *handle) {
@@ -186,6 +186,7 @@ CUresult cuCtxCreate_v2(void **context, unsigned flags, int device) {
             ctxs[i].ctx = c;
             ctxs[i].device = device;
             ctxs[i].live = 1;
+            ctxs[i].uses = 1;
             break;
         }
     UNLOCK;
@@ -213,30 +214,25 @@ CUresult cuCtxDestroy(void *context) { return destroy(context); }
 CUresult cuGreenCtxDestroy(void *context) { return destroy(context); }
 // (A green context is its own context here: what is loaded through the one given for it is its.)
 CUresult cuCtxFromGreenCtx(void **context, void *green) { *context = green; return 0; }
-// The last detach of a context destroys it; each attach takes one detach more.
-static uintptr_t attached_to[64];
+// A context has one use when it is made, one more at each attach; the detach of the last destroys
+// it. (cuCtxDestroy destroys it whatever its uses.)
 CUresult cuCtxAttach(void **context, unsigned flags) {
     (void)flags;
+    if (!current) return INVALID_CONTEXT;
     LOCK;
-    for (int i = 0; i < 64; ++i)
-        if (!attached_to[i]) {
-            attached_to[i] = current;
-            break;
-        }
+    for (int i = 0; i < 1024; ++i)
+        if (ctxs[i].live && ctxs[i].ctx == current) ++ctxs[i].uses;
     UNLOCK;
     *context = (void *)current;
-    return current ? 0 : INVALID_CONTEXT;
+    return 0;
 }
 CUresult cuCtxDetach(void *context) {
     LOCK;
-    for (int i = 0; i < 64; ++i)
-        if (attached_to[i] == (uintptr_t)context) {
-            attached_to[i] = 0;
-            UNLOCK;
-            return 0;
-        }
+    int last = 0;
+    for (int i = 0; i < 1024; ++i)
+        if (ctxs[i].live && ctxs[i].ctx == (uintptr_t)context) last = --ctxs[i].uses == 0;
     UNLOCK;
-    return destroy(context);
+    return last ? destroy(context) : 0;
 }
 CUresult cuCtxGetCurrent(void **context) { *context = (void *)current; return 0; }
 CUresult cuCtxSetCurrent(void *context) { current = (uintptr_t)context; return 0; }
