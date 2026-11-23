@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changed
+
+- From `VF_LOG_LEVEL=2`, the lines about an image that a program loads name it: by the file of a load from a file (`cuModuleLoad`), by its size and XXH64 digest for a load from memory (`cuModuleLoadData`, `cuLibraryLoadData` and the other loads), so that two specializations of one kernel, loaded as two images, can be told apart. The digest is that of the image's bytes, as `xxhsum -H1` gives it.
+- `emulated in NAME` and `kernel NAME cannot run on this GPU` are said once for each kernel, a kernel being its name and its image: a second kernel of one name from another image (another specialization, which Triton loads as another module) was silent, and is now said too, with that image's digest; the same image loaded again is not said again. Refusals of a name said before are said up to `VF_EMULATION_WARNINGS`, then one line says that the next are not.
+- Documentation: `LIMITS.md` says that the last bits of a Triton FP16 product through the layer can depend on `num_stages` when B is stored N x K (operands copied between the turns of a pipelined loop are gathered, and added in another order than those of a 1-stage kernel; both valid sums), with the cases measured; `docs/performance.md` says how to measure on a V100: settings in turns inside one job, and small kernels timed through a CUDA graph, not one eager launch at a time from Python (figures).
+
+### Added
+
+- `VF_SUMMARY=FILE`: the report at exit (the kernels with emulated instructions, the second translations, the counts of `VF_STATS`) is also written to `FILE.PID`, and rewritten while the process runs, every `VF_SUMMARY_INTERVAL` seconds (30 by default) when it changed, so that a process killed without exiting (SIGKILL) leaves it. One thread writes it, none without the variable; as the other reports at exit, only the process that loaded the layer.
+- `tests/release-check.sh`: the host checks of a release in order, with a table and the exit status 1 on a failure (with `--full`, also the validator over the corpora), and the commands of the GPU part, for the tree and for an installed archive; `VF_RELEASE_GPU_RUN` runs them through a runner of GPU jobs.
+
+### Tests
+
+- `tests/gpu/triton.sh` (`triton-diff.py`): each case's inputs are made once, in one thread, saved with the references, and given to the reference and to both routes; every record and the report give their digest. `ld-erfinv-f64` had failed twice with the two routes on different inputs: PyTorch's tanh, MKL's, had computed one block of 2,048 values with MKL's AVX2 low-accuracy code in one thread of PyTorch's pool, in one process. `triton-diff.py inputs` makes the inputs alone and prints the digest of all of them.
+- `tests/proxy/log_lines.py` and `tests/proxy/summary_file.py` (in the CI): the images named at level 2, the lines of each kernel of a name, and `VF_SUMMARY`'s file of a process killed with SIGKILL, against a stand-in driver.
+
+## Unreleased
+
 ### Fixed
 
 - `CUDA_MODULE_LOADING=EAGER`: cuBLAS 12.9, cuBLASLt, cuSPARSE, cuSOLVER and cuDNN 9.10 (its CUDA 12 build) start again through the layer, reached directly or through the forwarding libraries. Under eager loading the CUDA 12 runtime that they carry asks for the module of every fat binary at its start and gave up at the first lookup that failed: one of cuBLAS 12.9's images has ten grouped GEMM kernels for sm_80 that the layer does not translate, so `cublasCreate`, `cublasLtCreate`, `cusparseCreate` and `cusolverDnCreate` failed, and cuDNN 9.10's first operation. As NVIDIA's driver does for an image without code for the GPU, the layer now gives no module (209) under eager loading for an image with a kernel it refuses, and for an image it made from one without code for the V100 when the caller has code for the V100 of its own; their kernels stay given by `cuLibraryGetKernel`. A program of the CUDA 12 runtime whose own fat binary has a refused kernel starts without the kernels of that fat binary under eager loading. `LIMITS.md` says what eager loading costs through the layer.
