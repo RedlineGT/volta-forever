@@ -13,6 +13,7 @@
 pub mod assemble;
 pub mod decode;
 pub mod distance;
+pub mod effects;
 pub mod elf;
 pub mod field;
 pub mod pairing;

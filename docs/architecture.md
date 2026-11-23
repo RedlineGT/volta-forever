@@ -351,7 +351,9 @@ the default log level says so. The images that such a caller loads are then adap
 what it is told: an image that also has PTX for sm_80, or sm_80 cubins that retain theirs,
 is given its sm_75 code or its PTX for sm_75. PyTorch is such a program: in its sm_75 code, the
 kernels it chooses for 8.0 print an error and write nothing, and some of those it
-chooses for 9.0 stop the GPU. A program whose code is PTX for the generation asked (as
+chooses for 9.0 stop the GPU. Where such a caller is told a later generation all the same
+(below), a kernel whose machine code for sm_75 writes no memory, where its code for the
+architecture told writes, is refused (`vf_sass::effects`). A program whose code is PTX for the generation asked (as
 llama.cpp's, for sm_75, sm_80 and sm_90) is told what was asked and given its PTX for that
 capability. The decision is taken when a caller first asks; a
 library loaded after that is not looked at. `VF_CAPABILITY_ALL=1` tells such callers
