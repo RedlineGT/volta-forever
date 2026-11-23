@@ -58,6 +58,16 @@ CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch --family qwen36 --model
 
 Ask “What is the capital of France? Answer in one word.” in the local chat. The unpinned installation selected the signed Strata 0.2.18 terminal and CUDA 13 engine 0.1.64. It answered **Paris** on a Tesla V100-SXM2-32GB with driver 580.178.04 with the CUDA 12 native engine and with CUDA 13 under VF.
 
+### Several GPUs
+
+With the layers split over several GPUs (`--gpu 0,1`), the engine captures its first verify window inside its first request, under its watchdog of 60 s, and the kernels of that window are adapted and compiled there: the first start spends tens of seconds in that request. On two V100-SXM2-32GB with two Xeon Gold 6133 and empty caches, the first window took 33 s and 43 s in two runs with VF from main (2026-11-23), most of it on one CPU core, so a slower machine has little margin; with VF 0.1.3 it took 212 s, and the watchdog stopped the engine (issue #3). For the first start, give the watchdog more time in the environment of the launch:
+
+```sh
+STRATA_WATCHDOG_S=900 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch ... --gpu 0,1 ...
+```
+
+VF and the driver keep what they made in their caches (here 7 MB and 15 MB; with VF 0.1.3 the driver's took 140 MB, which `CUDA_CACHE_MAXSIZE` must allow), and the next starts need no setting: the first window then took 1.7 s and 2.9 s in two runs (31 s with VF 0.1.3).
+
 ## 5. Benchmarks
 
 With that server running, download the client and prompts to the same directory. The client runs a warm-up and three different chats at temperature zero with thinking disabled.
