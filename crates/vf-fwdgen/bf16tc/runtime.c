@@ -768,7 +768,12 @@ EXPORT cublasStatus_t vf_bf16_cublasSetWorkspace_v2(cublasHandle_t handle, void 
 {
     const cublasStatus_t s = cb.SetWorkspace(handle, workspace, size);
     HState *h = s == CUBLAS_STATUS_SUCCESS ? handle_state(handle) : NULL;
-    if (h) atomic_store_explicit(&h->workspace_ok, size >= VF_SEQ_MIN_WORKSPACE, memory_order_relaxed);
+    /* A workspace that is not 256-byte aligned counts as too small: with 4 MiB at 8 to 255 bytes past such an
+     * address, 12.9 ran gemmSN_TN_kernel, not its sequential kernel, at TN 448 x 8 x 256 (tests/gpu/forward/bf16-lt.c). */
+    if (h)
+        atomic_store_explicit(&h->workspace_ok,
+                              size >= VF_SEQ_MIN_WORKSPACE && ((uintptr_t)workspace % 256 == 0 || CONTROL("ws-align")),
+                              memory_order_relaxed);
     return s;
 }
 
@@ -1715,6 +1720,8 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
         goto forward;
     /* A size without a workspace: 12.9 returns CUBLAS_STATUS_INVALID_VALUE, so it is left to say so. */
     if (!workspace && workspaceSizeInBytes) goto forward;
+    /* A workspace that is not 256-byte aligned: 12.9 refuses the call (CUBLAS_STATUS_INVALID_VALUE). */
+    if (workspace && (uintptr_t)workspace % 256 && !CONTROL("ws-align")) goto forward;
     const Shape shape = {ta, tb, (long long)m, (long long)n, (long long)k,
                          aligned16(A) && aligned16(B) && aligned16(D) && (!C || aligned16(C)) && la.ld % 8 == 0 &&
                              lb.ld % 8 == 0 && lc.ld % 8 == 0 && ld.ld % 8 == 0,
@@ -1782,6 +1789,10 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     mat_range(B, (long long)lb.rows, (long long)lb.cols, lb.ld, 2, &b0, &b1);
     mat_range(D, (long long)m, (long long)n, ld.ld, es, &d0, &d1);
     if (overlap(d0, d1, a0, a1) || overlap(d0, d1, b0, b1)) goto forward;
+    /* A bias vector (m elements of D's type) that overlaps D: written while it is read; 12.9's to compute. */
+    if (c.o.btype >= 0 && !CONTROL("bias-alias") &&
+        overlap((uintptr_t)bias, (uintptr_t)bias + (uintptr_t)(m * (uint64_t)es), d0, d1))
+        goto forward;
     if (C && C != D) {
         mat_range(C, (long long)m, (long long)n, lc.ld, es, &c0, &c1);
         if (overlap(c0, c1, d0, d1)) goto forward;

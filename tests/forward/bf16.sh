@@ -121,6 +121,8 @@ control skinny-k skinny "skinny alone, k = 16392: not one call" VF_CUBLAS_BF16_S
 control skinny-speed skinny "(slower than 12.9 there): not one call" VF_CUBLAS_BF16_SKINNY=1
 control seq-any skinny "skinny alone, TN with a 1 MiB workspace: not one call" VF_CUBLAS_BF16_SKINNY=1
 control lt-scan-first skinny "Lt reads: a call left to 12.9 for its workspace read" VF_CUBLAS_BF16_SKINNY=1
+control ws-align skinny "TN with a 4 MiB workspace 16 bytes past an aligned address: not one call" VF_CUBLAS_BF16_SKINNY=1
+control bias-alias skinny "cuBLASLt, a bias that overlaps D (its fourth column): not left to 12.9" VF_CUBLAS_BF16_SKINNY=1
 control any-build otherbuild "skinny alone, another cuBLAS build: not one call" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901
 control eager-setup lazy "lazy: the runtime made something with the handle" VF_CUBLAS_BF16_TC=1
 control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1

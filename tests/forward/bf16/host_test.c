@@ -527,6 +527,63 @@ static void lt_reads(void)
     v.DescDestroy(d32);
 }
 
+/* ---- workspaces not 256-byte aligned, and a bias that overlaps D: left to 12.9 ---- */
+static void ws_and_bias(void)
+{
+    /* legacy: a 4 MiB workspace 16 bytes past an aligned address counts as too small (12.9 runs gemmSN there
+     * at TN 448 x 8 x 256); aligned, it counts */
+    G g = gemm(1, 0, 1536, 8, 1536);
+    v.SetWorkspace(H, (char *)DEV(9) + 16, 4u << 20);
+    expect_forwarded("TN with a 4 MiB workspace 16 bytes past an aligned address", &g, R_SEQ);
+    v.SetWorkspace(H, DEV(9), 4u << 20);
+    expect_skinny("TN with an aligned 4 MiB workspace", &g, "vf_bf16_skinny_8_16");
+    v.SetStream(H, S1);
+    /* cuBLASLt: 12.9 refuses a workspace that is not 256-byte aligned */
+    cublasLtMatmulDesc_t d, db;
+    cublasLtMatrixLayout_t la, lb, lc;
+    v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    v.DescCreate(&db, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    const int32_t ta = CUBLAS_OP_T;
+    const uint32_t e = CUBLASLT_EPILOGUE_BIAS;
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof ta);
+    v.DescSet(db, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof ta);
+    v.DescSet(db, CUBLASLT_MATMUL_DESC_EPILOGUE, &e, sizeof e);
+    v.LayoutCreate(&la, CUDA_R_16BF, 1536, 1536, 1536);
+    v.LayoutCreate(&lb, CUDA_R_16BF, 1536, 8, 1536);
+    v.LayoutCreate(&lc, CUDA_R_32F, 1536, 8, 1536);
+    const float one = 1.0f, zero = 0.0f;
+    static const struct {
+        const char *what;
+        size_t ws_offset;
+        const void *bias; /* NULL: no bias epilogue */
+        int served;
+    } cases[] = {
+        {"cuBLASLt, a 32 MiB workspace at an aligned address", 0, NULL, 1},
+        {"cuBLASLt, a 32 MiB workspace 16 bytes past an aligned address", 16, NULL, 0},
+        {"cuBLASLt, a 32 MiB workspace 128 bytes past an aligned address", 128, NULL, 0},
+        {"cuBLASLt, a bias apart from D", 0, DEV(5), 1},
+        {"cuBLASLt, a bias that overlaps D (its fourth column)", 0, (const char *)DEV(3) + 3 * 1536 * 4, 0},
+        {"cuBLASLt, a bias that overlaps D's last element", 0, (const char *)DEV(3) + (8 * 1536 - 1) * 4, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        if (cases[i].bias) v.DescSet(db, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &cases[i].bias, sizeof cases[i].bias);
+        take();
+        v.LtMatmul((cublasLtHandle_t)H, cases[i].bias ? db : d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), lc, DEV(3), lc,
+                   NULL, (char *)DEV(9) + cases[i].ws_offset, 32u << 20, S1);
+        take();
+        const int served = count("launch vf_bf16_skinny") == 1, forwarded = count("ltmatmul handle=") == 1;
+        if (cases[i].served)
+            CHECK(served && !forwarded, "%s: not served by the skinny path", cases[i].what);
+        else
+            CHECK(forwarded && !served, "%s: not left to 12.9", cases[i].what);
+    }
+    v.LayoutDestroy(la);
+    v.LayoutDestroy(lb);
+    v.LayoutDestroy(lc);
+    v.DescDestroy(d);
+    v.DescDestroy(db);
+}
+
 /* ---- H5: the internal GEMM on the runtime's own handle, with the stream read once ---- */
 static void h5_internal_gemm(void)
 {
@@ -706,6 +763,7 @@ int main(int argc, char **argv)
         v.SetStream(H, S1);
         expect_skinny("skinny alone, TN after cublasSetStream", &g, "vf_bf16_skinny_8_16");
         lt_reads();
+        ws_and_bias();
     } else if (!strcmp(mode, "lazy")) { /* VF_CUBLAS_BF16_TC=1: what the runtime makes, and when */
         take(); /* every event since the process started: cublasCreate and cublasSetStream */
         CHECK(count("module load") == 0 && count("pool create") == 0 && count("ltcreate") == 0,

@@ -794,7 +794,7 @@ the handle. The skinny path therefore serves only where 12.9 was seen to run its
 | op(A) op(B) | served when |
 |---|---|
 | NT, TT | always (m >= 2): 12.9 ran its sequential kernel in all 130,096 such configurations, whatever the alignment, the workspace or the interface |
-| TN | A, B, C at 16-byte addresses, lda, ldb, ldc, m, k multiples of 8, a workspace of cuBLAS's default or at least 4 MiB, 448 <= m <= 16384, 256 <= k <= 4096 |
+| TN | A, B, C at 16-byte addresses, lda, ldb, ldc, m, k multiples of 8, a workspace of cuBLAS's default or of at least 4 MiB at a 256-byte aligned address, 448 <= m <= 16384, 256 <= k <= 4096 |
 | NN | the same conditions, with 8 <= m <= 9728, 896 <= k <= 16384 |
 
 (A workspace of none, 4 KiB, 64 KiB, 256 KiB, 1 MiB or 2 MiB changed 12.9's choice on 202, 202,

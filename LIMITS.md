@@ -341,8 +341,11 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
   configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
   pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with any attribute outside
-  the supported set, a `cublasLtMatmul` without a C descriptor or with a workspace size and no
-  workspace, and every call of a context that is not a V100's. The tensor-core path does not follow
+  the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no
+  workspace, or with a workspace that is not 256-byte aligned (12.9 refuses that), a bias epilogue
+  whose bias overlaps D, and every call of a context that is not a V100's. A legacy workspace set at
+  an address that is not 256-byte aligned counts as smaller than 4 MiB (with 4 MiB 16 bytes past an
+  aligned address, 12.9 ran its gemmSN kernel at TN 448 x 8 x 256). The tensor-core path does not follow
   a `cublasLtMatmul` algorithm: it computes the product its own way, whatever the algorithm says.
 - **Speed that depends on the data.** A row of op(A) or a column of op(B) that does not convert
   exactly to fp16 is computed by the fallback, which is slower: with every column failing at
