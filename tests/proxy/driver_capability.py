@@ -313,14 +313,17 @@ def run_runtimes(proxy, directory):
     """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED). With two
     of them, one with PTX for sm_80 and one with PTX for sm_75 and sm_90 (libcudart.so.17): told
     8.0 for the first, the runtime would be given the PTX for sm_75 of the second: 7.5 (until
-    2026-11-23, 8.0 at 9.0 and 12.0)."""
+    2026-11-23, 8.0 at 9.0 and 12.0). With one that has code for this GPU, which runs as it is
+    (libcudart.so.18): what it chose for a later generation is not there either, and the runtime is
+    told 7.5 (until 2026-11-23, what VF_CAPABILITY asked)."""
     api = c.CDLL(str(proxy))
     given = asked()
     for runtime, users, code_sm in (("libcudart.so.13", ["user_turing.so"], 75),
                                     ("libcudart.so.14", ["user_ptx.so"], 75),
                                     ("libcudart.so.15", ["user_ampere.so"], 80),
                                     ("libcudart.so.16", ["user_chain.so"], 75),
-                                    ("libcudart.so.17", ["user_ptx80.so", "user_ptx75_90.so"], 75)):
+                                    ("libcudart.so.17", ["user_ptx80.so", "user_ptx75_90.so"], 75),
+                                    ("libcudart.so.18", ["user_volta.so"], 75)):
         for user in users:
             c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
         sm = limited(given, code_sm) or 75
@@ -393,7 +396,8 @@ def build(directory):
                                    ("libcudart.so.14", "user_ptx.so", data / "elf75-ptx75-zstd.fatbin"),
                                    ("libcudart.so.15", "user_ampere.so", directory / "ampere_only.fatbin"),
                                    ("libcudart.so.17", "user_ptx80.so", directory / "ptx80.fatbin"),
-                                   ("libcudart.so.17", "user_ptx75_90.so", directory / "ptx75_90.fatbin")):
+                                   ("libcudart.so.17", "user_ptx75_90.so", directory / "ptx75_90.fatbin"),
+                                   ("libcudart.so.18", "user_volta.so", data / "elf70-elf75-ptx70-lz4.fatbin")):
         if not (runtimes / runtime).exists():
             subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", f"-Wl,-soname,{runtime}", "-x", "c",
                             "-", "-o", str(runtimes / runtime)], input=CLIENT, text=True, check=True)

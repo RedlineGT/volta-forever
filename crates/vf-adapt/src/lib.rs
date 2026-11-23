@@ -715,6 +715,11 @@ impl Policy {
     pub fn told_limit(&self, fat: &FatBinary<'_>) -> Option<u32> {
         let told = self.told_sm?;
         let earlier = |sm: &u32| sm / 10 < told / 10;
+        // Code that runs on the device as it is: what it chose for a later generation is not there
+        // either (`given_from` answers `None` for it, as for no code at all).
+        if self.translate != Translate::Force && fat.entries.iter().any(|entry| self.usable(entry)) {
+            return earlier(&self.device_sm).then_some(self.device_sm.max(TRANSLATED_FROM));
+        }
         // `given_from` is one of these: where none is earlier, the cubins need not be read.
         let candidates = [
             self.source_of(fat, KIND_PTX),
@@ -1724,10 +1729,12 @@ mod tests {
             let outcome = policy.adapt_fatbin(&fat).unwrap().outcome;
             let given = match outcome {
                 Outcome::Translated { from_sm, .. } | Outcome::Retargeted { from_sm, .. } => Some(from_sm),
+                Outcome::Native => Some(policy.device_sm),
                 _ => None,
             };
             match (limit, told_sm) {
-                (Some(sm), _) => assert_eq!(given, Some(sm), "{outcome:?}"),
+                // (7.5 for code of Volta's generation.)
+                (Some(sm), _) => assert_eq!(given.map(|g| g.max(TRANSLATED_FROM)), Some(sm), "{outcome:?}"),
                 (None, Some(told)) => assert!(given.is_none_or(|sm| sm / 10 >= told / 10), "{outcome:?}"),
                 (None, None) => {}
             }
@@ -1743,7 +1750,9 @@ mod tests {
             assert_eq!(limit(Some(told), default, &multi), Some(75), "{told}");
             // Given its PTX for sm_75: what `__CUDA_ARCH__` chose there is for 7.5.
             assert_eq!(limit(Some(told), default, &with_ptx), Some(75), "{told}");
-            assert_eq!(limit(Some(told), default, &native), None, "{told}");
+            // Code for this GPU, which runs as it is: what it chose for a later generation is not
+            // there either (until 2026-11-23 it set no limit).
+            assert_eq!(limit(Some(told), default, &native), Some(75), "{told}");
             // Machine code is not translated: nothing is given, and the driver says so.
             assert_eq!(limit(Some(told), Translate::Never, &multi), None, "{told}");
             // Machine code before PTX: what is given of this one is its sm_75 code.
@@ -1769,10 +1778,14 @@ mod tests {
             assert_eq!(limit(Some(told), default, &llama), expected, "{told}");
         }
         let mut file = b"\x7fELF....".to_vec();
-        for image in [&llama, &from_ampere, &native] {
+        for image in [&llama, &from_ampere] {
             file.extend_from_slice(image);
         }
         assert_eq!(policy.told_limit_in(&file), Some(80));
+        let mut with_native = file.clone();
+        with_native.extend_from_slice(&native);
+        assert_eq!(policy.told_limit_in(&with_native), Some(75));
+        file.extend_from_slice(&native);
         file.extend_from_slice(&[0x50, 0xed, 0x55, 0xba, 9, 9]); // the magic number, not a fat binary
         file.extend_from_slice(&multi);
         assert_eq!(policy.told_limit_in(&file), Some(75));
