@@ -1170,5 +1170,15 @@ mod tests {
         // Same policy, same image: same hash.
         let h1b = cache_hash(img, &p1);
         assert_eq!(h1, h1b);
+        // Safe mode (VF_SAFE=1): what a run without it kept is not given to a run with it, nor the
+        // reverse, though safe mode turns nothing off of the default. A switch that safe mode turns
+        // off does not change its key.
+        let mut safe = vf_adapt::Policy::default();
+        safe.make_safe();
+        assert_ne!(cache_hash(img, &safe), h1, "safe mode changes the cache key");
+        let mut grouped_safe = grouped;
+        grouped_safe.make_safe();
+        assert_ne!(cache_hash(img, &grouped_safe), cache_hash(img, &grouped));
+        assert_eq!(cache_hash(img, &grouped_safe), cache_hash(img, &safe));
     }
 }

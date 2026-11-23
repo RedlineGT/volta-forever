@@ -467,6 +467,34 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   the layer)
 - Coverage across all model architectures. The engine guides give the checkpoints and workloads tested.
 
+## Safe mode (`VF_SAFE=1`)
+
+What `VF_SAFE=1` turns off, and how it is read, is in `INSTALL.md` ("Environment variables"). It
+gives the bits of the conservative reference for what the layer chooses, not results that are the
+same everywhere:
+
+- **The reference has dependences of its own.** cuBLAS 12.9 chooses its kernel by the shape of a
+  product, so the bits of one column can change with the number of columns (the batch); the
+  layer's emulated products round otherwise than a later GPU's ([Numerical
+  accuracy](#numerical-accuracy)). Safe mode keeps these: a model's outputs can still depend on
+  its batch size, and differ from another GPU's.
+- **What a program is told is unchanged.** A program told 8.0 (`VF_CAPABILITY`,
+  `VF_CAPABILITY_ALL`) chooses its code for 8.0 and computes what that code computes: Triton's
+  float32 `tl.dot` in tf32, for one ([The capability told with
+  `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
+- **Pairs of products in machine code.** In the PTX lowering, a pair of products gives the bits of
+  each product by itself (`docs/pairs.md`, section 13). In sm_75 machine code the two can differ
+  in the last bits where the sums round: a pair adds the halves of k, (C + k 0..3) + k 4..7, where a
+  product translated by itself adds the even k, then the odd k (`docs/pairs.md`, section 9). The default
+  makes pairs where a function has the registers for them, and none at the third level of borrowing
+  (`docs/translator.md`, "Registers"), which a kernel that names nearly every register gets, and
+  the second translation at launch when it comes to that level: a kernel launched from its second
+  translation can give other last bits than from its first. Safe mode leaves `VF_PAIRS`,
+  `VF_BORROW` and `VF_FIT` as they are, and these differences with them.
+- **It is read once.** `libcuda.so.1` reads it when it is loaded, the nvJitLink adapter and the
+  bf16 cuBLAS variants at their first use: a program that sets `VF_SAFE` while it runs does not get
+  safe mode from `libcuda.so.1`, and may get it from the others.
+
 ## Numerical accuracy
 
 - **Machine-code translation** does not change arithmetic, Turing's tensor-core products apart

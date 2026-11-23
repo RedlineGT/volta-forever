@@ -115,6 +115,26 @@ VF_BF16_COLUMN=ordered px bf16-column-ordered "$G/ptx-cases/bf16-column.ptx" 0 0
 VF_BF16_COLUMN=tree px bf16-column-tree "$G/ptx-cases/bf16-column.ptx" 0 0 0 0
 VF_BF16_ROW=ordered px bf16-row-ordered "$G/ptx-cases/bf16-row.ptx" 4b800000 4b800000 41800000 1
 VF_BF16_ROW=tree px bf16-row-tree "$G/ptx-cases/bf16-row.ptx" 4b800008 4b800008 41800000 1
+# Safe mode (VF_SAFE=1, INSTALL.md): a switch whose results are not the default's bits is not used,
+# and one line says so. Four bf16 products whose terms round up one at a time with the default's
+# fma.rn (3f800004), which Volta's tensor cores truncate (3f800000 with VF_BF16_TC_GROUPS=1): with
+# VF_SAFE=1 the default's words; with VF_SAFE=true (not 1) the switch's. The same for
+# VF_BF16_ROW=tree, whose words differ from the default's above. (Before safe mode, the cases with
+# VF_SAFE=1 gave the switch's words: 2026-11-24.)
+safe_px() {  # safe_px NAME SAID MODULE WORD...: px, and a line of the log matches SAID
+    local name=$1 said=$2 module=$3; shift 3
+    log=$out/logs/$name.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" "$module" k "$@" >"$log" 2>&1
+    check "$name" "^PASS k of" "$said"
+}
+px bf16-group-rounding "$G/ptx-cases/bf16-group-rounding.ptx" 3f800004 3f800004 3f800004 3f800004
+VF_BF16_TC_GROUPS=1 px bf16-group-rounding-on "$G/ptx-cases/bf16-group-rounding.ptx" 3f800000 3f800000 3f800000 3f800000
+VF_SAFE=1 VF_BF16_TC_GROUPS=1 safe_px safe-bf16-group-rounding "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_TC_GROUPS=1 not used" \
+    "$G/ptx-cases/bf16-group-rounding.ptx" 3f800004 3f800004 3f800004 3f800004
+VF_SAFE=true VF_BF16_TC_GROUPS=1 safe_px safe-not-one-bf16-group-rounding "VF_SAFE='true' is not 1: safe mode stays off" \
+    "$G/ptx-cases/bf16-group-rounding.ptx" 3f800000 3f800000 3f800000 3f800000
+VF_SAFE=1 VF_BF16_ROW=tree safe_px safe-bf16-row-tree "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_ROW=tree not used" \
+    "$G/ptx-cases/bf16-row.ptx" 4b800000 4b800000 41800000 1
 
 # Kernels that exist as PTX text only (tests/kernels/ptx-cases): four products
 # on accumulators that hold 1.0, after a scope that declares their family again and sets its own

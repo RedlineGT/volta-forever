@@ -689,6 +689,15 @@ memory setting at the V100's limit: section 5), and the opt-in BF16 paths of the
 rewriting, `VF_BF16_TC_GROUPS`, `VF_BF16_TC_TILES`, `VF_BF16_COLUMN`, `VF_BF16_ROW`
 (`docs/emulations.md`).
 
+### Safe mode
+
+`VF_SAFE=1` puts back to the default's setting, whatever their variables say, the switches above
+whose results are not bit-identical to the default's (`INSTALL.md` lists them):
+`vf_adapt::Policy::make_safe`, in every part that adapts code (the proxy, the nvJitLink adapter,
+`vf ptxas`, `vf adapt`), and the runtime of the bf16 cuBLAS variants for its tensor-core path. The
+policy keeps it (`Policy::safe`), so the cache of section 3 keeps what is made with it and without
+it apart.
+
 ### Cache
 
 `VF_PROXY_CACHE`, `VF_PROXY_CACHE_MAX`: where the cache of section 3 is, and how large it may

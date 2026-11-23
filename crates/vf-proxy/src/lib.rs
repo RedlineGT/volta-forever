@@ -40,7 +40,10 @@
 //!   the number of calls per function and the kernels launched most often (adds an atomic increment
 //!   to each driver call, and a name lookup to each launch);
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
-//!   refuses (kernel name, grid, block, shared memory, launch attributes).
+//!   refuses (kernel name, grid, block, shared memory, launch attributes);
+//! - `VF_SAFE=1` (exactly): safe mode, the switches of the rewriting whose results are not
+//!   bit-identical to the default's are not used (`vf_adapt::Policy::make_safe`), said once at
+//!   level 1.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -104,6 +107,8 @@ pub struct Config {
     /// on its stream after it returns, so the GPU time is known. One file per process (`.PID`
     /// appended). Off when unset or empty.
     pub profile: bool,
+    /// What to say once about safe mode (`VF_SAFE`, `vf_adapt::safe_line`): what it turned off.
+    pub safe_said: Option<String>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -114,7 +119,7 @@ static OWN_ENTRY: OnceLock<HashMap<usize, usize>> = OnceLock::new();
 pub fn config() -> &'static Config {
     CONFIG.get_or_init(|| {
         let var = |name: &str| std::env::var(name).ok();
-        let policy = vf_adapt::Policy::default().with_environment();
+        let (policy, safe_said) = vf_adapt::Policy::default().with_environment_said();
         let capability = policy.told_sm.map(|sm| ((sm / 10) as i32, (sm % 10) as i32));
         Config {
             adapt: var("VF_ADAPT").is_none_or(|v| v != "0"),
@@ -129,6 +134,7 @@ pub fn config() -> &'static Config {
             emulation_warnings: var("VF_EMULATION_WARNINGS").and_then(|v| v.parse().ok()).unwrap_or(20),
             timing: var("VF_TIMING").is_some_and(|v| v != "0"),
             profile: var("VF_PROFILE").is_some_and(|v| !v.is_empty() && v != "0"),
+            safe_said,
         }
     })
 }
@@ -214,6 +220,9 @@ extern "C" fn init() {
     log::open();
     if let Err(problem) = vf_adapt::requested_capability() {
         log::warn(format_args!("{problem}"));
+    }
+    if let Some(said) = &config.safe_said {
+        log::warn(format_args!("{said}"));
     }
     profile::open();
     let path = real_library();
