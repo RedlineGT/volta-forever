@@ -142,6 +142,25 @@ fat binary, it is not read (that would take decompressing the code of every libr
 load), except in a process whose links through the driver had kernels to refuse. A cubin loaded without the layer keeps its kernels that trap: the warning that nvJitLink
 writes when it links them is then all there is.
 
+**A variable asked for by name can be refused too.** In a library (`cuLibraryLoadData`, which
+the CUDA runtime uses), a kernel compiled on its own (`VF_LAZY`, the default) that reads a
+lookup table of its module (a variable with an initializer and no `.visible` or `.weak` name,
+which no function of the module can change, as a `static const __device__` array or the grids
+of the i-quants in llama.cpp and Strata) is given a copy of the table. NVIDIA's driver gives
+such a table by its name in the PTX (`table`, or the name that nvcc mangles in a namespace), and
+a kernel then reads what the program writes there. Through the layer, once a kernel holds a
+copy, a lookup of the table by name returns `CUDA_ERROR_NOT_SUPPORTED` (801) instead of an
+address, and a line on standard error says why, since a write through the address would not
+reach the copy: `cuLibraryGetGlobal`, `cuModuleGetGlobal` on a module of the library, and with
+them the CUDA runtime's `cudaMemcpyToSymbol`, `cudaMemcpyFromSymbol` and
+`cudaGetSymbolAddress` (`cudaErrorNotSupported`, measured with CUDA 13.5). The answer depends on
+the order: a table that the program asks for before any kernel that reads it is given, and its
+kernels then come from the whole module, where the program's writes are. A name that the module
+does not have is `CUDA_ERROR_NOT_FOUND` (500), as without the layer. `VF_LAZY=0` compiles every
+module whole, with one copy of each variable, and gives every table. Neither Strata on two
+V100s (issue #3) nor any case of `tests/gpu/run.sh` but those that test this asked for such a
+table (2026-11-23).
+
 ## Kernels launched from a second translation
 
 A kernel compiled for blocks of 1,024 threads may have 64 registers at most on a V100, and the

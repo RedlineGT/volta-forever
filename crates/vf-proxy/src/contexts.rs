@@ -65,6 +65,7 @@ fn current() -> Option<usize> {
 /// just loaded, or the module of a library in this context. (Called before anything else is
 /// kept for a module that the driver gives for a library: see `destroyed`.)
 pub fn loaded(module: usize) {
+    crate::lazy::forget_module(module);
     let context = current();
     let mut modules = modules();
     match context {
@@ -83,6 +84,7 @@ pub fn loaded(module: usize) {
 /// (Called before anything else is kept for a handle that the driver gives again: see
 /// `destroyed`.)
 pub fn forget(handle: usize) {
+    crate::lazy::forget_module(handle);
     modules().remove(&handle);
 }
 
@@ -138,6 +140,7 @@ pub fn destroyed(modules: Modules) {
         // done before it keeps anything for it (`forget`, `loaded`).
         crate::fit::forget(module);
         crate::images::dropped(module);
+        crate::lazy::forget_module(module);
     }
 }
 

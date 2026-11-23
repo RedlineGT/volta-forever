@@ -51,7 +51,9 @@ scripts of `tests/sass/`).
   what the native sm_70 build of the same source, the host models or the reference vectors of
   an RTX 5090 say. 126 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
-  (error 218 and a NULL handle, through a module, a library and the driver's linker).
+  (error 218 and a NULL handle, through a module, a library and the driver's linker), and
+  lookup tables asked for by name, answered as NVIDIA's driver answers them, except where the
+  layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result (cuBLAS is exercised by
   `run.sh`).
@@ -173,7 +175,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Seven more host regressions exercise the built libraries directly:
+Eight more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -183,6 +185,7 @@ python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
 python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
 python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
+python3 tests/proxy/readonly_tables.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -209,7 +212,15 @@ the translator refuses), and that with one kernel that runs both are linked, int
 names the kernel that traps in a note, which a link of that cubin keeps. The seventh
 checks, with a stand-in for nvJitLink 12.9.2, that a child made by `fork()` while another
 thread of the parent waits in a write of the adapter's log ends when it calls `exit()`; it
-needs a C compiler.
+needs a C compiler. The eighth checks, with another stand-in that keeps the text of what it is
+given, that a deferred library gives a kernel that only reads a table of its module from a
+sub-module that holds a copy of the table, and then refuses the table by every name the program
+could ask for it with (error 801; a name that the module does not have stays 500), while a
+variable that kernels write is given; and that a table
+the program was given first keeps the kernels that read it in the whole module, also one that
+another thread asks for while the whole module is compiled for the table (the stand-in holds that
+compilation). Each case in a
+process of its own, a second time from the proxy cache; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -225,7 +236,7 @@ libraries against a mock library.
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`, 422 at 0.1.3); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
-`graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `driver_capability.py`,
+`graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`

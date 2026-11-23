@@ -13,6 +13,9 @@ use crate::{COUNTS, REALS, callers, config, contexts, fit, idx, images, kernels,
 
 type CUresult = c_int;
 const CUDA_SUCCESS: CUresult = 0;
+/// What the layer answers for a variable that it does not give to the program (`may_name_global`):
+/// not `CUDA_ERROR_NOT_FOUND`, which says that the module has no such name.
+const CUDA_ERROR_NOT_SUPPORTED: CUresult = 801;
 /// `CUjit_option` values of the buffer for the compiler's error messages and of its size.
 const JIT_ERROR_LOG_BUFFER: c_int = 5;
 const JIT_ERROR_LOG_BUFFER_SIZE: c_int = 6;
@@ -655,6 +658,40 @@ pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
 
 // ---- globals and textures: mark modules from which the program accessed these -----------------------
 
+/// Whether the variable `name` of the deferred library `library` may be given to the program
+/// (`lazy::name_global`); when it may not, says why, and the program is answered
+/// `CUDA_ERROR_NOT_SUPPORTED`. (NVIDIA's driver gives every variable of a module by its name in the
+/// PTX, of internal linkage too: measured on a V100 with driver 580.178.04, 2026-11-23.)
+///
+/// # Safety
+/// `name` must be null or a C string.
+unsafe fn may_name_global(library: usize, name: *const c_char) -> bool {
+    if name.is_null() {
+        return true;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    if lazy::name_global(library, &name) {
+        return true;
+    }
+    // (Said once for each name: a program may ask again.)
+    static SAID: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    if !SAID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_default()
+        .insert(name.to_string())
+    {
+        return false;
+    }
+    log::warn(format_args!(
+        "the variable {name} is not given to the program (error {CUDA_ERROR_NOT_SUPPORTED}): kernels of its module \
+         that were compiled alone hold copies of it, which no kernel writes, and a write of the program to the copy it \
+         would be given would not reach them (a variable asked for before such a kernel is given). VF_LAZY=0 \
+         compiles every module whole, so that each variable has one copy"
+    ));
+    false
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleGetGlobal(
     dptr: *mut u64,
@@ -664,6 +701,11 @@ pub unsafe extern "C" fn cuModuleGetGlobal(
 ) -> CUresult {
     let real =
         real!(cuModuleGetGlobal: unsafe extern "C" fn(*mut u64, *mut usize, *mut c_void, *const c_char) -> CUresult);
+    if let Some(library) = lazy::module_owner(module as usize)
+        && !unsafe { may_name_global(library, name) }
+    {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
     let result = unsafe { real(dptr, size, module, name) };
     if result == CUDA_SUCCESS {
         fit::asked_for_data(module as usize);
@@ -680,6 +722,11 @@ pub unsafe extern "C" fn cuModuleGetGlobal_v2(
 ) -> CUresult {
     let real =
         real!(cuModuleGetGlobal_v2: unsafe extern "C" fn(*mut u64, *mut usize, *mut c_void, *const c_char) -> CUresult);
+    if let Some(library) = lazy::module_owner(module as usize)
+        && !unsafe { may_name_global(library, name) }
+    {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
     let result = unsafe { real(dptr, size, module, name) };
     if result == CUDA_SUCCESS {
         fit::asked_for_data(module as usize);
@@ -1361,6 +1408,9 @@ pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetModule].load(Relaxed)) };
                 let result = unsafe { real(module, mat.handle as *mut c_void) };
                 unsafe { share_kernels(result, module, handle) };
+                if result == CUDA_SUCCESS && !module.is_null() {
+                    lazy::module_of(unsafe { *module } as usize, handle);
+                }
                 return result;
             }
             Err(code) => return code,
@@ -1411,6 +1461,9 @@ pub unsafe extern "C" fn cuLibraryGetGlobal(
     COUNTS[idx::cuLibraryGetGlobal].fetch_add(1, Relaxed);
     let handle = library as usize;
     if lazy::is_lazy(handle) {
+        if !unsafe { may_name_global(handle, name) } {
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
         // Globals live in the full module; materialize it.
         match unsafe { lazy::materialize(handle) } {
             Ok(mat) => {
@@ -1518,6 +1571,7 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
         // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module as usize);
         share_on_this_device(module as usize, owner);
+        lazy::module_of(module as usize, owner);
     }
     result
 }
