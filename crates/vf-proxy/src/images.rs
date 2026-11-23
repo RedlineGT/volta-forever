@@ -229,9 +229,10 @@ pub fn retained(handle: usize) -> Option<Arc<Replacement>> {
 /// The driver loaded `replacement` as `handle`: keep it, and what is known of its kernels.
 pub fn keep(handle: usize, mut replacement: Replacement) {
     // Context destruction can retire a CUmodule without an explicit unload.
-    // The driver's next load starts a new lifetime at the same address.
-    kernels::forget(handle);
+    // The driver's next load starts a new lifetime at the same address. (The context's record
+    // first: what `contexts::destroyed` drops for the handle is then dropped before this.)
     crate::contexts::forget(handle);
+    kernels::forget(handle);
     if config().profile
         && let Some(origin) = replacement.origin
     {
@@ -259,10 +260,18 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
 /// the image is given back, for the caller to hold until the driver's unload returned
 /// (`unload_failed` when it failed).
 pub fn release(handle: usize) -> Option<Arc<Replacement>> {
+    // (The context's record first, as in `keep`.)
+    crate::contexts::forget(handle);
     let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
     kernels::forget(handle);
-    crate::contexts::forget(handle);
     kept
+}
+
+/// The module `handle` went with its context (`contexts::destroyed`, which holds its record's
+/// lock and has dropped the record): what is kept for it is dropped.
+pub fn dropped(handle: usize) {
+    KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+    kernels::forget(handle);
 }
 
 /// The driver did not unload `handle`, of which `release` gave `kept`: the driver may still read

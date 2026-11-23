@@ -1364,9 +1364,10 @@ pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *
 unsafe fn share_kernels(result: CUresult, module: *mut *mut c_void, library: usize) {
     if result == CUDA_SUCCESS && !module.is_null() {
         let module_handle = unsafe { *module } as usize;
+        // (The context's record first: see `contexts::destroyed`.)
+        contexts::loaded(module_handle);
         kernels::share(module_handle, library);
         fit::share_module(module_handle, library);
-        contexts::loaded(module_handle);
     }
 }
 
@@ -1484,8 +1485,9 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
     let get_module: GetHandle = unsafe { std::mem::transmute(REALS[idx::cuFuncGetModule].load(Relaxed)) };
     let mut module = std::ptr::null_mut();
     if unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS {
-        kernels::share(module as usize, owner);
+        // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module as usize);
+        kernels::share(module as usize, owner);
     }
     result
 }
@@ -2148,12 +2150,17 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
 type ContextDestroy = unsafe extern "C" fn(*mut c_void) -> CUresult;
 type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
 
+// What is known of the modules of a context is taken before the driver's call (`contexts::of`):
+// once it returns, another thread can be given a context at the same address, and load modules
+// in it.
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
     let real = real!(cuCtxDestroy: ContextDestroy);
+    let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
-        contexts::destroyed(context as usize);
+        contexts::destroyed(modules);
     }
     result
 }
@@ -2161,9 +2168,10 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     let real = real!(cuCtxDestroy_v2: ContextDestroy);
+    let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
-        contexts::destroyed(context as usize);
+        contexts::destroyed(modules);
     }
     result
 }
@@ -2182,9 +2190,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, dev
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_released(device);
+        contexts::primary_released(device, modules);
     }
     result
 }
@@ -2192,9 +2201,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_released(device);
+        contexts::primary_released(device, modules);
     }
     result
 }
@@ -2202,9 +2212,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_reset(device);
+        contexts::primary_reset(modules);
     }
     result
 }
@@ -2212,9 +2223,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_reset(device);
+        contexts::primary_reset(modules);
     }
     result
 }

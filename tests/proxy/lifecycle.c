@@ -13,7 +13,11 @@
 //     (a kernel that the layer refuses is still refused); a library stays when the context in
 //     which the driver gave a module for it goes. The cubin of tests/kernels/k_fit_test (CUBIN in
 //     the environment), whose original the layer keeps for a second translation at launch, is
-//     dropped with its context too.
+//     dropped with its context too. What another thread does once the driver destroyed a context,
+//     before the call returns, is not dropped with it: a module loaded in a context made at the
+//     same address (after cuCtxDestroy, and after the last release of a primary context), and a
+//     module that the driver gives the handle of a module of the context destroyed (its refused
+//     kernel is still refused).
 //   - lazy_lock: a library restored from the layer's cache, whose kernel's code is not in the
 //     cache, is adapted when the program asks for the kernel; meanwhile a kernel of another
 //     library is given at once (the lock of all lazy libraries was held over the adaptation),
@@ -247,6 +251,22 @@ static void *read_file(const char *path) {
     return data;
 }
 
+// What another thread does once the driver destroyed a context, before the call returns (the
+// stand-in's `while_destroyed`): it makes a context at the address of the one destroyed and loads
+// a module in it, or makes another and loads a module that the driver gives the handle of a module
+// of the one destroyed.
+static void *mock_driver, *destroyed_context, *gone_module, *again_context, *again_module;
+static void at_same_address(void) {
+    *(uintptr_t *)dlsym(mock_driver, "next_context") = (uintptr_t)destroyed_context;
+    cuCtxCreate_v2(&again_context, 0, 0);
+    cuModuleLoadData(&again_module, ptx);
+}
+static void with_same_handle(void) {
+    cuCtxCreate_v2(&again_context, 0, 0);
+    *(uintptr_t *)dlsym(mock_driver, "next_module") = (uintptr_t)gone_module;
+    cuModuleLoadData(&again_module, ptx);
+}
+
 static int contexts(const char *proxy, const char *dir) {
     // Translations kept: a translation is taken from there after the first.
     char cache[4096];
@@ -313,6 +333,47 @@ static int contexts(const char *proxy, const char *dir) {
     check("other_context_destroyed", cuModuleGetFunction(&function, module, "bad") == CUDA_ERROR_INVALID_PTX,
           "the refused kernel of this context's module is refused");
     cuCtxDestroy_v2(context);
+
+    // What another thread does once the driver destroyed a context, before the call returns.
+    mock_driver = dlopen(getenv("VF_REAL_LIBCUDA"), RTLD_NOW | RTLD_NOLOAD);
+    if (!mock_driver) { fprintf(stderr, "contexts: the stand-in is not loaded\n"); return 2; }
+    void (**while_destroyed)(void) = dlsym(mock_driver, "while_destroyed");
+    // A context at the same address, and a module in it.
+    cuCtxCreate_v2(&context, 0, 0);
+    cuModuleLoadData(&module, ptx);
+    destroyed_context = context;
+    again_module = NULL;
+    *while_destroyed = at_same_address;
+    cuCtxDestroy_v2(context);
+    check("context_at_same_address",
+          again_context == context && again_module
+              && cuModuleGetFunction(&function, again_module, "bad") == CUDA_ERROR_INVALID_PTX,
+          "the refused kernel of its module is refused");
+    cuCtxDestroy_v2(again_context);
+    // A module given the handle of a module of the context destroyed.
+    cuCtxCreate_v2(&context, 0, 0);
+    cuModuleLoadData(&module, ptx);
+    gone_module = module;
+    again_module = NULL;
+    *while_destroyed = with_same_handle;
+    cuCtxDestroy_v2(context);
+    check("module_with_same_handle",
+          again_module == module && cuModuleGetFunction(&function, again_module, "bad") == CUDA_ERROR_INVALID_PTX,
+          "the refused kernel of the new module is refused");
+    cuCtxDestroy_v2(again_context);
+    // After the last release of the primary context: a context at its address, and a module in it.
+    cuDevicePrimaryCtxRetain(&context, 0);
+    cuCtxSetCurrent(context);
+    cuModuleLoadData(&module, ptx);
+    destroyed_context = context;
+    again_module = NULL;
+    *while_destroyed = at_same_address;
+    cuDevicePrimaryCtxRelease_v2(0);
+    check("primary_context_at_same_address",
+          again_context == context && again_module
+              && cuModuleGetFunction(&function, again_module, "bad") == CUDA_ERROR_INVALID_PTX,
+          "the refused kernel of its module is refused");
+    cuCtxDestroy_v2(again_context);
 
     // A library, and the module that the driver gives for it in a context that goes: the library
     // stays as it is.
