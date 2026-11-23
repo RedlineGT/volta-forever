@@ -32,5 +32,6 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$gpu PYTHONPATH=$site
 export VF_OUT=${VF_OUT:-$VF_TEST_ROOT}
 proxy=${VF_PROXY:-$W/dist/lib}
 map=$(vf_torch_map "$VF_OUT")
+python3 "$W/tests/gpu/torch-ops.py" --comparison || exit 1
 vf_layer "$proxy" "$map"
 python3 "$W/tests/gpu/torch-ops.py" "$@"

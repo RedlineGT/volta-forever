@@ -2,6 +2,7 @@
 """Operations of PyTorch on the GPU against the same operations on the CPU.
 
     torch-ops.py [-v] [PATTERN...]        (run by tests/gpu/torch.sh, which sets the paths)
+    torch-ops.py --comparison             (what decides ok, checked on tensors of the CPU)
 
 A stock PyTorch wheel has machine code only, for sm_75 and later: on a V100 every kernel it launches
 went through the translator of the layer. Each case computes on the CPU and on the GPU from the same
@@ -356,12 +357,34 @@ def stats(t):
     return torch.stack([t.mean(), t.std(), t.min(), t.max()]).round(decimals=1)
 
 
+def several(result):
+    """Whether a result is several (a tuple, of names or not, or a list), not one tensor."""
+    return isinstance(result, (tuple, list)) or hasattr(result, '_fields')
+
+
+def shapes(a, b):
+    """How the results a (the CPU's) and b (the GPU's) differ in how they are made: several or
+    one, how many, a tensor or not; None when alike. Compared before any arithmetic, which would
+    broadcast one shape to the other, or `zip`, which stops at the shorter."""
+    import torch
+    if several(a) or several(b):
+        if not (several(a) and several(b)):
+            return 'a result of %d on the CPU, %d on the GPU' % (len(a) if several(a) else 1, len(b) if several(b) else 1)
+        if len(a) != len(b):
+            return 'another number of results: %d on the CPU, %d on the GPU' % (len(a), len(b))
+        return None
+    if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
+        return 'a %s on the CPU, a %s on the GPU' % (type(a).__name__, type(b).__name__)
+    return None
+
+
 def same(a, b, name):
     """None when the two results agree, else how they differ."""
     import torch
-    if isinstance(a, (tuple, list)) or hasattr(a, '_fields'):
-        if len(a) != len(b):
-            return 'another number of results'
+    different = shapes(a, b)
+    if different:
+        return different
+    if several(a):
         return next((d for d in (same(x, y, name) for x, y in zip(a, b)) if d), None)
     if a.shape != b.shape or a.dtype != b.dtype:
         return 'shape or type: %s %s on the CPU, %s %s on the GPU' % (tuple(a.shape), a.dtype, tuple(b.shape), b.dtype)
@@ -391,7 +414,10 @@ def through_double(expected, got, truth):
     heads of 64, 9.5e-5 and 9.0e-5 for heads of 256, and by the same on average (1.4e-6 and
     1.4e-6; 5.32e-6 and 5.33e-6), while they differ from each other by more than any tolerance
     by element allows at elements near zero. None when they agree, else how they differ."""
-    if isinstance(expected, (tuple, list)) or hasattr(expected, '_fields'):
+    different = shapes(expected, got) or shapes(expected, truth)
+    if different:
+        return different
+    if several(expected):
         return next((d for d in (through_double(a, b, t) for a, b, t in zip(expected, got, truth)) if d), None)
     if expected.shape != got.shape or expected.dtype != got.dtype:
         return 'shape or type: %s %s on the CPU, %s %s on the GPU' % (tuple(expected.shape), expected.dtype, tuple(got.shape), got.dtype)
@@ -400,6 +426,32 @@ def through_double(expected, got, truth):
     if gpu.isnan().any() or worst[1] > 3 * worst[0] or mean[1] > 2 * mean[0]:
         return 'off the float64 result by %.3g at most and %.3g on average, where the CPU in float32 is off by %.3g and %.3g' % (worst[1], mean[1], worst[0], mean[0])
     return None
+
+
+def comparison_checks():
+    """What same and through_double must refuse, and take, on tensors of the CPU: a check that was
+    never seen to fail has not been shown to check. (Until 2026-11-23 a tuple of two results was
+    compared row by row with a tensor of two rows, and through_double compared the gradients
+    that both had: a missing last one passed.)"""
+    import torch
+    one, rows = torch.ones(3), torch.ones(2, 3)
+    truth = one.double()
+    wrong = []
+    for what, difference, ok, said in [
+        ('the same', same((one, rows), [one, rows], 'x'), True, None),
+        ('a tuple and a tensor of as many rows', same((one, one), rows, 'x'), False, 'a result of 2 on the CPU, 1 on the GPU'),
+        ('a tensor and a tuple', same(rows, (one, one), 'x'), False, 'a result of 1 on the CPU, 2 on the GPU'),
+        ('one result fewer', same((one, one), [one], 'x'), False, 'another number of results: 2 on the CPU, 1 on the GPU'),
+        ('a row where the CPU has rows', same(rows, one, 'x'), False, 'shape or type: (2, 3)'),
+        ('float64 where the CPU has float32', same(one, truth, 'x'), False, 'shape or type: (3,) torch.float32 on the CPU, (3,) torch.float64'),
+        ('gradients, the same', through_double((one, one), [one, one], (truth, truth)), True, None),
+        ('gradients, the last one missing', through_double((one, one), [one], (truth, truth)), False, 'another number of results: 2 on the CPU, 1 on the GPU'),
+        ('gradients, one where the CPU has two', through_double((one, one), one, (truth, truth)), False, 'a result of 2 on the CPU, 1 on the GPU'),
+        ('a gradient of another shape', through_double(one, rows, truth), False, 'shape or type'),
+    ]:
+        if (difference is None) != ok or (said and said not in (difference or '')):
+            wrong.append('%s: %r (should %s%s)' % (what, difference, 'pass' if ok else 'fail', ', saying %r' % said if said else ''))
+    return wrong
 
 
 def worker(first, channel, patterns):
@@ -495,6 +547,12 @@ def main():
     args = sys.argv[1:]
     if args[:1] == ['--worker']:
         return worker(int(args[1]), int(args[2]), args[3:])
+    if args[:1] == ['--comparison']:
+        wrong = comparison_checks()
+        for line in wrong:
+            print('WRONG  the comparison: ' + line)
+        print('FAIL  the comparison' if wrong else 'PASS  the comparison')
+        return 1 if wrong else 0
     verbose = '-v' in args
     patterns = [a for a in args if a != '-v']
     wait = int(os.environ.get('VF_CASE_WAIT', '600'))
