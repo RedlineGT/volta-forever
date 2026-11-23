@@ -10,6 +10,10 @@
 # checked, 1 problems, 2 nothing found and a check that could not be made), NAME.reasons (the
 # functions by what became of them: `ok`, or why they were refused), NAME.lines (instructions in
 # the map), NAME.failed (the prototype did not read the file). An hour for 3,108 cubins.
+# The exit status is 1 when a translation has problems, when the validator could not make a check
+# of one (its status 2) or ended without a verdict, or when no cubin was checked; a cubin that the
+# prototype does not read at all is counted, and does not fail the run (both translators refuse
+# it whole). (Until 2026-11-23 the status was 0 whatever the verdicts.)
 #   JOBS   processes (default 40)
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -43,3 +47,7 @@ echo "cubins: $(find "$C" -name '*.sm_75.cubin' | wc -l); with a verdict: $(grep
 echo "functions: $(cat checks/*.reasons | awk '{s+=$1} END {print s}'), translated: $(cat checks/*.reasons | awk '$2 == "ok" {s+=$1} END {print s}')"
 grep -h "^  [0-9]* (" checks/*.check | sed 's/^ *\([0-9]*\) /\1\t/' | awk -F'\t' '{n[$2]+=$1; f[$2]++} END {for (k in n) print "  " n[k], k, "(in", f[k], "cubins)"}' | sort -k2
 grep -h "^  " checks/*.check | grep -v "^  [0-9]* (" | sed 's/^  [^:]*: //; s/: .*//' | sort | uniq -c | sort -rn | head -12
+# (A verdict: the line that counts what was checked. Each NAME.check ends with the validator's status.)
+failing=$({ grep -L "instructions of" checks/*.check; grep -l "^exit [12]$" checks/*.check; } 2>/dev/null | sort -u | wc -l)
+[ -n "$(ls checks/*.check 2>/dev/null)" ] || { echo "no cubin was checked" >&2; exit 1; }
+[ "$failing" -eq 0 ] || { echo "cubins whose translation has problems, a check not made or no verdict: $failing" >&2; exit 1; }
