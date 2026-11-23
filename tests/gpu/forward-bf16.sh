@@ -99,8 +99,9 @@ if want bf16-accept; then
         if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* TN 1024x128x[0-9]* fp32" "$log"; then
             echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate)"
         else echo "FAIL  bf16-accept control: VF_ACCEPT_STRICT=1 did not fail ($out/logs/forward-bf16-accept-strict.log)"; failed=1; fi
-        # Control: the tensor-core path off, the gate expected: every call from the gate on must then fail as not served.
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
+        # Control: the tensor-core path off (the skinny path on, so that the variants load the test runtime and its
+        # counters), the gate expected: every call from the gate on must then fail as not served.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
         cp "$log" "$out/logs/forward-bf16-accept-tc-off.log"
         if [ "$status" != 0 ] && grep -q "^FAIL  .*: not served by the tensor-core path at k >= the gate" "$log"; then
             echo "PASS  bf16-accept control: with the tensor-core path off, the calls from the gate on are not served and it fails"

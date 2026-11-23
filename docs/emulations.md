@@ -918,8 +918,9 @@ Two synthetic constructions exceed the bias bound above the gate, and the test j
 larger k (documented exceptions; `VF_ACCEPT_STRICT=1` removes both, and the test then fails):
 
 - **craftsub**, built against the path's 256-element slices: a product of 2^20 at the start of every slice,
-  then products of half to one ulp of it. Its bias is judged from k = 4096; at 2048 it is 1.20 times its
-  bound (-382.32 units against 318.32, there 12.9's own bias).
+  then products of half to one ulp of it. Its bias is judged from k = 4096, where it is 0.85 times its bound;
+  it is 1.50 times its bound at 1024, 1.29 at 1536 and 1.20 at 2048 (-382.32 units against 318.32, there
+  12.9's own bias).
 - **The search's configuration 1653006390**: non-negative operands with a 2^21 activation at the start of
   every slice. Its bias is judged from k = 2048, where it is 0.95 times its bound (-183.65 units against
   192.7); it is 1.27 times its bound at 1536 and 1.90 times at 1024.

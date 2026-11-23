@@ -26,7 +26,7 @@
  *     the runtime has its gate; the number judged is printed). Prints "ok bf16-accept" and exits 0, or FAIL lines
  *     and exits 1. Controls, each of which must fail: VF_ACCEPT_GATE=256 and 512 (the path exceeds A on craftsub
  *     at 256, the bias bound below 1024); VF_ACCEPT_STRICT=1 (the two exceptions removed); the tensor-core path
- *     off with VF_ACCEPT_EXPECT_GATE=1 (nothing served).
+ *     off (the skinny path on, for the test runtime's counters) with VF_ACCEPT_EXPECT_GATE=1 (nothing served).
  *
  *   bf16-accept safe       with VF_SAFE=1: no call served by the tensor-core path, every result with 12.9's bits
  *                          (the conservative switch; the skinny path, whose results are 12.9's bits, still serves
@@ -76,9 +76,10 @@ static const double native_slope[FAM_N] = {
     [FAM_OUTLIER] = 0.0167,  [FAM_CANCEL] = 0.0,      [FAM_MIXED30] = 0.0031};
 static double cur_slope; /* the slope of the data being judged */
 /* Two synthetic constructions exceed the bias bound above the gate: craftsub (a product of 2^20 at the start of
- * every 256-element slice of the path, then products of 1/2 to 1 ulp of it; 1.20 times its bound at k = 2048, which
- * is 12.9's own bias there) up to k = 4096, and the search's configuration 1653006390 (non-negative operands, a 2^21
- * activation at the start of every slice; 1.90 times its bound at 1024 and 1.27 at 1536, 0.95 at 2048) up to 2048.
+ * every 256-element slice of the path, then products of 1/2 to 1 ulp of it; 1.50 times its bound at k = 1024, 1.29
+ * at 1536 and 1.20 at 2048, the bound being 12.9's own bias there) up to k = 4096, and the search's configuration
+ * 1653006390 (non-negative operands, a 2^21 activation at the start of every slice; 1.90 times its bound at 1024
+ * and 1.27 at 1536, 0.95 at 2048) up to 2048.
  * Real operands (1,728 pairs of four models) have mixed-sign products and a bias of at most 0.22 u at every k.
  * Their bias is judged from 4096 and 2048 on, unless VF_ACCEPT_STRICT=1 (then from the gate). Every other bound
  * applies from the gate. */
