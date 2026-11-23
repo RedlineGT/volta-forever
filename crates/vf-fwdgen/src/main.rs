@@ -288,8 +288,21 @@ fn main() {
             }
             Ok(())
         }
+        // The packaged runtime of the bf16 variants against the kernels and manifest this generator was
+        // built with, without the toolkits (scripts/package.sh)
+        Some("check-bf16") if args.len() == 2 => {
+            let dir = std::path::Path::new(&args[1]);
+            let mut problems = bf16::check_runtime(&dir.join(bf16::RUNTIME));
+            problems.extend(bf16::check_kernels());
+            if problems.is_empty() {
+                println!("{}: the runtime of the bf16 variants holds the kernels of kernels.manifest", dir.display());
+                Ok(())
+            } else {
+                Err(problems.join("; "))
+            }
+        }
         _ => Err(
-            "usage: vf-fwdgen (generate|verify) --old DIR --new DIR --out DIR [--only key,key]\n       vf-fwdgen list"
+            "usage: vf-fwdgen (generate|verify) --old DIR --new DIR --out DIR [--only key,key]\n       vf-fwdgen list\n       vf-fwdgen check-bf16 DIR"
                 .to_string(),
         ),
     };

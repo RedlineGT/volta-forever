@@ -216,10 +216,15 @@ if [ -e "$pkg/forward/bf16tc" ]; then
         echo "ERROR: forward/bf16tc/ does not hold the ${#bf16_files[@]} files of the bf16 cuBLAS variants"
         fail=1
     fi
+    # The runtime: its exports, the libraries it needs, and the kernels of kernels.manifest in it
+    if ! "$gen" check-bf16 "$pkg/forward/bf16tc"; then
+        echo "ERROR: forward/bf16tc/libvf_cublas_bf16.so does not pass vf-fwdgen check-bf16"
+        fail=1
+    fi
 fi
 
-# Forwarding libraries must need only libc.so.6
-for f in "$pkg/forward/"*.so.*; do
+# Forwarding libraries (the bf16 variants included) must need only libc.so.6
+for f in "$pkg/forward/"*.so.* "$pkg/forward/bf16tc/"libcublas*.so.*; do
     [ -f "$f" ] || continue
     extra=$(readelf -d "$f" 2>/dev/null | grep NEEDED | grep -v "libc.so.6" | head -1 || true)
     if [ -n "$extra" ]; then

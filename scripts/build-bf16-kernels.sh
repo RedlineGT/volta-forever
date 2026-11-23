@@ -50,8 +50,8 @@ inspect() {  # inspect FILE: sm_70 machine code only, one image, no PTX
 inspect "$work/kernels.fatbin"
 hash() { sha256sum "$1" | cut -d' ' -f1; }
 {
-    echo "# What scripts/build-bf16-kernels.sh made kernels.fatbin from. Checked by the script (--check),"
-    echo "# by vf-fwdgen verify and by scripts/package.sh."
+    echo "# What scripts/build-bf16-kernels.sh made kernels.fatbin from. Checked by the script (--check), by"
+    echo "# vf-fwdgen's unit tests and verify, and by scripts/package.sh (vf-fwdgen check-bf16)."
     echo "compiler $version"
     echo "flags ${flags[*]}"
     echo "source kernels.cu $(hash "$work/kernels.cu")"

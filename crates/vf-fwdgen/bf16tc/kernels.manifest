@@ -1,5 +1,5 @@
-# What scripts/build-bf16-kernels.sh made kernels.fatbin from. Checked by the script (--check),
-# by vf-fwdgen verify and by scripts/package.sh.
+# What scripts/build-bf16-kernels.sh made kernels.fatbin from. Checked by the script (--check), by
+# vf-fwdgen's unit tests and verify, and by scripts/package.sh (vf-fwdgen check-bf16).
 compiler Build cuda_12.9.r12.9/compiler.36037853_0
 flags -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false --compress-mode=none -frandom-seed=vf-bf16 -std=c++17
 source kernels.cu 2658c20d4842050890ba144a4b068a68946563cb33c39b0870f39a98aedf5c46
