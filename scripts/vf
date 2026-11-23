@@ -275,8 +275,10 @@ build_map() {
 # --- prepend to a colon-separated list without duplicating entries ---------------
 
 path_prepend() {
-    # $1 = new components (colon-separated), $2 = old value.
-    _new_parts=$1 _old=$2 _result=
+    # $1 = new components (colon-separated), $2 = old value, $3 = the characters that separate
+    # the components of the old value (':' when not given; ':;' for LD_LIBRARY_PATH, which the
+    # loader splits at a ';' too). The result is colon-separated.
+    _new_parts=$1 _old=$2 _old_ifs=${3:-:} _result=
     # Build the result from new parts, then add old parts not already present. An empty
     # component, of either, is left out (the loader takes it for the current directory), and
     # a component is taken as it is (no pattern expanded, no backslash read).
@@ -292,7 +294,7 @@ path_prepend() {
             *) if [ -n "$_result" ]; then _result=$_result:$_p; else _result=$_p; fi ;;
         esac
     done
-    _oifs=$IFS; IFS=:
+    _oifs=$IFS; IFS=$_old_ifs
     # shellcheck disable=SC2086
     set -- $_old
     IFS=$_oifs
@@ -366,7 +368,9 @@ setup_env() {
         _ldpath_new=$_ldpath_new:$fwd_dir
     fi
     [ -n "$_cuda12" ] && _ldpath_new=$_ldpath_new:$_cuda12
-    _ldpath=$(path_prepend "$_ldpath_new" "${LD_LIBRARY_PATH:-}")
+    # (What was there is split at both separators of the loader, ':' and ';': a component left
+    # empty between two of them, which the loader takes for the current directory, goes.)
+    _ldpath=$(path_prepend "$_ldpath_new" "${LD_LIBRARY_PATH:-}" ':;')
 
     # (The marker is the version alone, as the library's volta_forever_version() gives it.)
     _version=$(get_version)

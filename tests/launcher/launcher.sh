@@ -697,10 +697,29 @@ sed -n '/^path_prepend() {/,/^}/p' "$launcher" >"$tmp/path_prepend.sh"
 got=$(. "$tmp/path_prepend.sh"; path_prepend '/a::/c:' ':/c:/d::/a:')
 got2=$(cd "$tmp" && . "$tmp/path_prepend.sh"; path_prepend '*:/b\tc' '/b\tc:/d\n')
 got3=$(. "$tmp/path_prepend.sh"; path_prepend '' ':/d:')
-if [ "$got" = "/a:/c:/d" ] && [ "$got2" = '*:/b\tc:/d\n' ] && [ "$got3" = /d ]; then
+# (Told that ';' separates the old value too, as the loader has it for LD_LIBRARY_PATH; otherwise
+# a ';' is part of a component, as in LD_AUDIT and VF_AUDIT_MAP.)
+got4=$(. "$tmp/path_prepend.sh"; path_prepend '/a' ';/usr/lib;;/lib:;/a;' ':;')
+got5=$(. "$tmp/path_prepend.sh"; path_prepend '/a' '/x;y::/z')
+if [ "$got" = "/a:/c:/d" ] && [ "$got2" = '*:/b\tc:/d\n' ] && [ "$got3" = /d ] && [ "$got4" = /a:/usr/lib:/lib ] \
+    && [ "$got5" = '/a:/x;y:/z' ]; then
     pass "$name"
 else
-    fail "$name" "got: $got | $got2 | $got3"
+    fail "$name" "got: $got | $got2 | $got3 | $got4 | $got5"
+fi
+
+# An LD_LIBRARY_PATH that was there is split at both separators of the loader, ':' and ';', and
+# what comes of it has no empty component (the loader takes one for the current directory),
+# in what env prints and in what a command sees. (Until 2026-11-23 '/usr/lib;;/lib' was kept
+# as it was.)
+name="ldpath-semicolons"
+want="$arch/lib:$arch/forward:$arch/cuda-12.9.2/lib:/usr/lib:/lib"
+ldp1=$(LD_LIBRARY_PATH='/usr/lib;;/lib' get_var "$vf" LD_LIBRARY_PATH)
+ldp2=$(LD_LIBRARY_PATH=';/usr/lib;:/lib;' run_var "$vf" LD_LIBRARY_PATH)
+if [ "$ldp1" = "$want" ] && [ "$ldp2" = "$want" ]; then
+    pass "$name"
+else
+    fail "$name" "env: $ldp1, run: $ldp2"
 fi
 
 # 13b. What env prints is read back by eval as it is, whatever the path holds: a space, a
