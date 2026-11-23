@@ -215,10 +215,12 @@ def ptx(header, sm):
     return bytes(header), stored
 
 
-def limited(given, code_sm):
+def limited(given, code_sm, runtime=False):
     """What a caller whose code runs from machine code for `code_sm` is told when VF_CAPABILITY is
-    `given`: no later generation than that code's, unless VF_CAPABILITY_ALL=1."""
-    if os.environ.get("VF_CAPABILITY_ALL") == "1":
+    `given`: no later generation than that code's, unless it is a CUDA runtime or code that uses
+    one (`runtime`) and VF_CAPABILITY_ALL=1 (until 2026-11-23, every caller with
+    VF_CAPABILITY_ALL=1)."""
+    if runtime and os.environ.get("VF_CAPABILITY_ALL") == "1":
         return given
     return code_sm if given and code_sm and given // 10 > code_sm // 10 else given
 
@@ -364,8 +366,13 @@ def run_runtimes(proxy, directory):
                                     ("libcudart.so.18", ["user_volta.so"], 75)):
         for user in users:
             c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
-        sm = limited(given, code_sm) or 75
+        sm = limited(given, code_sm, runtime=True) or 75
         probe(api, c.CDLL(str(directory / "runtimes" / runtime)), sm, sm)
+    # Code that uses a runtime (DT_NEEDED) and asks the driver itself, with machine code for sm_75,
+    # as PyTorch's library: part of the program that the runtime serves, told what was asked with
+    # VF_CAPABILITY_ALL=1, as the runtime is (until 2026-11-23, as every caller was).
+    sm = limited(given, 75, runtime=True) or 75
+    probe(api, c.CDLL(str(directory / "runtimes" / "client_turing.so")), sm, sm)
 
 
 def build(directory):
@@ -451,6 +458,12 @@ def build(directory):
                         "-Wl,--no-as-needed", f"-l:{runtime}", "-Wl,-rpath,$ORIGIN"],
                        input="int user(void) { return 0; }\n", text=True, check=True)
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", runtimes / user], check=True)
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-x", "c", "-", "-o",
+                    str(runtimes / "client_turing.so"), "-L", str(runtimes), "-Wl,--no-as-needed",
+                    "-l:libcudart.so.13", "-Wl,-rpath,$ORIGIN"],
+                   input=CLIENT, text=True, check=True)
+    subprocess.run(["objcopy", "--add-section", f".nv_fatbin={directory / 'turing_only.fatbin'}",
+                    runtimes / "client_turing.so"], check=True)
     # A library with machine code for sm_75 that uses a runtime through a library of its own, which
     # has no GPU code.
     subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-Wl,-soname,libcudart.so.16", "-x", "c", "-",

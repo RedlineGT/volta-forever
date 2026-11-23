@@ -27,9 +27,11 @@
 //! with it as a dependency (a CUDA runtime answers for the programs that use it), or, for a caller
 //! without code of its own, that of the libraries beside it that depend on it and that it may load
 //! later (cuDNN's graph library loads the library of its engines when it needs them): 7.5 in this
-//! case (`vf_adapt::Policy::told_limit`), with a line at the default log level that says so. `VF_CAPABILITY_ALL=1` tells such a caller what `VF_CAPABILITY`
+//! case (`vf_adapt::Policy::told_limit`), with a line at the default log level that says so. `VF_CAPABILITY_ALL=1` tells a CUDA runtime and the code that uses it what `VF_CAPABILITY`
 //! asks all the same, for a program that does not launch the kernels it would choose for it
-//! (SGLang with the settings of its guide selects its quantized experts from PyTorch's capability).
+//! (SGLang with the settings of its guide selects its quantized experts from PyTorch's capability);
+//! a library that asks for itself without that runtime is still told what its code allows
+//! (`Decision::program`).
 //! The code given to a caller follows what it is told: the images it loads are adapted for the
 //! architecture it is told (`told_sm`), so that a caller told 7.5 is given the sm_75 code of an
 //! image that also has PTX for sm_80.
@@ -69,6 +71,16 @@ struct Decision {
     /// The architecture that the code given for the caller limits what it is told to, below what
     /// `VF_CAPABILITY` asks (`vf_adapt::Policy::told_limit`).
     limit: Option<u32>,
+    /// Whether the caller is a CUDA runtime (`libcudart.so.13` and later) or code loaded with one as
+    /// a dependency: the program that uses the runtime, the callers whose limit
+    /// `VF_CAPABILITY_ALL=1` lifts. A program reads the capability also for decisions that are not
+    /// about its own kernels (SGLang its quantized experts, Triton its code), and its kernels that
+    /// are stubs for the capability told are refused (`vf_adapt::Policy::adapt_fatbin`). A library
+    /// that asks for itself without that runtime (cuDNN, cuFFT, cuSOLVER, which have none or have it
+    /// linked in) chooses only its own kernels by the answer: told 8.0, they chose kernels that their
+    /// sm_75 code does not have, refused or stubs (cuDNN's convolutions gave zeros, cuFFT stopped the
+    /// GPU, cuSOLVER's Cholesky factorization failed).
+    program: bool,
 }
 
 #[derive(Default)]
@@ -749,6 +761,7 @@ fn caller(return_address: usize) -> Decision {
         return Decision {
             caller: Caller::Other,
             limit: None,
+            program: false,
         };
     }
     let unloads = unload_count();
@@ -801,9 +814,16 @@ fn caller(return_address: usize) -> Decision {
             }
         }
     }
+    let program = runtime
+        || own.is_some_and(|object| {
+            object.needed.iter().any(|name| {
+                runtime_version(&String::from_utf8_lossy(name)).is_some_and(|v| v >= FIRST_RUNTIME_WITHOUT_DEVICE)
+            })
+        });
     let decision = Decision {
         caller,
         limit: limit.as_ref().map(|(sm, _)| *sm),
+        program,
     };
     {
         let mut cache = callers();
@@ -832,7 +852,7 @@ fn caller(return_address: usize) -> Decision {
             } else {
                 format!("the code of {}", file.to_string_lossy())
             };
-            if config().capability_all {
+            if config().capability_all && program {
                 log::warn(format_args!(
                     "{name} is told compute capability {major}.{minor}, as VF_CAPABILITY and VF_CAPABILITY_ALL ask, \
                      although {whose} runs here from its code for sm_{sm}, in which the \
@@ -842,10 +862,15 @@ fn caller(return_address: usize) -> Decision {
                 log::warn(format_args!(
                     "{name} is told compute capability {}.{}, not the {major}.{minor} that VF_CAPABILITY asks: {whose} \
                      runs here from its code for sm_{sm}, in which the kernels that a \
-                     program told {major}.{minor} chooses are not the real ones (VF_CAPABILITY_ALL=1 tells it \
-                     {major}.{minor} all the same)",
+                     program told {major}.{minor} chooses are not the real ones ({})",
                     sm / 10,
-                    sm % 10
+                    sm % 10,
+                    if program {
+                        format!("VF_CAPABILITY_ALL=1 tells it {major}.{minor} all the same")
+                    } else {
+                        "VF_CAPABILITY_ALL=1 lifts the limit of a CUDA runtime and of the code that uses it only"
+                            .to_string()
+                    }
                 ))
             }
         }
@@ -870,13 +895,17 @@ fn caller(return_address: usize) -> Decision {
 /// is told, where the code it runs limits it (`vf_adapt::Policy::told_limit`). Told 7.5, a caller
 /// is then given the sm_75 code, or the PTX for sm_75, of every image it loads that has some, not
 /// the code for sm_80 that the image may also have. The caller that loads an image is the caller
-/// that asks what the GPU is, a CUDA runtime for the programs that use it. `None` with
-/// `VF_CAPABILITY_ALL=1`, which tells every caller what `VF_CAPABILITY` asks.
+/// that asks what the GPU is, a CUDA runtime for the programs that use it. `None` for a CUDA
+/// runtime and the code that uses it with `VF_CAPABILITY_ALL=1`, which tells them what
+/// `VF_CAPABILITY` asks (`Decision::program`).
 pub fn told_sm(return_address: usize) -> Option<u32> {
-    if config().capability_all || !limits_apply() {
+    if !limits_apply() {
         return None;
     }
-    caller(return_address).limit
+    let decision = caller(return_address);
+    decision
+        .limit
+        .filter(|_| !(config().capability_all && decision.program))
 }
 
 /// The capability reported for a physical sm_70 device.
@@ -896,7 +925,9 @@ pub fn binary_capability(return_address: usize) -> Option<(i32, i32)> {
 
 fn capability(decision: Decision) -> Option<(i32, i32)> {
     let as_pair = |sm: u32| ((sm / 10) as i32, (sm % 10) as i32);
-    let limit = decision.limit.filter(|_| !config().capability_all);
+    let limit = decision
+        .limit
+        .filter(|_| !(config().capability_all && decision.program));
     let told = config().capability.map(|asked| limit.map_or(asked, as_pair));
     let sm = match decision.caller {
         Caller::Native => return None,

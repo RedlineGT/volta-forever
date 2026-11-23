@@ -281,12 +281,14 @@ at the default log level: told 8.0, it would choose kernels that its sm_75 code 
 which write nothing, and told 9.0, some that stop the GPU (`docs/architecture.md`, section 4).
 What that does not cover:
 
-- `VF_CAPABILITY_ALL=1` tells such callers the value asked for all the same. A kernel that such a
-  caller chooses for that capability, and whose sm_75 code is a stub (it writes no memory, where
-  its code for the capability told does: PyTorch's attention kernels for sm_80), is refused, and
-  the operation fails. Convolutions through cuDNN, which loads engines for 8.0 that are refused,
-  give wrong results with no error. It is only for a program that does not launch those kernels,
-  as SGLang with the settings of its guide.
+- `VF_CAPABILITY_ALL=1` tells the value asked for all the same to a CUDA runtime and to the code
+  that uses it (PyTorch's library), the program; a library that asks for itself without that
+  runtime (cuDNN, cuFFT, cuSOLVER) is still told what its own code allows (told 8.0, cuDNN's convolutions gave zeros, cuFFT stopped the GPU
+  and cuSOLVER's Cholesky factorization failed). A kernel that the program then chooses for that
+  capability, and whose sm_75 code is a stub (it writes no memory, where its code for the
+  capability told does: PyTorch's attention kernels for sm_80), is refused, and the operation
+  fails. It is only for a program that does not launch those kernels, as SGLang with the
+  settings of its guide.
 - NVML, answered by the audit library, reports the value asked for to every caller: told 8.0, a
   program that reads NVML (vLLM does) and a CUDA runtime that is told 7.5 give it two answers.
 - Triton compiles for the capability that PyTorch reports (`torch.cuda.get_device_capability`)

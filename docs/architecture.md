@@ -356,10 +356,11 @@ chooses for 9.0 stop the GPU. Where such a caller is told a later generation all
 architecture told writes, is refused (`vf_sass::effects`). A program whose code is PTX for the generation asked (as
 llama.cpp's, for sm_75, sm_80 and sm_90) is told what was asked and given its PTX for that
 capability. The decision is taken when a caller first asks; a
-library loaded after that is not looked at. `VF_CAPABILITY_ALL=1` tells such callers
-what was asked all the same, for a program that does not launch the kernels it would
+library loaded after that is not looked at. `VF_CAPABILITY_ALL=1` tells a CUDA runtime,
+and the code that uses it, what was asked all the same, for a program that does not launch the kernels it would
 choose for it (the SGLang guide: SGLang selects its quantized experts from PyTorch's
-capability). The proxy checks the queried
+capability); a library that asks for itself without that runtime (cuDNN, cuFFT, cuSOLVER)
+chooses only its own kernels by the answer, and is still told what its code allows. The proxy checks the queried
 device's physical major and minor before changing an answer. Other GPUs keep their
 physical values, including in a mixed-device process. A code-free client using the
 proxy without the launcher gets the physical capability by default.
