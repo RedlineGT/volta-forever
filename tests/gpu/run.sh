@@ -382,6 +382,37 @@ for lazy in 0 1; do
         "$out/bin/jitlink-marked.cubin" bad=218 good=0 >"$log" 2>&1
     check "jitlink-marked-$lazy" "^all lookup results match$"
 done
+# Lookup tables of internal linkage (k_tables.cu: `static const __device__`, `static __constant__`,
+# and one in a namespace, whose name nvcc mangles): NVIDIA's driver gives each by its name in the
+# PTX, before and after the kernel that reads it, by the library, by its module and by the module of
+# the kernel's function, and the kernel reads what the program writes there; a name the PTX does not
+# have is 500. Through the layer the same, except in a deferred library whose kernel that reads them
+# was compiled alone with copies of them: the tables are then refused by name with 801
+# (CUDA_ERROR_NOT_SUPPORTED, until 2026-11-23 500, which says that the module has no such name),
+# and given when the program asks for them first, or with VF_LAZY=0.
+tables() {  # tables NAME LIBCUDA IMAGE INTERFACE STEP...
+    local name=$1 libcuda=$2 image=$3 interface=$4; shift 4
+    log=$out/logs/$name.log
+    DRVRUN_LIBCUDA=$libcuda VF_LOG_LEVEL=2 python3 "$W/tests/gpu/tables.py" "$G/$image" "$interface" "$@" >"$log" 2>&1
+}
+mangled=_ZN40_INTERNAL_61e6d877_11_k_tables_cu_reader2ns6ntableE
+read=run=166,288,410,532 written=run=1155,1267,1379,1491
+given=("get:table=0" "get:ctable=0" "get:$mangled=0" "get:ntable=500")
+in_modules=("mod:table=0" "fn:table=0" "mod:$mangled=0")
+tables tables-driver libcuda.so.1 k_tables.129.sm70.ptx library $read "${given[@]}" "${in_modules[@]}" set:table $written
+check tables-driver "^all results match$"
+tables tables-driver-first libcuda.so.1 k_tables.129.sm70.ptx library "${given[@]}" "${in_modules[@]}" set:table $written
+check tables-driver-first "^all results match$"
+tables tables-module "$proxy/libcuda.so.1" k_tables.135.sm75.ptx module $read "${given[@]}" set:table $written
+check tables-module "^all results match$"
+tables tables-asked-first "$proxy/libcuda.so.1" k_tables.135.sm75.ptx library "${given[@]}" "${in_modules[@]}" set:table $written
+check tables-asked-first "^all results match$" "lazy: module with 2 entries deferred"
+VF_LAZY=0 tables tables-lazy-off "$proxy/libcuda.so.1" k_tables.135.sm75.ptx library $read "${given[@]}" "${in_modules[@]}" set:table $written
+check tables-lazy-off "^all results match$"
+tables tables-copied "$proxy/libcuda.so.1" k_tables.135.sm75.ptx library $read \
+    get:table=801 get:ctable=801 "get:$mangled=801" get:ntable=500 mod:table=801 fn:table=801 "mod:$mangled=801"
+check tables-copied "^all results match$" "lazy: compiling sub-module for kernel reader" \
+    "the variable table is not given to the program \(error 801\)" "the variable $mangled is not given to the program \(error 801\)"
 
 rt runtime-12.9 rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "own kernel: 0/65536 wrong" "sgemm check: 0 wrong" "half gemm check: 0 wrong"
 rt runtime-13.5-ptx rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "runtime 13050, driver API 13000" "rt_probe.135.sm75ptx is told compute capability 7.5: its code starts there" "device 0: .*sm_75" "PTX for sm_75 retargeted" "own kernel: 0/65536 wrong" "machine code for sm_75 translated" "kernel volta_sgemm_.* is not given to the program: its machine code for sm_75 is not translated" "cublasCreate -> 0 " "cublasSgemm -> 13 "

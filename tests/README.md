@@ -51,7 +51,9 @@ scripts of `tests/sass/`).
   what the native sm_70 build of the same source, the host models or the reference vectors of
   an RTX 5090 say. 126 cases at 0.1.3, including nonconsecutive MMA fragments, a partial warp
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
-  (error 218 and a NULL handle, through a module, a library and the driver's linker).
+  (error 218 and a NULL handle, through a module, a library and the driver's linker), and
+  lookup tables asked for by name, answered as NVIDIA's driver answers them, except where the
+  layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result (cuBLAS is exercised by
   `run.sh`).
@@ -213,7 +215,8 @@ thread of the parent waits in a write of the adapter's log ends when it calls `e
 needs a C compiler. The eighth checks, with another stand-in that keeps the text of what it is
 given, that a deferred library gives a kernel that only reads a table of its module from a
 sub-module that holds a copy of the table, and then refuses the table by every name the program
-could ask for it with (error 500), while a variable that kernels write is given; and that a table
+could ask for it with (error 801; a name that the module does not have stays 500), while a
+variable that kernels write is given; and that a table
 the program was given first keeps the kernels that read it in the whole module. Each case in a
 process of its own, a second time from the proxy cache; it needs a C compiler.
 

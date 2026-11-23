@@ -245,9 +245,11 @@ Strata's i-quants). The sub-module of a kernel that reads it holds a copy, and e
 copy keeps the same bytes for as long as the program writes none; it can write one
 only through an address it asks for by name. So while a sub-module holds a copy of a
 variable, the program is not given that variable (`cuLibraryGetGlobal`, and
-`cuModuleGetGlobal` on a module of the library): it gets `CUDA_ERROR_NOT_FOUND`, and a
-line at the default log level says why. A variable that the program was given first is
-the whole module's, and the kernels that read it are then served from there.
+`cuModuleGetGlobal` on a module of the library): it gets `CUDA_ERROR_NOT_SUPPORTED`
+(801; NVIDIA's driver gives a variable of internal linkage by its name in the PTX, so
+`CUDA_ERROR_NOT_FOUND` would wrongly say that there is none), and a line at the default
+log level says why. A variable that the program was given first is the whole module's,
+and the kernels that read it are then served from there.
 
 Over llama.cpp's 149 modules (b12418, its sm_75 PTX), all 7,628 entries are
 independent (7,365 before read-only data was copied); over the 52 modules of Strata's

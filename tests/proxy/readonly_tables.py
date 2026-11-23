@@ -3,10 +3,10 @@
 A deferred library (`VF_LAZY`) gives a kernel that only reads a table of its module (a variable with
 an initializer that no function writes) from a sub-module of its own, which holds a copy of the
 table, instead of compiling the whole module for it. While such a copy is loaded, the program is not
-given the table by name: a write to the copy it would be given would not reach the kernel. A table
-that the program was given first stays the whole module's. Each round in a process of its own, with a
-stand-in for the driver that keeps the text of what it is given; the second load of the module in a
-round is set up from the proxy cache.
+given the table by name (CUDA_ERROR_NOT_SUPPORTED, 801: NVIDIA's driver would give it): a write to the
+copy it would be given would not reach the kernel. A table that the program was given first stays the
+whole module's. Each round in a process of its own, with a stand-in for the driver that keeps the text
+of what it is given; the second load of the module in a round is set up from the proxy cache.
 
 Run with python3 tests/proxy/readonly_tables.py path/to/libcuda.so.1.
 """
@@ -81,13 +81,15 @@ def copies_first(api, mock):
     assert "reader(" in image and not whole(image), "the whole module was compiled for a kernel that reads a table:\n" + image
     assert ".global .align 4 .b8 table[8] = {1, 0, 0, 0, 2, 0, 0, 0};" in image, image
     address, size = c.c_ulonglong(7), c.c_size_t(7)
-    # The program asks for the table: refused, as the driver refuses a name it does not have.
-    assert api.cuLibraryGetGlobal(c.byref(address), c.byref(size), library, b"table") == 500
+    # The program asks for the table: refused, and not as a name that the module does not have (500).
+    assert api.cuLibraryGetGlobal(c.byref(address), c.byref(size), library, b"table") == 801
     assert address.value == 7, "an address was given"
     function, module = c.c_void_p(), c.c_void_p()
     assert api.cuKernelGetFunction(c.byref(function), kernel) == 0
     assert api.cuFuncGetModule(c.byref(module), function) == 0
-    assert api.cuModuleGetGlobal_v2(c.byref(address), c.byref(size), module, b"table") == 500
+    assert api.cuModuleGetGlobal_v2(c.byref(address), c.byref(size), module, b"table") == 801
+    # A name that the module does not have is answered as the driver answers it.
+    assert api.cuLibraryGetGlobal(c.byref(address), c.byref(size), library, b"absent") == 500
     # A variable that kernels write has one copy, the whole module's, and is given.
     assert api.cuLibraryGetGlobal(c.byref(address), c.byref(size), library, b"counter") == 0
     assert address.value != 7
@@ -96,7 +98,7 @@ def copies_first(api, mock):
     whole_module = c.c_void_p()
     assert api.cuLibraryGetModule(c.byref(whole_module), library) == 0
     for get in (api.cuModuleGetGlobal, api.cuModuleGetGlobal_v2):
-        assert get(c.byref(address), c.byref(size), whole_module, b"table") == 500
+        assert get(c.byref(address), c.byref(size), whole_module, b"table") == 801
         assert get(c.byref(address), c.byref(size), whole_module, b"counter") == 0
     assert api.cuLibraryUnload(library) == 0
 
