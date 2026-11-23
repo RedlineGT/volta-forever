@@ -15,11 +15,12 @@
 
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::Read as _;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 // --- nvJitLink error codes (matching the CUDA 13.5 header) ---
 
@@ -378,9 +379,65 @@ fn ptx_kernels(text: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// The kernels that trap in the inputs of each link, by its handle: the cubin that the link makes
+/// names them (`marked_cubin`).
+static MARKS: LazyLock<Mutex<HashMap<usize, Vec<vf_adapt::Refused>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn marks() -> std::sync::MutexGuard<'static, HashMap<usize, Vec<vf_adapt::Refused>>> {
+    MARKS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// An input of the link `handle`, in which the kernels `refused` trap, was added.
+fn mark(handle: HandlePtr, refused: Vec<vf_adapt::Refused>) {
+    if !refused.is_empty() {
+        marks().entry(handle as usize).or_default().extend(refused);
+    }
+}
+
+/// The cubin that the link `handle` made, with a note that names the kernels that trap in its
+/// inputs (`vf_fatbin::cubin_with_refused`), when there are some: the layer refuses them when the
+/// program asks for them, wherever the cubin is loaded. `Ok(None)`: there are none.
+fn marked_cubin(lib: &RealLib, handle: HandlePtr) -> Result<Option<Vec<u8>>, c_int> {
+    let refused: Vec<vf_fatbin::RefusedKernel> = match marks().get(&(handle as usize)) {
+        Some(refused) => refused
+            .iter()
+            .map(|r| vf_fatbin::RefusedKernel {
+                kernel: r.kernel.clone(),
+                function: r.function.clone(),
+                reason: r.reason.clone(),
+            })
+            .collect(),
+        None => return Ok(None),
+    };
+    let mut size = 0usize;
+    let result = unsafe { (lib.get_linked_cubin_size)(handle, &mut size) };
+    if result != NVJITLINK_SUCCESS {
+        return Err(result);
+    }
+    let mut cubin = vec![0u8; size];
+    let result = unsafe { (lib.get_linked_cubin)(handle, cubin.as_mut_ptr().cast()) };
+    if result != NVJITLINK_SUCCESS {
+        return Err(result);
+    }
+    match vf_fatbin::cubin_with_refused(&cubin, &refused) {
+        Some(marked) => Ok(Some(marked)),
+        None => {
+            // Refuse rather than give machine code with kernels that trap, unmarked.
+            log::error(format_args!(
+                "the linked cubin cannot be marked with the {} kernels that cannot run on this GPU (the first is {}); \
+                 it is not given",
+                refused.len(),
+                refused[0].kernel
+            ));
+            Err(NVJITLINK_ERROR_INTERNAL)
+        }
+    }
+}
+
 /// What is compiled here comes back to the program as machine code, whose kernels the driver
-/// hands out: a kernel that cannot run can only be refused here, by refusing the compilation, and
-/// that only when it would lose nothing else. `kernels` are the kernels of what is compiled (the
+/// hands out: a kernel that cannot run can only be refused by refusing the compilation, when it
+/// would lose nothing else, or by the layer, at the lookup of the kernel in the cubin that the link
+/// makes, which names it (`marked_cubin`). `kernels` are the kernels of what is compiled (the
 /// PTX given, or the entries of a fat binary that the linker takes), `refused` those of them that
 /// trap, `what` what they are of. True: the compilation is refused (every kernel traps). Otherwise
 /// each refused kernel is said, and the kernels that run emulated instructions are announced.
@@ -411,7 +468,8 @@ fn refuses_compilation(
         for kernel in refused {
             log::warn(format_args!(
                 "kernel {} cannot run on this GPU ({}: {}); it is compiled as a trap with the others of its \
-                 {what}, and launching it ends the CUDA context of the program",
+                 {what}, and named in the cubin that the link makes: loaded through the layer, it is refused when \
+                 the program asks for it; loaded otherwise, launching it ends the CUDA context of the program",
                 kernel.kernel, kernel.function, kernel.reason
             ));
         }
@@ -425,8 +483,9 @@ fn refuses_compilation(
 }
 
 /// Adapt PTX data using the jitlink policy (ptx_max 8.8, sm 70).
-/// Returns Ok(adapted_bytes) on success, Err(error_code) if the PTX cannot be used on sm_70.
-fn adapt_ptx_data(data: &[u8]) -> Result<Vec<u8>, c_int> {
+/// Returns Ok(adapted_bytes, the kernels that trap in them) on success, Err(error_code) if the PTX
+/// cannot be used on sm_70.
+fn adapt_ptx_data(data: &[u8]) -> Result<(Vec<u8>, Vec<vf_adapt::Refused>), c_int> {
     dump_input(data);
     let policy = jitlink_policy();
     let adapted = policy.adapt_ptx(data);
@@ -451,7 +510,7 @@ fn adapt_ptx_data(data: &[u8]) -> Result<Vec<u8>, c_int> {
         vf_adapt::Outcome::Native => {
             log::info(format_args!("PTX already native for sm_70"));
             // Native PTX still needs null-termination for 12.9.2.
-            return Ok(ensure_null_terminated(data.to_vec()));
+            return Ok((ensure_null_terminated(data.to_vec()), Vec::new()));
         }
         vf_adapt::Outcome::NeedsTranslation { lowest_sm } => {
             log::error(format_args!(
@@ -466,9 +525,13 @@ fn adapt_ptx_data(data: &[u8]) -> Result<Vec<u8>, c_int> {
             return Err(NVJITLINK_ERROR_INVALID_INPUT);
         }
     }
+    let refused = match adapted.outcome {
+        vf_adapt::Outcome::Retargeted { refused, .. } => refused,
+        _ => Vec::new(),
+    };
     match adapted.image {
-        Some(img) => Ok(ensure_null_terminated(img)),
-        None => Ok(ensure_null_terminated(data.to_vec())),
+        Some(img) => Ok((ensure_null_terminated(img), refused)),
+        None => Ok((ensure_null_terminated(data.to_vec()), refused)),
     }
 }
 
@@ -496,8 +559,9 @@ fn fatbin_kernels(image: &[u8], kind: u16, sm: u32) -> Vec<String> {
     kernels
 }
 
-/// Try to adapt a fat binary for sm_70.
-fn check_fatbin_data(data: &[u8]) -> Result<Option<Vec<u8>>, c_int> {
+/// Try to adapt a fat binary for sm_70: the image to link in its place, if there is one, and the
+/// kernels that trap in what the linker takes of it.
+fn check_fatbin_data(data: &[u8]) -> Result<(Option<Vec<u8>>, Vec<vf_adapt::Refused>), c_int> {
     let policy = jitlink_policy();
     if let Ok(fat) = vf_fatbin::parse(data) {
         match policy.adapt_fatbin(&fat) {
@@ -552,17 +616,46 @@ fn check_fatbin_data(data: &[u8]) -> Result<Option<Vec<u8>>, c_int> {
                     }
                     vf_adapt::Outcome::Native => {
                         log::info(format_args!("fatbin already has sm_70 code"));
+                        // Machine code for sm_70 that a link through this library made names what
+                        // traps in it.
+                        let refused = fat
+                            .entries
+                            .iter()
+                            .filter(|entry| entry.kind() == vf_fatbin::KIND_ELF && policy.usable(entry))
+                            .filter_map(|entry| entry.payload().ok())
+                            .flat_map(|cubin| marked_kernels(&cubin))
+                            .collect();
+                        return Ok((None, refused));
                     }
                     vf_adapt::Outcome::Unknown => {}
                 }
-                return Ok(adapted.image);
+                let refused = match adapted.outcome {
+                    vf_adapt::Outcome::Retargeted { refused, .. } | vf_adapt::Outcome::Translated { refused, .. } => {
+                        refused
+                    }
+                    _ => Vec::new(),
+                };
+                return Ok((adapted.image, refused));
             }
             Err(e) => {
                 log::warn(format_args!("fatbin parse error during adapt: {e:?}"));
             }
         }
     }
-    Ok(None)
+    Ok((None, Vec::new()))
+}
+
+/// The kernels that the note of a cubin made by a link through this library names
+/// (`marked_cubin`).
+fn marked_kernels(cubin: &[u8]) -> Vec<vf_adapt::Refused> {
+    vf_fatbin::cubin_refused(cubin)
+        .into_iter()
+        .map(|r| vf_adapt::Refused {
+            kernel: r.kernel,
+            function: r.function,
+            reason: r.reason,
+        })
+        .collect()
 }
 
 /// Check a raw CUDA cubin. Host objects and archives are read by the native linker.
@@ -578,7 +671,13 @@ fn check_machine_code(
     let policy = jitlink_policy();
     let adapted = policy.adapt_cubin(raw);
     match adapted.outcome {
-        vf_adapt::Outcome::Native => unsafe { (lib.add_data)(handle, input_type, data, size, name) },
+        vf_adapt::Outcome::Native => {
+            let result = unsafe { (lib.add_data)(handle, input_type, data, size, name) };
+            if result == NVJITLINK_SUCCESS {
+                mark(handle, marked_kernels(raw));
+            }
+            result
+        }
         vf_adapt::Outcome::NeedsTranslation { lowest_sm } => {
             log::error(format_args!(
                 "rejected machine code input (type {input_type}): sm_{lowest_sm} cannot run on sm_70"
@@ -617,6 +716,9 @@ fn do_create(handle: *mut HandlePtr, num_options: c_uint, options: *const *const
 
     if result != NVJITLINK_SUCCESS {
         log::warn(format_args!("nvJitLinkCreate failed: {result}"));
+    } else {
+        // (Of a link destroyed before that had this handle, nothing is left.)
+        marks().remove(&(unsafe { *handle } as usize));
     }
     result
 }
@@ -629,7 +731,17 @@ fn do_destroy(handle: *mut HandlePtr) -> c_int {
     if handle.is_null() {
         return NVJITLINK_ERROR_INVALID_INPUT;
     }
-    unsafe { (lib.destroy)(handle) }
+    // Before 12.9.2 frees the handle, which another thread's link can then be given; put back if
+    // the link was not destroyed.
+    let link = unsafe { *handle } as usize;
+    let kept = marks().remove(&link);
+    let result = unsafe { (lib.destroy)(handle) };
+    if result != NVJITLINK_SUCCESS
+        && let Some(kept) = kept
+    {
+        marks().entry(link).or_insert(kept);
+    }
+    result
 }
 
 fn do_add_data(handle: HandlePtr, input_type: c_int, data: *const c_void, size: usize, name: *const c_char) -> c_int {
@@ -646,30 +758,22 @@ fn do_add_data(handle: HandlePtr, input_type: c_int, data: *const c_void, size: 
     // Safety: data points to `size` bytes.
     let raw = unsafe { std::slice::from_raw_parts(data as *const u8, size) };
 
+    // Add what was made of the input, and note its kernels that trap for the cubin of the link.
+    let added = |input_type: c_int, image: Option<&[u8]>, refused: Vec<vf_adapt::Refused>| {
+        let (data, size) = image.map_or((data, size), |image| (image.as_ptr().cast(), image.len()));
+        let result = unsafe { (lib.add_data)(handle, input_type, data, size, name) };
+        if result == NVJITLINK_SUCCESS {
+            mark(handle, refused);
+        }
+        result
+    };
     match input_type {
         NVJITLINK_INPUT_PTX => match adapt_ptx_data(raw) {
-            Ok(adapted) => unsafe {
-                (lib.add_data)(
-                    handle,
-                    input_type,
-                    adapted.as_ptr() as *const c_void,
-                    adapted.len(),
-                    name,
-                )
-            },
+            Ok((adapted, refused)) => added(input_type, Some(&adapted), refused),
             Err(e) => e,
         },
         NVJITLINK_INPUT_FATBIN => match check_fatbin_data(raw) {
-            Ok(Some(adapted)) => unsafe {
-                (lib.add_data)(
-                    handle,
-                    input_type,
-                    adapted.as_ptr() as *const c_void,
-                    adapted.len(),
-                    name,
-                )
-            },
-            Ok(None) => unsafe { (lib.add_data)(handle, input_type, data, size, name) },
+            Ok((adapted, refused)) => added(input_type, adapted.as_deref(), refused),
             Err(e) => e,
         },
         NVJITLINK_INPUT_OBJECT | NVJITLINK_INPUT_LIBRARY => {
@@ -688,15 +792,7 @@ fn do_add_data(handle: HandlePtr, input_type: c_int, data: *const c_void, size: 
             // Auto-detect. Try PTX first (text with a header).
             if vf_ptx::header(raw).is_some() {
                 return match adapt_ptx_data(raw) {
-                    Ok(adapted) => unsafe {
-                        (lib.add_data)(
-                            handle,
-                            NVJITLINK_INPUT_PTX,
-                            adapted.as_ptr() as *const c_void,
-                            adapted.len(),
-                            name,
-                        )
-                    },
+                    Ok((adapted, refused)) => added(NVJITLINK_INPUT_PTX, Some(&adapted), refused),
                     Err(e) => e,
                 };
             }
@@ -705,16 +801,7 @@ fn do_add_data(handle: HandlePtr, input_type: c_int, data: *const c_void, size: 
                 let magic = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                 if magic == vf_fatbin::MAGIC {
                     return match check_fatbin_data(raw) {
-                        Ok(Some(adapted)) => unsafe {
-                            (lib.add_data)(
-                                handle,
-                                NVJITLINK_INPUT_FATBIN,
-                                adapted.as_ptr() as *const c_void,
-                                adapted.len(),
-                                name,
-                            )
-                        },
-                        Ok(None) => unsafe { (lib.add_data)(handle, NVJITLINK_INPUT_FATBIN, data, size, name) },
+                        Ok((adapted, refused)) => added(NVJITLINK_INPUT_FATBIN, adapted.as_deref(), refused),
                         Err(e) => e,
                     };
                 }
@@ -792,6 +879,16 @@ fn do_get_linked_cubin_size(handle: HandlePtr, size: *mut usize) -> c_int {
         Ok(l) => l,
         Err(e) => return e,
     };
+    if !handle.is_null() && !size.is_null() {
+        match marked_cubin(lib, handle) {
+            Ok(Some(marked)) => {
+                unsafe { *size = marked.len() };
+                return NVJITLINK_SUCCESS;
+            }
+            Ok(None) => {}
+            Err(e) => return e,
+        }
+    }
     unsafe { (lib.get_linked_cubin_size)(handle, size) }
 }
 
@@ -800,6 +897,16 @@ fn do_get_linked_cubin(handle: HandlePtr, cubin: *mut c_void) -> c_int {
         Ok(l) => l,
         Err(e) => return e,
     };
+    if !handle.is_null() && !cubin.is_null() {
+        match marked_cubin(lib, handle) {
+            Ok(Some(marked)) => {
+                unsafe { std::ptr::copy_nonoverlapping(marked.as_ptr(), cubin.cast::<u8>(), marked.len()) };
+                return NVJITLINK_SUCCESS;
+            }
+            Ok(None) => {}
+            Err(e) => return e,
+        }
+    }
     unsafe { (lib.get_linked_cubin)(handle, cubin) }
 }
 
@@ -1270,9 +1377,15 @@ mod tests {
 
             // One kernel that runs: both compile, the other kernel as a trap.
             let half = format!(".version 8.8\n.target sm_{sm}\n.address_size 64\n{BAD}{GOOD}");
-            assert!(adapt_ptx_data(half.as_bytes()).is_ok());
-            let adapted = check_fatbin_data(&ptx_fatbin(half.as_bytes(), sm)).unwrap().unwrap();
-            assert_eq!(fatbin_kernels(&adapted, vf_fatbin::KIND_PTX, 70), ["bad", "good"]);
+            // The kernel that traps is given back, for the note of the cubin that the link makes.
+            let names = |refused: &[vf_adapt::Refused]| refused.iter().map(|r| r.kernel.clone()).collect::<Vec<_>>();
+            assert_eq!(names(&adapt_ptx_data(half.as_bytes()).unwrap().1), ["bad"]);
+            let (adapted, refused) = check_fatbin_data(&ptx_fatbin(half.as_bytes(), sm)).unwrap();
+            assert_eq!(
+                fatbin_kernels(&adapted.unwrap(), vf_fatbin::KIND_PTX, 70),
+                ["bad", "good"]
+            );
+            assert_eq!(names(&refused), ["bad"]);
         }
     }
 

@@ -59,7 +59,9 @@ pub struct Replacement {
 }
 
 // SAFETY: the wrapper points at owned, immutable data. Its fourth word is either the program
-// file name (v1), or an immutable array and objects owned by this replacement (v2).
+// file name (v1), or an immutable array and objects owned by this replacement (v2), or the
+// program's own array (v2, of which the replacement is a copy of the first fat binary: the
+// runtime keeps it while the image is registered).
 unsafe impl Send for Replacement {}
 // Shared references are published only after the metadata is registered. The image, wrapper and
 // relocation inputs remain immutable, just as they must for concurrent lookups by the driver.
@@ -228,6 +230,7 @@ pub fn retained(handle: usize) -> Option<Arc<Replacement>> {
 
 /// The driver loaded `replacement` as `handle`: keep it, and what is known of its kernels.
 pub fn keep(handle: usize, mut replacement: Replacement) {
+    given(handle);
     // Context destruction can retire a CUmodule without an explicit unload.
     // The driver's next load starts a new lifetime at the same address. (The context's record
     // first: what `contexts::destroyed` drops for the handle is then dropped before this.)
@@ -255,16 +258,54 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         .insert(handle, Arc::new(replacement));
 }
 
+/// What `release` took of a module or library: held until the driver's unload returned, and
+/// given back to `unload_failed` when it failed.
+pub struct Released {
+    handle: usize,
+    /// The number of the load of `handle` it was taken from (`LOADS`).
+    load: u64,
+    kept: Option<Arc<Replacement>>,
+    kernels: kernels::Taken,
+    context: crate::contexts::Taken,
+}
+
+/// The number of each load of a module or library whose handle the driver gave, by handle: a
+/// handle given again (a load once the unload of the one before returned) has another.
+static LOADS: LazyLock<Mutex<HashMap<usize, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LOAD_NUMBERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The driver gave `handle` to a load: it is the handle of a load of another number.
+fn given(handle: usize) {
+    let number = LOAD_NUMBERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    LOADS.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, number);
+}
+
+fn load_of(handle: usize) -> u64 {
+    LOADS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&handle)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// The module or library `handle` is unloaded: what is kept for it is forgotten. Called before the
 /// driver's unload, which may give the handle to a load in another thread as soon as it returns:
-/// the image is given back, for the caller to hold until the driver's unload returned
+/// what is taken is given back, for the caller to hold until the driver's unload returned
 /// (`unload_failed` when it failed).
-pub fn release(handle: usize) -> Option<Arc<Replacement>> {
+pub fn release(handle: usize) -> Released {
+    let load = load_of(handle);
     // (The context's record first, as in `keep`.)
-    crate::contexts::forget(handle);
+    let context = crate::contexts::take(handle);
     let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
-    kernels::forget(handle);
-    kept
+    let kernels = kernels::take(handle);
+    Released {
+        handle,
+        load,
+        kept,
+        kernels,
+        context,
+    }
 }
 
 /// The module `handle` went with its context (`contexts::destroyed`, which holds its record's
@@ -274,16 +315,29 @@ pub fn dropped(handle: usize) {
     kernels::forget(handle);
 }
 
-/// The driver did not unload `handle`, of which `release` gave `kept`: the driver may still read
-/// the image, which is kept again. (What else was known of its kernels is not: a kernel refused
-/// in it that the program asks for again is given, and traps.)
-pub fn unload_failed(handle: usize, kept: Option<Arc<Replacement>>) {
+/// The driver did not unload the module or library of which `release` took `released`: it is
+/// still the program's, and what was known of it is known again (the image, which the driver may
+/// still read, the kernels refused in it, its context), if its handle was not given to another
+/// load since. (What the second translation at launch kept for it is not: `fit::unload` let it go.)
+pub fn unload_failed(released: Released) {
+    let Released {
+        handle,
+        load,
+        kept,
+        kernels,
+        context,
+    } = released;
+    if load_of(handle) != load {
+        return;
+    }
+    crate::contexts::restore(context);
     if let Some(kept) = kept {
         KEPT.lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(handle)
             .or_insert(kept);
     }
+    kernels::restore(kernels);
 }
 
 /// What the adaptation found in the inputs of a link.
@@ -306,6 +360,9 @@ struct Links {
     /// The architecture that the options of a link name for its output (`CU_JIT_TARGET`), by
     /// link state.
     targets: HashMap<usize, u32>,
+    /// The number of the link that each state was last given to (`link_created`).
+    created: HashMap<usize, u64>,
+    links: u64,
 }
 
 static LINKS: LazyLock<Mutex<Links>> = LazyLock::new(|| Mutex::new(Links::default()));
@@ -367,6 +424,9 @@ pub unsafe fn link_output(state: usize, image: *const c_void, size: usize) {
 /// The driver made the link `state`, for the architecture `target` when its options name one.
 pub fn link_created(state: usize, target: Option<u32>) {
     let mut links = links();
+    links.links += 1;
+    let number = links.links;
+    links.created.insert(state, number);
     links.inputs.remove(&state);
     match target {
         Some(sm) => links.targets.insert(state, sm),
@@ -379,55 +439,118 @@ pub fn link_target(state: usize) -> Option<u32> {
     links().targets.get(&state).copied()
 }
 
-/// The link `state` is to be destroyed: the driver may give its handle to another as soon as it
-/// is, and this is called before.
-pub fn link_destroyed(state: usize) {
-    let mut links = links();
-    links.inputs.remove(&state);
-    links.targets.remove(&state);
+/// What `link_destroyed` took of a link, for `link_destroy_failed`.
+pub struct LinkTaken {
+    state: usize,
+    inputs: Option<Found>,
+    target: Option<u32>,
+    /// The number of the link of `state` it was taken from (`Links::created`).
+    link: u64,
 }
 
-/// The cubin at `bytes`, when a link made it from inputs in which kernels trap or run emulated
-/// instructions: the same bytes, to load with what is known of those kernels.
-///
-/// # Safety
-/// As for `adapt`, with `bytes` at a cubin.
-unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
-    let links = links();
-    if links.outputs.is_empty() {
-        return None;
+/// The link `state` is to be destroyed: the driver may give its handle to another as soon as it
+/// is, and this is called before. What is known of it is given back, for `link_destroy_failed`.
+pub fn link_destroyed(state: usize) -> LinkTaken {
+    let mut links = links();
+    LinkTaken {
+        state,
+        inputs: links.inputs.remove(&state),
+        target: links.targets.remove(&state),
+        link: links.created.get(&state).copied().unwrap_or(0),
     }
-    let length = unsafe { cubin_extent(bytes, len) }?;
-    let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
-    let found = links.outputs.get(&(length, digest(cubin)))?.clone();
-    drop(links);
+}
+
+/// The driver did not destroy the link of which `link_destroyed` took `taken`: what was known of
+/// it is known again, if its handle was not given to another link since.
+pub fn link_destroy_failed(taken: LinkTaken) {
+    let mut links = links();
+    if links.created.get(&taken.state).copied().unwrap_or(0) != taken.link {
+        return;
+    }
+    if let Some(inputs) = taken.inputs {
+        links.inputs.entry(taken.state).or_insert(inputs);
+    }
+    if let Some(target) = taken.target {
+        links.targets.entry(taken.state).or_insert(target);
+    }
+}
+
+/// The kernels that the note of a cubin names, which the nvJitLink of this project made from code in
+/// which they trap (`vf_fatbin::cubin_with_refused`).
+fn marked(cubin: &[u8]) -> Vec<Refused> {
+    fatbin::cubin_refused(cubin)
+        .into_iter()
+        .map(|r| Refused {
+            kernel: r.kernel,
+            function: r.function,
+            reason: r.reason,
+        })
+        .collect()
+}
+
+/// What is known of the kernels of `cubin`, of `length` bytes: what its note names
+/// (`marked`), and what was found in the inputs of the driver's link that made it, if one did.
+fn known_of(cubin: &[u8], length: usize) -> Found {
+    let mut found = Found {
+        refused: marked(cubin),
+        emulated: Vec::new(),
+    };
+    let links = links();
+    if !links.outputs.is_empty()
+        && let Some(known) = links.outputs.get(&(length, digest(cubin)))
+    {
+        found.refused.extend(known.refused.iter().cloned());
+        found.emulated.extend(known.emulated.iter().cloned());
+    }
+    found
+}
+
+/// Say where the kernels that cannot run in a cubin that was loaded as it is were found.
+fn say_known(who: &str, what: &str, found: &Found) {
     if let Some(first) = found.refused.first() {
         log::info(format_args!(
-            "{who}: cubin made by the driver's linker, in which {} kernels cannot run on this GPU (the first is {}: \
-             {}); they are refused if the program asks for them",
+            "{who}: {what}, in which {} kernels cannot run on this GPU (the first is {}: {}); they are refused if \
+             the program asks for them",
             found.refused.len(),
             first.kernel,
             first.reason
         ));
     }
+}
+
+/// The cubin at `bytes`, when kernels of it trap or run emulated instructions, as its note says or
+/// as the inputs of the driver's link that made it said: the same bytes, to load with what is known
+/// of those kernels.
+///
+/// # Safety
+/// As for `adapt`, with `bytes` at a cubin.
+unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
+    let length = unsafe { cubin_extent(bytes, len) }?;
+    let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
+    let found = known_of(cubin, length);
+    if found.refused.is_empty() && found.emulated.is_empty() {
+        return None;
+    }
+    say_known(who, "cubin made by a linker", &found);
     let mut replacement = Replacement::new(cubin.to_vec(), None);
     replacement.refused = found.refused;
     replacement.emulated = found.emulated;
     Some(replacement)
 }
 
-/// What is known of the image that a link made, when the machine code of `fat` that the driver
-/// takes on this GPU is that image: a program can put it in a fat binary of its own.
+/// What is known of the machine code of `fat` that the driver takes on this GPU (`known_of`): a
+/// program can put the image that a link made in a fat binary of its own. An entry stored
+/// compressed is read only when this process made links that have something to say: to read the
+/// note of every compressed entry, the code of every library loaded (hundreds of megabytes for
+/// cuBLAS) would be decompressed.
 fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
-    if links().outputs.is_empty() {
-        return None;
-    }
     let policy = &config().policy;
+    let outputs = !links().outputs.is_empty();
     let mut found: Option<Found> = None;
     for entry in fat
         .entries
         .iter()
-        .filter(|e| e.kind() == fatbin::KIND_ELF && policy.usable(e))
+        .filter(|e| e.kind() == fatbin::KIND_ELF && policy.usable(e) && (outputs || !e.is_compressed()))
     {
         let Ok(cubin) = entry.payload() else {
             continue;
@@ -435,11 +558,11 @@ fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
         let Some(length) = fatbin::cubin_len(&cubin).filter(|&length| length <= cubin.len()) else {
             continue;
         };
-        let key = (length, digest(&cubin[..length]));
-        if let Some(known) = links().outputs.get(&key) {
+        let known = known_of(&cubin[..length], length);
+        if !known.refused.is_empty() || !known.emulated.is_empty() {
             let found = found.get_or_insert_with(Found::default);
-            found.refused.extend(known.refused.iter().cloned());
-            found.emulated.extend(known.emulated.iter().cloned());
+            found.refused.extend(known.refused);
+            found.emulated.extend(known.emulated);
         }
     }
     found
@@ -533,7 +656,30 @@ pub fn policy() -> vf_adapt::Policy {
     if let Some(sm) = TOLD_SM.get() {
         policy.told_sm = Some(sm);
     }
+    policy.keep_sources = FOR_LIBRARY.get();
     policy
+}
+
+thread_local! {
+    /// The load this thread is making is a library's (`ForLibrary`).
+    static FOR_LIBRARY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While it lives, the images that this thread adapts are those of a library, which the driver
+/// loads for every GPU of the process: the entries replaced for the device are kept beside their
+/// replacements (`vf_adapt::Policy::keep_sources`).
+pub struct ForLibrary(bool);
+
+impl ForLibrary {
+    pub fn load() -> ForLibrary {
+        ForLibrary(FOR_LIBRARY.replace(true))
+    }
+}
+
+impl Drop for ForLibrary {
+    fn drop(&mut self) {
+        FOR_LIBRARY.set(self.0);
+    }
 }
 
 /// While it lives, the images that this thread adapts are adapted for a caller told `sm`
@@ -567,7 +713,8 @@ pub unsafe fn loaded_as_is(result: c_int, handle: *mut *mut c_void) {
     if result == 0 && !handle.is_null() {
         // (Nothing of a module that is gone may be left under a handle that the driver gives again.)
         let fresh = unsafe { *handle } as usize;
-        release(fresh);
+        drop(release(fresh));
+        given(fresh);
         crate::fit::forget(fresh);
     }
     if !config().profile {
@@ -680,15 +827,7 @@ fn adapt_fatbin(
     });
     match result {
         Ok((original, _, Some(found))) => {
-            if let Some(first) = found.refused.first() {
-                log::info(format_args!(
-                    "{who}: fat binary with a cubin made by the driver's linker, in which {} kernels cannot run on \
-                     this GPU (the first is {}: {}); they are refused if the program asks for them",
-                    found.refused.len(),
-                    first.kernel,
-                    first.reason
-                ));
-            }
+            say_known(who, "fat binary with a cubin made by a linker", &found);
             let mut replacement = Replacement::new(original.to_vec(), wrapper);
             replacement.refused = found.refused;
             replacement.emulated = found.emulated;
@@ -714,6 +853,18 @@ unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
     let primary = unsafe { fatbin::parse_at(wrapper.data) }.ok()?;
     let linked = unsafe { std::slice::from_raw_parts(wrapper.data, primary.len) };
     let adapted = policy.adapt_fatbin(&primary).ok()?;
+    // The driver takes the first fat binary when it has code for this GPU: that code can be an
+    // image that a link made, of which something is known (`linked_in`), as for a version-1
+    // wrapper (`adapt_fatbin`).
+    if matches!(adapted.outcome, Outcome::Native)
+        && let Some(found) = linked_in(&primary)
+    {
+        say_known(who, "linked fat binary with a cubin made by a linker", &found);
+        let mut replacement = Replacement::new(linked.to_vec(), Some(wrapper));
+        replacement.refused = found.refused;
+        replacement.emulated = found.emulated;
+        return Some(replacement);
+    }
     if adapted.image.is_some() || matches!(adapted.outcome, Outcome::Native) {
         // This is the complete, already linked program.
         return finish(who, "linked fat binary", adapted, None, false, Some(linked));
@@ -756,6 +907,14 @@ unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
             _ => Vec::new(),
         };
         object_traps.push(traps);
+        // A relocatable fat binary with code for this GPU, of which a link made the image.
+        if matches!(lowering.outcome, Outcome::Native)
+            && let Some(found) = linked_in(&fat)
+        {
+            say_known(who, "relocatable fat binary with a cubin made by a linker", &found);
+            refused.extend(found.refused);
+            emulated.extend(found.emulated);
+        }
         match finish(who, "relocatable fat binary", lowering, None, false, Some(source)) {
             Some(replaced) => {
                 origin = origin.or(replaced.origin);
@@ -766,7 +925,9 @@ unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
             None => objects.push(source.into()),
         }
     }
-    let origin = origin?;
+    // Nothing adapted: the program's image is loaded as it is, unless something is known of an
+    // image that a link made in it.
+    let origin = origin.or_else(|| (!refused.is_empty() || !emulated.is_empty()).then_some(kernels::Origin::Native))?;
     if check_external_calls {
         let mut graph = vf_ptx::deps::LinkedDependencies::default();
         for (object, traps) in objects.iter().zip(&object_traps) {

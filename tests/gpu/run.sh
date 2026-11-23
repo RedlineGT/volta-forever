@@ -153,6 +153,13 @@ px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
 px cubin-embedded-ptx "$G/ptx-cases/copy-octal.sm80.cubin" 12345678 abcdef01 0 0
 px cubin-embedded-division "$G/ptx-cases/signed-division.sm80.cubin" 0 0 0 0
 px cubin-embedded-import "$G/ptx-cases/assert-import.sm80.cubin" 12345678 9abcdef0 0badf00d 00c0ffee
+# Built with CUDA 13.5 ptxas -lineinfo -arch=sm_80: the PTX compiled again rounds as the machine
+# code did. (1 + 2^-23) * (1 - 2^-23) - 1 is 0 rounded twice (--fmad=false: FMUL and FADD, with and
+# without a driver import) and -2^-46 rounded once (--fmad=true: FFMA). (Until 2026-11-23 the
+# driver's compiler contracted the first two too, and they gave a8800000.)
+px cubin-embedded-separate-product "$G/ptx-cases/product-sum.fmad-false.sm80.cubin" 00000000 3f800001 3f7ffffe bf800000
+px cubin-embedded-separate-product-import "$G/ptx-cases/product-sum-assert.fmad-false.sm80.cubin" 00000000 3f800001 3f7ffffe bf800000
+px cubin-embedded-fused-product "$G/ptx-cases/product-sum.fmad-true.sm80.cubin" a8800000 3f800001 3f7ffffe bf800000
 # CUDA 12.9 ptxas -lineinfo -arch=sm_75 predicates the HMMA; the PTX keeps its uniform branch.
 px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 41400000 41500000 41600000
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"
@@ -348,6 +355,23 @@ for lazy in 0 1; do
         "$W/crates/vf-ptx/tests/data/indirect-calls.ptx" dispatch=218 bounded=0 unrelated=0 \
         different_signature=0 different_return=0 transitive_dispatch=218 >"$log" 2>&1
     check "indirect-lookup-$lazy" "^all lookup results match$"
+done
+# The cubin that the layer's nvJitLink makes from PTX in which one kernel cannot run and one can
+# names the first in a note (.note.vf.refused): NVIDIA's driver loads it and gives both kernels;
+# through the layer, the one that cannot run is refused (218 and NULL), by a module and a library,
+# eager and deferred. (Until 2026-11-23 the layer gave it to the program.)
+log=$out/logs/jitlink-marked.log
+VF_JITLINK_REAL=$T/cuda-12.9.2/lib/libnvJitLink.so.12 python3 "$W/tests/gpu/jitlink-marked.py" \
+    "$proxy/libnvJitLink.so.13" "$out/bin/jitlink-marked.cubin" >"$log" 2>&1
+check jitlink-marked "^marked cubin written$"
+log=$out/logs/jitlink-marked-driver.log
+DRVRUN_LIBCUDA=libcuda.so.1 python3 "$W/tests/gpu/lookup.py" "$out/bin/jitlink-marked.cubin" bad=0 good=0 >"$log" 2>&1
+check jitlink-marked-driver "^all lookup results match$"
+for lazy in 0 1; do
+    log=$out/logs/jitlink-marked-$lazy.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LAZY=$lazy python3 "$W/tests/gpu/lookup.py" \
+        "$out/bin/jitlink-marked.cubin" bad=218 good=0 >"$log" 2>&1
+    check "jitlink-marked-$lazy" "^all lookup results match$"
 done
 
 rt runtime-12.9 rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "own kernel: 0/65536 wrong" "sgemm check: 0 wrong" "half gemm check: 0 wrong"

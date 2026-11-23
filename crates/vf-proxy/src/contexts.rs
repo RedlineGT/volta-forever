@@ -86,6 +86,23 @@ pub fn forget(handle: usize) {
     modules().remove(&handle);
 }
 
+/// The record of a module that `take` took, for `restore`.
+pub struct Taken(Option<(usize, Record)>);
+
+/// The module `handle` is to be unloaded: its record is taken away (as `forget`), and given back
+/// for `restore` if the driver does not unload it.
+pub fn take(handle: usize) -> Taken {
+    Taken(modules().remove(&handle).map(|record| (handle, record)))
+}
+
+/// The driver did not unload the module of which `take` took `taken`: its record is kept again,
+/// unless another was made for its handle since.
+pub fn restore(taken: Taken) {
+    if let Taken(Some((handle, record))) = taken {
+        modules().entry(handle).or_insert(record);
+    }
+}
+
 /// What is known of the modules of a context, taken before the driver is asked to destroy it.
 pub struct Modules {
     context: Option<usize>,

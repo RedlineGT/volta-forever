@@ -386,7 +386,7 @@ unsafe fn load_adapted(
 /// (without a context, a load fails anyway). In a machine that also has a later card, a context on
 /// that card is given the program's code as it is. (A library, `cuLibraryLoadData`, is loaded for
 /// every context of the process, the V100's included: its code is adapted, and a fat binary keeps
-/// the entries of the other cards.)
+/// the entries of the other cards beside what replaces them, `images::ForLibrary`.)
 fn context_needs_adapting() -> bool {
     let device = real!(cuCtxGetDevice: unsafe extern "C" fn(*mut c_int) -> CUresult);
     let mut ordinal = -1;
@@ -645,10 +645,10 @@ pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     // What is kept for the module is forgotten before the driver unloads it: from then on, the
     // driver may give its handle to a load in another thread, whose records are not to be dropped.
     fit::unload(module as usize);
-    let kept = images::release(module as usize);
+    let released = images::release(module as usize);
     let result = unsafe { real(module) };
     if result != CUDA_SUCCESS {
-        images::unload_failed(module as usize, kept);
+        images::unload_failed(released);
     }
     result
 }
@@ -800,6 +800,7 @@ unsafe extern "C" fn library_load_data(
     library_count: c_uint,
 ) -> CUresult {
     let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
+    let _library = images::ForLibrary::load();
     let real = real!(cuLibraryLoadData: LibraryLoad<*const c_void>);
     let call = |code: *const c_void| unsafe {
         real(
@@ -813,6 +814,12 @@ unsafe extern "C" fn library_load_data(
             library_count,
         )
     };
+    // Compiler options that cannot be read (a count, and no array for them or their values) are
+    // the driver's to answer: nothing is adapted, and the layer reads neither array. (The values
+    // of the library options may be missing: the layer reads them as 0, `lazy`.)
+    if !lazy::options_readable(jit_options, jit_values, jit_count) {
+        return call(code);
+    }
 
     // Proxy cache: hash the original image before adapting it.  On a cache hit the adaptation
     // and analysis are skipped entirely.  A copy of the original bytes is kept so that the
@@ -1029,6 +1036,7 @@ unsafe extern "C" fn library_load_from_file(
     library_count: c_uint,
 ) -> CUresult {
     let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
+    let _library = images::ForLibrary::load();
     let real = real!(cuLibraryLoadFromFile: LibraryLoad<*const c_char>);
     let from_file = || unsafe {
         real(
@@ -1042,6 +1050,10 @@ unsafe extern "C" fn library_load_from_file(
             library_count,
         )
     };
+    // Compiler options that cannot be read are the driver's to answer, as for cuLibraryLoadData.
+    if !lazy::options_readable(jit_options, jit_values, jit_count) {
+        return from_file();
+    }
     // This hint is only valid for the data API. Forward it unchanged on a file
     // load so that adapting through cuLibraryLoadData cannot turn it into success.
     if !library_options.is_null()
@@ -1098,10 +1110,10 @@ pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
     }
     let real = real!(cuLibraryUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     fit::unload(library as usize);
-    let kept = images::release(library as usize);
+    let released = images::release(library as usize);
     let result = unsafe { real(library) };
     if result != CUDA_SUCCESS {
-        images::unload_failed(library as usize, kept);
+        images::unload_failed(released);
     }
     result
 }
@@ -1142,6 +1154,8 @@ struct Enumeration {
     owner: *mut c_void,
     /// Library or module actually queried in the driver.
     handle: *mut c_void,
+    /// The materialized module of a deferred library, while `handle` is it.
+    _pinned: Option<lazy::Pinned>,
     library: bool,
     count: CountEntries,
     enumerate: EnumerateEntries,
@@ -1154,6 +1168,7 @@ impl Enumeration {
             Self {
                 owner: module,
                 handle: module,
+                _pinned: None,
                 library: false,
                 count: std::mem::transmute::<usize, CountEntries>(REALS[idx::cuModuleGetFunctionCount].load(Relaxed)),
                 enumerate: std::mem::transmute::<usize, EnumerateEntries>(
@@ -1165,17 +1180,20 @@ impl Enumeration {
     }
 
     unsafe fn library(owner: *mut c_void) -> Result<Self, CUresult> {
+        // (The materialized module of a deferred library is pinned while the enumeration lives.)
         // The full compiler can discover further refusals, so both the count and
         // enumeration must see the same materialized library.
-        let handle = if lazy::is_lazy(owner as usize) {
-            unsafe { lazy::materialize(owner as usize)? as *mut c_void }
+        let pinned = if lazy::is_lazy(owner as usize) {
+            Some(unsafe { lazy::materialize(owner as usize)? })
         } else {
-            owner
+            None
         };
+        let handle = pinned.as_ref().map_or(owner, |pinned| pinned.handle as *mut c_void);
         unsafe {
             Ok(Self {
                 owner,
                 handle,
+                _pinned: pinned,
                 library: true,
                 count: std::mem::transmute::<usize, CountEntries>(REALS[idx::cuLibraryGetKernelCount].load(Relaxed)),
                 enumerate: std::mem::transmute::<usize, EnumerateEntries>(
@@ -1341,7 +1359,7 @@ pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetModule].load(Relaxed)) };
-                let result = unsafe { real(module, mat as *mut c_void) };
+                let result = unsafe { real(module, mat.handle as *mut c_void) };
                 unsafe { share_kernels(result, module, handle) };
                 return result;
             }
@@ -1366,8 +1384,20 @@ unsafe fn share_kernels(result: CUresult, module: *mut *mut c_void, library: usi
         let module_handle = unsafe { *module } as usize;
         // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module_handle);
-        kernels::share(module_handle, library);
+        share_on_this_device(module_handle, library);
         fit::share_module(module_handle, library);
+    }
+}
+
+/// `module` is the module that the driver gave for `library` in the current context: what is
+/// known of the library's kernels holds for it when the context is on a GPU whose code is adapted.
+/// On a later card the driver takes the library's own entries, which a library keeps
+/// (`images::ForLibrary`): its kernels refused on the V100 run there, and are given.
+fn share_on_this_device(module: usize, library: usize) {
+    if context_needs_adapting() {
+        kernels::share(module, library);
+    } else {
+        kernels::forget(module);
     }
 }
 
@@ -1386,7 +1416,7 @@ pub unsafe extern "C" fn cuLibraryGetGlobal(
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut u64, *mut usize, *mut c_void, *const c_char) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetGlobal].load(Relaxed)) };
-                let result = unsafe { real(dptr, size, mat as *mut c_void, name) };
+                let result = unsafe { real(dptr, size, mat.handle as *mut c_void, name) };
                 if result == CUDA_SUCCESS {
                     fit::asked_for_data(handle);
                 }
@@ -1419,7 +1449,7 @@ pub unsafe extern "C" fn cuLibraryGetManaged(
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut u64, *mut usize, *mut c_void, *const c_char) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetManaged].load(Relaxed)) };
-                let result = unsafe { real(dptr, size, mat as *mut c_void, name) };
+                let result = unsafe { real(dptr, size, mat.handle as *mut c_void, name) };
                 if result == CUDA_SUCCESS {
                     fit::asked_for_data(handle);
                 }
@@ -1451,7 +1481,7 @@ pub unsafe extern "C" fn cuLibraryGetUnifiedFunction(
             Ok(mat) => {
                 let real: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> CUresult =
                     unsafe { std::mem::transmute(REALS[idx::cuLibraryGetUnifiedFunction].load(Relaxed)) };
-                return unsafe { real(fptr, mat as *mut c_void, name) };
+                return unsafe { real(fptr, mat.handle as *mut c_void, name) };
             }
             Err(code) => return code,
         }
@@ -1487,7 +1517,7 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
     if unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS {
         // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module as usize);
-        kernels::share(module as usize, owner);
+        share_on_this_device(module as usize, owner);
     }
     result
 }
@@ -1540,9 +1570,9 @@ unsafe fn link_add_data(
     };
     let replacement = match input {
         _ if !for_this_gpu => None,
-        INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
-        // (Read within the size given, when there is one.)
-        INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size).filter(|&size| size > 0)) },
+        // (Read within the size given, which is the length of the input, as the header has it: of
+        // no bytes, nothing is read, and the input goes to the driver as it is.)
+        INPUT_CUBIN | INPUT_PTX | INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size)) },
         _ => None,
     };
     let Some(replacement) = replacement else {
@@ -1707,9 +1737,13 @@ pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_v
 pub unsafe extern "C" fn cuLinkDestroy(state: *mut c_void) -> CUresult {
     let real = real!(cuLinkDestroy: unsafe extern "C" fn(*mut c_void) -> CUresult);
     // Before the driver's: once it returns, the driver may give the state to a link in another
-    // thread, whose inputs are recorded under it.
-    images::link_destroyed(state as usize);
-    unsafe { real(state) }
+    // thread, whose inputs are recorded under it. Given back if the link was not destroyed.
+    let taken = images::link_destroyed(state as usize);
+    let result = unsafe { real(state) };
+    if result != CUDA_SUCCESS {
+        images::link_destroy_failed(taken);
+    }
+    result
 }
 
 // ---- failed launches (diagnostics) -------------------------------------------------------------------
@@ -2176,10 +2210,24 @@ pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     result
 }
 
+/// A release of the primary context of a device and the query of its state that tells whether the
+/// release was the last are one step for the retains of that device (`contexts::primary_released`):
+/// a retain by another thread between them would make the driver say the context is active, and
+/// what the layer kept for the modules of the context that the release destroyed would be kept.
+/// The retains of the device wait for the step (and the steps of a reset, the same way).
+static PRIMARY_STEPS: [std::sync::Mutex<()>; 16] = [const { std::sync::Mutex::new(()) }; 16];
+
+fn primary_step(device: c_int) -> std::sync::MutexGuard<'static, ()> {
+    PRIMARY_STEPS[device as usize % PRIMARY_STEPS.len()]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Only to know which context is the primary context of the device, for its release or reset.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRetain: unsafe extern "C" fn(*mut *mut c_void, c_int) -> CUresult);
+    let _step = primary_step(device);
     let result = unsafe { real(context, device) };
     if result == CUDA_SUCCESS && !context.is_null() {
         contexts::primary_retained(device, unsafe { *context } as usize);
@@ -2190,6 +2238,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, dev
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -2201,6 +2250,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -2212,6 +2262,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -2223,6 +2274,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
+    let _step = primary_step(device);
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {

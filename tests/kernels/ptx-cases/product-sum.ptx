@@ -1,0 +1,25 @@
+.version 8.0
+.target sm_80
+.address_size 64
+// A product and a sum that a fused multiply-add would round once: (1 + 2^-23) * (1 - 2^-23) - 1
+// is 0 rounded twice (FMUL, then FADD) and -2^-46 rounded once (FFMA). The inputs are read from
+// memory, so that nothing is computed when the module is compiled. Assembled with
+// `ptxas -lineinfo --fmad=false` the machine code rounds twice; with `--fmad=true`, once. Every
+// lane stores the sum and the three inputs.
+.global .align 4 .f32 inputs[3] = {0f3F800001, 0f3F7FFFFE, 0fBF800000};
+.visible .entry k(.param .u64 output) {
+    .reg .b32 %lane;
+    .reg .f32 %f<6>;
+    .reg .b64 %in, %out;
+    mov.u32 %lane, %tid.x;
+    mov.u64 %in, inputs;
+    ld.global.f32 %f1, [%in];
+    ld.global.f32 %f2, [%in+4];
+    ld.global.f32 %f3, [%in+8];
+    mul.f32 %f4, %f1, %f2;
+    add.f32 %f5, %f4, %f3;
+    ld.param.u64 %out, [output];
+    mad.wide.u32 %out, %lane, 16, %out;
+    st.global.v4.f32 [%out], {%f5, %f1, %f2, %f3};
+    ret;
+}

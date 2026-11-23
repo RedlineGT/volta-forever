@@ -19,6 +19,14 @@ def check(proxy, mock):
            b".visible .entry bad()\n{\n barrier.cluster.arrive;\n ret;\n}\n"
            b".visible .entry good()\n{\n ret;\n}\n")
     library = c.c_void_p()
+    # Compiler options without the array of their values are the driver's to answer: the image goes
+    # to it as it is, with them (until 2026-11-23 the layer read the values through the null
+    # pointer, and the process ended).
+    loads = c.c_uint.in_dll(backend, "loads").value
+    jit = (c.c_int * 1)(0)  # CU_JIT_MAX_REGISTERS
+    assert api.cuLibraryLoadData(c.byref(library), ptx, jit, None, 1, None, None, 0) == 0
+    assert c.c_uint.in_dll(backend, "loads").value == loads + 1
+    assert api.cuLibraryUnload(library) == 0
     options = (c.c_int * 1)(1)  # CU_LIBRARY_BINARY_IS_PRESERVED
     values = (c.c_void_p * 1)(None)
     assert api.cuLibraryLoadData(c.byref(library), ptx, None, None, 0, options, values, 1) == 0
@@ -154,6 +162,49 @@ def check(proxy, mock):
         assert c.c_uint.in_dll(backend, "loads_of_55555").value == compiled + 1, "the kernel of the first was given"
         assert answers != [0], answers
         assert api.cuLibraryUnload(second) == 0
+        # A lookup that waits while another thread compiles the same kernel, when the library is
+        # unloaded meanwhile and its handle given to another: it is for the first library, of which
+        # nothing is given (until 2026-11-23 it compiled and gave the kernel of the second).
+        assert api.cuLibraryLoadData(c.byref(first), module(b"77777"), None, None, 0, None, None, 0) == 0
+        c.c_uint.in_dll(backend, "slow_compile").value = 400
+        answers = []
+
+        def ask_first():
+            kernel = c.c_void_p()
+            answers.append(api.cuLibraryGetKernel(c.byref(kernel), first, b"k"))
+
+        threads = [threading.Thread(target=ask_first) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+            time.sleep(0.1)
+        assert api.cuLibraryUnload(first) == 0
+        c.c_size_t.in_dll(backend, "next_handle").value = first.value
+        assert api.cuLibraryLoadData(c.byref(second), module(b"55555"), None, None, 0, None, None, 0) == 0
+        for thread in threads:
+            thread.join()
+        c.c_uint.in_dll(backend, "slow_compile").value = 0
+        assert 0 not in answers, answers
+        assert api.cuLibraryUnload(second) == 0
+        # A lookup in the whole module, made while the library is unloaded: the module is unloaded
+        # after the lookup, not during it (until 2026-11-23 the driver was asked with a handle it
+        # had unloaded).
+        assert api.cuLibraryLoadData(c.byref(first), module(b"77777"), None, None, 0, None, None, 0) == 0
+        alias = c.c_void_p()
+        assert api.cuLibraryGetModule(c.byref(alias), first) == 0  # the whole module
+        c.c_uint.in_dll(backend, "slow_lookup").value = 300
+        answers = []
+
+        def lookup_whole():
+            kernel = c.c_void_p()
+            answers.append(api.cuLibraryGetKernel(c.byref(kernel), first, b"k"))
+
+        thread = threading.Thread(target=lookup_whole)
+        thread.start()
+        time.sleep(0.1)
+        assert api.cuLibraryUnload(first) == 0
+        thread.join()
+        c.c_uint.in_dll(backend, "slow_lookup").value = 0
+        assert c.c_uint.in_dll(backend, "used_unloaded").value == 0, answers
     assert c.c_uint.in_dll(backend, "loads").value == c.c_uint.in_dll(backend, "unloads").value
 
 

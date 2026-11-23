@@ -1,16 +1,20 @@
 """CPU nvJitLink regression for native CUDA host objects and static libraries, for null
 arguments and empty inputs, and for kernels that cannot run on Volta: PTX or machine code in which
 every kernel traps is refused, as PTX text and in a fat binary alike; with one kernel that runs, both
-are linked.
+are linked, and the cubin that the link makes names the kernel that traps in a note, which a link
+of that cubin keeps.
 
 Usage: python3 tests/proxy/jitlink_objects.py adapter.so cuda-12.9.2-directory
 """
 import ctypes as c
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
+
+import refusal_note
 
 
 def check(lib, path, kind, memory):
@@ -36,6 +40,7 @@ def check(lib, path, kind, memory):
         cubin = c.create_string_buffer(size.value)
         assert lib.nvJitLinkGetLinkedCubin(h, cubin) == 0
         assert cubin.raw[:4] == b"\x7fELF" and cubin.raw[0x30] == 70
+        assert refusal_note.read(cubin.raw) == [], "a note in a link without a kernel that traps"
     finally:
         assert lib.nvJitLinkDestroy(c.byref(h)) == 0
 
@@ -72,13 +77,24 @@ NVJITLINK_ERROR_PTX_COMPILE = 4
 NVJITLINK_ERROR_UNRECOGNIZED_INPUT = 8
 
 
+def linked_cubin(lib, h):
+    size = c.c_size_t()
+    assert lib.nvJitLinkGetLinkedCubinSize(h, c.byref(size)) == 0
+    cubin = c.create_string_buffer(size.value)
+    assert lib.nvJitLinkGetLinkedCubin(h, cubin) == 0
+    return cubin.raw
+
+
 def refusals(lib, toolkit, work, log):
     """Every kernel traps: refused, by AddData and AddFile, with the type given and with
     NVJITLINK_INPUT_ANY, as PTX text and as a fat binary (compressed or not) of that PTX alike;
     also relocatable Turing machine code that the translator refuses. (Until 2026-11-23 the fat
     binaries were linked into machine code that only traps.) With one kernel that runs, the same
     inputs are linked, the PTX and the machine code, and the kernel that traps is said in the log
-    for each, as the layer says a kernel that it does not give to the program."""
+    for each, as the layer says a kernel that it does not give to the program, and named with its
+    reason in the note of the cubin that the link makes (until 2026-11-23 nothing in the cubin
+    said it, and the layer gave it to a program that loaded the cubin), which a link of that cubin
+    (as a cubin, and in a fat binary) keeps."""
     nvcc = [toolkit / "bin/nvcc", "-allow-unsupported-compiler", "-Wno-deprecated-gpu-targets"]
     inputs = []
     for name, source in [("bad", BAD), ("half", BAD + GOOD)]:
@@ -111,12 +127,25 @@ def refusals(lib, toolkit, work, log):
                 else:
                     rc = lib.nvJitLinkAddFile(h, kind, os.fsencode(path))
                 complete = lib.nvJitLinkComplete(h) if rc == 0 else None
+                note = refusal_note.read(linked_cubin(lib, h)) if complete == 0 else None
                 with open(log, "rb") as f:
                     f.seek(said)
                     lines = f.read()
-                assert lib.nvJitLinkDestroy(c.byref(h)) == 0
                 case = (file, kind, "AddData" if memory else "AddFile")
                 trapping = {"half": "bad", "halfimma": "imma"}.get(name)
+                if trapping and complete == 0 and memory and kind == explicit_type:
+                    # The cubin linked again, as a cubin and in a fat binary: the note is kept.
+                    output = linked_cubin(lib, h)
+                    for again_type, again in ((1, output), (4, fat_binary(output))):
+                        g = c.c_void_p()
+                        assert lib.nvJitLinkCreate(c.byref(g), 1, (c.c_char_p * 1)(b"-arch=sm_70")) == 0
+                        assert lib.nvJitLinkAddData(g, again_type, again, c.c_size_t(len(again)), b"again") == 0
+                        assert lib.nvJitLinkComplete(g) == 0
+                        kept = refusal_note.read(linked_cubin(lib, g))
+                        assert lib.nvJitLinkDestroy(c.byref(g)) == 0
+                        if kept != note:
+                            wrong.append(f"{case}: linked again as input type {again_type}, the note is {kept}")
+                assert lib.nvJitLinkDestroy(c.byref(h)) == 0
                 if name == "bad":
                     want = (NVJITLINK_ERROR_PTX_COMPILE, None)
                 elif name == "imma":
@@ -127,10 +156,26 @@ def refusals(lib, toolkit, work, log):
                     wrong.append(f"{case}: AddData/AddFile {rc}, Complete {complete}, want {want}")
                 elif trapping and f"kernel {trapping} cannot run on this GPU".encode() not in lines:
                     wrong.append(f"{case}: linked without saying that kernel {trapping} traps")
+                elif trapping and ([k for k, _, reason in note if reason] != [trapping]):
+                    wrong.append(f"{case}: the linked cubin names {note}, not kernel {trapping} with its reason")
                 elif not trapping and b"compilation refused" not in lines:
                     wrong.append(f"{case}: refused without saying why")
     assert not wrong, "\n".join(wrong)
     return len(inputs) * 4
+
+
+def fat_binary(cubin):
+    """`cubin` as the one entry of a fat binary, for sm_70 and stored as it is (the header of the
+    sm_70 entry of a fat binary of the repository's, with this size)."""
+    native = Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data/elf70-elf75-ptx70-lz4.fatbin"
+    header = bytearray(native.read_bytes()[16:16 + 64])
+    stored = cubin + bytes(-len(cubin) % 8)
+    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<Q", header, 0x28, struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000)
+    struct.pack_into("<Q", header, 0x38, 0)
+    assert struct.unpack_from("<HI", header, 0)[0] == 2 and struct.unpack_from("<I", header, 0x1C)[0] == 70
+    body = bytes(header) + stored
+    return struct.pack("<IHHQ", 0xBA55ED50, 1, 16, len(body)) + body
 
 
 def file_names(lib, work):

@@ -147,21 +147,47 @@ pub fn share(module: usize, library: usize) {
 
 /// The module or library is unloaded.
 pub fn forget(handle: usize) {
+    drop(take(handle));
+}
+
+/// What `take` took of a module or library, for `restore`.
+pub struct Taken(Vec<(usize, Kernels)>);
+
+/// The module or library `handle` is to be unloaded: what is known of its kernels, and of the
+/// modules of a library, is taken away, and given back for `restore` if the driver does not
+/// unload it.
+pub fn take(handle: usize) -> Taken {
     let profiling = config().profile;
-    let mut gone = Vec::new();
-    known().retain(|&known, kernels| {
-        let keep = known != handle && kernels.library != Some(handle);
-        if !keep && profiling {
-            gone.push(known);
+    let mut taken = Vec::new();
+    let mut known = known();
+    let gone: Vec<usize> = known
+        .iter()
+        .filter(|&(&known, kernels)| known == handle || kernels.library == Some(handle))
+        .map(|(&known, _)| known)
+        .collect();
+    for at in &gone {
+        if let Some(kernels) = known.remove(at) {
+            taken.push((*at, kernels));
         }
-        keep
-    });
+    }
+    drop(known);
     if profiling {
         // The handle itself may have had no entry (a module the proxy knew nothing about).
+        let mut gone = gone;
         if !gone.contains(&handle) {
             gone.push(handle);
         }
         profile::forget(&gone);
+    }
+    Taken(taken)
+}
+
+/// The driver did not unload the module or library of which `take` took `taken`: what was known
+/// of its kernels is known again, where nothing was recorded under those handles since.
+pub fn restore(taken: Taken) {
+    let mut known = known();
+    for (handle, kernels) in taken.0 {
+        known.entry(handle).or_insert(kernels);
     }
 }
 

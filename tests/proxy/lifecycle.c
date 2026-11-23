@@ -17,7 +17,9 @@
 //     before the call returns, is not dropped with it: a module loaded in a context made at the
 //     same address (after cuCtxDestroy, and after the last release of a primary context), and a
 //     module that the driver gives the handle of a module of the context destroyed (its refused
-//     kernel is still refused).
+//     kernel is still refused). A retain of the primary context by another thread, made once the
+//     driver destroyed it at its last release and before the layer asked whether it was active,
+//     does not keep what the layer kept for the modules of the context destroyed.
 //   - lazy_lock: a library restored from the layer's cache, whose kernel's code is not in the
 //     cache, is adapted when the program asks for the kernel; meanwhile a kernel of another
 //     library is given at once (the lock of all lazy libraries was held over the adaptation),
@@ -266,6 +268,39 @@ static void with_same_handle(void) {
     *(uintptr_t *)dlsym(mock_driver, "next_module") = (uintptr_t)gone_module;
     cuModuleLoadData(&again_module, ptx);
 }
+// Another thread retains the primary context of device 0 (`retainer`) while the driver destroys it
+// at its last release: the release waits for that retain 300 ms at most (the layer, which then
+// decides whether the release was the last, makes it wait until it has).
+static pthread_mutex_t retain_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t retain_changed = PTHREAD_COND_INITIALIZER;
+static int retain_asked, retain_done;
+static void *retainer(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&retain_lock);
+    while (!retain_asked) pthread_cond_wait(&retain_changed, &retain_lock);
+    pthread_mutex_unlock(&retain_lock);
+    void *context;
+    cuDevicePrimaryCtxRetain(&context, 0);
+    pthread_mutex_lock(&retain_lock);
+    retain_done = 1;
+    pthread_cond_broadcast(&retain_changed);
+    pthread_mutex_unlock(&retain_lock);
+    return NULL;
+}
+static void retained_meanwhile(void) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += 300 * 1000000L;
+    if (until.tv_nsec >= 1000000000L) {
+        until.tv_sec += 1;
+        until.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&retain_lock);
+    retain_asked = 1;
+    pthread_cond_broadcast(&retain_changed);
+    while (!retain_done && pthread_cond_timedwait(&retain_changed, &retain_lock, &until) == 0) {}
+    pthread_mutex_unlock(&retain_lock);
+}
 
 static int contexts(const char *proxy, const char *dir) {
     // Translations kept: a translation is taken from there after the first.
@@ -374,6 +409,21 @@ static int contexts(const char *proxy, const char *dir) {
               && cuModuleGetFunction(&function, again_module, "bad") == CUDA_ERROR_INVALID_PTX,
           "the refused kernel of its module is refused");
     cuCtxDestroy_v2(again_context);
+    // The last release of the primary context while another thread retains it again: what was kept
+    // of the module of the context destroyed is dropped (its refused kernel is asked of the driver,
+    // which has every name). Until 2026-11-23 the layer asked the driver whether the context was
+    // active after that retain, kept the module's records, and refused the kernel.
+    pthread_t thread;
+    pthread_create(&thread, NULL, retainer, NULL);
+    cuDevicePrimaryCtxRetain(&context, 0);
+    cuCtxSetCurrent(context);
+    cuModuleLoadData(&module, ptx);
+    *while_destroyed = retained_meanwhile;
+    cuDevicePrimaryCtxRelease_v2(0);
+    pthread_join(thread, NULL);
+    check("primary_retained_meanwhile", retain_done && cuModuleGetFunction(&function, module, "bad") == 0,
+          "the records of the module of the context destroyed are dropped");
+    cuDevicePrimaryCtxRelease_v2(0);
 
     // A library, and the module that the driver gives for it in a context that goes: the library
     // stays as it is.

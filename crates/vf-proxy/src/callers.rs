@@ -75,8 +75,8 @@ struct Decision {
 struct Cache {
     unloads: u64,
     by_base: HashMap<usize, Decision>,
-    /// `vf_adapt::Policy::told_limit_in` of the files read, by path.
-    limits: HashMap<CString, Option<u32>>,
+    /// `vf_adapt::Policy::told_limit_in` of the files read, by path and what is told.
+    limits: HashMap<(CString, Option<u32>), Option<u32>>,
 }
 
 /// Held only to read or write the cache: not over a walk of the loader's list (`dl_iterate_phdr`
@@ -102,9 +102,20 @@ fn unload_count() -> u64 {
 
 /// An object of the process (the main program or a shared library), as the dynamic loader lists it.
 struct Object {
-    /// The file its code can be read from: `/proc/self/exe` for the main program; `None` for
-    /// an object without a name (the kernel's vDSO has no file either, and reads as nothing).
+    /// The file its code can be read from: `/proc/self/exe` for the main program (without `/proc`,
+    /// the loader's name for it: see `objects`); `None` for an object without a name (the
+    /// kernel's vDSO has no file either, and reads as nothing).
     path: Option<CString>,
+    /// The address of its first loaded segment.
+    first: Option<usize>,
+    /// What the file it was loaded from must have to be that file (`loaded_file`): its table of
+    /// program headers and the contents of its notes (the build ID among them), as they are in
+    /// memory.
+    headers: Vec<u8>,
+    notes: Vec<(usize, Vec<u8>)>,
+    /// The inode of the file mapped at its first segment, as `/proc/self/maps` says (`None`
+    /// without `/proc`).
+    inode: Option<u64>,
     /// Whether the address asked about is in one of its segments.
     holds: bool,
     /// Its `DT_SONAME`, and the `DT_NEEDED` names of the libraries it was loaded with.
@@ -124,7 +135,49 @@ fn objects(address: usize) -> Vec<Object> {
     }
     let mut data = (address, Vec::<Object>::new());
     unsafe { libc::dl_iterate_phdr(Some(each), (&raw mut data).cast()) };
-    data.1
+    let mut list = data.1;
+    // The main program's file is read through `/proc/self/exe`, its name for the loader being
+    // `argv[0]`, which names no file when it was started by name through PATH or once it changed
+    // directory. Without `/proc` (a sandbox, a chroot), that name is taken, as the loader gives it
+    // (`dladdr`): it names the file when it is a path. Once here, for every reader of the list:
+    // the caller's own code, and the code of the libraries it answers for.
+    if let Some(main) = list.first_mut()
+        && main.path.as_deref() == Some(c"/proc/self/exe")
+        && !readable(c"/proc/self/exe")
+    {
+        main.path = main.first.and_then(|address| {
+            let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+            // SAFETY: an address of the main program, which stays loaded.
+            let found = unsafe { libc::dladdr(address as *const c_void, &mut info) } != 0;
+            (found && !info.dli_fname.is_null()).then(|| unsafe { CStr::from_ptr(info.dli_fname) }.to_owned())
+        });
+    }
+    // The inode of what is mapped where each object starts (`loaded_file`).
+    if let Ok(maps) = std::fs::read("/proc/self/maps") {
+        let mappings: Vec<(usize, usize, u64)> = maps
+            .split(|&b| b == b'\n')
+            .filter_map(|line| {
+                let line = std::str::from_utf8(line).ok()?;
+                let mut fields = line.split_ascii_whitespace();
+                let (start, end) = fields.next()?.split_once('-')?;
+                let inode = fields.nth(3)?.parse().ok()?;
+                Some((
+                    usize::from_str_radix(start, 16).ok()?,
+                    usize::from_str_radix(end, 16).ok()?,
+                    inode,
+                ))
+            })
+            .collect();
+        for object in &mut list {
+            object.inode = object.first.and_then(|at| {
+                mappings
+                    .iter()
+                    .find(|&&(start, end, _)| (start..end).contains(&at))
+                    .map(|&(_, _, inode)| inode)
+            });
+        }
+    }
+    list
 }
 
 /// # Safety
@@ -162,8 +215,29 @@ unsafe fn object(info: &libc::dl_phdr_info, address: usize, first: bool) -> Obje
         [] => None,
         name => CString::new(name).ok(),
     };
+    const PT_NOTE: u32 = 4;
+    let notes = headers
+        .iter()
+        .filter(|h| h.p_type == PT_NOTE)
+        .filter_map(|h| {
+            let (start, size) = (base.wrapping_add(h.p_vaddr as usize), h.p_filesz as usize);
+            // SAFETY: `size` bytes inside a segment of the object.
+            mapped(start, size).then(|| {
+                (
+                    h.p_offset as usize,
+                    unsafe { std::slice::from_raw_parts(start as *const u8, size) }.to_vec(),
+                )
+            })
+        })
+        .collect();
+    // SAFETY: the program headers that the loader gives, `count` of them.
+    let table = unsafe { std::slice::from_raw_parts(headers.as_ptr().cast::<u8>(), std::mem::size_of_val(headers)) };
     let mut found = Object {
         path,
+        first: segments.first().map(|&(start, _)| start),
+        headers: table.to_vec(),
+        notes,
+        inode: None,
         holds: mapped(address, 1),
         soname: None,
         needed: Vec::new(),
@@ -220,6 +294,7 @@ fn readable(path: &CStr) -> bool {
 struct Mapped {
     start: *mut c_void,
     len: usize,
+    inode: u64,
 }
 
 impl Mapped {
@@ -236,13 +311,14 @@ impl Mapped {
             } else {
                 0
             };
+            let inode = stat.st_ino;
             let start = if len > 0 {
                 libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, fd, 0)
             } else {
                 libc::MAP_FAILED
             };
             libc::close(fd);
-            (start != libc::MAP_FAILED).then_some(Mapped { start, len })
+            (start != libc::MAP_FAILED).then_some(Mapped { start, len, inode })
         }
     }
 
@@ -259,12 +335,45 @@ impl Drop for Mapped {
     }
 }
 
+/// The file of `object`, when the file at its path is the one it was loaded from: the inode that
+/// `/proc/self/maps` gives for the object (the device is not compared: an overlay file system
+/// gives another than `stat` does), and the same table of program headers and the same notes (the
+/// build ID, when it has one) as are in memory. A file replaced at that path since, or one that
+/// cannot be read, is not taken for it (`None`): what code the object has is then not known.
+/// (Without `/proc`, a file of the same build whose GPU code is in sections that are not loaded,
+/// as `objcopy --add-section` puts it, cannot be told from the one loaded.)
+fn loaded_file(object: &Object) -> Option<Mapped> {
+    let file = Mapped::open(object.path.as_deref()?)?;
+    if object.inode.is_some_and(|inode| inode != file.inode) {
+        return None;
+    }
+    let bytes = file.bytes();
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let u64_at = |at: usize| Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?) as usize);
+    let same = || -> Option<bool> {
+        if object.headers.is_empty() || bytes.get(..6)? != b"\x7fELF\x02\x01" || u16_at(0x36)? != 56 {
+            return Some(false);
+        }
+        let table = u64_at(0x20)?;
+        let headers = bytes.get(table..table.checked_add(usize::from(u16_at(0x38)?).checked_mul(56)?)?)?;
+        Some(
+            headers == object.headers.as_slice()
+                && object.notes.iter().all(|(offset, note)| {
+                    offset.checked_add(note.len()).and_then(|end| bytes.get(*offset..end)) == Some(note.as_slice())
+                }),
+        )
+    };
+    same().unwrap_or(false).then_some(file)
+}
+
 /// The major version in `libcudart.so.<major>[.minor...]`.
 fn runtime_version(file_name: &str) -> Option<u32> {
     file_name.strip_prefix("libcudart.so.")?.split('.').next()?.parse().ok()
 }
 
-fn classify(path: &CStr) -> Caller {
+/// The caller of file `path`, whose contents are `file` when it is the file that was loaded
+/// (`loaded_file`).
+fn classify(path: &CStr, file: Option<&[u8]>) -> Caller {
     let policy = &config().policy;
     let name = path.to_string_lossy();
     let file_name = name.rsplit('/').next().unwrap_or(&name);
@@ -275,7 +384,7 @@ fn classify(path: &CStr) -> Caller {
             Caller::Other
         };
     }
-    match Mapped::open(path).map(|file| policy.embedded(file.bytes())) {
+    match file.map(|file| policy.embedded(file)) {
         Some(Embedded::Usable) => Caller::Native,
         Some(Embedded::Nothing) if *UNDER_LAUNCHER => Caller::Direct,
         Some(Embedded::Other { lowest_sm }) if policy.retargetable(lowest_sm) => Caller::From(lowest_sm),
@@ -284,25 +393,44 @@ fn classify(path: &CStr) -> Caller {
 }
 
 /// The limit that the code embedded in the file at `path` sets to what a caller that runs it is
-/// told (`vf_adapt::Policy::told_limit_in`), with the file. Each file is read once while the
-/// loader's count of unloads is `unloads`.
-fn file_limit(path: &CStr, unloads: u64) -> Option<(u32, CString)> {
+/// told (`vf_adapt::Policy::told_limit_in`, with `policy`, which tells what the caller is told so
+/// far), with the file. Each file is read once for what is told while the loader's count of
+/// unloads is `unloads`.
+fn file_limit(object: &Object, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
+    let path = object.path.as_deref()?;
+    // A file that is not the one loaded, or cannot be read: what code the object runs is not
+    // known, and it is taken to run from the lowest that adapted code does (7.5).
+    let Some(file) = loaded_file(object) else {
+        return unknown_limit(path);
+    };
+    let key = (path.to_owned(), policy.told_sm);
     let known = {
         let cache = callers();
         (cache.unloads == unloads)
-            .then(|| cache.limits.get(path).copied())
+            .then(|| cache.limits.get(&key).copied())
             .flatten()
     };
     let limit = known.unwrap_or_else(|| {
-        let limit =
-            Mapped::open(path).and_then(|file| unpanicked(path, || config().policy.told_limit_in(file.bytes())));
+        let limit = unpanicked(path, || policy.told_limit_in(file.bytes()));
         let mut cache = callers();
         if cache.unloads == unloads {
-            cache.limits.insert(path.to_owned(), limit);
+            cache.limits.insert(key, limit);
         }
         limit
     });
     limit.map(|sm| (sm, path.to_owned()))
+}
+
+/// The limit of an object loaded from `path` whose file is not known (`loaded_file`): what
+/// adapted code sets at least (7.5).
+fn unknown_limit(path: &CStr) -> Option<(u32, CString)> {
+    let description = format!(
+        "{} (the file at that path is not the one that was loaded, or cannot be read: its code is taken to run \
+         from code for sm_{}),",
+        path.to_string_lossy(),
+        vf_adapt::TRANSLATED_FROM
+    );
+    Some((vf_adapt::TRANSLATED_FROM, CString::new(description).ok()?))
 }
 
 /// What `scan` answers of the file at `path`, or `None` (no limit: the answer without the scan)
@@ -333,10 +461,17 @@ fn file_name(path: &[u8]) -> &[u8] {
 
 /// The limit that the code in the file of the caller of class `caller` at `path` sets, when it
 /// embeds code.
-fn own_limit(path: &CStr, caller: Caller, unloads: u64) -> Option<(u32, CString)> {
+fn own_limit(
+    object: Option<&Object>,
+    caller: Caller,
+    policy: &vf_adapt::Policy,
+    unloads: u64,
+) -> Option<(u32, CString)> {
+    let object = object?;
+    let path = object.path.as_deref()?;
     let own = matches!(caller, Caller::From(_))
         && runtime_version(&String::from_utf8_lossy(file_name(path.to_bytes()))).is_none();
-    own.then(|| file_limit(path, unloads)).flatten()
+    own.then(|| file_limit(object, policy, unloads)).flatten()
 }
 
 /// The names in the dynamic section of a shared object.
@@ -350,9 +485,11 @@ struct Names {
 fn dynamic_names(file: &[u8]) -> Option<Names> {
     const PT_LOAD: u32 = 1;
     const PT_DYNAMIC: u32 = 2;
-    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at + 2)?.try_into().ok()?));
-    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at + 4)?.try_into().ok()?));
-    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at + 8)?.try_into().ok()?) as usize);
+    // (Every offset is the file's: added to with checks, and read within the file.)
+    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at.checked_add(4)?)?.try_into().ok()?));
+    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at.checked_add(8)?)?.try_into().ok()?) as usize);
+    let field = |at: usize, offset: usize| at.checked_add(offset);
     if file.get(..6)? != b"\x7fELF\x02\x01" {
         return None;
     }
@@ -361,13 +498,18 @@ fn dynamic_names(file: &[u8]) -> Option<Names> {
     let headers: Vec<(u32, usize, usize, usize)> = (0..count)
         .map(|i| {
             let at = table.checked_add(i.checked_mul(size)?)?;
-            Some((u32_at(at)?, u64_at(at + 8)?, u64_at(at + 16)?, u64_at(at + 32)?))
+            Some((
+                u32_at(at)?,
+                u64_at(field(at, 8)?)?,
+                u64_at(field(at, 16)?)?,
+                u64_at(field(at, 32)?)?,
+            ))
         })
         .collect::<Option<_>>()?;
     let &(_, dynamic, _, length) = headers.iter().find(|header| header.0 == PT_DYNAMIC)?;
     let (mut strings, mut strings_size, mut names, mut soname) = (None, 0, Vec::new(), None);
     for at in (dynamic..dynamic.checked_add(length)?).step_by(16) {
-        match (u64_at(at)?, u64_at(at + 8)?) {
+        match (u64_at(at)?, u64_at(field(at, 8)?)?) {
             (0, _) => break,
             (1, name) => names.push(name),
             (5, address) => strings = Some(address),
@@ -396,9 +538,10 @@ fn dynamic_names(file: &[u8]) -> Option<Names> {
 /// The sections of the 64-bit ELF object in `file` in which compilers put GPU code:
 /// `.nv_fatbin`, and `__nv_relfatbin` for code linked again when it is loaded.
 fn fat_binary_sections(file: &[u8]) -> Vec<&[u8]> {
-    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at + 2)?.try_into().ok()?) as usize);
-    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at + 4)?.try_into().ok()?) as usize);
-    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at + 8)?.try_into().ok()?) as usize);
+    // (Every offset is the file's: added to with checks, and read within the file.)
+    let u16_at = |at: usize| Some(u16::from_le_bytes(file.get(at..at.checked_add(2)?)?.try_into().ok()?) as usize);
+    let u32_at = |at: usize| Some(u32::from_le_bytes(file.get(at..at.checked_add(4)?)?.try_into().ok()?) as usize);
+    let u64_at = |at: usize| Some(u64::from_le_bytes(file.get(at..at.checked_add(8)?)?.try_into().ok()?) as usize);
     let sections = || -> Option<Vec<&[u8]>> {
         if file.get(..6)? != b"\x7fELF\x02\x01" {
             return None;
@@ -407,7 +550,7 @@ fn fat_binary_sections(file: &[u8]) -> Vec<&[u8]> {
         // (name, offset, size) of each section header.
         let header = |i: usize| {
             let at = table.checked_add(i.checked_mul(size)?)?;
-            Some((u32_at(at)?, u64_at(at + 24)?, u64_at(at + 32)?))
+            Some((u32_at(at)?, u64_at(at.checked_add(24)?)?, u64_at(at.checked_add(32)?)?))
         };
         let (_, start, length) = header(names)?;
         let names = file.get(start..start.checked_add(length)?)?;
@@ -433,6 +576,18 @@ fn fat_binary_sections(file: &[u8]) -> Vec<&[u8]> {
 /// this GPU's, which is adapted, the limit is the lowest that adapted code sets (7.5). Once they
 /// are loaded, the files that the loader took are read (`dependents_limit`).
 fn beside_limit(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32, CString)> {
+    // The files read are any beside the caller: a panic while reading them sets no limit, as one
+    // while reading the code of a caller does (`unpanicked`), instead of ending the process.
+    catch_unwind(AssertUnwindSafe(|| beside_limit_unguarded(path, caller, objects))).unwrap_or_else(|_| {
+        log::error(format_args!(
+            "internal error while reading the libraries beside {}; they set no limit to the capability told",
+            path.to_string_lossy()
+        ));
+        None
+    })
+}
+
+fn beside_limit_unguarded(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32, CString)> {
     let bytes = path.to_bytes();
     let own_name = file_name(bytes);
     if !matches!(caller, Caller::Direct | Caller::Other)
@@ -463,29 +618,49 @@ fn beside_limit(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32,
     } else {
         directory
     }));
-    let mut beside: Vec<Beside> = std::fs::read_dir(directory_path)
+    // A link is followed (cuDNN's libraries are links to files, and a link can lead to another
+    // directory), and a file is read once, under all its names in the directory.
+    let mut beside: Vec<Beside> = Vec::new();
+    let mut files: HashMap<(u64, u64), Option<usize>> = HashMap::new();
+    let mut entries: Vec<Vec<u8>> = std::fs::read_dir(directory_path)
         .ok()?
         .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_vec();
-            // (Not the links to a file, as from the name of a library to its file: the file is
-            // read, and its `DT_SONAME` is that name.)
-            if name.as_slice() == own_name
-                || !name.windows(3).any(|w| w == b".so")
-                || loaded.contains(&name)
-                || !entry.file_type().is_ok_and(|kind| kind.is_file())
-            {
-                return None;
-            }
-            let path = CString::new([directory, &name].concat()).ok()?;
-            let Names { soname, needed } = Mapped::open(&path).and_then(|file| dynamic_names(file.bytes()))?;
-            if soname.as_ref().is_some_and(|soname| loaded.contains(soname)) {
-                return None;
-            }
-            let names = soname.into_iter().chain([name]).collect();
-            Some(Beside { path, names, needed })
-        })
+        .map(|entry| entry.file_name().into_vec())
         .collect();
+    entries.sort();
+    for name in entries {
+        if name.as_slice() == own_name || !name.windows(3).any(|w| w == b".so") || loaded.contains(&name) {
+            continue;
+        }
+        let Ok(path) = CString::new([directory, &name].concat()) else {
+            continue;
+        };
+        let Ok(metadata) = std::fs::metadata(std::ffi::OsStr::from_bytes(path.to_bytes())) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        use std::os::unix::fs::MetadataExt as _;
+        let file = (metadata.dev(), metadata.ino());
+        if let Some(read) = files.get(&file) {
+            if let Some(at) = *read {
+                beside[at].names.push(name);
+            }
+            continue;
+        }
+        let Some(Names { soname, needed }) = Mapped::open(&path).and_then(|file| dynamic_names(file.bytes())) else {
+            files.insert(file, None);
+            continue;
+        };
+        if soname.as_ref().is_some_and(|soname| loaded.contains(soname)) {
+            files.insert(file, None);
+            continue;
+        }
+        files.insert(file, Some(beside.len()));
+        let names = soname.into_iter().chain([name]).collect();
+        beside.push(Beside { path, names, needed });
+    }
     beside.sort_by(|a, b| a.path.cmp(&b.path));
     // Those that depend on the caller, directly or through each other.
     let mut dependents = Vec::new();
@@ -525,7 +700,7 @@ fn beside_limit(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32,
 /// that name one of these, and so on (a CUDA runtime answers for the programs that use it, also
 /// through a library of their own that has no GPU code). Their files are read once each. A
 /// library loaded after the caller first asks is not seen.
-fn dependents_limit(objects: &[Object], unloads: u64) -> Option<(u32, CString)> {
+fn dependents_limit(objects: &[Object], policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
     let names_of = |object: &Object| {
         let file_name = object.path.as_ref().map(|path| {
             path.to_bytes()
@@ -548,8 +723,8 @@ fn dependents_limit(objects: &[Object], unloads: u64) -> Option<(u32, CString)> 
                 continue;
             }
             (seen[at], more) = (true, true);
-            if let Some(path) = &object.path {
-                lowest = lower(lowest, file_limit(path, unloads));
+            if object.path.is_some() {
+                lowest = lower(lowest, file_limit(object, policy, unloads));
             }
             names.extend(names_of(object));
         }
@@ -591,21 +766,40 @@ fn caller(return_address: usize) -> Decision {
     }
     // Outside the lock (see `CALLERS`).
     let objects = objects(return_address);
-    // For the main program the loader's name is `argv[0]`, which names no file when the program
-    // was started by name through PATH, or once it has changed directory: its file is read
-    // through `/proc/self/exe`, when that can be opened (without `/proc`, in a sandbox or a
-    // chroot, the loader's name is read: it names the file when it is a path).
+    // The main program's file, as `objects` resolved it.
     let main = objects
         .first()
         .filter(|object| object.holds)
-        .and_then(|object| object.path.as_deref())
-        .filter(|&path| path != c"/proc/self/exe" || readable(path));
+        .and_then(|object| object.path.as_deref());
     let path = main.unwrap_or_else(|| unsafe { CStr::from_ptr(info.dli_fname) });
-    let caller = classify(path);
+    // Its code is read from its file only when that is the file it was loaded from: a path can
+    // name another file once the object is loaded (replaced, or removed).
+    let own = objects.iter().find(|object| object.holds);
+    let file = own.and_then(loaded_file);
+    let caller = classify(path, file.as_ref().map(Mapped::bytes));
+    let runtime = runtime_version(&String::from_utf8_lossy(file_name(path.to_bytes()))).is_some();
+    let unknown = (file.is_none() && !runtime).then(|| unknown_limit(path)).flatten();
+    drop(file);
     let mut limit = None;
     if limits_apply() && caller != Caller::Native {
-        limit = lower(own_limit(path, caller, unloads), beside_limit(path, caller, &objects));
-        limit = lower(limit, dependents_limit(&objects, unloads));
+        // Told the lowest limit that its code and the code it answers for set, the caller is given
+        // the code for it, which can set a lower one: lowered until nothing lowers it more
+        // (`vf_adapt::Policy::lowered`), keeping the file that sets it.
+        let beside = lower(beside_limit(path, caller, &objects), unknown);
+        let mut policy = config().policy;
+        loop {
+            let found = lower(
+                lower(own_limit(own, caller, &policy, unloads), beside.clone()),
+                dependents_limit(&objects, &policy, unloads),
+            );
+            match found {
+                Some((sm, file)) if policy.told_sm.is_some_and(|told| sm < told) => {
+                    policy.told_sm = Some(sm);
+                    limit = Some((sm, file));
+                }
+                _ => break,
+            }
+        }
     }
     let decision = Decision {
         caller,
@@ -727,6 +921,19 @@ mod tests {
         assert!(dynamic_names(b"not an object").is_none());
         assert!(fat_binary_sections(&file).is_empty());
         assert!(fat_binary_sections(b"\x7fELF\x02\x01 a file cut short").is_empty());
+        // Tables said to be at the end of what an offset can be: nothing read, no overflow (until
+        // 2026-11-23 the field after the table's offset was computed unchecked, which a debug build
+        // stops at, in the capability hook).
+        let mut wild = vec![0u8; 0x40];
+        wild[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        for (table, size, count) in [(0x20, 0x36, 0x38), (0x28, 0x3a, 0x3c)] {
+            wild[table..table + 8].copy_from_slice(&(u64::MAX - 3).to_le_bytes());
+            wild[size..size + 2].copy_from_slice(&64u16.to_le_bytes());
+            wild[count..count + 2].copy_from_slice(&1u16.to_le_bytes());
+        }
+        wild[0x3e..0x40].copy_from_slice(&0u16.to_le_bytes());
+        assert!(dynamic_names(&wild).is_none());
+        assert!(fat_binary_sections(&wild).is_empty());
     }
 
     #[test]

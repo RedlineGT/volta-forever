@@ -15,6 +15,7 @@
 //! - When the driver's compiler still refuses functions of an adapted image, `without_refused` makes
 //!   the image to load instead.
 
+mod contraction;
 pub mod emulation;
 
 use vf_fatbin::{self as fatbin, Entry, FatBinary, KIND_ELF, KIND_PTX, NewEntry};
@@ -49,6 +50,12 @@ pub struct Policy {
     /// program's own that hold nothing, then with nothing kept in a register at all, kernels with
     /// tensor-core products included.
     pub borrow: u32,
+    /// For an image that the driver loads for every GPU of the process (a library,
+    /// `cuLibraryLoadData`): the entries of a fat binary that are rewritten or translated for the
+    /// device are kept beside what replaces them, so that a later card in the same machine is
+    /// still given its own code. The driver of the device takes the replacement (machine code for
+    /// it, or PTX it reaches); the later card, its entries as they were.
+    pub keep_sources: bool,
 }
 
 /// When machine code is translated.
@@ -135,6 +142,7 @@ impl Default for Policy {
             translate: Translate::WithoutPtx,
             pairs: true,
             borrow: vf_sass::translate::BORROW_DEFAULT,
+            keep_sources: false,
         }
     }
 }
@@ -291,6 +299,9 @@ fn embedded_ptx(cubin: &[u8], sm: u32) -> Option<(Vec<u8>, vf_ptx::Header)> {
             return None;
         }
     }
+    // Compiled again, the source must round as the machine code does: what ptxas did not contract
+    // stays so, and a source of which that is not known is not used (`contraction`).
+    let text = contraction::as_compiled(cubin, text)?;
     Some((text, header))
 }
 
@@ -576,6 +587,9 @@ impl Policy {
             match self.translate_cubin(&payload, source) {
                 Ok(translation) => {
                     all_refused = all_refused && translation.all_entries_refused(&payload);
+                    if self.keep_sources {
+                        entries.push(NewEntry::copy_of(entry));
+                    }
                     entries.push(NewEntry::replace(
                         entry,
                         translation.cubin,
@@ -711,6 +725,11 @@ impl Policy {
     pub fn told_limit(&self, fat: &FatBinary<'_>) -> Option<u32> {
         let told = self.told_sm?;
         let earlier = |sm: &u32| sm / 10 < told / 10;
+        // Code that runs on the device as it is: what it chose for a later generation is not there
+        // either (`given_from` answers `None` for it, as for no code at all).
+        if self.translate != Translate::Force && fat.entries.iter().any(|entry| self.usable(entry)) {
+            return earlier(&self.device_sm).then_some(self.device_sm.max(TRANSLATED_FROM));
+        }
         // `given_from` is one of these: where none is earlier, the cubins need not be read.
         let candidates = [
             self.source_of(fat, KIND_PTX),
@@ -724,8 +743,29 @@ impl Policy {
     }
 
     /// `told_limit` for the code embedded in `file` (a shared library, an executable): the lowest
-    /// over its fat binaries.
+    /// over its fat binaries, lowered until nothing lowers it more (`lowered`).
     pub fn told_limit_in(&self, file: &[u8]) -> Option<u32> {
+        self.lowered(|policy| policy.told_limit_once_in(file))
+    }
+
+    /// What a program is told when `limit_at`, the limit that its code sets for a policy that tells
+    /// `told_sm` (`told_limit` over all of that code), is below what this policy tells: told the
+    /// limit, the program is given the code for the limit (the images it loads are adapted with
+    /// `told_sm` set to it), which can set a lower one. Told 9.0, code with PTX for sm_80 sets 8.0;
+    /// told 8.0, an image with PTX for sm_75 and sm_90 is given its PTX for sm_75, which sets 7.5.
+    /// So the limit is lowered until nothing lowers it more. `None`: nothing lowers what is told.
+    pub fn lowered(&self, mut limit_at: impl FnMut(&Policy) -> Option<u32>) -> Option<u32> {
+        let mut policy = *self;
+        let mut limit = None;
+        while let Some(sm) = limit_at(&policy).filter(|&sm| policy.told_sm.is_some_and(|told| sm < told)) {
+            limit = Some(sm);
+            policy.told_sm = Some(sm);
+        }
+        limit
+    }
+
+    /// `told_limit` over the fat binaries of `file`, once.
+    fn told_limit_once_in(&self, file: &[u8]) -> Option<u32> {
         // Nothing limits what Volta's generation is told.
         if self.told_sm? / 10 <= TRANSLATED_FROM / 10 {
             return None;
@@ -818,6 +858,9 @@ impl Policy {
                 (payload, (u32::from(major), u32::from(minor)))
             };
             let (text, lowering) = self.lower_ptx(&text);
+            if self.keep_sources {
+                entries.push(NewEntry::copy_of(entry));
+            }
             tensor_rewritten += lowering.tensor_rewritten;
             tanh_expanded += lowering.tanh_expanded;
             trapped.extend(lowering.trapped);
@@ -1699,10 +1742,12 @@ mod tests {
             let outcome = policy.adapt_fatbin(&fat).unwrap().outcome;
             let given = match outcome {
                 Outcome::Translated { from_sm, .. } | Outcome::Retargeted { from_sm, .. } => Some(from_sm),
+                Outcome::Native => Some(policy.device_sm),
                 _ => None,
             };
             match (limit, told_sm) {
-                (Some(sm), _) => assert_eq!(given, Some(sm), "{outcome:?}"),
+                // (7.5 for code of Volta's generation.)
+                (Some(sm), _) => assert_eq!(given.map(|g| g.max(TRANSLATED_FROM)), Some(sm), "{outcome:?}"),
                 (None, Some(told)) => assert!(given.is_none_or(|sm| sm / 10 >= told / 10), "{outcome:?}"),
                 (None, None) => {}
             }
@@ -1718,7 +1763,9 @@ mod tests {
             assert_eq!(limit(Some(told), default, &multi), Some(75), "{told}");
             // Given its PTX for sm_75: what `__CUDA_ARCH__` chose there is for 7.5.
             assert_eq!(limit(Some(told), default, &with_ptx), Some(75), "{told}");
-            assert_eq!(limit(Some(told), default, &native), None, "{told}");
+            // Code for this GPU, which runs as it is: what it chose for a later generation is not
+            // there either (until 2026-11-23 it set no limit).
+            assert_eq!(limit(Some(told), default, &native), Some(75), "{told}");
             // Machine code is not translated: nothing is given, and the driver says so.
             assert_eq!(limit(Some(told), Translate::Never, &multi), None, "{told}");
             // Machine code before PTX: what is given of this one is its sm_75 code.
@@ -1744,15 +1791,55 @@ mod tests {
             assert_eq!(limit(Some(told), default, &llama), expected, "{told}");
         }
         let mut file = b"\x7fELF....".to_vec();
-        for image in [&llama, &from_ampere, &native] {
+        for image in [&llama, &from_ampere] {
             file.extend_from_slice(image);
         }
         assert_eq!(policy.told_limit_in(&file), Some(80));
+        let mut with_native = file.clone();
+        with_native.extend_from_slice(&native);
+        assert_eq!(policy.told_limit_in(&with_native), Some(75));
+        file.extend_from_slice(&native);
         file.extend_from_slice(&[0x50, 0xed, 0x55, 0xba, 9, 9]); // the magic number, not a fat binary
         file.extend_from_slice(&multi);
         assert_eq!(policy.told_limit_in(&file), Some(75));
         assert_eq!(Policy::default().told_limit_in(&file), None);
         assert_eq!(policy.told_limit_in(b"\x7fELF no fat binary here"), None);
+        // PTX for sm_75 and sm_90 sets no limit at 9.0, and PTX for sm_80 sets 8.0; told 8.0, the
+        // first is given its PTX for sm_75, which sets 7.5. Together, in either order, the limit is
+        // 7.5, whatever the generation asked after Turing's (until 2026-11-23: 8.0 at 9.0 and 12.0,
+        // and the program told 8.0 was given the code for sm_75 of the first).
+        let ptx_75_90 = fatbin::build(&[ptx_for(75), ptx_for(90)]);
+        let ptx_80 = fatbin::build(&[ptx_for(80)]);
+        assert_eq!(limit(Some(90), default, &ptx_75_90), None);
+        assert_eq!(limit(Some(90), default, &ptx_80), Some(80));
+        assert_eq!(limit(Some(80), default, &ptx_75_90), Some(75));
+        for images in [[&ptx_75_90, &ptx_80], [&ptx_80, &ptx_75_90]] {
+            let mut file = b"\x7fELF....".to_vec();
+            for image in images {
+                file.extend_from_slice(image);
+            }
+            for told in [80, 86, 90, 120] {
+                let asked = Policy {
+                    told_sm: Some(told),
+                    ..policy
+                };
+                assert_eq!(asked.told_limit_in(&file), Some(75), "{told}");
+            }
+        }
+        // The fixed point itself: lowered while the limit is below what is told.
+        let steps = |told: Option<u32>| match told {
+            Some(120) => Some(90),
+            Some(90) => Some(80),
+            Some(80) => Some(75),
+            _ => None,
+        };
+        let asked_12 = Policy {
+            told_sm: Some(120),
+            ..policy
+        };
+        assert_eq!(asked_12.lowered(|p| steps(p.told_sm)), Some(75));
+        assert_eq!(asked_12.lowered(|p| p.told_sm), None);
+        assert_eq!(Policy::default().lowered(|_| Some(75)), None);
         // A file with code that limits what its program is told to 7.5, and code for sm_75 and
         // sm_80 that alone would not: the program, told 7.5, is given the sm_75 code of both.
         let mut file = b"\x7fELF....".to_vec();
@@ -1836,6 +1923,60 @@ mod tests {
         let fat = fatbin::parse(&bytes).unwrap();
         assert_eq!(fat.entries.len(), 1);
         assert_eq!(fat.entries[0].sm(), 70);
+    }
+
+    #[test]
+    fn a_library_keeps_the_entries_of_other_gpus_beside_their_replacements() {
+        let cubin = include_bytes!("../../../tests/kernels/translate/k_ampere.sm80.cubin");
+        let native = fatbin::parse(ELF70_ELF75_PTX70).unwrap().entries[0];
+        let ampere = fatbin::build(&[NewEntry::replace(&native, cubin.to_vec(), 80, (1, 7))]);
+        let ptx = fatbin::parse(ELF75_PTX75).unwrap().entries[1];
+        let ptx_80 = fatbin::build(&[NewEntry::replace(
+            &ptx,
+            b".version 9.5\n.target sm_80\n.address_size 64\n".to_vec(),
+            80,
+            (9, 5),
+        )]);
+        let kept = |image: &[u8]| -> Vec<(u16, u32)> {
+            fatbin::parse(image)
+                .unwrap()
+                .entries
+                .iter()
+                .map(|e| (e.kind(), e.sm()))
+                .collect()
+        };
+        let library = Policy {
+            keep_sources: true,
+            ..Policy::default()
+        };
+        for (image, alone, beside) in [
+            (&ampere, vec![(KIND_ELF, 70)], vec![(KIND_ELF, 80), (KIND_ELF, 70)]),
+            (&ptx_80, vec![(KIND_PTX, 70)], vec![(KIND_PTX, 80), (KIND_PTX, 70)]),
+            (
+                &fatbin::build(&[NewEntry::replace(&native, DEBUG_CUBIN.to_vec(), 80, (1, 7))]),
+                vec![(KIND_PTX, 70)],
+                vec![(KIND_ELF, 80), (KIND_PTX, 70)],
+            ),
+        ] {
+            let fat = fatbin::parse(image).unwrap();
+            // A module is loaded in the context of one GPU: the V100's code alone.
+            let module = Policy::default().adapt_fatbin(&fat).unwrap();
+            assert_eq!(kept(&module.image.unwrap()), alone);
+            // A library, for every GPU of the process: the V100's, and the other cards' as it was
+            // (until 2026-11-23 the V100's alone), the same outcome.
+            let adapted = library.adapt_fatbin(&fat).unwrap();
+            assert_eq!(adapted.outcome, Policy::default().adapt_fatbin(&fat).unwrap().outcome);
+            let image = adapted.image.unwrap();
+            assert_eq!(kept(&image), beside);
+            let fat_again = fatbin::parse(&image).unwrap();
+            assert_eq!(fat_again.entries[0].stored, fat.entries[0].stored);
+            // What the driver takes on the V100 is the replacement, and the second retry still
+            // finds the one PTX entry it reaches.
+            assert_eq!(
+                Policy::default().adapt_fatbin(&fat_again).unwrap().outcome,
+                Outcome::Native
+            );
+        }
     }
 
     #[test]
@@ -1945,6 +2086,84 @@ mod tests {
             }
             elf.set_symbols(&symbols);
             assert!(policy.adapt_cubin(&elf.write()).image.is_none(), "edit {edit}");
+        }
+        // With an import, the source is compiled again as the machine code was: the addition that
+        // ptxas did not contract (`--fmad=false`) keeps the rounding of its own.
+        let separate = include_bytes!("../../../tests/kernels/ptx-cases/product-sum-assert.fmad-false.sm80.cubin");
+        assert_eq!(fatbin::cubin_imports(separate).unwrap(), ["__assertfail"]);
+        let text = retargeted_text(&Policy::default(), separate).unwrap();
+        assert!(
+            text.contains("\nmul.f32 %f4, %f1, %f2;\nadd.rn.f32 %f5, %f4, %f3;"),
+            "{text}"
+        );
+    }
+
+    /// The text of the image that `policy` makes of the sm_80 `cubin`, or what it found when it
+    /// retargets nothing.
+    fn retargeted_text(policy: &Policy, cubin: &[u8]) -> Result<String, Outcome> {
+        let adapted = policy.adapt_cubin(cubin);
+        match (&adapted.outcome, adapted.image) {
+            (Outcome::Retargeted { from_sm: 80, .. }, Some(image)) => Ok(String::from_utf8(image).unwrap()),
+            _ => Err(adapted.outcome),
+        }
+    }
+
+    #[test]
+    fn retained_ptx_rounds_as_its_machine_code_did() {
+        let separate = include_bytes!("../../../tests/kernels/ptx-cases/product-sum.fmad-false.sm80.cubin");
+        let fused = include_bytes!("../../../tests/kernels/ptx-cases/product-sum.fmad-true.sm80.cubin");
+        let never = Policy {
+            translate: Translate::Never,
+            ..Policy::default()
+        };
+        for policy in [Policy::default(), never] {
+            // ptxas did not contract the product and the sum: the driver's compiler must not either.
+            let text = retargeted_text(&policy, separate).unwrap();
+            assert!(
+                text.contains("\nmul.f32 %f4, %f1, %f2;\nadd.rn.f32 %f5, %f4, %f3;"),
+                "{text}"
+            );
+            assert_eq!(text.matches(".rn.").count(), 1);
+            // It did: the source is left as it is, and contracted again.
+            let text = retargeted_text(&policy, fused).unwrap();
+            assert!(
+                text.contains("\nmul.f32 %f4, %f1, %f2;\nadd.f32 %f5, %f4, %f3;"),
+                "{text}"
+            );
+            assert!(!text.contains(".rn."));
+        }
+        // The same in a fat binary.
+        let template = fatbin::parse(ELF75_PTX75).unwrap().entries[0];
+        let bytes = fatbin::build(&[NewEntry::replace(&template, separate.to_vec(), 80, (1, 7))]);
+        let image = Policy::default()
+            .adapt_fatbin(&fatbin::parse(&bytes).unwrap())
+            .unwrap()
+            .image
+            .unwrap();
+        let entry = fatbin::parse(&image).unwrap().entries[0];
+        assert!(String::from_utf8_lossy(&entry.payload().unwrap()).contains("\nadd.rn.f32 %f5, %f4, %f3;"));
+        // Without the line table, what ptxas made of the sum is not known, whichever it was: the
+        // source is not used, and the machine code is translated (or nothing is given).
+        for cubin in [&separate[..], &fused[..]] {
+            let mut unknown = cubin.to_vec();
+            let name = b".nv_debug_line_sass";
+            while let Some(at) = unknown.windows(name.len()).position(|w| w == name) {
+                unknown[at] = b'_';
+            }
+            assert!(
+                vf_sass::elf::Elf::parse(&unknown)
+                    .unwrap()
+                    .section("_nv_debug_line_sass")
+                    .is_some()
+            );
+            assert!(matches!(
+                Policy::default().adapt_cubin(&unknown).outcome,
+                Outcome::Translated { from_sm: 80, .. }
+            ));
+            assert_eq!(
+                never.adapt_cubin(&unknown).outcome,
+                Outcome::NeedsTranslation { lowest_sm: 80 }
+            );
         }
     }
 

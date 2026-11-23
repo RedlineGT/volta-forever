@@ -18,6 +18,7 @@ import time
 DRIVER = """
 #define _GNU_SOURCE
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 static const int sm[] = {70, 75, 80, 86};
 int cuDeviceGetAttribute(int *v, int a, int d) {
@@ -81,6 +82,9 @@ int cuLibraryLoadData(void **l, const void *image, int *o, void **v, unsigned n,
     return 0;
 }
 int cuLibraryUnload(void *l) { return 0; }
+/* The module of a library in the current context, one for each device; it has every function. */
+int cuLibraryGetModule(void **m, void *l) { *m = (void *)(uintptr_t)(0x4000 + 0x10 * (mock_device + 1)); return 0; }
+int cuModuleGetFunction(void **f, void *m, const char *name) { *f = (void *)((uintptr_t)m + 1); return 0; }
 int cuLinkAddData_v2(void *s, int type, void *data, size_t size, const char *name, unsigned n, int *o, void **v) {
     keep(data);
     return seen(data, size);
@@ -102,8 +106,26 @@ int library(int (*f)(void **, const void *, int *, void **, unsigned, int *, voi
             const void *image) {
     return f(l, image, 0, 0, 0, 0, 0, 0);
 }
-int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, int *, void **), void *image) {
-    return f(0, 2, image, 0, 0, 0, 0, 0);
+int link(int (*f)(void *, int, void *, unsigned long, const char *, unsigned, int *, void **), void *image,
+         unsigned long size) {
+    return f(0, 2, image, size, 0, 0, 0, 0);
+}
+"""
+
+
+# A main program that asks through the CUDA runtime it needs (libcudart.so.19, of CLIENT's code):
+#   main_rt PROXY
+MAIN_RT = """
+#include <dlfcn.h>
+#include <stdio.h>
+int both(int (*f)(int *, int *, int), int *a, int *b, int dev);
+int main(int argc, char **argv) {
+    void *proxy = dlopen(argv[1], RTLD_NOW);
+    if (!proxy) return 2;
+    int (*query)(int *, int *, int) = (int (*)(int *, int *, int))dlsym(proxy, "cuDeviceComputeCapability");
+    int major = -1, minor = -1, status = both(query, &major, &minor, 0);
+    printf("%d.%d %d\\n", major, minor, status);
+    return 0;
 }
 """
 
@@ -179,6 +201,20 @@ def machine_code(header, cubin, sm, lz4=False):
     return bytes(header), stored
 
 
+def ptx(header, sm):
+    """An entry of PTX for `sm` (a module without functions), stored as it is, with the other
+    fields of `header`."""
+    text = f".version 9.5\n.target sm_{sm}\n.address_size 64\n".encode()
+    stored = text + bytes(8 - len(text) % 8)
+    header = bytearray(header)
+    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<I", header, 0x1C, sm)
+    struct.pack_into("<HH", header, 0x18, 5, 9)
+    struct.pack_into("<Q", header, 0x28, struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000)
+    struct.pack_into("<Q", header, 0x38, 0)
+    return bytes(header), stored
+
+
 def limited(given, code_sm):
     """What a caller whose code runs from machine code for `code_sm` is told when VF_CAPABILITY is
     `given`: no later generation than that code's, unless VF_CAPABILITY_ALL=1."""
@@ -206,13 +242,15 @@ def given_code(api, mock, client, image):
     for load in (lambda: client.load(api.cuModuleLoadData, c.byref(handle), data),
                  lambda: client.load_ex(api.cuModuleLoadDataEx, c.byref(handle), data),
                  lambda: client.library(api.cuLibraryLoadData, c.byref(handle), data),
-                 lambda: client.link(api.cuLinkAddData_v2, data)):
+                 lambda: client.link(api.cuLinkAddData_v2, data, c.c_ulong(len(image)))):
         c.c_size_t.in_dll(mock, "mock_image_length").value = 0
         assert load() == 0
         length = c.c_size_t.in_dll(mock, "mock_image_length").value
+        # (What the V100 is given: a library also keeps the entries that it replaces, for later cards.)
         kinds = {struct.unpack_from("<H", header)[0] * 100 + struct.unpack_from("<I", header, 0x1C)[0]
                  for header, _ in entries(bytes((c.c_ubyte * length).in_dll(mock, "mock_image")))}
-        given.add({frozenset((270, 280)): "sm_75 code", frozenset((275, 170)): "sm_80 PTX"}.get(frozenset(kinds), kinds))
+        kinds = frozenset(kind for kind in kinds if kind % 100 <= 70)
+        given.add({frozenset((270,)): "sm_75 code", frozenset((170,)): "sm_80 PTX"}.get(kinds, kinds))
     assert len(given) == 1, given
     return given.pop()
 
@@ -266,13 +304,26 @@ def run(proxy, directory):
         previous_address = address
         probe(api, client, sm, binary)
         _ctypes.dlclose(client._handle)
-    # The loader can still identify this mapping after unlink, but VF cannot inspect its code.
+    # The loader can still identify this mapping after unlink, but VF cannot inspect its code: it
+    # is taken to run from the lowest that adapted code does (7.5) when a later generation is asked
+    # (until 2026-11-23, told what was asked).
     path = directory / "unreadable.so"
     shutil.copyfile(directory / "plain", path)
     client = c.CDLL(str(path))
     path.unlink()
-    probe(api, client, given or 70, given or 70)
+    probe(api, client, limited(given, 75) or 70, limited(given, 75) or 70)
     _ctypes.dlclose(client._handle)
+    # The same when the file at its path is now another, without GPU code (here replaced at once,
+    # as an installation does), while the object loaded has machine code for sm_75: its code is not
+    # read from that file (until 2026-11-23, told what was asked, as a library without code).
+    path = directory / "replaced.so"
+    shutil.copyfile(directory / "turing_only", path)
+    client = c.CDLL(str(path))
+    shutil.copyfile(directory / "plain", directory / "replacement.so")
+    os.replace(directory / "replacement.so", path)
+    probe(api, client, limited(given, 75) or 70, limited(given, 75) or 70)
+    _ctypes.dlclose(client._handle)
+    path.unlink()
 
 
 def run_beside(proxy, directory, case):
@@ -280,14 +331,15 @@ def run_beside(proxy, directory, case):
     that it may load later (libkernels.so, with code to adapt; as cuDNN's graph library and the
     library of its engines): told what the code of the library that the loader loaded allows, when
     it is loaded, whatever is beside the first; before, 7.5 at most, whatever is beside it, also
-    through a library without code that depends on it; told what was asked when nothing beside it
-    depends on it."""
+    through a library without code that depends on it, and through a link to a file in another
+    directory (until 2026-11-23, not followed: told what was asked); told what was asked when
+    nothing beside it depends on it."""
     api = c.CDLL(str(proxy))
     launched = "VOLTA_FOREVER" in os.environ
     given = asked()
     front, loaded, code_sm = {"none": ("front-ampere", None, 75), "turing": ("front-ampere", "kernels-turing", 75),
                               "ampere": ("front-turing", "kernels-ampere", 80), "chain": ("front-chain", None, 75),
-                              "alone": ("front-alone", None, None)}[case]
+                              "alone": ("front-alone", None, None), "linked": ("front-linked", None, 75)}[case]
     library = c.CDLL(str(directory / front / "libfront.so"))
     if loaded:
         c.CDLL(str(directory / loaded / "libkernels.so"))
@@ -296,12 +348,22 @@ def run_beside(proxy, directory, case):
 
 
 def run_runtimes(proxy, directory):
-    """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED)."""
+    """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED). With two
+    of them, one with PTX for sm_80 and one with PTX for sm_75 and sm_90 (libcudart.so.17): told
+    8.0 for the first, the runtime would be given the PTX for sm_75 of the second: 7.5 (until
+    2026-11-23, 8.0 at 9.0 and 12.0). With one that has code for this GPU, which runs as it is
+    (libcudart.so.18): what it chose for a later generation is not there either, and the runtime is
+    told 7.5 (until 2026-11-23, what VF_CAPABILITY asked)."""
     api = c.CDLL(str(proxy))
     given = asked()
-    for runtime, user, code_sm in (("libcudart.so.13", "user_turing.so", 75), ("libcudart.so.14", "user_ptx.so", 75),
-                                   ("libcudart.so.15", "user_ampere.so", 80), ("libcudart.so.16", "user_chain.so", 75)):
-        c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
+    for runtime, users, code_sm in (("libcudart.so.13", ["user_turing.so"], 75),
+                                    ("libcudart.so.14", ["user_ptx.so"], 75),
+                                    ("libcudart.so.15", ["user_ampere.so"], 80),
+                                    ("libcudart.so.16", ["user_chain.so"], 75),
+                                    ("libcudart.so.17", ["user_ptx80.so", "user_ptx75_90.so"], 75),
+                                    ("libcudart.so.18", ["user_volta.so"], 75)):
+        for user in users:
+            c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
         sm = limited(given, code_sm) or 75
         probe(api, c.CDLL(str(directory / "runtimes" / runtime)), sm, sm)
 
@@ -357,6 +419,14 @@ def build(directory):
         else:
             # Code beside it, of a library that does not depend on it.
             shared(directory / name / "libother.so", "libother.so", None, directory / "turing_only.fatbin")
+    # libkernels.so beside libfront.so is a link to a file in another directory, under another name.
+    (directory / "front-linked").mkdir()
+    (directory / "store").mkdir()
+    shared(directory / "front-linked/libfront.so", "libfront.so")
+    shutil.copyfile(directory / "front-linked/libfront.so", directory / "store/libfront.so")
+    shared(directory / "store/libkernels.so.1", "libkernels.so.1", "libfront.so", directory / "turing_only.fatbin")
+    (directory / "store/libfront.so").unlink()
+    (directory / "front-linked/libkernels.so").symlink_to(directory / "store/libkernels.so.1")
     for code in ("turing", "ampere"):
         (directory / f"kernels-{code}").mkdir()
         shutil.copyfile(directory / f"front-{code}/libfront.so", directory / f"kernels-{code}/libfront.so")
@@ -365,11 +435,18 @@ def build(directory):
         (directory / f"kernels-{code}/libfront.so").unlink()
     runtimes = directory / "runtimes"
     runtimes.mkdir()
+    ptx_header = entries((data / "elf75-ptx75-zstd.fatbin").read_bytes())[1][0]
+    (directory / "ptx80.fatbin").write_bytes(fat_binary([ptx(ptx_header, 80)]))
+    (directory / "ptx75_90.fatbin").write_bytes(fat_binary([ptx(ptx_header, 75), ptx(ptx_header, 90)]))
     for runtime, user, fixture in (("libcudart.so.13", "user_turing.so", directory / "turing_only.fatbin"),
                                    ("libcudart.so.14", "user_ptx.so", data / "elf75-ptx75-zstd.fatbin"),
-                                   ("libcudart.so.15", "user_ampere.so", directory / "ampere_only.fatbin")):
-        subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", f"-Wl,-soname,{runtime}", "-x", "c", "-",
-                        "-o", str(runtimes / runtime)], input=CLIENT, text=True, check=True)
+                                   ("libcudart.so.15", "user_ampere.so", directory / "ampere_only.fatbin"),
+                                   ("libcudart.so.17", "user_ptx80.so", directory / "ptx80.fatbin"),
+                                   ("libcudart.so.17", "user_ptx75_90.so", directory / "ptx75_90.fatbin"),
+                                   ("libcudart.so.18", "user_volta.so", data / "elf70-elf75-ptx70-lz4.fatbin")):
+        if not (runtimes / runtime).exists():
+            subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", f"-Wl,-soname,{runtime}", "-x", "c",
+                            "-", "-o", str(runtimes / runtime)], input=CLIENT, text=True, check=True)
         subprocess.run(["cc", "-shared", "-fPIC", "-x", "c", "-", "-o", str(runtimes / user), "-L", str(runtimes),
                         "-Wl,--no-as-needed", f"-l:{runtime}", "-Wl,-rpath,$ORIGIN"],
                        input="int user(void) { return 0; }\n", text=True, check=True)
@@ -389,6 +466,13 @@ def build(directory):
     (directory / "elsewhere").mkdir()
     subprocess.run(["cc", "-O0", "-x", "c", "-", "-o", str(directory / "main"), "-ldl"], input=MAIN, text=True,
                    check=True)
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", "-Wl,-soname,libcudart.so.19", "-x", "c", "-",
+                    "-o", str(runtimes / "libcudart.so.19")], input=CLIENT, text=True, check=True)
+    subprocess.run(["cc", "-O0", "-x", "c", "-", "-o", str(directory / "main_rt"), "-ldl", "-L", str(runtimes),
+                    "-Wl,--no-as-needed", "-l:libcudart.so.19", f"-Wl,-rpath,{runtimes}"], input=MAIN_RT, text=True,
+                   check=True)
+    subprocess.run(["objcopy", "--add-section", f".nv_fatbin={directory / 'turing_only.fatbin'}",
+                    directory / "main_rt", directory / "bin" / "main_rt_turing"], check=True)
     for name, fixture in (("main75", data / "elf75-ptx75-zstd.fatbin"),
                           ("main_turing_only", directory / "turing_only.fatbin")):
         subprocess.run(["objcopy", "--add-section", f".nv_fatbin={fixture}", directory / "main",
@@ -419,6 +503,32 @@ def run_mixed(proxy, directory):
             seen = (c.c_char * 64).in_dll(mock, "mock_seen").value
             expected = b".target sm_70" if adapted else b"file" if name == "cuModuleLoad" else b".target sm_75"
             assert seen == expected, (name, ordinal, seen)
+    # A library is loaded for every GPU of the process: it is given the V100's code beside the other
+    # cards' own (until 2026-11-23, the V100's alone, and a later card lost even its own kernel); a
+    # module, loaded in a context on the V100, the V100's alone. A kernel of the library that cannot
+    # run on the V100 is refused in the module that the driver gives for the library in a context
+    # on the V100, and given in one on a later card, which runs its own code.
+    ampere = (directory / "ampere_only.fatbin").read_bytes()
+    data = c.create_string_buffer(ampere, len(ampere))
+
+    def kinds():
+        length = c.c_size_t.in_dll(mock, "mock_image_length").value
+        image = bytes((c.c_ubyte * length).in_dll(mock, "mock_image"))
+        return sorted((struct.unpack_from("<H", h)[0], struct.unpack_from("<I", h, 0x1C)[0]) for h, _ in entries(image))
+
+    device.value = 0
+    library = c.c_void_p()
+    assert api.cuLibraryLoadData(c.byref(library), data, None, None, 0, None, None, 0) == 0
+    assert kinds() == [(2, 70), (2, 80)], kinds()
+    assert api.cuModuleLoadData(c.byref(module), data) == 0
+    assert kinds() == [(2, 70)], kinds()
+    for ordinal, expected in ((0, 218), (2, 0), (0, 218)):
+        device.value = ordinal
+        alias, function = c.c_void_p(), c.c_void_p()
+        assert api.cuLibraryGetModule(c.byref(alias), library) == 0
+        assert api.cuModuleGetFunction(c.byref(function), alias, b"unsupported_atomic") == expected, ordinal
+        assert api.cuModuleGetFunction(c.byref(function), alias, b"memory_check") == 0
+    device.value = -1
 
 
 def run_binary(proxy, directory):
@@ -533,10 +643,13 @@ def run_loader(proxy, directory):
 def run_main(proxy, directory, env):
     """The main program is told what its code says, however it was started (by its path, by name
     through PATH, before a change of directory), and without /proc when it was started by its
-    path."""
+    path; so is the CUDA runtime that it asks through (main_rt_turing; until 2026-11-23 told 8.0
+    without /proc)."""
     programs = directory / "bin"
     for name, override, told in (("main75", None, "7.5"), ("main75", "8.0", "7.5"),
-                                 ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5")):
+                                 ("main_turing_only", "8.0", "7.5"), ("main_turing_only", None, "7.5"),
+                                 ("main_rt_turing", "8.0", "7.5"), ("main_rt_turing", "12.0", "7.5"),
+                                 ("main_rt_turing", None, "7.5")):
         settings = {**env, "VOLTA_FOREVER": "test", "PATH": f"{programs}:{os.environ['PATH']}"}
         if override:
             settings["VF_CAPABILITY"] = override
@@ -580,7 +693,7 @@ if __name__ == "__main__":
                     settings["VF_CAPABILITY"], _, everyone = override.partition(" ")
                     if everyone:
                         settings["VF_CAPABILITY_ALL"] = "1"
-                besides = [["--beside", case] for case in ("none", "turing", "ampere", "chain", "alone")]
+                besides = [["--beside", case] for case in ("none", "turing", "ampere", "chain", "alone", "linked")]
                 for mode in ([], ["--runtimes"], *besides):
                     subprocess.run([sys.executable, __file__, proxy, directory, *mode], env={**env, **settings},
                                    check=True)

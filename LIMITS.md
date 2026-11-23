@@ -81,7 +81,10 @@ have code for Volta, behind their names (`INSTALL.md`).
 before compiling that PTX for Volta. This covers standalone cubins from Triton and cubins in
 fat binaries. Calls that the executable leaves to the driver (`__assertfail`, `vprintf`,
 `malloc`, `free`) are accepted when the retained source declares them `.extern .func`. For sm_75, VF also tries retained PTX when its default machine-code translation
-refuses every kernel in the image.
+refuses every kernel in the image. The line information also tells which additions written
+without a rounding modifier ptxas fused with a multiplication: one that it did not fuse
+(`--fmad=false`, a debug build) is given the `.rn` form, so that the driver's compiler does not
+fuse it either, and a source of which that cannot be told is not used.
 
 Since 0.1.2, VF also translates a subset of stripped `sm_80` executables. VF checks each function's
 instruction forms, branches and memory addressing. Global loads and stores, including 128-bit
@@ -109,6 +112,13 @@ can still be refused if any linked object contains a trapped device function.
 The image that the driver's linker makes (`cuLinkComplete`) is known by its bytes, as it is or
 inside a fat binary, for the life of the process only: saved to a file and loaded in another
 process, its kernels that trap are given to the program, and launched, end its context.
+The cubin that the layer's nvJitLink (`libnvJitLink.so.13`) makes from inputs of which some
+kernels cannot run (and others can: when none can, the link is refused) names them in a note
+(`.note.vf.refused`). The layer reads it wherever the cubin is loaded, in any process: as a cubin,
+as an input of the driver's linker, or stored uncompressed in a fat binary. Stored compressed in a
+fat binary, it is not read (that would take decompressing the code of every library at every
+load), except in a process whose links through the driver had kernels to refuse. A cubin loaded without the layer keeps its kernels that trap: the warning that nvJitLink
+writes when it links them is then all there is.
 
 ## Kernels launched from a second translation
 
@@ -272,8 +282,12 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   result; no script of the repository does.
 - A machine with a V100 and a later GPU. Modules loaded into a context on the later card are
   given to the driver as the program gave them; this is tested with a stand-in for the driver
-  only. Libraries (`cuLibraryLoadData`) are adapted for the V100 in every context, so a kernel
-  refused for the V100 is refused on the later card too.
+  only. A library (`cuLibraryLoadData`) is loaded for every card: its fat binary keeps the entries
+  that are replaced for the V100 beside their replacements, and the later card takes its own. A
+  kernel refused for the V100 is given in the module that the driver gives for the library in a
+  context on the later card, and refused when it is taken from the library (`cuLibraryGetKernel`,
+  which is for every card). A library whose PTX is compiled kernel by kernel (deferred) gives the
+  later card the V100's PTX.
 - MPS (the Multi-Process Service)
 - Driver 580.196.07 and later drivers of the 580 branch (everything was run with 580.178.04)
 - Windows; ARM

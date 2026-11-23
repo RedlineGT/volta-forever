@@ -2,7 +2,8 @@
 // in `linked`, with one handle for every link state (as an allocator may give a freed one again),
 // and modules that have every kernel they are asked for. What another thread may do while the
 // driver destroys a link or unloads a module, once the handle is free (`while_freed`), is done
-// there; the next module loaded can be given a handle chosen by the test (`next_module`).
+// there; the next module loaded can be given a handle chosen by the test (`next_module`). An unload
+// fails with 201 while `unload_fails` is set, a link destroy with 400 while `destroy_fails` is.
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +14,7 @@ size_t linked_size;
 unsigned inputs, links, destroyed;
 void (*while_freed)(void);
 uintptr_t next_module;
+unsigned unload_fails, destroy_fails;
 
 int cuLinkCreate_v2(unsigned count, int *options, void **values, void **state) {
     ++links;
@@ -35,6 +37,7 @@ int cuLinkComplete(void *state, void **image, size_t *size) {
     return 0;
 }
 int cuLinkDestroy(void *state) {
+    if (destroy_fails) return 400;
     ++destroyed;
     if (while_freed) while_freed();
     return 0;
@@ -47,10 +50,30 @@ int cuModuleLoadData(void **module, const void *image) {
     return 0;
 }
 int cuModuleUnload(void *module) {
+    if (unload_fails) return 201;
     if (while_freed) while_freed();
     return 0;
 }
 int cuModuleGetFunction(void **function, void *module, const char *name) {
     *function = (void *)((uintptr_t)module + 1);
+    return 0;
+}
+int cuModuleLoadDataEx(void **module, const void *image, unsigned count, int *options, void **values) {
+    return cuModuleLoadData(module, image);
+}
+int cuModuleLoadFatBinary(void **module, const void *image) { return cuModuleLoadData(module, image); }
+int cuModuleLoad(void **module, const char *path) { return cuModuleLoadData(module, path); }
+/* Libraries, with every kernel they are asked for. */
+int cuLibraryLoadData(void **library, const void *image, int *jo, void **jv, unsigned jc, int *lo, void **lv,
+                      unsigned lc) {
+    return cuModuleLoadData(library, image);
+}
+int cuLibraryLoadFromFile(void **library, const char *path, int *jo, void **jv, unsigned jc, int *lo, void **lv,
+                          unsigned lc) {
+    return cuModuleLoadData(library, path);
+}
+int cuLibraryUnload(void *library) { return cuModuleUnload(library); }
+int cuLibraryGetKernel(void **kernel, void *library, const char *name) {
+    *kernel = (void *)((uintptr_t)library + 2);
     return 0;
 }
