@@ -525,6 +525,23 @@ else
     fail "$name" "LD_AUDIT is set: $lda"
 fi
 
+# --no-audit takes an audit library of the layer out of an LD_AUDIT that was there (after
+# eval "$(vf env)": the loader would load it all the same), and keeps the others; LD_AUDIT is
+# unset when nothing is left. env says so too. (Until 2026-11-23 it was left as it was.)
+name="no-audit-inherited"
+lda1=$(LD_AUDIT="$arch/lib/libvf_audit.so:/my/audit.so" "$vf" --no-audit sh -c 'printf "%s" "${LD_AUDIT-unset}"')
+lda2=$(LD_AUDIT="$arch/lib/libvf_audit.so" "$vf" --no-audit sh -c 'printf "%s" "${LD_AUDIT-unset}"')
+lda3=$(LD_AUDIT=/my/audit.so "$vf" --no-audit sh -c 'printf "%s" "${LD_AUDIT-unset}"')
+env1=$(LD_AUDIT="/other/lib/libvf_audit.so:/my/audit.so" "$vf" env --no-audit | grep LD_AUDIT || true)
+env2=$(LD_AUDIT="$arch/lib/libvf_audit.so" "$vf" env --no-audit | grep LD_AUDIT || true)
+env3=$(LD_AUDIT=/my/audit.so "$vf" env --no-audit | grep LD_AUDIT || true)
+if [ "$lda1" = /my/audit.so ] && [ "$lda2" = unset ] && [ "$lda3" = /my/audit.so ] \
+    && [ "$env1" = "export LD_AUDIT='/my/audit.so'" ] && [ "$env2" = "unset LD_AUDIT" ] && [ -z "$env3" ]; then
+    pass "$name"
+else
+    fail "$name" "run: $lda1 | $lda2 | $lda3; env: $env1 | $env2 | $env3"
+fi
+
 # 7. --cuda12 DIR overrides auto-detection.
 
 name="cuda12-override"

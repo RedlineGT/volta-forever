@@ -346,17 +346,23 @@ setup_env() {
     # what the layer substituted and has the last word, as the user's entries of VF_AUDIT_MAP
     # come before the launcher's.
     _others_audit=
+    _layer_audit_there=0
     set -f
     _oifs=$IFS; IFS=:
     for _a in ${LD_AUDIT:-}; do
         case $_a in
-            libvf_audit.so|*/libvf_audit.so) ;;
+            libvf_audit.so|*/libvf_audit.so) _layer_audit_there=1 ;;
             *) _others_audit=$_others_audit:$_a ;;
         esac
     done
     IFS=$_oifs
     set +f
     _ld_audit=$(path_prepend "$_audit" "$_others_audit")
+    # Without the audit library (--no-audit, or none in the installation), an audit library of
+    # the layer that LD_AUDIT already names (after eval "$(vf env)") is taken out of it too: the
+    # loader would load it all the same. (_ld_audit_without: what is left; LD_AUDIT is unset
+    # when nothing is.)
+    _ld_audit_without=$(path_prepend "" "$_others_audit")
 
     # The library path: the layer's own libraries, the forwarding libraries, the CUDA 12.9.2
     # libraries, then what was there. The directory of the forwarding libraries is left out
@@ -448,6 +454,12 @@ cmd_env() {
     if [ "$_with_audit" = 1 ]; then
         printf 'export LD_AUDIT=%s\n' "$(quoted "$_ld_audit")"
         [ -n "$_full_map" ] && printf 'export VF_AUDIT_MAP=%s\n' "$(quoted "$_full_map")"
+    elif [ "$_layer_audit_there" = 1 ]; then
+        if [ -n "$_ld_audit_without" ]; then
+            printf 'export LD_AUDIT=%s\n' "$(quoted "$_ld_audit_without")"
+        else
+            printf 'unset LD_AUDIT\n'
+        fi
     fi
     printf 'export VOLTA_FOREVER=%s\n' "$(quoted "$_version")"
     printf 'export VOLTA_FOREVER_HOME=%s\n' "$(quoted "$home")"
@@ -523,6 +535,8 @@ cmd_run() {
     if [ "$_with_audit" = 1 ]; then
         export LD_AUDIT="$_ld_audit"
         [ -n "$_full_map" ] && export VF_AUDIT_MAP="$_full_map"
+    elif [ "$_layer_audit_there" = 1 ]; then
+        if [ -n "$_ld_audit_without" ]; then export LD_AUDIT="$_ld_audit_without"; else unset LD_AUDIT; fi
     fi
     export VOLTA_FOREVER="$_version"
     export VOLTA_FOREVER_HOME="$home"

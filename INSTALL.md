@@ -175,7 +175,7 @@ eval "$(vf env)"
 | `vf version`, `help` | |
 | `--cuda12 DIR` | the directory of the CUDA 12.9.2 libraries (else `VF_CUDA12`, then `cuda-12.9.2/lib` of the installation, then in a source tree `toolkits/cuda-12.9.2/lib`, then `/usr/local/cuda-12.9/lib64`); a path with a `:` is refused |
 | `--map FILE` | substitutions of your own, which come before the launcher's (the format of section 4, B) |
-| `--no-audit` | do not set `LD_AUDIT` (a program that finds all its libraries through the loader does without it) |
+| `--no-audit` | do not set `LD_AUDIT` (a program that finds all its libraries through the loader does without it); an audit library of the layer that `LD_AUDIT` already names (after `eval "$(vf env)"`) is taken out of it |
 
 **What the launcher sets.**
 
