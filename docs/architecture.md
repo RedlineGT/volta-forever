@@ -232,11 +232,15 @@ copy, and read-only data. Everything else is **dependent** and served from the w
 module. The analysis is in `crates/vf-ptx/src/deps.rs`.
 
 Read-only data is a variable whose bytes the module gives (plain data with an
-initializer that names nothing, not managed memory), whose name the module keeps to
-itself (no `.visible`, `.weak`, `.extern` or `.common`: such a name is shared state that
-other translation units may use) and that no function can change: its address, or a
-value made from it, reaches nothing but the address of a load and arithmetic (no store
-of any kind, atomic, reduction, call or copy, and no other variable's initializer). Lookup tables are such data (the grids of llama.cpp's and
+initializer that names nothing, no attribute such as managed memory, alone in its
+declaration), whose name the module keeps to itself (no `.visible`, `.weak`, `.extern`
+or `.common`: such a name is shared state that other translation units may use) and
+that no function can change: its address, or a value made from it, reaches nothing but
+the address of a load and arithmetic (no store of any kind, atomic, reduction, call or
+copy, no register of a function's signature, no comparison and no carry, from which
+the address could be rebuilt, and no other variable's initializer). Every function of
+the module is read for this: a body that the analysis cannot read, or a definition
+that it does not find, leaves no variable read-only. Lookup tables are such data (the grids of llama.cpp's and
 Strata's i-quants). The sub-module of a kernel that reads it holds a copy, and every
 copy keeps the same bytes for as long as the program writes none; it can write one
 only through an address it asks for by name. So while a sub-module holds a copy of a

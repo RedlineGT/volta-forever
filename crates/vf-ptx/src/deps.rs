@@ -196,11 +196,21 @@ fn find_referenced_names(text: &str, declared: impl Fn(&str) -> bool) -> HashSet
 const READONLY_EXTERN_CALLEES: &[&str] = &["vprintf", "__assertfail"];
 
 /// The instructions through which an address only becomes another value: what they give is tainted
-/// by what they are given, and they read and write no memory (by the opcode's first word).
+/// by what they are given, and they read and write no memory (by the opcode's first word). Not a
+/// comparison (`setp`), nor an instruction that sets the carry (`.cc`): the taint follows what
+/// instructions give, not a predicate that guards or branches, nor the carry, and an address could
+/// be rebuilt bit by bit from those. (No kernel of Strata's CUDA 13 engine 0.1.64 or of
+/// llama.cpp b12418 that reads a table compares its address or carries from it, 2026-11-23.)
 const ADDRESS_ARITHMETIC: &[&str] = &[
     "mov", "cvta", "cvt", "add", "sub", "mul", "mad", "mul24", "mad24", "and", "or", "xor", "not", "shl", "shr", "shf",
-    "selp", "prmt", "min", "max", "neg", "setp", "bfe", "bfi", "lop3",
+    "selp", "prmt", "min", "max", "neg", "bfe", "bfi", "lop3",
 ];
+
+/// Whether an instruction only computes a value from what it is given (`ADDRESS_ARITHMETIC`).
+fn is_address_arithmetic(opcode: &str) -> bool {
+    let mut words = opcode.split('.');
+    ADDRESS_ARITHMETIC.contains(&words.next().unwrap_or_default()) && !words.any(|word| word == "cc")
+}
 
 /// What the taint analysis of a function body found: the variables written, loaded from, and not
 /// only read.
@@ -215,7 +225,36 @@ struct Accesses {
     not_only_read: HashSet<String>,
 }
 
-fn find_writes_to_globals(code: &str, global_names: &HashSet<String>, safe_callees: &HashSet<String>) -> Accesses {
+/// A statement as the assembler reads it: its opcode (the letters, digits, `.`, `_` and `:` after its
+/// guard, if it has one: `@p` or `@!p`, with spaces or not) and its operands (all that follows the
+/// opcode, which needs no space before them).
+fn split_statement(statement: &str) -> (&str, &str) {
+    let mut rest = statement.trim_start();
+    if let Some(guard) = rest.strip_prefix('@') {
+        let guard = guard.trim_start();
+        let guard = guard.strip_prefix('!').unwrap_or(guard).trim_start();
+        let predicate = guard
+            .bytes()
+            .take_while(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'%'))
+            .count();
+        rest = guard[predicate..].trim_start();
+    }
+    let opcode = rest
+        .bytes()
+        .take_while(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':'))
+        .count();
+    (&rest[..opcode], &rest[opcode..])
+}
+
+/// `signature_names` are the names in the function's signature (its parameters, and its return
+/// value when it is a register): a value made from a variable's address that one of them is given
+/// leaves the function, so the variable is not only read.
+fn find_writes_to_globals(
+    code: &str,
+    signature_names: &[&str],
+    global_names: &HashSet<String>,
+    safe_callees: &HashSet<String>,
+) -> Accesses {
     let items = match scan::items(code.as_bytes(), 0..code.len()) {
         Some(items) => items,
         // (What the body does with a variable is not known: none of them is only read.)
@@ -244,11 +283,18 @@ fn find_writes_to_globals(code: &str, global_names: &HashSet<String>, safe_calle
     let mut stmts: Vec<Stmt<'_>> = Vec::new();
 
     for item in &items {
-        let scan::Kind::Statement { opcode, operands, .. } = &item.kind else {
+        let scan::Kind::Statement { operands, .. } = &item.kind else {
             continue;
         };
-        let op = &code[opcode.clone()];
-        let ops = &code[operands.clone()];
+        // (The scanner ends the opcode at a space: `st.global.u32[t], %r1` and `@ %p st.global.u32
+        // [t], %r1` are stores too.)
+        let (op, ops) = split_statement(&code[item.range.start..operands.end]);
+        // A declaration names what it declares and uses nothing, unless it has an initializer
+        // (a variable of the function, `.global .u64 q = generic(t)`): then it is an instruction
+        // that the rules below do not know.
+        if op.starts_with('.') && !ops.contains('=') {
+            continue;
+        }
         let names: Vec<String> = scan::names(ops).map(|s| s.to_string()).collect();
         // First operand (destination): up to the first comma outside braces/brackets.
         let first_comma = {
@@ -322,14 +368,13 @@ fn find_writes_to_globals(code: &str, global_names: &HashSet<String>, safe_calle
                 continue;
             }
 
-            // Taint each destination register with those variables.
+            // Taint each destination with those variables, whatever its name: a register needs no
+            // `%` (`.reg .b64 p; mov.u64 p, t;`).
             for dest in &stmt.dest_names {
-                if dest.starts_with('%') {
-                    let entry = name_to_vars.entry(dest.clone()).or_default();
-                    for var in &tainted_by {
-                        if entry.insert(var.clone()) {
-                            changed = true;
-                        }
+                let entry = name_to_vars.entry(dest.clone()).or_default();
+                for var in &tainted_by {
+                    if entry.insert(var.clone()) {
+                        changed = true;
                     }
                 }
             }
@@ -390,13 +435,20 @@ fn find_writes_to_globals(code: &str, global_names: &HashSet<String>, safe_calle
     let mut not_only_read = HashSet::new();
     for stmt in &stmts {
         let is_load = stmt.opcode.starts_with("ld.") || stmt.opcode.starts_with("ldu.");
-        if is_load || ADDRESS_ARITHMETIC.contains(&stmt.opcode.split('.').next().unwrap_or_default()) {
+        if is_load || is_address_arithmetic(stmt.opcode) {
             continue;
         }
         for name in &stmt.names {
             if let Some(vars) = name_to_vars.get(name) {
                 not_only_read.extend(vars.iter().cloned());
             }
+        }
+    }
+    // A register of the signature that holds a value made from the address: the function gives it
+    // back to its caller (whose `call` does not taint what it receives) or keeps it in a parameter.
+    for name in signature_names {
+        if let Some(vars) = name_to_vars.get(*name) {
+            not_only_read.extend(vars.iter().cloned());
         }
     }
 
@@ -541,6 +593,23 @@ struct ModuleLevelItems {
     has_unrecognised: bool,
     has_module_pragma: bool,
     has_unindexed_shared: bool,
+    /// A function definition that `crate::visit_functions` did not find: its body is not analysed.
+    has_unscanned_definition: bool,
+}
+
+/// Whether a variable declaration declares more than one name (a comma outside its initializer's
+/// braces, an array's brackets or parentheses).
+fn declares_several(declaration: &str) -> bool {
+    let mut depth = 0usize;
+    declaration.bytes().any(|b| {
+        match b {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => return true,
+            _ => {}
+        }
+        false
+    })
 }
 
 fn find_module_level_items(text: &[u8], header_end: usize, func_defs: &[FuncDef]) -> ModuleLevelItems {
@@ -551,6 +620,7 @@ fn find_module_level_items(text: &[u8], header_end: usize, func_defs: &[FuncDef]
         has_unrecognised: false,
         has_module_pragma: false,
         has_unindexed_shared: false,
+        has_unscanned_definition: false,
     };
 
     // Build gap ranges: regions not covered by any function definition.
@@ -672,10 +742,13 @@ fn find_module_level_items(text: &[u8], header_end: usize, func_defs: &[FuncDef]
                         } else {
                             Linkage::Private
                         };
+                    // (One name per declaration: `.global .b8 t[4] = {...}, u[4] = {...};` declares
+                    // a `u` that nothing here knows of, and that a copy of `t` would hold.)
                     let initialized_data = linkage == Linkage::Private
                         && !shared
                         && decl_text.contains('=')
-                        && !decl_text.contains(".managed")
+                        && !declares_several(decl_text)
+                        && !decl_text.contains(".attribute")
                         && ![".texref", ".samplerref", ".surfref"]
                             .iter()
                             .any(|kind| decl_text.contains(kind));
@@ -709,7 +782,9 @@ fn find_module_level_items(text: &[u8], header_end: usize, func_defs: &[FuncDef]
                     }
                 } else {
                     // Has a body: this is a definition, not a declaration. Should have been found
-                    // by crate::functions(). Skip past the body.
+                    // by crate::functions() (it is not when no space follows the keyword:
+                    // `.func(.reg .b32 r) f()`). Skip past the body, which is not analysed.
+                    result.has_unscanned_definition = true;
                     if at < gap.end && text[at] == b'{' {
                         at = crate::matching(text, at).map_or(gap.end, |c| c + 1);
                         if at < gap.end && text[at] == b'\n' {
@@ -1088,6 +1163,10 @@ impl ModuleInfo {
         let mut written_vars = HashSet::new();
         let mut loaded_vars = HashSet::new();
         let mut not_only_read: HashSet<String> = HashSet::new();
+        // A body that is not analysed could do anything with any variable.
+        if module_items.has_unscanned_definition {
+            not_only_read.extend(persistent_names.iter().cloned());
+        }
 
         // A referenced variable brings every symbol used to initialize it. A persistent
         // address in an initializer can also be loaded and written through.
@@ -1150,7 +1229,8 @@ impl ModuleInfo {
             }
             let vr: HashSet<String> = all_names.intersection(&all_var_names).cloned().collect();
             if need_taint {
-                let accesses = find_writes_to_globals(body_text, &persistent_names, &safe_callees);
+                let signature: Vec<&str> = scan::names(&text_str[func.signature.clone()]).collect();
+                let accesses = find_writes_to_globals(body_text, &signature, &persistent_names, &safe_callees);
                 written_vars.extend(accesses.written);
                 loaded_vars.extend(accesses.loaded);
                 not_only_read.extend(accesses.not_only_read);
@@ -2983,17 +3063,257 @@ $str:
                 ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.global .align 8 .u64 p = generic(t);",
                 "\tld.global.u64 %rd1, [p];",
             ),
+            // A register needs no `%` (2026-11-23: these five changed `t` and left it copied).
+            (
+                "a store through a register whose name has no %",
+                TABLE,
+                "\t.reg .b64 p;\n\tmov.u64 p, t;\n\tst.global.u32 [p], %r1;",
+            ),
+            (
+                "a store through an address made from it in a register whose name has no %",
+                TABLE,
+                "\t.reg .b64 p;\n\tmov.u64 %rd1, t;\n\tadd.s64 p, %rd1, 4;\n\tst.global.u32 [p], %r1;",
+            ),
+            (
+                "its address passed to a call in a register whose name has no %",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.func f(\n\t.reg .b64 a\n)\n{\n\tst.global.u32 [a], 9;\n\tret;\n}",
+                "\t.reg .b64 q;\n\tmov.u64 q, t;\n\tcall f, (q);",
+            ),
+            (
+                "its address given back by a callee in a register of its signature",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.func (.reg .b64 rv) get()\n{\n\tmov.u64 rv, t;\n\tret;\n}",
+                "\tcall (%rd1), get, ();\n\tst.global.u32 [%rd1], %r1;",
+            ),
+            (
+                "its address moved into a parameter register of a function",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.func put(\n\t.reg .b64 a\n)\n{\n\tmov.u64 a, t;\n\tret;\n}",
+                "\tld.global.u32 %r1, [t];",
+            ),
+            // An opcode needs no space before its operands, and a guard none after its `@`.
+            (
+                "a store written against its operands",
+                TABLE,
+                "\tst.global.u32[t], %r1;",
+            ),
+            (
+                "its address taken by an instruction written against its operands",
+                TABLE,
+                "\tmov.u64%rd1, t;\n\tst.global.u32 [%rd1], %r1;",
+            ),
+            (
+                "a store under a guard written with a space",
+                TABLE,
+                "\t.reg .pred %p<2>;\n\tsetp.eq.u32 %p1, %r1, 0;\n\t@ %p1 st.global.u32 [t], %r1;",
+            ),
+            (
+                "its address taken under a guard written with spaces",
+                TABLE,
+                "\t.reg .pred %p<2>;\n\tsetp.eq.u32 %p1, %r1, 0;\n\t@ ! %p1 mov.u64 %rd1, t;\n\tst.global.u32 [%rd1], %r1;",
+            ),
+            // Other variables and declarations that hold its address.
+            (
+                "its address in a table of addresses",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.global .align 8 .u64 t2[1] = {t};",
+                "\tld.global.u64 %rd1, [t2];\n\tst.u32 [%rd1], %r1;",
+            ),
+            (
+                "an address made from it in a table of addresses",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.global .align 8 .u64 t2[1] = {generic(t)+4};",
+                "\tld.global.u64 %rd1, [t2];\n\tst.u32 [%rd1], %r1;",
+            ),
+            (
+                "a variable of the function initialized with its address",
+                TABLE,
+                "\t.global .align 8 .u64 q = generic(t);\n\tld.global.u64 %rd1, [q];\n\tst.u32 [%rd1], %r1;",
+            ),
+            (
+                "another attribute",
+                ".global .attribute(.unified(19,95)) .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};",
+                "\tld.global.u32 %r1, [t];",
+            ),
+            // Its address through memory, in parameter space, and in every other kind of write.
+            (
+                "its address kept in shared memory and loaded back",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.shared .align 8 .b8 s[8];",
+                "\tmov.u64 %rd1, t;\n\tmov.u64 %rd3, s;\n\tst.shared.u64 [%rd3], %rd1;\n\tld.shared.u64 %rd2, [%rd3];\n\tst.global.u32 [%rd2], %r1;",
+            ),
+            (
+                "its address exchanged by an atomic",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tatom.global.exch.b64 %rd2, [%rd3], %rd1;",
+            ),
+            (
+                "its address passed to a call in parameter space",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.func g(\n\t.param .b64 a\n)\n{\n\tret;\n}",
+                "\t{\n\t.param .b64 param0;\n\tmov.u64 %rd1, t;\n\tst.param.b64 [param0], %rd1;\n\tcall.uni g, (param0);\n\t}",
+            ),
+            ("a reduction on it", TABLE, "\tred.global.add.u32 [t], 1;"),
+            ("a volatile store into it", TABLE, "\tst.volatile.global.u32 [t], %r1;"),
+            (
+                "a store through its generic address",
+                TABLE,
+                "\tcvta.global.u64 %rd1, t;\n\tst.u32 [%rd1], %r1;",
+            ),
+            (
+                "a store through selections and moves whose registers have no %",
+                TABLE,
+                "\t.reg .pred %p<2>;\n\t.reg .b64 x, y, z;\n\tsetp.eq.u32 %p1, %r1, 0;\n\tmov.u64 x, t;\n\tselp.b64 y, x, %rd2, %p1;\n\tmov.b64 z, y;\n\tst.global.u32 [z], %r1;",
+            ),
+            // Instructions of the shared state space: a table is not there, but the rule does not
+            // follow state spaces, and an address stored as data can be loaded back by another thread.
+            (
+                "a matrix store through an address made from it",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tstmatrix.sync.aligned.m8n8.x1.shared.b16 [%rd1], {%r1};",
+            ),
+            (
+                "its address stored as data to shared memory",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.shared .align 8 .b8 s[8];",
+                "\tmov.u64 %rd1, t;\n\tst.shared.u64 [s], %rd1;",
+            ),
+            // An address rebuilt from a comparison, or from the carry, without a value made from it.
+            (
+                "a store through an address chosen by a comparison of its address",
+                TABLE,
+                "\t.reg .pred %p<2>;\n\tmov.u64 %rd1, t;\n\tsetp.eq.u64 %p1, %rd1, 4096;\n\t@%p1 mov.u64 %rd2, 4096;\n\tst.global.u32 [%rd2], %r1;",
+            ),
+            (
+                "a store through an address made from the carry of an addition to its address",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tadd.cc.u64 %rd2, %rd1, 4;\n\taddc.u64 %rd3, 0, 0;\n\tst.global.u32 [%rd3], %r1;",
+            ),
+            // What only reads, but is not taught to the rule.
+            (
+                "a matrix load from an address made from it",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tldmatrix.sync.aligned.m8n8.x1.shared.b16 {%r1}, [%rd1];",
+            ),
+            (
+                "a test of the state space of its address",
+                TABLE,
+                "\t.reg .pred %p<2>;\n\tmov.u64 %rd1, t;\n\tisspacep.global %p1, %rd1;",
+            ),
         ];
+        let mut copied = Vec::new();
         for (what, declaration, other) in cases {
             let text = table_module(declaration, other);
             let info = ModuleInfo::analyse(text.as_bytes());
-            assert!(
-                !info.is_entry_independent("reader"),
-                "{what}: reader should be dependent"
-            );
-            assert!(info.copied_tables("reader").is_empty(), "{what}");
-            assert!(info.dependent_vars("reader").contains(&"t".to_string()), "{what}");
+            if info.is_entry_independent("reader")
+                || !info.copied_tables("reader").is_empty()
+                || !info.dependent_vars("reader").contains(&"t".to_string())
+            {
+                copied.push(what);
+            }
         }
+        assert!(copied.is_empty(), "reader should be dependent with: {copied:#?}");
+    }
+
+    #[test]
+    fn table_that_is_only_read_is_copied() {
+        // What only reads `t`, by any way of writing it: `reader` and `other` keep copies.
+        let cases = [
+            ("a volatile load", "\tld.volatile.global.u32 %r1, [t];"),
+            (
+                "a load under a guard",
+                "\t.reg .pred %p<2>;\n\tsetp.eq.u32 %p1, %r1, 0;\n\t@%p1 ld.global.u32 %r1, [t];",
+            ),
+            ("a vector load", "\tld.global.v2.u32 {%r1, %r2}, [t];"),
+            (
+                "a load through its generic address",
+                "\tcvta.global.u64 %rd1, t;\n\tld.u32 %r1, [%rd1];",
+            ),
+            (
+                "a load through registers whose names have no %",
+                "\t.reg .pred %p<2>;\n\t.reg .b64 x, y;\n\tsetp.eq.u32 %p1, %r1, 0;\n\tmov.u64 x, t;\n\tselp.b64 y, x, %rd2, %p1;\n\tld.global.u32 %r2, [y+4];",
+            ),
+            ("a load written against its operands", "\tld.global.u32%r1, [t];"),
+            (
+                "its bytes stored elsewhere",
+                "\tld.global.u32 %r1, [t+4];\n\tst.local.u32 [%rd3], %r1;\n\tst.global.u32 [%rd3], %r1;",
+            ),
+            (
+                "a declaration of registers named as nothing else",
+                "\t.reg .b64 p;\n\tmov.u64 p, t;\n\tld.global.u32 %r1, [p];",
+            ),
+        ];
+        let mut dependent = Vec::new();
+        for (what, other) in cases {
+            let info = ModuleInfo::analyse(table_module(TABLE, other).as_bytes());
+            if !info.is_entry_independent("reader") || info.copied_tables("other") != ["t"] {
+                dependent.push(what);
+            }
+        }
+        assert!(dependent.is_empty(), "t should be copied with: {dependent:#?}");
+    }
+
+    #[test]
+    fn declaration_of_several_variables_is_not_copied() {
+        // `u` is declared with `t`: the analysis knows `t` only, and `writer`, which writes `u`
+        // without naming anything it knows, comes from the whole module after its sub-module
+        // fails to compile. `reader` must then not hold a copy of `u` (2026-11-23: it did).
+        let text = "\
+.version 9.0
+.target sm_70
+.address_size 64
+
+.global .align 4 .b8 t[4] = {1, 2, 3, 4}, u[4] = {5, 6, 7, 8};
+
+.visible .entry reader(
+\t.param .u64 reader_param_0
+)
+{
+\t.reg .b32 %r<3>;
+\t.reg .b64 %rd<3>;
+\tld.param.u64 %rd1, [reader_param_0];
+\tcvta.to.global.u64 %rd2, %rd1;
+\tld.global.u32 %r1, [t];
+\tld.global.u32 %r2, [u];
+\tadd.u32 %r1, %r1, %r2;
+\tst.global.u32 [%rd2], %r1;
+\tret;
+}
+
+.visible .entry writer()
+{
+\tst.global.u32 [u], 9;
+\tret;
+}
+";
+        let info = ModuleInfo::analyse(text.as_bytes());
+        assert!(!info.is_entry_independent("reader"));
+        assert!(info.copied_tables("reader").is_empty());
+    }
+
+    #[test]
+    fn function_not_analysed_disqualifies_every_table() {
+        // A function whose body the analysis does not read could write `t`: then nothing is copied.
+        // `w` is defined in a way the function scanner does not find (2026-11-23: `t` was copied,
+        // and `other`, which calls `w`, came from the whole module once its sub-module failed to
+        // compile), or with a body the statement scanner cannot read.
+        let writers = [
+            (
+                "no space after .func",
+                ".func(.reg .b32 rv) w(\n\t.reg .b32 a\n)\n{\n\tst.global.u32 [t], a;\n\tmov.u32 rv, 0;\n\tret;\n}",
+            ),
+            (
+                "a comment after .func",
+                ".func/* the writer */ (.reg .b32 rv) w(\n\t.reg .b32 a\n)\n{\n\tst.global.u32 [t], a;\n\tmov.u32 rv, 0;\n\tret;\n}",
+            ),
+            (
+                "an unreadable body",
+                ".func (.reg .b32 rv) w(\n\t.reg .b32 a\n)\n{\n\tst.global.u32 [t], a;\n\tmov.u32 rv, 0;\n\tret\n}",
+            ),
+        ];
+        let mut copied = Vec::new();
+        for (what, writer) in writers {
+            let declaration = format!("{TABLE}\n{writer}");
+            let text = table_module(&declaration, "\tcall (%r2), w, (%r1);");
+            let info = ModuleInfo::analyse(text.as_bytes());
+            if info.is_entry_independent("reader") || !info.copied_tables("reader").is_empty() {
+                copied.push(what);
+            }
+        }
+        assert!(copied.is_empty(), "reader should be dependent with: {copied:#?}");
     }
 
     #[test]
