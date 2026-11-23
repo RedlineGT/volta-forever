@@ -331,7 +331,7 @@ What that does not cover:
   program that does not import it. With `VF_CAPABILITY=8.0` alone, Triton is then told 7.5, as
   PyTorch's CUDA runtime is, and its `tl.dot` runs without tensor cores ([Speed](#speed)).
   `VF_CAPABILITY_ALL=1` gives it 8.0 and the tensor cores, and gives PyTorch 8.0 too, with the
-  wrong results of the first item. Told 8.0, Triton also computes a float32 `tl.dot` of its
+  refusals of the first item. Told 8.0, Triton also computes a float32 `tl.dot` of its
   default precision in tf32 (10 bits of mantissa), as on an Ampere GPU, where told 7.5 it
   computes it in float32; a bf16 `tl.dot` told 8.0 runs on the layer's scalar bf16 products,
   unless a `VF_BF16_TC_*` switch is set (`docs/emulations.md`, "bf16"); the `tf32x3` precision
