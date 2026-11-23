@@ -34,7 +34,8 @@
 //! - `VF_CAPABILITY=8.0`: compute capability reported to the callers that have no code for this GPU
 //!   (default: the architecture their code starts at when it can be adapted, else the real one; see
 //!   `callers`). The PTX taken from a program is then the PTX it has for that capability; a caller
-//!   whose code runs from its sm_75 machine code is still told 7.5, unless `VF_CAPABILITY_ALL=1`;
+//!   whose code runs from its sm_75 machine code is still told 7.5, unless it is a CUDA runtime or
+//!   code that uses one and `VF_CAPABILITY_ALL=1`;
 //! - `VF_STATS=1`: route every function through this library and print, when the process exits,
 //!   the number of calls per function and the kernels launched most often (adds an atomic increment
 //!   to each driver call, and a name lookup to each launch);
@@ -82,8 +83,9 @@ pub struct Config {
     /// Compute capability to report to callers without code for this GPU, instead of what `callers`
     /// works out.
     pub capability: Option<(i32, i32)>,
-    /// `VF_CAPABILITY_ALL=1`: `capability` is reported also to the callers whose code runs from
-    /// machine code of an earlier generation, which are otherwise told that one (`callers`).
+    /// `VF_CAPABILITY_ALL=1`: `capability` is reported also to a CUDA runtime, and to code that uses
+    /// one, whose code runs from machine code of an earlier generation and which are otherwise told
+    /// that one (`callers`).
     pub capability_all: bool,
     pub stats: bool,
     pub trace_launch: bool,

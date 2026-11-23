@@ -561,6 +561,65 @@ impl Policy {
         fatbin::cubin_sm(header).is_some_and(|sm| !self.runs(sm) && (self.translatable(sm) || self.retargetable(sm)))
     }
 
+    /// The kernels of `cubin`, the machine code for `source` taken from `fat`, that are stubs for
+    /// the architecture the program is told (`told_sm`), when that is of a later generation: their
+    /// code writes no memory that outlives them (`vf_sass::effects`), where the code of the same
+    /// kernels for the architecture that a GPU of the capability told runs (the latest of `fat` up to
+    /// it) writes. A library compiled for several architectures picks the variant of a kernel by the
+    /// capability it is told, and its code for an earlier architecture can have the variant for a
+    /// later one as such a stub: told 8.0 (`VF_CAPABILITY_ALL=1`), PyTorch launches attention kernels
+    /// that in its code for sm_75 print an error and write nothing, and goes on with what the output
+    /// held. Refused, they make the program fail instead. A kernel that writes nothing in both, as one
+    /// that only waits or only checks, and one of which either answer is not known, is given as
+    /// before; the code for the later architecture is only read, not translated.
+    fn stubs_for_told(&self, fat: &FatBinary<'_>, source: u32, cubin: &[u8]) -> Vec<Refused> {
+        use vf_sass::effects::{Effect, kernel_effects};
+        let Some(told) = self.told_sm.filter(|told| told / 10 > source / 10) else {
+            return Vec::new();
+        };
+        let later = fat
+            .entries
+            .iter()
+            .filter(|e| e.kind() == KIND_ELF && e.sm() > source && e.sm() <= told)
+            .map(Entry::sm)
+            .max();
+        let Some(later) = later else {
+            return Vec::new();
+        };
+        let with = |cubin: &[u8], wanted: Effect| -> Vec<String> {
+            let found = kernel_effects(cubin).unwrap_or_default();
+            found
+                .into_iter()
+                .filter(|(_, e)| *e == wanted)
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let quiet = with(cubin, Effect::None);
+        if quiet.is_empty() {
+            return Vec::new();
+        }
+        let mut writing = std::collections::HashSet::new();
+        for entry in fat.entries.iter().filter(|e| e.kind() == KIND_ELF && e.sm() == later) {
+            if let Ok(payload) = entry.payload() {
+                writing.extend(with(&payload, Effect::Writes));
+            }
+        }
+        quiet
+            .into_iter()
+            .filter(|name| writing.contains(name))
+            .map(|kernel| Refused {
+                function: kernel.clone(),
+                reason: format!(
+                    "its machine code for sm_{source} writes no memory (a stub), where its code for sm_{later}, which \
+                     a GPU of the capability told ({}.{}) runs, does; that code is not translated",
+                    told / 10,
+                    told % 10
+                ),
+                kernel,
+            })
+            .collect()
+    }
+
     /// Translate the machine code for one target, keeping entries for other GPUs. With the
     /// default policy, use a later target's complete retained PTX when it is available.
     fn translate_fatbin(&self, fat: &FatBinary<'_>) -> Result<Option<Adapted>, fatbin::Error> {
@@ -605,6 +664,12 @@ impl Policy {
                     functions += translation.functions;
                     over_budget |= translation.over_budget;
                     refused.extend(translation.refused);
+                    let stubs: Vec<Refused> = self
+                        .stubs_for_told(fat, source, &payload)
+                        .into_iter()
+                        .filter(|stub| !refused.iter().any(|r: &Refused| r.kernel == stub.kernel))
+                        .collect();
+                    refused.extend(stubs);
                     emulated.extend(translation.emulated);
                 }
                 Err(reason) => {
@@ -1579,6 +1644,64 @@ mod tests {
             (KIND_PTX, 70, (7, 0))
         );
         assert_eq!(&*entry.payload().unwrap(), image.as_slice());
+    }
+
+    /// `tests/kernels/k_stub.cu`: machine code for sm_75 and sm_80, no PTX.
+    const STUBS: &[u8] = include_bytes!("../../../tests/kernels/k_stub.135.sm75-sm80.fatbin");
+
+    #[test]
+    fn a_stub_for_the_architecture_told_is_refused() {
+        let fat = fatbin::parse(STUBS).unwrap();
+        let refused = |told: Option<u32>| -> Vec<(String, String)> {
+            let policy = Policy {
+                told_sm: told,
+                ..Policy::default()
+            };
+            match policy.adapt_fatbin(&fat).unwrap().outcome {
+                Outcome::Translated {
+                    from_sm: 75, refused, ..
+                } => refused.into_iter().map(|r| (r.kernel, r.reason)).collect(),
+                other => panic!("told {told:?}: {other:?}"),
+            }
+        };
+        // Told nothing, or the generation of the code given: every kernel is given.
+        assert_eq!(refused(None), []);
+        assert_eq!(refused(Some(75)), []);
+        // Told a later one: the kernel whose code for sm_75 writes nothing where its code for sm_80
+        // writes. Not the one that writes in both, nor those that write nothing in both (one waits,
+        // one asserts).
+        for told in [80, 86, 90] {
+            let found = refused(Some(told));
+            assert_eq!(
+                found.iter().map(|(kernel, _)| kernel.as_str()).collect::<Vec<_>>(),
+                ["k_stub"],
+                "told {told}"
+            );
+            assert!(
+                found[0]
+                    .1
+                    .starts_with("its machine code for sm_75 writes no memory (a stub), where its code for sm_80"),
+                "{}",
+                found[0].1
+            );
+        }
+        // Without the code for the later architecture, nothing tells a stub from a kernel that
+        // writes nothing: given.
+        let turing: Vec<NewEntry> = fat
+            .entries
+            .iter()
+            .filter(|e| e.sm() == 75)
+            .map(NewEntry::copy_of)
+            .collect();
+        let alone = fatbin::build(&turing);
+        let policy = Policy {
+            told_sm: Some(80),
+            ..Policy::default()
+        };
+        assert!(matches!(
+            policy.adapt_fatbin(&fatbin::parse(&alone).unwrap()).unwrap().outcome,
+            Outcome::Translated { from_sm: 75, ref refused, .. } if refused.is_empty()
+        ));
     }
 
     #[test]

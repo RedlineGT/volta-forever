@@ -310,6 +310,29 @@ impl Decoder {
         })
     }
 
+    /// The mnemonics of the classes of sm_75 whose opcode `word` has, whatever its other fields:
+    /// what instruction a word that `decode` does not take is, for a later architecture that kept
+    /// the opcodes of sm_75 (sm_80 for its stores, atomics and reductions).
+    pub fn opcode_mnemonics_sm75(word: u128) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        for (fid, offsets, candidates) in [
+            (0, &SM75_OPCODE_0_OFFSETS[..], &SM75_OPCODE_0_CANDIDATES[..]),
+            (34, &SM75_OPCODE_34_OFFSETS[..], &SM75_OPCODE_34_CANDIDATES[..]),
+        ] {
+            let value = field::get(fid, word) as usize;
+            let Some(&(off, cnt)) = offsets.get(value) else {
+                continue;
+            };
+            for &class_id in &candidates[off as usize..(off as usize + cnt as usize)] {
+                let class = &SM75_CLASSES[class_id as usize];
+                if !class.2 && !found.contains(&class.1) {
+                    found.push(class.1);
+                }
+            }
+        }
+        found
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn check_opcode(
         &self,
