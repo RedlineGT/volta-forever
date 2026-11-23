@@ -80,13 +80,65 @@ impl Slot {
     }
 }
 
-/// Handles found allowed, by a hash of the handle. A handle that collides with another is asked
-/// about again.
-const SLOTS: usize = 4096;
-static ALLOWED: [Slot; SLOTS] = [const { Slot::empty() }; SLOTS];
+/// Four slots for the handles of one hash, in two cache lines, and which of the four a fifth
+/// replaces.
+#[repr(align(128))]
+struct Set {
+    ways: [Slot; WAYS],
+    next: AtomicU64,
+}
 
-fn slot(handle: usize) -> &'static Slot {
-    &ALLOWED[((handle >> 4) ^ (handle >> 16)) % SLOTS]
+const WAYS: usize = 4;
+
+impl Set {
+    const fn empty() -> Set {
+        Set {
+            ways: [const { Slot::empty() }; WAYS],
+            next: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    fn holds(&self, handle: u64, generation: u64) -> bool {
+        self.ways.iter().any(|way| way.holds(handle, generation))
+    }
+
+    /// Keep `handle` found allowed in `generation`: in the slot that has the handle, else in one of
+    /// another generation, else in each slot in turn.
+    fn keep(&self, handle: u64, generation: u64) {
+        let way = (0..WAYS)
+            .find(|&way| self.ways[way].handle.load(Relaxed) == handle)
+            .or_else(|| (0..WAYS).find(|&way| self.ways[way].generation.load(Relaxed) != generation))
+            .unwrap_or_else(|| self.next.fetch_add(1, Relaxed) as usize % WAYS);
+        self.ways[way].keep(handle, generation);
+    }
+}
+
+/// Handles found allowed, by a hash of the handle: 4,096 sets of four (512 KB, of which only the pages
+/// used are touched). A handle whose set holds four others of this generation is asked about
+/// again. (With 4,096 slots of one, 743 of 2,000 kernels launched in turn were asked about again at
+/// every turn on a V100.)
+const SETS: usize = 4096;
+static ALLOWED: [Set; SETS] = [const { Set::empty() }; SETS];
+
+fn set(handle: usize) -> &'static Set {
+    // (Fibonacci hashing: the high bits of the product depend on every bit of the handle.)
+    &ALLOWED[((handle as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - SETS.trailing_zeros())) as usize]
+}
+
+/// What the refusal did, for `VF_STATS`: the times it asked the driver what a handle is, and the
+/// calls it refused.
+static QUESTIONS: AtomicU64 = AtomicU64::new(0);
+static REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// The line of `VF_STATS` about the refusal at a use.
+pub fn summary() -> String {
+    format!(
+        "guard: the driver was asked what a handle is {} times, {} calls were refused, {} generations",
+        QUESTIONS.load(Relaxed),
+        REFUSALS.load(Relaxed),
+        kernels::generation()
+    )
 }
 
 /// Whether `call` (the name of the driver's function, for the log) may be made with `handle`, a
@@ -110,7 +162,7 @@ fn allows_where(handle: *mut c_void, call: &str, device: Option<c_int>) -> bool 
     }
     let handle = handle as usize;
     let generation = kernels::generation();
-    if handle == 0 || slot(handle).holds(handle as u64, generation) {
+    if handle == 0 || set(handle).holds(handle as u64, generation) {
         return true;
     }
     decide(handle, generation, call, device)
@@ -120,10 +172,12 @@ fn allows_where(handle: *mut c_void, call: &str, device: Option<c_int>) -> bool 
 #[cold]
 #[inline(never)]
 fn decide(handle: usize, generation: u64, call: &str, device: Option<c_int>) -> bool {
+    QUESTIONS.fetch_add(1, Relaxed);
     // SAFETY: the program passes the handle to a call of the driver, which accepts it or refuses
     // it; the layer asks the driver about it the same way.
     match unsafe { kernels::verdict(handle, device) } {
         kernels::Verdict::Refused(refusal) => {
+            REFUSALS.fetch_add(1, Relaxed);
             refusal.explain(call);
             false
         }
@@ -132,7 +186,7 @@ fn decide(handle: usize, generation: u64, call: &str, device: Option<c_int>) -> 
             // is never found. Not kept while a module, a library or a context is going: the
             // handle may already be another function's, `kernels::Ending`.)
             if !kernels::ending_now() {
-                slot(handle).keep(handle as u64, generation);
+                set(handle).keep(handle as u64, generation);
             }
             true
         }

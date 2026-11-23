@@ -41,8 +41,9 @@
 //!   whose code runs from its sm_75 machine code is still told 7.5, unless it is a CUDA runtime or
 //!   code that uses one and `VF_CAPABILITY_ALL=1`;
 //! - `VF_STATS=1`: route every function through this library and print, when the process exits,
-//!   the number of calls per function and the kernels launched most often (adds an atomic increment
-//!   to each driver call, and a name lookup to each launch);
+//!   the number of calls per function, the kernels launched most often, and what `guard` asked the
+//!   driver and refused (adds an atomic increment to each driver call, and a name lookup to each
+//!   launch);
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
 //!   refuses (kernel name, grid, block, shared memory, launch attributes).
 
@@ -313,6 +314,7 @@ extern "C" fn fini() {
         .map(|(n, name)| format!("{}={n}", name.to_string_lossy()))
         .collect();
     log::error(format_args!("calls: {}", line.join(" "))); // asked for: printed at every level
+    log::error(format_args!("{}", guard::summary()));
     if let Some(launches) = hooks::launches() {
         let total: u64 = launches.iter().map(|(_, n)| n).sum();
         let line: Vec<String> = launches

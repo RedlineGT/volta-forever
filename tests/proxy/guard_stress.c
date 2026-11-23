@@ -37,6 +37,9 @@
  *             launch on a later GPU of the function of a library's kernel there, asked for before each
  *             launch through the layer (cuKernelGetFunction), as a runtime may: the refusal asks the
  *             driver what a handle is a few times only, not at every launch.
+ *   many      2,000 functions of 500 modules of nothing refused, beside a module with a refused kernel,
+ *             launched in turn three times: once each found allowed, the refusal asks the driver about
+ *             few of them again (at most 1 %), however their handles fall in its table.
  *   nocontext the function of a library's refused kernel in context A, taken from the driver, asked
  *             about while no context is current, then while another is; then, in A, asked about and
  *             launched: refused there, whatever was concluded in the other contexts.
@@ -371,6 +374,36 @@ int main(int argc, char **argv) {
                  "%lu times over 10,000 more each after a launch on a later GPU",
                  alone, between);
         check(line, !wrong && alone == 0 && between <= 10);
+    } else if (!strcmp(scenario, "many")) {
+        static const char FOUR[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
+                                   ".visible .entry k0()\n{\n ret;\n}\n.visible .entry k1()\n{\n ret;\n}\n"
+                                   ".visible .entry k2()\n{\n ret;\n}\n.visible .entry k3()\n{\n ret;\n}\n";
+        enum { MODULES = 500, KERNELS = 4 * MODULES };
+        static void *f[KERNELS];
+        void *ctx, *refusing, *m;
+        char line[300], name[4] = "k0";
+        int wrong = 0;
+        *(volatile int *)D("random_handles") = 1;
+        l_ctx_create(&ctx, 0, 0);
+        l_load(&refusing, PTX);
+        for (int i = 0; i < MODULES; ++i) {
+            wrong |= l_load(&m, FOUR) != 0;
+            for (int j = 0; j < 4; ++j) {
+                name[1] = (char)('0' + j);
+                wrong |= d_get_function(&f[4 * i + j], m, name) != 0;
+            }
+        }
+        unsigned long asked[3];
+        for (int pass = 0; pass < 3; ++pass) {
+            unsigned long base = *identified;
+            for (int i = 0; i < KERNELS; ++i) wrong |= go(f[i]) != 0;
+            // (Two questions for a function: is it a kernel of a library, and of which module is it.)
+            asked[pass] = (*identified - base) / 2;
+        }
+        snprintf(line, sizeof line,
+                 "many: of %d functions launched in turn, the refusal asked about %lu, then %lu and %lu again", KERNELS,
+                 asked[0], asked[1], asked[2]);
+        check(line, !wrong && asked[1] <= KERNELS / 100 && asked[2] <= KERNELS / 100);
     } else if (!strcmp(scenario, "greenstale")) {
         static const char LIB_RUNS[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
                                        ".visible .entry bad()\n{\n ret;\n}\n";

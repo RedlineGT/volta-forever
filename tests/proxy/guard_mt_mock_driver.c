@@ -31,6 +31,7 @@ volatile int destroy_sleep_us;
 volatile uintptr_t hold_library;   // cuLibraryGetKernel on this library waits while `held` is 1
 volatile int held, holding;
 volatile uintptr_t hold_function; // cuFuncGetName of this handle reads the name, then waits while `held`
+volatile int random_handles; // new handles of functions and kernels fall at random (16-aligned), as heap addresses
 
 enum { MODULE = 1, LIBRARY, CONTEXT_MODULE };
 #define MAXOBJ 4096
@@ -107,7 +108,22 @@ static uintptr_t handle_of(int owner, int name, int kernel) {
         if (fn_hw == MAXFN) abort();
         ++fn_hw;
     }
-    fns[i].handle = n_free_fn ? free_fn[--n_free_fn] : (fn_counter += 0x40);
+    if (n_free_fn) fns[i].handle = free_fn[--n_free_fn];
+    else if (random_handles) {
+        static uint64_t state = 0x9e3779b97f4a7c15u;
+        uintptr_t candidate;
+        int taken;
+        do {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            candidate = 0x500000000000u + (uintptr_t)(state & 0xfffffff0u);
+            taken = 0;
+            for (int j = 0; j < fn_hw && !taken; ++j) taken = fns[j].live && fns[j].handle == candidate;
+        } while (taken);
+        fns[i].handle = candidate;
+    } else
+        fns[i].handle = (fn_counter += 0x40);
     fns[i].owner = owner;
     fns[i].name = name;
     fns[i].live = 1;

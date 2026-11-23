@@ -474,11 +474,14 @@ indirect call or across inputs of a link (it still traps), and a launch through 
 of the driver (cuFFT launches with `cuLaunchKernel`).
 
 What a handle is takes calls of the driver and a lock. It is asked once for each handle; what was
-found allowed is kept in a table without a lock, for the generation of the layer's records it
-was found in (a generation ends whenever the records of refusals change, and whenever a module,
-a library or a context goes). While no module or library has a refused kernel, nothing is asked
-and a launch costs one load of a counter more; otherwise a launch of a handle already seen costs
-three loads and a comparison. Measured on a V100 (one session, three rounds alternated,
+found allowed is kept in a table read without a lock (4,096 sets of four slots, by a hash of the
+handle; a slot holds the handle and the whole generation it was found in, with a version that a
+writer makes odd), for the generation of the layer's records it was found in (a generation ends
+whenever the records of refusals change, and whenever a module, a library or a context goes).
+While no module or library has a refused kernel, nothing is asked and a launch costs one load of
+a counter more; otherwise a launch of a handle already seen costs a few loads: the counter, the
+generation, and the slots of its set. `VF_STATS` says at exit how many times the driver was asked,
+how many calls were refused and how many generations there were. Measured on a V100 (one session, three rounds alternated,
 2026-11-23; `tests/kernels/launch_rate.c`, the median of 2,000 bursts of 64 launches of an empty
 kernel): one `cuLaunchKernel` call takes 2.20 to 2.23 microseconds on the CPU through the layer
 before the change and 2.23 to 2.25 after; with a module with a refused kernel loaded, 2.23 to 2.28
@@ -761,7 +764,8 @@ grow.
 
 ### Diagnostics
 
-`VF_STATS` (call counts and the kernels launched most), `VF_TIMING` (the time of each stage),
+`VF_STATS` (call counts, the kernels launched most, and what the refusal of a kernel at its use
+asked the driver and refused), `VF_TIMING` (the time of each stage),
 `VF_PROFILE` (a profile of each kernel; every launch is synchronised on its stream, so a
 profile is not a benchmark), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
 `VF_TRANSLATE_DUMP` (every cubin given to the translator, for offline validation),
