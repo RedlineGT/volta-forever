@@ -44,6 +44,8 @@ jobs:
           bash --posix tests/launcher/launcher.sh
       - name: How the PyTorch test programs run their workers, with fake workers
         run: python3 tests/gpu/torch-workers.py
+      - name: The verdicts of the vLLM engine stage, with a stand-in for vLLM
+        run: python3 tests/gpu/vllm-engine-verdicts.py
       - name: The installer is a POSIX shell script
         run: |
           dash -n install.sh
