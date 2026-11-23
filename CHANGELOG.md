@@ -10,6 +10,10 @@
 
 - `VF_SAFE=1` turns the tensor-core path of the bf16 cuBLAS variants off, whatever `VF_CUBLAS_BF16_TC` says; the skinny path, whose results are 12.9's bits, is not affected.
 
+### Tests
+
+- `tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh` (`bf16-accept`): the tensor-core path's acceptance test against the exact product, for every call it serves at k >= 2048 (12.9's classes and NaN bits, the same bits from two runs, a handle without workspace and a call of half the columns, an error bound and a bias bound), nothing served below the gate; it fails when the gate is moved to 1536, 1024 or 256, and with `VF_SAFE=1` it requires every result to be 12.9's.
+
 ## 0.1.4 (2026-11-23)
 
 ### Fixed

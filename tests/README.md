@@ -73,7 +73,10 @@ scripts of `tests/sass/`).
   the real capability under the layer's settings, under both module loading modes
   (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the
-  tensor-core path's special values against 12.9 (`bf16-s1.c`); with
+  tensor-core path's special values against 12.9 (`bf16-s1.c`) and its acceptance test
+  (`bf16-accept.c`: 12.9's classes, determinism, an error bound and a bias bound against the exact
+  product for every call it serves at k >= 2048, nothing served below, failing when the gate is
+  moved to 1536, 1024 or 256; with `VF_SAFE=1`, every result 12.9's); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), and `bf16-cost.c` the one behind the

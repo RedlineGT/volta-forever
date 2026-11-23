@@ -53,7 +53,7 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_TC_GATE_MK (1LL << 20)    /* tensor-core path: m * k at least this, or n >= VF_TC_GATE_N */
 #define VF_TC_GATE_N 32
 /* The tensor-core path's shortest k, from the evaluation of its results against the exact product
- * (10 families of data and an adversarial search, k = 256 to 16384):
+ * (tests/gpu/forward/bf16-accept.c: 10 families of data and an adversarial search, k = 256 to 16384):
  * from k = 2048 on, each element's error is within the larger of 12.9's own error and the classical
  * fp32 bound (k - 1) u sum |a b| (only k = 256 was found beyond it), and the mean error towards zero
  * within 0.8 times that of an RTX 5090's own accumulation on the same data (the search's worst case:

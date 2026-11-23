@@ -891,8 +891,8 @@ it taken, its internal fp16 GEMM would give column 0 other bits than at n >= 2 (
 shapes, where n = 2 to 512 agreed); a zero second column given to that GEMM is the expected remedy
 (not run on a GPU).
 
-The shortest k comes from an evaluation of the path against the exact product: 10 families of data
-(normal,
+The shortest k comes from an evaluation of the path against the exact product
+(`tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh`): 10 families of data (normal,
 squared ReLU, outliers, cancelling pairs, spreads over about 30 binades, one sign, log-normal, an
 adversarial positive construction, and two built against the path's 256-element slices, with large
 values at the start of every slice) and the configurations of an adversarial search, at k = 256 to
@@ -904,9 +904,12 @@ and (k - 1) u sum |a b| + h (u = 2^-24, h half an ulp of the output at the exact
 beta or a bias, (k + 2) u S' + h, S' adding |beta c| and |bias|), and, per matrix with fp32 output,
 the mean error towards zero in units of u sum |a b| is at most the larger of 12.9's and 0.8 times
 that of an RTX 5090's own accumulation on the same data (its native bias slope per family, measured
-once at k = 1024 to 2048, where that card does not split its sums).
+once at k = 1024 to 2048, where that card does not split its sums; the constants are in the test).
 The error bound held from k = 384 on (at k = 256 one family reached 1.54 times it, the search 1.29);
 the bias bound needs k = 2048 for the search's worst configuration (0.76 times the bound at 2048,
 1.02 at 1536, 1.52 at 1024). One family, built against the 256-element slices (a product of 2^20 at
 the start of every slice, then products of half to one ulp of it), exceeds the bias bound up to
-about k = 4096 (1.36 times at 2048).
+about k = 4096 (1.36 times at 2048): the test judges its bias from k = 4096, and
+`VF_ACCEPT_STRICT=1` removes that exception. The test fails when the gate is moved to 1536, 1024 or
+256 (a test build's `VF_BF16_TC_MIN_K`), and with `VF_SAFE=1` it requires that no call be served by
+the tensor-core path and every result be 12.9's.
