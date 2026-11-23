@@ -427,6 +427,13 @@ that as a module of its own, and launches the kernel from there
 Every launch still goes to the first translation first: a smaller block may fit it,
 and it is the faster code. The refused call costs about 1 microsecond.
 
+A kernel that requires one block size (PTX's `.reqntid`, which Triton writes for every kernel) has
+no smaller block, and a program may read the largest block the loaded kernel allows before it
+launches (Triton does, and stops when it is smaller than its own). Such a kernel is not left to
+this: its first translation keeps within the registers of that block, or it is refused for its
+registers and the layer runs the PTX that its cubin keeps (`docs/translator.md`, "A kernel that
+requires its block size").
+
 **What the program set on the kernel.** The settings that the program made
 (`cuFuncSetAttribute`, `cuKernelSetAttribute`, the cache configuration) are made on the
 kernel of the second translation too, when it is taken and whenever the program makes

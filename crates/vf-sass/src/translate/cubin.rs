@@ -275,6 +275,17 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
         let mut done: Vec<(usize, TransResult)> = Vec::new();
         let mut why: Option<String> = None;
         let declared = fs.iter().map(|f| f.registers).max().unwrap();
+        // The fewest registers that the block a kernel of the group requires allows, and that block.
+        let required = fs
+            .iter()
+            .filter_map(|f| {
+                let info = e
+                    .section(&format!(".nv.info.{}", f.name))
+                    .map_or(&[][..], |i| e.sections[i].data.as_slice());
+                let threads = super::block_registers::required_threads(info)?;
+                Some((super::block_registers::registers_for(threads), threads))
+            })
+            .min();
         if fs.len() > 1 && fs.iter().any(|f| !f.uniform_predicates.is_empty()) {
             why = Some("uniform predicates in functions that call one another".into());
         } else if let Some(f) = fs.iter().find(|f| f.highest >= declared) {
@@ -589,7 +600,7 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                         }
                     })
                 };
-                if opts.borrow == 8 && alone {
+                let chosen: Tried = 'chain: { if opts.borrow == 8 && alone {
                     // For tests: level 3 first for EVERY kernel, products included (as 3 is
                     // without products). With room made: a small function that has not enough
                     // registers for the product's scratch at once gets them above its own (top
@@ -657,7 +668,7 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                                     let old = &normal[0].1.new_of;
                                     let new = &candidate[0].1.new_of;
                                     if old.len() == new.len() && old.keys().all(|offset| new.contains_key(offset)) {
-                                        return Ok(candidate);
+                                        break 'chain Ok(candidate);
                                     }
                                     break;
                                 }
@@ -851,7 +862,35 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                     }
                 } else {
                     usual(&mut attempt)
+                } };
+                // A kernel that requires its block size (`block_registers::required_threads`) is
+                // launched with that block and no other: a translation with more registers than
+                // such a block may have on a V100 never runs, and a program that reads the limit
+                // from the loaded kernel (Triton) stops before any launch, so that the second
+                // translation at launch never comes. The first of levels 1, 2 and 3 that keeps
+                // within it is taken instead; when none does, the kernel is refused for its
+                // registers, and the layer runs the PTX that the cubin keeps, when it keeps some.
+                let Some((limit, threads)) = required else {
+                    return chosen;
+                };
+                let count = |d: &[(usize, TransResult)]| d.iter().map(|(_, tr)| tr.count).max().unwrap_or(0);
+                let chosen = chosen?;
+                if count(&chosen) <= limit {
+                    return Ok(chosen);
                 }
+                if opts.borrow > 0 && alone {
+                    let top = limit.saturating_sub(3).saturating_sub(saves);
+                    for (pairs, level, bound) in [(true, 1, None), (true, 2, None), (false, 3, Some(top))] {
+                        if let Ok(candidate) = attempt(pairs, level, bound, &empty_gave_up)
+                            && count(&candidate) <= limit
+                        {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+                Err(Refused(format!(
+                    "more registers than its required block of {threads} threads allows ({limit})"
+                )))
             });
             match attempt_result {
                 Ok(d) => done = d,

@@ -1,0 +1,144 @@
+// A kernel that requires blocks of 1,024 threads (.reqntid), in which a V100 allows 64 registers a
+// thread, and that no translation of its machine code keeps within them. ptxas gives it 64 registers
+// for sm_75: 28 doubles that each thread keeps through a loop, and a matrix load (ldmatrix) in the
+// loop. The usual translation takes 73 (the sequence of the matrix load computes in registers above
+// the program's), and with nothing kept in a register no register is free at the load for that
+// sequence: the registers of the doubles are written late by DFMA, and are not borrowed. The
+// translator refuses it for its registers, and the layer runs the PTX that the cubin keeps
+// (tests/gpu/run.sh, `cubin-required-block-over`), as for Triton's sort of 16 warps. Every thread
+// stores the same four words: the sum of the 28 doubles after `rounds` rounds (two words), the last
+// value added in the loop, and `rounds`.
+//   toolkits/cuda-13.5.0/bin/ptxas -arch=sm_75 -lineinfo -o k_required_block_over.sm75.cubin k_required_block_over.ptx
+.version 7.0
+.target sm_75
+.address_size 64
+.shared .align 16 .b8 rows[128];
+.visible .entry k(.param .u64 output, .param .u32 rounds) .reqntid 1024,1,1 {
+    .reg .f64 %a<28>, %t, %s;
+    .reg .b32 %x, %i, %n, %th, %w<2>, %m<4>, %at, %u;
+    .reg .b64 %out, %p;
+    .reg .pred %done;
+    ld.param.u64 %out, [output];
+    ld.param.u32 %n, [rounds];
+    cvta.to.global.u64 %out, %out;
+    mov.u32 %th, %tid.x;
+    mul.wide.u32 %p, %th, 16;
+    add.s64 %p, %out, %p;
+    ld.global.u32 %x, [%p];
+    cvt.rn.f64.u32 %t, %x;
+    add.f64 %a0, %t, 0d3FF0000000000000;
+    add.f64 %a1, %t, 0d4000000000000000;
+    add.f64 %a2, %t, 0d4008000000000000;
+    add.f64 %a3, %t, 0d4010000000000000;
+    add.f64 %a4, %t, 0d4014000000000000;
+    add.f64 %a5, %t, 0d4018000000000000;
+    add.f64 %a6, %t, 0d401C000000000000;
+    add.f64 %a7, %t, 0d4020000000000000;
+    add.f64 %a8, %t, 0d4022000000000000;
+    add.f64 %a9, %t, 0d4024000000000000;
+    add.f64 %a10, %t, 0d4026000000000000;
+    add.f64 %a11, %t, 0d4028000000000000;
+    add.f64 %a12, %t, 0d402A000000000000;
+    add.f64 %a13, %t, 0d402C000000000000;
+    add.f64 %a14, %t, 0d402E000000000000;
+    add.f64 %a15, %t, 0d4030000000000000;
+    add.f64 %a16, %t, 0d4031000000000000;
+    add.f64 %a17, %t, 0d4032000000000000;
+    add.f64 %a18, %t, 0d4033000000000000;
+    add.f64 %a19, %t, 0d4034000000000000;
+    add.f64 %a20, %t, 0d4035000000000000;
+    add.f64 %a21, %t, 0d4036000000000000;
+    add.f64 %a22, %t, 0d4037000000000000;
+    add.f64 %a23, %t, 0d4038000000000000;
+    add.f64 %a24, %t, 0d4039000000000000;
+    add.f64 %a25, %t, 0d403A000000000000;
+    add.f64 %a26, %t, 0d403B000000000000;
+    add.f64 %a27, %t, 0d403C000000000000;
+    // Every word of the 128 bytes the same: each lane loads it four times.
+    and.b32 %at, %th, 31;
+    shl.b32 %at, %at, 2;
+    mov.u32 %u, rows;
+    add.u32 %at, %at, %u;
+    add.u32 %u, %x, 0x51525354;
+    st.shared.b32 [%at], %u;
+    bar.sync 0;
+    shl.b32 %at, %th, 4;
+    and.b32 %at, %at, 112;
+    mov.u32 %u, rows;
+    add.u32 %at, %at, %u;
+    mov.u32 %i, 0;
+    mov.u32 %u, 0;
+$L_loop:
+    setp.ge.u32 %done, %i, %n;
+    @%done bra $L_end;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%m0, %m1, %m2, %m3}, [%at];
+    add.u32 %u, %m0, %m1;
+    add.u32 %u, %u, %m2;
+    add.u32 %u, %u, %m3;
+    xor.b32 %u, %u, %i;
+    and.b32 %u, %u, 255;
+    cvt.rn.f64.u32 %t, %u;
+    fma.rn.f64 %a0, %a0, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a1, %a1, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a2, %a2, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a3, %a3, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a4, %a4, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a5, %a5, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a6, %a6, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a7, %a7, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a8, %a8, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a9, %a9, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a10, %a10, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a11, %a11, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a12, %a12, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a13, %a13, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a14, %a14, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a15, %a15, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a16, %a16, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a17, %a17, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a18, %a18, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a19, %a19, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a20, %a20, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a21, %a21, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a22, %a22, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a23, %a23, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a24, %a24, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a25, %a25, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a26, %a26, 0d3FE0000000000000, %t;
+    fma.rn.f64 %a27, %a27, 0d3FE0000000000000, %t;
+    add.u32 %i, %i, 1;
+    bra $L_loop;
+$L_end:
+    mov.f64 %s, 0d0000000000000000;
+    add.f64 %s, %s, %a0;
+    add.f64 %s, %s, %a1;
+    add.f64 %s, %s, %a2;
+    add.f64 %s, %s, %a3;
+    add.f64 %s, %s, %a4;
+    add.f64 %s, %s, %a5;
+    add.f64 %s, %s, %a6;
+    add.f64 %s, %s, %a7;
+    add.f64 %s, %s, %a8;
+    add.f64 %s, %s, %a9;
+    add.f64 %s, %s, %a10;
+    add.f64 %s, %s, %a11;
+    add.f64 %s, %s, %a12;
+    add.f64 %s, %s, %a13;
+    add.f64 %s, %s, %a14;
+    add.f64 %s, %s, %a15;
+    add.f64 %s, %s, %a16;
+    add.f64 %s, %s, %a17;
+    add.f64 %s, %s, %a18;
+    add.f64 %s, %s, %a19;
+    add.f64 %s, %s, %a20;
+    add.f64 %s, %s, %a21;
+    add.f64 %s, %s, %a22;
+    add.f64 %s, %s, %a23;
+    add.f64 %s, %s, %a24;
+    add.f64 %s, %s, %a25;
+    add.f64 %s, %s, %a26;
+    add.f64 %s, %s, %a27;
+    mov.b64 {%w0, %w1}, %s;
+    st.global.v4.u32 [%p], {%w0, %w1, %u, %n};
+    ret;
+}

@@ -1245,3 +1245,64 @@ fn a_matrix_load_writes_its_destinations_first_by_shuffles() {
     }
     assert_eq!(loads, 4);
 }
+
+/// `k_fit_regs` (64 registers on sm_75; 66 translated the usual way) with a block it declares in its
+/// attributes, translated with `borrow`: its register count and code, or why it was refused.
+fn with_block(shape: Option<(u8, u32)>, borrow: u32) -> Result<(u32, Vec<u8>), String> {
+    let original = include_bytes!("../../../../tests/kernels/k_fit_test.135.sm75.cubin");
+    let name = "k_fit_regs";
+    let mut elf = crate::elf::Elf::parse(original).unwrap();
+    if let Some((kind, threads)) = shape {
+        let i = elf.section(&format!(".nv.info.{name}")).unwrap();
+        let info = &mut elf.sections[i].data;
+        info.extend([4, kind, 12, 0]);
+        for dim in [threads, 1, 1] {
+            info.extend(dim.to_le_bytes());
+        }
+    }
+    let opts = Options {
+        borrow,
+        ..Options::default()
+    };
+    let result = translate_with_options(&elf.write(), false, &opts).unwrap();
+    if let Some(why) = &result.report.iter().find(|f| f.name == name).unwrap().refused {
+        return Err(why.clone());
+    }
+    let out = crate::elf::Elf::parse(&result.bytes).unwrap();
+    let i = out.section(&format!(".text.{name}")).unwrap();
+    Ok((out.sections[i].info >> 24, out.sections[i].data.clone()))
+}
+
+/// A kernel that requires blocks of 1,024 threads (EIATTR_REQNTID, as Triton writes it) is launched
+/// with no other block: its usual translation, at 66 registers, never runs (a V100 allows 64 for
+/// such a block), and a program that reads the limit from the kernel stops before the launch that
+/// would bring the second translation. It is translated within 64 at once, as the policy for
+/// graphs (9) translates it. A smaller required block, a block that is only a maximum
+/// (EIATTR_MAX_THREADS, `__launch_bounds__`) and no block at all keep the usual translation, and
+/// the second translation at launch for blocks it does not fit.
+#[test]
+fn a_kernel_that_requires_its_block_is_translated_within_it() {
+    let usual = with_block(None, BORROW_DEFAULT).unwrap();
+    assert_eq!(usual.0, 66);
+    let required = with_block(Some((0x10, 1024)), BORROW_DEFAULT).unwrap();
+    assert!(required.0 <= 64, "{} registers", required.0);
+    assert_eq!(Ok(required), with_block(Some((0x10, 1024)), 9));
+    assert_eq!(with_block(Some((0x10, 896)), BORROW_DEFAULT).as_ref(), Ok(&usual));
+    assert_eq!(with_block(Some((0x05, 1024)), BORROW_DEFAULT).as_ref(), Ok(&usual));
+}
+
+/// When no translation keeps within the registers that the required block allows (here, without
+/// borrowed registers: `VF_BORROW=0`), the kernel is refused for its registers, so that the layer
+/// takes the PTX that the cubin keeps; without a required block the same translation is given.
+#[test]
+fn a_kernel_whose_required_block_no_translation_fits_is_refused() {
+    assert_eq!(with_block(None, 0).map(|(registers, _)| registers), Ok(66));
+    assert_eq!(
+        with_block(Some((0x10, 1024)), 0),
+        Err("more registers than its required block of 1024 threads allows (64)".to_string())
+    );
+    assert_eq!(
+        with_block(Some((0x05, 1024)), 0).map(|(registers, _)| registers),
+        Ok(66)
+    );
+}

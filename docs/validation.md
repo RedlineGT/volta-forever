@@ -557,12 +557,15 @@ problems** (307,059 instructions of 334 functions). In 12 of these cubins, all v
 Then (2026-11-23, after 0.1.3) the cubins that Triton made for the corpus of section 6
 ("Triton"): **4,308 distinct cubins** of 20 kernels in 3,516 configurations, and the caches of
 this site again (334 distinct cubins). The two translators give the same bytes for all of them
-(`compare.sh`); the translator refuses 112 functions of the first (84 reductions whose layout
-conversion is an `LDSM` at an address without register, `LDSM [RZ]`; 22 for registers; 6 for
-`UP2UR` with an immediate) and 7 of the second (6 for registers, one for `STL` with a uniform
-register), and the layer runs the PTX kept in those cubins instead. The validator: 334 of 334 at 0
-problems (278,681 instructions of 327 functions), and **4,308 of 4,308 at 0 problems** (2,876,544
-instructions of 4,196 functions) once a check of the whole function was told that the registers
+(`compare.sh`); the translator refuses 114 functions of the first (84 reductions whose layout
+conversion is an `LDSM` at an address without register, `LDSM [RZ]`; 24 for registers, two of them
+since 2026-11-23, for the registers that the block their cubin requires allows: the two cubins of
+the gather of 16 warps of section 6; 6 for `UP2UR` with an immediate) and 7 of the second (6 for
+registers, one for `STL` with a uniform register), and the layer runs the PTX kept in those cubins
+instead. The validator: 334 of 334 at 0 problems (278,681 instructions of 327 functions), and
+**4,308 of 4,308 at 0 problems** (2,876,544 instructions of 4,196 functions, the gather's two
+translations among them, 10,865 instructions each: refused since) once a check of the whole
+function was told that the registers
 a matrix load at level 3 borrows are borrowed at its instruction alone: it objected for that
 alone to two cubins, one `tl.dot` in float32 with 252 registers in two precisions, whose
 translation was right on the V100 and is checked instruction by instruction by the rules that
@@ -832,11 +835,14 @@ allows, and none differs between its runs**, at the default and with `VF_BORROW=
 second translation at launch translates with), `VF_BORROW=1` and, for the products,
 `VF_PAIRS=0`: the four give the same bits for every case. 86 cases are not compiled by Triton for
 sm_75 (an int8 product, `div_rn` or `clamp` of integers, a rounding of float32 to bfloat16 toward
-zero, a block too large for the shared memory); one, a sort of 16 warps, is not launched by Triton
-because the translation takes 137 registers where its cubin requires blocks of 512 threads (a V100
-allows 384 then: Triton reads that limit from the loaded kernel and stops before the launch, so the
-second translation at launch never comes; the kernel takes 128 registers on sm_75, all its blocks
-allow, and every level of the translator needs more);
+zero, a block too large for the shared memory); one, a gather in a sort kernel of 16 warps, was
+not launched by Triton because the translation takes 137 registers where its cubin requires blocks
+of 512 threads (a V100 allows 384 then: Triton reads that limit from the loaded kernel and stops
+before the launch, so the second translation at launch never comes; the kernel takes 128 registers
+on sm_75, all its blocks allow, and every level of the translator needs more): since the translator
+keeps the block a kernel requires (later the same day), its machine code is refused for its
+registers and the layer runs the PTX its cubin keeps, which gives the reference (`PASS-PTX`;
+`tests/gpu/triton.sh` has the case: `ERROR` with the translator before, on the V100);
 397 have no reference (the interpreter has no libdevice and no exchange of floats; subnormal
 inputs, which Triton's instructions flush and numpy does not) and are compared between their runs
 and the routes only, and 58 (98 with `VF_BORROW=1`) are refused as machine code and run as the
@@ -857,13 +863,17 @@ helpers: decode, extend and prefill attention, MoE, its router, alignment and re
 KV-cache copies, norms, activations, the gated delta rule, Mamba, quantization, LoRA, EAGLE), each
 5 times through each route (2026-11-23): vLLM 135 PASS, 10 PASS-PTX, 6 not compiled for sm_75 or
 too large for the shared memory; SGLang 83 PASS, 5 PASS-PTX, 1 not compiled, and one not launched:
-`fused_moe_router_cudacore_kernel` for 128 experts, 16 warps, whose translation (as the sort
-above) takes more registers than blocks of 512 threads allow; its PTX route gives the reference.
-No case differs between its runs or between the routes.
+`fused_moe_router_cudacore_kernel` for 128 experts, 16 warps, whose usual translation takes 136
+registers where blocks of 512 threads allow 128; its PTX route gives the reference. No case
+differs between its runs or between the routes. Since the translator keeps the block a kernel
+requires, the router is translated at level 3 within 128 registers (five uniform registers in the
+thread's local memory; the validator finds nothing in it, and every control that changes it is
+objected to): its four cases PASS on the machine-code route, 5 runs each, with the bits of the
+PTX route (2026-11-23).
 
 The test can fail: with the translator of 0.1.2, three of the float32 and bfloat16 `tl.dot` cases
 give lane numbers for accumulators, other ones in each run, and three more stop with a misaligned
-address (the fault seen when 0.1.3 was prepared). `tests/gpu/triton.sh` runs 179 of the cases,
+address (the fault seen when 0.1.3 was prepared). `tests/gpu/triton.sh` runs 180 of the cases,
 among them those three, in four minutes.
 
 ### The second translation at launch

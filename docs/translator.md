@@ -532,6 +532,37 @@ can reach data of its module, among others). In PyTorch's test battery,
 need it for blocks of 1,024 threads. `VF_FIT=0` turns it off.
 
 
+### A kernel that requires its block size
+
+A kernel may require one block size (the attribute `EIATTR_REQNTID`, from
+PTX's `.reqntid`: Triton writes it for every kernel, CUDA C never): the driver
+launches it with that block and no other. The second translation at launch does
+not help such a kernel: a translation with more registers than that block may
+have never runs, and a program that reads the largest block the loaded kernel
+allows (`CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK`, which the layer answers as
+the driver does, from the translation's count) stops before any launch. Triton
+does: `OutOfResources: threads, Required: 512, Hardware limit: 384`.
+
+So when the translation chosen by `VF_BORROW` takes more registers than the
+required block allows (128 for 512 threads, 64 for 1,024), the translator takes
+the first of levels 1, 2 and 3 (with room) that keeps within that count; when
+none does (or with `VF_BORROW=0`), the kernel is refused for its registers
+("more registers than its required block of 512 threads allows (128)"), and the
+layer runs the PTX that the cubin keeps, as for any kernel whose machine code is
+refused; without PTX the kernel is refused when the program asks for it, which
+is what its launch would end in. A kernel whose block is only a maximum
+(`EIATTR_MAX_THREADS`, `__launch_bounds__`) or that declares none keeps the
+usual translation and the second translation at launch: a smaller block may fit
+the faster code. In the corpus of Triton's kernels (4,308 sm_75 cubins of
+`tests/gpu/triton_corpus.py`, 347 of vLLM's and SGLang's kernels and 334 that
+Triton made in this site's other runs) this changes three functions: the gather
+of 16 warps of the corpus' sort kernel (two cubins of it, from two versions of
+the corpus' source; 128 registers, 137 translated at every level) is refused and
+runs as PTX, and SGLang's MoE router for 128 experts (128 registers, 136
+translated the usual way) is translated at level 3 within 128. PyTorch's and the
+held-out cubins have no required block.
+
+
 ## 6. Tensor-core products in machine code
 
 Turing's tensor-core instructions (`HMMA.1688` for the m16n8k8 half-precision

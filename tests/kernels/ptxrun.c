@@ -7,7 +7,9 @@
 // each lane writes its own 16 (lane * 16). With -i the second parameter is a signed integer.
 // WORDn: what every lane must have as its word n, in
 // hexadecimal, or `-` for a word that is not looked at. Environment: DRVRUN_LIBCUDA (library to
-// load, default libcuda.so.1).
+// load, default libcuda.so.1). Before the launch, the largest block that the loaded kernel allows
+// (CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK) must be THREADS at least, as Triton requires before it
+// launches anything.
 //
 // For kernels that only exist as PTX text (a register family declared again in a scope, an
 // accumulator that is also an operand: tests/kernels/ptx-cases/), which no compiler of CUDA C
@@ -38,6 +40,7 @@ SYM(CUresult, cuCtxDestroy_v2, CUcontext);
 SYM(CUresult, cuCtxSynchronize, void);
 SYM(CUresult, cuModuleLoadDataEx, CUmodule*, const void*, unsigned, int*, void**);
 SYM(CUresult, cuModuleGetFunction, CUfunction*, CUmodule, const char*);
+SYM(CUresult, cuFuncGetAttribute, int*, int, CUfunction);
 SYM(CUresult, cuMemAlloc_v2, CUdeviceptr*, size_t);
 SYM(CUresult, cuMemcpyDtoH_v2, void*, CUdeviceptr, size_t);
 SYM(CUresult, cuMemsetD8_v2, CUdeviceptr, unsigned char, size_t);
@@ -109,7 +112,7 @@ int main(int argc, char** argv) {
     if (!lib) { fprintf(stderr, "dlopen %s: %s\n", libname, dlerror()); return 2; }
     LOAD(cuInit); LOAD(cuDeviceGet); LOAD(cuCtxCreate_v2); LOAD(cuCtxDestroy_v2); LOAD(cuCtxSynchronize);
     LOAD(cuModuleLoadDataEx); LOAD(cuModuleGetFunction); LOAD(cuMemAlloc_v2); LOAD(cuMemcpyDtoH_v2);
-    LOAD(cuMemsetD8_v2); LOAD(cuLaunchKernel); LOAD(cuGetErrorName);
+    LOAD(cuMemsetD8_v2); LOAD(cuLaunchKernel); LOAD(cuGetErrorName); LOAD(cuFuncGetAttribute);
 
     CUdevice device;
     CUcontext context;
@@ -126,6 +129,12 @@ int main(int argc, char** argv) {
     if (r) { printf("FAIL the module does not load: %d %s\n%s\n", r, ename(r), error); return 1; }
     CUfunction function;
     CK(cuModuleGetFunction(&function, module, kernel));
+    int largest = 0;
+    CK(cuFuncGetAttribute(&largest, 0 /* CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK */, function));
+    if (largest < threads) {
+        printf("FAIL %s allows blocks of %d threads at most, fewer than %d\n", kernel, largest, threads);
+        return 1;
+    }
 
     CUdeviceptr out;
     CK(cuMemAlloc_v2(&out, threads * WORDS * 4));

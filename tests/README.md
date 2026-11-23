@@ -68,7 +68,7 @@ scripts of `tests/sass/`).
   stage's verdict is the last `verdict:` line that its program prints, and counts only when the
   program then ends by itself, with status 0, within its time (`tests/gpu/verdict.sh`).
 - `zml.sh`: the program answers with the right word and reports a speed.
-- `triton.sh`: each of the 179 cases of the quick subset of the Triton corpus gives on the V100
+- `triton.sh`: each of the 180 cases of the quick subset of the Triton corpus gives on the V100
   what the same kernel gives on the CPU under Triton's interpreter (or the case's PyTorch
   computation), bit for bit or within the tolerance the case states; its five runs give the same
   bits; and the layer's two routes, the translated sm_75 machine code and the retargeted PTX of
@@ -118,7 +118,7 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 | `profile-torch.sh` | PyTorch with the layer's profile | the profile has the right columns | 15 min | both PyTorch wheels |
 | `launcher.sh` | PyTorch and llama.cpp through the launcher (`vf`), and a virtual environment made by `vf venv` whose Python is started with no prefix | a matmul against the CPU (within 1e-3); the forwarding cuBLAS in `/proc/self/maps`; text from llama.cpp; the layer says that it is there, by its variable and by the functions of `libcuda.so.1` | 10 min | PyTorch 2.14.0+cu130 wheel, demos |
 | `vllm-topk-topp-run.sh` | vLLM's top-k and top-p sampling kernel (Triton), 18 cases, in two passes, each with a proxy cache of its own: at `VF_BORROW=1` (levels 2, 1, 0), then at `VF_BORROW=5` (level 3 with room made, as the second translation at launch translates) | the same kernel run on the CPU by Triton's interpreter | not timed | vLLM, PyTorch, Python headers; the GPU chosen by `CUDA_VISIBLE_DEVICES` |
-| `triton.sh` | 179 Triton kernels and configurations (the quick subset of `triton_corpus.py`, run by `triton-diff.py`): element-wise operations in every type, conversions, reductions, scans, sorts, `tl.dot` in several types, precisions, tiles, warps and stages, attention, gathers, atomics, loops, grids, libdevice; each through the translated machine code (5 runs) and through the retargeted PTX of the same kernel (2 runs) | Triton's interpreter on the CPU, or a PyTorch computation on the CPU; the runs and the two routes with each other | 4 min (2 of them for the interpreter) | PyTorch 2.14.0+cu130 with its Triton, numpy (`VF_TRITON_EXTRA`), Python headers; or `VF_TRITON_PYTHON` |
+| `triton.sh` | 180 Triton kernels and configurations (the quick subset of `triton_corpus.py`, run by `triton-diff.py`): element-wise operations in every type, conversions, reductions, scans, sorts, `tl.dot` in several types, precisions, tiles, warps and stages, attention, gathers, atomics, loops, grids, libdevice; each through the translated machine code (5 runs) and through the retargeted PTX of the same kernel (2 runs) | Triton's interpreter on the CPU, or a PyTorch computation on the CPU; the runs and the two routes with each other | 4 min (2 of them for the interpreter) | PyTorch 2.14.0+cu130 with its Triton, numpy (`VF_TRITON_EXTRA`), Python headers; or `VF_TRITON_PYTHON` |
 | `sglang-decode-graph.py` | SGLang's FP16 decode attention captured in CUDA graphs and replayed with new inputs, run through the layer with SGLang and PyTorch on `PYTHONPATH` | the CPU in FP32 | not timed | SGLang, PyTorch |
 
 (Times on one V100 with everything already compiled and in the file cache.)

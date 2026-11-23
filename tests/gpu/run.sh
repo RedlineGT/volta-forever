@@ -170,6 +170,21 @@ px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 4140000
 # translator refuses: the layer runs the PTX kept in the cubin). Both refused until 2026-11-23.
 px ptx-ldmatrix-variable "$G/ptx-cases/ldmatrix-variable.ptx" a0b0c000 a0b0c003 a0b0c005 a0b0c006
 px cubin-ldmatrix-variable "$G/ptx-cases/ldmatrix-variable.sm75.cubin" a0b0c000 a0b0c003 a0b0c005 a0b0c006
+# Kernels that require blocks of 1,024 threads (.reqntid, as Triton writes it), at 64 registers on
+# sm_75, whose usual translation takes more than such a block may have: ptxrun reads the largest
+# block that the loaded kernel allows before it launches, as Triton does, and stops when it is
+# smaller. The first is translated within 64 registers, the second, which no translation keeps
+# within them, runs from the PTX that its cubin keeps (both made by CUDA 13.5 ptxas -lineinfo). Until
+# 2026-11-23 both were given translated, at 66 and 73 registers: blocks of 896 and 768 threads at most.
+rb() {  # rb NAME ROUTE WORD... : kernel `k` of tests/kernels/translate/k_required_block_NAME.sm75.cubin, 1,024 threads
+    local name=$1 route=$2; shift 2
+    log=$out/logs/cubin-required-block-$name.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -t 1024 -i 5 \
+        "$G/translate/k_required_block_$name.sm75.cubin" k "$@" >"$log" 2>&1
+    check "cubin-required-block-$name" "^PASS k of" "$route"
+}
+rb within "machine code for sm_75 translated \(1 functions\)" 082eedf0 a2a5da74 e4681800 00000005
+rb over "PTX for sm_75 retargeted" 00000000 40b1ac30 00000054 00000005
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"
 # FP8: the conversions both ways, and the products, which run on the tensor cores as products of halves.
 tc fp8 "$G/k_fp8.135.sm89.ptx" "PTX for sm_89 retargeted \(1 module, 8 tensor-core instructions rewritten\)" "19 kernels, 0 wrong"

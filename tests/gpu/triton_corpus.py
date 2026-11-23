@@ -1027,8 +1027,13 @@ def sort_cases():
                 ref = 'interp32' if dt == torch.bfloat16 else 'interp'
                 if op == 'hist' and dt == torch.float32:
                     ref = 'interp'
+                # (And the gather of floats in 16 warps: blocks of 512 threads, which its cubin
+                # requires, allow 128 registers, and its translation takes 137 at every level. Until
+                # 2026-11-23 it was given so, and Triton stopped before the launch; it is refused
+                # since, and runs from the PTX that its cubin keeps: PASS-PTX.)
                 quick = ((dt == torch.float32 and nw == 4 and bn <= 256)
-                         or (op in ('sort', 'topk') and dt in (torch.int64, torch.float16) and nw == 4 and bn <= 256))
+                         or (op in ('sort', 'topk') and dt in (torch.int64, torch.float16) and nw == 4 and bn <= 256)
+                         or (op == 'gather' and dt == torch.float32 and nw == 16))
                 for desc in ([False, True] if op == 'sort' else [False]):
                     out.append(Case(f'sort-{op}-{SHORT[dt]}-d{int(desc)}-{bm}x{bn}w{nw}', k_sort, (M // bm,),
                                     ['x', 'o', 'i', bn], make, ['o', 'i'],

@@ -152,8 +152,37 @@ def graph_register_budget(registers, info):
         pos += 4 + size
     per_warp = ((32 * max(registers, 1) + 255) // 256) * 256
     threads = min(max_threads, (16384 // per_warp) * 4 * 32)
+    return block_registers(threads)
+
+
+def block_registers(threads):
+    """The most registers a thread may have for a block of `threads` threads to be launched on a
+    GV100 (the admission check counts warps by fours: each 128 threads take the same)."""
     groups = max(1, (threads + 127) // 128)
     return min(255, (65536 // (128 * groups) // 8) * 8)
+
+
+def required_threads(info):
+    """The block size an entry requires (EIATTR_REQNTID, which Triton writes for every kernel and
+    CUDA C never): the driver launches it with that block and no other. None when it requires
+    none, or one that is not understood or that no GPU launches (more than 1,024 threads)."""
+    required, pos = None, 0
+    while pos < len(info):
+        if pos + 4 > len(info):
+            return None
+        fmt, kind, size = struct.unpack_from('<BBH', info, pos)
+        size = size if fmt == 4 else 0
+        if pos + 4 + size > len(info):
+            return None
+        if kind == 0x10:
+            if fmt != 4 or size != 12:
+                return None
+            x, y, z = struct.unpack_from('<3I', info, pos + 4)
+            if not 0 < x * y * z <= 1024:
+                return None
+            required = x * y * z if required is None else min(required, x * y * z)
+        pos += 4 + size
+    return required
 
 
 def tables_of(data):
@@ -3004,6 +3033,36 @@ def translate(data, mc=None, listing=None, lives=None):
                         raise why
             else:
                 done = usual()
+            # A kernel that requires its block size (`required_threads`) is launched with that block
+            # and no other: a translation with more registers than such a block may have on a V100
+            # never runs, and a program that reads the limit from the loaded kernel (Triton) stops
+            # before any launch, so that the second translation at launch never comes. The first of
+            # levels 1, 2 and 3 that keeps within it is taken instead; when none does, the kernel is
+            # refused for its registers, and the layer runs the PTX that the cubin keeps, when it
+            # keeps some. (The fewest registers that the block of a kernel of the group allows.)
+            required = []
+            for f in fs:
+                info = e.section('.nv.info.' + f.name)
+                threads = required_threads(info.data) if info is not None else None
+                if threads is not None:
+                    required.append((block_registers(threads), threads))
+            if required and max(r[2] for r in done.values()) > min(required)[0]:
+                limit, threads = min(required)
+                fitted = None
+                if BORROW and alone:
+                    top = max(0, limit - 3 - fs[0].save_slots)
+                    for bounded in (lambda: attempt(True, True, 1), lambda: attempt(True, True, 2),
+                                    lambda: attempt(False, False, 3, top)):
+                        try:
+                            candidate = bounded()
+                        except Refused:
+                            continue
+                        if max(r[2] for r in candidate.values()) <= limit:
+                            fitted = candidate
+                            break
+                if fitted is None:
+                    raise Refused('more registers than its required block of %d threads allows (%d)' % (threads, limit))
+                done = fitted
             count = max(r[2] for r in done.values())
             if count > declared and not any(i in entries for i in indices):
                 # No kernel of the file calls them: their callers are elsewhere (a library of
