@@ -1,6 +1,7 @@
 //! A Bazel application can resolve the whole CUDA toolkit by directory and then append
 //! "bin/ptxas". Preserve that lookup and the original resources using directory symlinks.
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -12,7 +13,7 @@ use std::time::{Duration, SystemTime};
 /// it points to).
 type Layout = (BTreeSet<PathBuf>, BTreeMap<PathBuf, PathBuf>);
 
-/// A view not used for this long, that its runfiles would not give now, is removed.
+/// A view not used for this long, that cannot work, is removed (`remove_stale`).
 const UNUSED: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn view(source: &Path, compiler: &Path, cache: &Path) -> io::Result<PathBuf> {
@@ -38,14 +39,13 @@ pub fn view(source: &Path, compiler: &Path, cache: &Path) -> io::Result<PathBuf>
     };
     let final_dir = cache.join(name(&links));
     if final_dir.is_dir() {
-        // (Used: see `remove_stale`.)
-        let _ = fs::File::open(&final_dir).and_then(|dir| dir.set_modified(SystemTime::now()));
+        touch(&final_dir);
         return Ok(final_dir);
     }
-    remove_stale(&cache, compiler);
+    remove_stale(&cache);
     let staging = (0..)
         .find_map(|i: u32| {
-            let p = cache.join(format!(".tmp-{}-{i}", std::process::id()));
+            let p = cache.join(format!(".tmp-{}-{}-{i}", boot(), std::process::id()));
             match fs::DirBuilder::new().mode(0o700).create(&p) {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
                 result => Some(result.map(|()| p)),
@@ -135,12 +135,47 @@ fn name(links: &BTreeMap<PathBuf, PathBuf>) -> String {
     format!("{hash:016x}")
 }
 
+/// The view `dir` is used now (see `remove_stale`).
+fn touch(dir: &Path) {
+    let _ = fs::File::open(dir).and_then(|dir| dir.set_modified(SystemTime::now()));
+}
+
+/// The assembler `compiler` was started by the path `argv0`: when that is its link in a view
+/// (`<view>/<repo>/bin/ptxas` or `<view>/<repo>/sandbox/bin/ptxas`), the view is used now. An
+/// engine whose `RUNFILES_DIR` is a view starts the assembler through it each time it compiles,
+/// and may not ask for its view again for as long as it runs.
+pub fn used(argv0: &Path, compiler: &Path) {
+    let link = fs::symlink_metadata(argv0).is_ok_and(|m| m.file_type().is_symlink());
+    if argv0.file_name() != Some(OsStr::new("ptxas")) || !link || argv0.canonicalize().ok().as_deref() != Some(compiler)
+    {
+        return;
+    }
+    let mut ancestors = argv0.ancestors().skip(1);
+    if ancestors.next().and_then(Path::file_name) != Some(OsStr::new("bin")) {
+        return;
+    }
+    // `<repo>` or `sandbox`, then the view, or `<repo>` then the view.
+    let above: Vec<&Path> = ancestors.skip(1).take(2).collect();
+    for view in above {
+        if view.file_name().and_then(OsStr::to_str).is_some_and(view_name) {
+            touch(view);
+        }
+    }
+}
+
+/// A name that a view can have.
+fn view_name(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Remove from `cache` what nothing will use again: the staging directories of processes that
-/// ended before they renamed them, and the views not used for a day (`UNUSED`) that their
-/// runfiles would not give now: these are gone, or their layout changed, or the view links
-/// another assembler, or it was named otherwise (by an earlier version). What cannot be read or
-/// removed is left: another process may be removing it too.
-fn remove_stale(cache: &Path, compiler: &Path) {
+/// ended before they renamed them, and the views not used for a day (`UNUSED`) that cannot work:
+/// one of their links leads nowhere (the runfiles they link are gone, or the assembler is). A
+/// view whose links all lead somewhere is left, whatever its name, the assembler it links or the
+/// layout its runfiles have now: it may be the `RUNFILES_DIR` of an engine that runs, which does
+/// not ask for its view again (an engine started by an earlier version, or before its runfiles
+/// changed). What cannot be read or removed is left: another process may be removing it too.
+fn remove_stale(cache: &Path) {
     let Ok(entries) = fs::read_dir(cache) else {
         return;
     };
@@ -149,41 +184,51 @@ fn remove_stale(cache: &Path, compiler: &Path) {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if let Some((pid, _)) = name.strip_prefix(".tmp-").and_then(|rest| rest.split_once('-')) {
-            if pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists() {
+        if let Some(staging) = name.strip_prefix(".tmp-") {
+            // `<boot>-<pid>-<n>`; `<pid>-<n>` from an earlier version.
+            let mut parts = staging.rsplitn(3, '-').skip(1);
+            let (pid, made_by) = (parts.next(), parts.next());
+            // A process of this system that ended; else (another system that shares the cache,
+            // whose processes cannot be seen from here, or this one before it was started again)
+            // one that would be making it for a day.
+            let ended = made_by == Some(boot().as_str())
+                && pid.is_some_and(|pid| pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists());
+            if ended || unused(&path) {
                 let _ = fs::remove_dir_all(&path);
             }
-        } else if name.len() == 16
-            && name.bytes().all(|b| b.is_ascii_hexdigit())
-            && fs::symlink_metadata(&path)
-                .and_then(|m| m.modified())
-                .is_ok_and(|used| used.elapsed().is_ok_and(|age| age > UNUSED))
-            && !current(&path, &name, compiler)
-        {
+        } else if view_name(&name) && unused(&path) && dead(&path) {
             let _ = fs::remove_dir_all(&path);
         }
     }
 }
 
-/// Whether the view `dir`, of that name, is the one its runfiles give now. (When it says nothing
-/// of where they are, all its links being to the assembler, it is taken to be.)
-fn current(dir: &Path, name: &str, compiler: &Path) -> bool {
+/// Whether `path` was last changed more than a day ago (`UNUSED`).
+fn unused(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|used| used.elapsed().is_ok_and(|age| age > UNUSED))
+}
+
+/// This system, as it runs now: the identity of its boot, which another system that shares the
+/// cache has not, nor this one once started again; `unknown` when it cannot be read.
+pub fn boot() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|id| id.trim().to_string())
+        .ok()
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Whether the view `dir` cannot work: one of its links leads nowhere. (One that cannot be read
+/// is taken to work.)
+fn dead(dir: &Path) -> bool {
     let mut links = BTreeMap::new();
     if read_links(dir, Path::new(""), &mut links).is_err() {
         return false;
     }
-    // The runfiles: what a link that is not to the assembler points to, less the link's own path.
-    let source = links.iter().find_map(|(rel, target)| {
-        let source = rel.components().try_fold(target.as_path(), |path, _| path.parent())?;
-        (target != compiler && source.join(rel) == *target).then(|| source.to_path_buf())
-    });
-    let Some(source) = source else {
-        return true;
-    };
-    match layout(&source, compiler) {
-        Ok(Some((_, now))) => now == links && self::name(&now) == name,
-        _ => false,
-    }
+    links
+        .keys()
+        .any(|rel| fs::metadata(dir.join(rel)).is_err_and(|e| e.kind() == io::ErrorKind::NotFound))
 }
 
 /// The links under `dir`, by their path from the view (`rel`).

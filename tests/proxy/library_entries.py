@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 
 def check(proxy, mock):
@@ -89,6 +91,69 @@ def check(proxy, mock):
     assert api.cuLibraryLoadData(c.byref(library), native, None, None, 0, options, values, 1) == 0
     assert c.c_uint.in_dll(backend, "preserved").value == 1
     assert api.cuLibraryUnload(library) == 0
+    # A lookup that fails leaves NULL in the handle, in a deferred library too: a kernel that the
+    # driver's compiler refuses only when the whole module is loaded for it (the layer learns it
+    # during that lookup), and a name that the library does not have.
+    refused = (b".version 8.8\n.target sm_75\n.address_size 64\n"
+               b".visible .entry refused()\n{\n .reg .b32 %r<2>;\n mov.u32 %r1, 12345;\n ret;\n}\n"
+               b".visible .entry good()\n{\n ret;\n}\n")
+    assert api.cuLibraryLoadData(c.byref(library), refused, None, None, 0, None, None, 0) == 0
+    for name, error in ((b"absent", 500), (b"refused", 218), (b"refused", 218), (b"absent", 500), (b"good", 0)):
+        kernel = c.c_void_p(0xDEADBEEF)
+        assert api.cuLibraryGetKernel(c.byref(kernel), library, name) == error, name
+        assert (kernel.value is None) == (error != 0), (name, kernel.value)
+    assert api.cuLibraryUnload(library) == 0
+    # Two threads ask for that kernel at once: the second waits while the first compiles it alone,
+    # then the whole module, and is refused too, not given the kernel of the whole module.
+    assert api.cuLibraryLoadData(c.byref(library), refused, None, None, 0, None, None, 0) == 0
+    c.c_uint.in_dll(backend, "refusal_delay").value = 300
+    answers = []
+
+    def ask():
+        kernel = c.c_void_p(0xDEADBEEF)
+        answers.append((api.cuLibraryGetKernel(c.byref(kernel), library, b"refused"), kernel.value))
+
+    threads = [threading.Thread(target=ask) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+        time.sleep(0.1)
+    for thread in threads:
+        thread.join()
+    c.c_uint.in_dll(backend, "refusal_delay").value = 0
+    assert answers == [(218, None), (218, None)], answers
+    assert api.cuLibraryUnload(library) == 0
+    if os.environ.get("VF_LAZY") != "0":
+        # A deferred library is unloaded while one of its kernels is being compiled, and the
+        # driver gives its handle to another one: what was compiled for the first is not given
+        # for the second, which compiles its own kernel of that name.
+        def module(mark):
+            return (b".version 8.8\n.target sm_75\n.address_size 64\n"
+                    b".visible .entry k()\n{\n .reg .b32 %r<2>;\n mov.u32 %r1, " + mark + b";\n ret;\n}\n"
+                    b".visible .entry other()\n{\n ret;\n}\n")
+        first, second = c.c_void_p(), c.c_void_p()
+        assert api.cuLibraryLoadData(c.byref(first), module(b"77777"), None, None, 0, None, None, 0) == 0
+        c.c_uint.in_dll(backend, "slow_compile").value = 400
+        answers = []
+
+        def compile_first():
+            kernel = c.c_void_p()
+            answers.append(api.cuLibraryGetKernel(c.byref(kernel), first, b"k"))
+
+        thread = threading.Thread(target=compile_first)
+        thread.start()
+        time.sleep(0.1)
+        assert api.cuLibraryUnload(first) == 0
+        c.c_size_t.in_dll(backend, "next_handle").value = first.value
+        assert api.cuLibraryLoadData(c.byref(second), module(b"55555"), None, None, 0, None, None, 0) == 0
+        assert second.value == first.value
+        thread.join()
+        c.c_uint.in_dll(backend, "slow_compile").value = 0
+        compiled = c.c_uint.in_dll(backend, "loads_of_55555").value
+        kernel = c.c_void_p()
+        assert api.cuLibraryGetKernel(c.byref(kernel), second, b"k") == 0 and kernel.value
+        assert c.c_uint.in_dll(backend, "loads_of_55555").value == compiled + 1, "the kernel of the first was given"
+        assert answers != [0], answers
+        assert api.cuLibraryUnload(second) == 0
     assert c.c_uint.in_dll(backend, "loads").value == c.c_uint.in_dll(backend, "unloads").value
 
 

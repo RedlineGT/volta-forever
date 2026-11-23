@@ -313,15 +313,22 @@ direct clients, older CUDA runtimes and programs built for later GPUs. A value t
 not `<major>.<minor>`, or that is below 7.0, is not used, and the proxy says so once
 when it is loaded. A caller
 with embedded Volta code retains 7.0 even with an explicit override. A caller is
-not told a later generation than the machine code it is given: when the code embedded
+not told a later generation than the code it is given: when the code embedded
 in its file, in a library loaded with it as a dependency (`DT_NEEDED`: the libraries
-that use a CUDA runtime), or, for cuDNN's graph library, in the library of cuDNN's
-precompiled engines beside it, runs from the translation of its sm_75 machine code,
+that use a CUDA runtime, and those that use these), or, for a caller without GPU code of
+its own, in a library beside it that depends on it and that it may load later (as cuDNN's
+graph library loads the library of its engines; until such a library is loaded, which file
+the loader takes for it is not known, and code of it to adapt is taken to be sm_75 machine
+code), runs from the translation of its sm_75 machine code, or
+from its PTX for sm_75 when it has none for the generation asked,
 the caller is told 7.5 (8.0 for sm_80 code, when 9.0 or later is asked), and a line at
-the default log level says so. PyTorch is such a program: in its sm_75 code, the
+the default log level says so. The images that such a caller loads are then adapted for
+what it is told: an image that also has PTX for sm_80, or sm_80 cubins that retain theirs,
+is given its sm_75 code or its PTX for sm_75. PyTorch is such a program: in its sm_75 code, the
 kernels it chooses for 8.0 print an error and write nothing, and some of those it
-chooses for 9.0 stop the GPU. A program whose code is PTX is told what was asked and
-given its PTX for that capability. The decision is taken when a caller first asks; a
+chooses for 9.0 stop the GPU. A program whose code is PTX for the generation asked (as
+llama.cpp's, for sm_75, sm_80 and sm_90) is told what was asked and given its PTX for that
+capability. The decision is taken when a caller first asks; a
 library loaded after that is not looked at. `VF_CAPABILITY_ALL=1` tells such callers
 what was asked all the same, for a program that does not launch the kernels it would
 choose for it (the SGLang guide: SGLang selects its quantized experts from PyTorch's

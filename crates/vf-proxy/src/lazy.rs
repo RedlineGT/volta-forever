@@ -19,8 +19,8 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
-use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
 use vf_adapt::Refused;
 use vf_fatbin as fatbin;
@@ -85,7 +85,17 @@ struct LazyLibrary {
     /// The original image bytes, kept on a cache hit so that the fallback path (materialization,
     /// dependent entries) can adapt later, outside the lock.
     original_bytes: Option<Arc<Vec<u8>>>,
+    /// The policy of the load (`images::policy`), by which they are adapted then.
+    policy: vf_adapt::Policy,
+    /// Which load this is: the handle can be given to another library after an unload, while a
+    /// thread works without the lock for this one (`same`).
+    id: u64,
+    /// A thread is adapting the original bytes (`adapt_restored`).
+    adapting: bool,
 }
+
+/// The number of the next load of a lazy library (`LazyLibrary::id`).
+static LOADS: AtomicU64 = AtomicU64::new(0);
 
 /// Compilation state of a kernel in a lazy library.
 enum KernelState {
@@ -638,6 +648,9 @@ unsafe fn setup_common(
         linked_entries,
         cache_key,
         original_bytes: original_bytes.map(Arc::new),
+        policy: crate::images::policy(),
+        id: LOADS.fetch_add(1, Relaxed),
+        adapting: false,
     };
 
     let (mutex, _) = &*LAZY_LIBS;
@@ -664,11 +677,10 @@ fn build_standin_ptx(full_ptx: &[u8]) -> Vec<u8> {
     standin
 }
 
-/// When a lazy library was set up from the proxy cache, adapt the original bytes and analyse the
-/// result. Fills `lazy_lib.adapted_data` and `lazy_lib.info` so that materialization and
-/// sub-module extraction work. Must be called outside the lock.
-fn ensure_adapted(original: &[u8]) -> Option<(Vec<u8>, ModuleInfo)> {
-    let policy = &crate::config().policy;
+/// When a lazy library was set up from the proxy cache, adapt the original bytes, by the policy of
+/// its load, and analyse the result. Fills `lazy_lib.adapted_data` and `lazy_lib.info` so that
+/// materialization and sub-module extraction work. Must be called outside the lock.
+fn ensure_adapted(original: &[u8], policy: &vf_adapt::Policy) -> Option<(Vec<u8>, ModuleInfo)> {
     // The original bytes are the fat binary or PTX the program gave. Adapt them exactly as
     // `images::adapt` would.
     let adapted = if original.len() >= 4 && u32::from_le_bytes(original[..4].try_into().ok()?) == fatbin::MAGIC {
@@ -894,6 +906,66 @@ pub fn is_lazy(library: usize) -> bool {
     mutex.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&library)
 }
 
+/// The lazy library `library` when it is still the one of the load `id`: while the lock is not
+/// held, an unload and another load can give its handle to another library.
+fn same(libs: &mut HashMap<usize, LazyLibrary>, library: usize, id: u64) -> Option<&mut LazyLibrary> {
+    libs.get_mut(&library).filter(|lazy_lib| lazy_lib.id == id)
+}
+
+type Libs = MutexGuard<'static, HashMap<usize, LazyLibrary>>;
+
+/// For a library restored from the proxy cache: its adapted image and analysis
+/// (`ensure_adapted`), made by one thread at a time (`adapting`); a thread that needs them
+/// meanwhile waits, then takes them. Gives the lock back, with `true` when the library is still
+/// the one of the load `id` and has them. `kernel`: the kernel they are needed for, if one is.
+fn adapt_restored(mut libs: Libs, library: usize, id: u64, kernel: Option<&str>) -> (Libs, bool) {
+    let (mutex, condvar) = &*LAZY_LIBS;
+    loop {
+        let Some(lazy_lib) = same(&mut libs, library, id) else {
+            return (libs, false);
+        };
+        if lazy_lib.info.is_some() && !lazy_lib.adapted_data.is_empty() {
+            return (libs, true);
+        }
+        if lazy_lib.adapting {
+            libs = condvar.wait(libs).unwrap_or_else(|e| e.into_inner());
+            continue;
+        }
+        let Some(original) = lazy_lib.original_bytes.clone() else {
+            return (libs, false);
+        };
+        match kernel {
+            Some(name) => log::info(format_args!(
+                "lazy: kernel {name} not cached, adapting original on demand"
+            )),
+            None => log::info(format_args!(
+                "lazy: adapting the original of a module restored from the cache, to load it whole"
+            )),
+        }
+        lazy_lib.adapting = true;
+        let policy = lazy_lib.policy;
+        // Outside the lock, which is that of every lazy library: the adaptation and the analysis
+        // of a whole module take from tens of milliseconds to seconds.
+        drop(libs);
+        let adapted = ensure_adapted(&original, &policy);
+        libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let made = adapted.is_some();
+        let there = match same(&mut libs, library, id) {
+            Some(lazy_lib) => {
+                lazy_lib.adapting = false;
+                if let Some((data, info)) = adapted {
+                    lazy_lib.adapted_data = data;
+                    lazy_lib.info = Some(info);
+                }
+                true
+            }
+            None => false,
+        };
+        condvar.notify_all();
+        return (libs, there && made);
+    }
+}
+
 /// Materialize a lazy library: load the full adapted image through the driver so that operations
 /// needing the complete module (globals, module handle, unified functions, enumeration) can work.
 ///
@@ -906,12 +978,23 @@ pub fn is_lazy(library: usize) -> bool {
 /// # Safety
 /// Makes a driver call to load the image.
 pub unsafe fn materialize(library: usize) -> Result<usize, CUresult> {
-    let (mutex, condvar) = &*LAZY_LIBS;
-    let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let (mutex, _) = &*LAZY_LIBS;
+    let libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let id = libs.get(&library).ok_or(CUDA_ERROR_NOT_FOUND)?.id;
+    unsafe { materialize_load(libs, library, id) }
+}
 
+/// `materialize`, for the library of the load `id`, with the lock held. What is made while the
+/// lock is not held is given to that library only if the handle is still its handle: else, it is
+/// unloaded.
+///
+/// # Safety
+/// Makes a driver call to load the image.
+unsafe fn materialize_load(mut libs: Libs, library: usize, id: u64) -> Result<usize, CUresult> {
+    let (mutex, condvar) = &*LAZY_LIBS;
     // Wait until any in-progress materialization finishes.
     loop {
-        let Some(lazy_lib) = libs.get(&library) else {
+        let Some(lazy_lib) = same(&mut libs, library, id) else {
             return Err(CUDA_ERROR_NOT_FOUND);
         };
         if let Some(handle) = lazy_lib.materialized_handle {
@@ -924,10 +1007,18 @@ pub unsafe fn materialize(library: usize) -> Result<usize, CUresult> {
     }
 
     // Mark as materializing and extract what we need for the driver call.
-    let lazy_lib = libs.get_mut(&library).unwrap();
+    let lazy_lib = same(&mut libs, library, id).unwrap();
     lazy_lib.materializing = true;
-    let mut adapted_data = lazy_lib.adapted_data.clone();
-    let original = lazy_lib.original_bytes.clone();
+    let restored = lazy_lib.adapted_data.is_empty() && lazy_lib.original_bytes.is_some();
+    // When set up from the proxy cache, adapted_data is empty: adapt the original now.
+    if restored {
+        libs = adapt_restored(libs, library, id, None).0;
+    }
+    let Some(lazy_lib) = same(&mut libs, library, id) else {
+        condvar.notify_all();
+        return Err(CUDA_ERROR_NOT_FOUND);
+    };
+    let adapted_data = lazy_lib.adapted_data.clone();
     let linked = lazy_lib
         .linked_entries
         .as_ref()
@@ -945,31 +1036,13 @@ pub unsafe fn materialize(library: usize) -> Result<usize, CUresult> {
     } else {
         0
     };
-    drop(libs);
-
-    // When set up from the proxy cache, adapted_data is empty: adapt the original now.
-    if adapted_data.is_empty()
-        && let Some(original) = original.as_deref()
-        && let Some((adapted, info)) = ensure_adapted(original)
-    {
-        adapted_data = adapted;
-        // Store the adapted data and info back for future use.
-        let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(lazy_lib) = libs.get_mut(&library) {
-            lazy_lib.adapted_data = adapted_data.clone();
-            lazy_lib.info = Some(info);
-        }
-        drop(libs);
-    }
     if adapted_data.is_empty() && linked.is_none() {
         log::warn(format_args!("lazy: cannot materialize: no adapted data"));
-        let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(lazy_lib) = libs.get_mut(&library) {
-            lazy_lib.materializing = false;
-        }
+        lazy_lib.materializing = false;
         condvar.notify_all();
         return Err(CUDA_ERROR_NOT_FOUND);
     }
+    drop(libs);
 
     log::info(format_args!("lazy: materializing full module ({entry_count} entries)"));
 
@@ -994,34 +1067,44 @@ pub unsafe fn materialize(library: usize) -> Result<usize, CUresult> {
     };
 
     let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-    let result = match loaded {
-        Ok((handle, image, refused)) => {
+    let result = match (loaded, same(&mut libs, library, id)) {
+        (Ok((handle, image, refused)), Some(lazy_lib)) => {
+            lazy_lib.materializing = false;
+            lazy_lib.materialized_handle = Some(handle);
             if let Some(image) = image {
                 crate::images::keep(handle, crate::images::Replacement::from_vec(image));
             }
             // By the handle the program holds: its lookups are answered from there.
             crate::kernels::describe(library, refused, Vec::new());
-            if let Some(lazy_lib) = libs.get_mut(&library) {
-                lazy_lib.materialized_handle = Some(handle);
-            }
             Ok(handle)
         }
-        Err(code) => Err(code),
+        // The library was unloaded meanwhile: what was loaded for it is nobody's.
+        (Ok((handle, _, _)), None) => {
+            drop(libs);
+            // SAFETY: a library handle the driver just gave.
+            unsafe { real_unload_fn()(handle as *mut c_void) };
+            condvar.notify_all();
+            return Err(CUDA_ERROR_NOT_FOUND);
+        }
+        (Err(code), lazy_lib) => {
+            if let Some(lazy_lib) = lazy_lib {
+                lazy_lib.materializing = false;
+            }
+            Err(code)
+        }
     };
-    if let Some(lazy_lib) = libs.get_mut(&library) {
-        lazy_lib.materializing = false;
-    }
     condvar.notify_all();
     result
 }
 
 /// Get a kernel by name from a specific (materialized or sub-module) library handle and store the
-/// result in the lazy library's kernel map.
+/// result in the kernel map of the lazy library of the load `id`, if it is still that one.
 ///
 /// # Safety
 /// `kernel` must be writable. `name` must be a valid C string.
 unsafe fn get_kernel_from(
     library: usize,
+    id: u64,
     from_handle: usize,
     name: *const c_char,
     name_str: &str,
@@ -1042,15 +1125,18 @@ unsafe fn get_kernel_from(
 
     // Store the result.
     let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(lazy_lib) = libs.get_mut(&library) {
-        lazy_lib.kernels.insert(
-            name_str.to_string(),
-            KernelState::Ready(KernelEntry {
-                lib_handle: from_handle,
-                kernel_handle: kernel_handle as usize,
-            }),
-        );
-    }
+    let Some(lazy_lib) = same(&mut libs, library, id) else {
+        // Unloaded meanwhile, and `from_handle` with it.
+        condvar.notify_all();
+        return CUDA_ERROR_NOT_FOUND;
+    };
+    lazy_lib.kernels.insert(
+        name_str.to_string(),
+        KernelState::Ready(KernelEntry {
+            lib_handle: from_handle,
+            kernel_handle: kernel_handle as usize,
+        }),
+    );
     drop(libs);
 
     KERNEL_TO_LIB
@@ -1072,43 +1158,40 @@ unsafe fn get_kernel_from(
 /// `kernel` must be writable. `name` must be a valid C string.
 unsafe fn materialize_and_get_kernel(
     library: usize,
+    id: u64,
     name: *const c_char,
     name_str: &str,
     kernel: *mut *mut c_void,
 ) -> CUresult {
     let (mutex, condvar) = &*LAZY_LIBS;
+    let unmark = || {
+        let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(lazy_lib) = same(&mut libs, library, id) {
+            lazy_lib.kernels.remove(name_str);
+        }
+        condvar.notify_all();
+    };
 
+    let libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: the driver call is unsafe; caller guarantees `name` is valid.
-    match unsafe { materialize(library) } {
+    match unsafe { materialize_load(libs, library, id) } {
         Ok(mat_handle) => {
             // The compilation of the whole module may have shown that this kernel cannot be given.
             if crate::kernels::refused(library, name_str) {
-                let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(lazy_lib) = libs.get_mut(&library) {
-                    lazy_lib.kernels.remove(name_str);
-                }
-                condvar.notify_all();
+                unmark();
                 return crate::images::CUDA_ERROR_INVALID_PTX;
             }
             // SAFETY: caller guarantees `kernel` and `name` are valid.
-            let result = unsafe { get_kernel_from(library, mat_handle, name, name_str, kernel) };
+            let result = unsafe { get_kernel_from(library, id, mat_handle, name, name_str, kernel) };
             if result != CUDA_SUCCESS {
                 // Remove the Compiling sentinel.
-                let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(lazy_lib) = libs.get_mut(&library) {
-                    lazy_lib.kernels.remove(name_str);
-                }
-                condvar.notify_all();
+                unmark();
             }
             result
         }
         Err(code) => {
             // Materialization also failed. Remove the Compiling sentinel.
-            let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(lazy_lib) = libs.get_mut(&library) {
-                lazy_lib.kernels.remove(name_str);
-            }
-            condvar.notify_all();
+            unmark();
             code
         }
     }
@@ -1120,7 +1203,8 @@ unsafe fn materialize_and_get_kernel(
 /// not one that must be refused (`kernels::refused`).
 ///
 /// The lock on `LAZY_LIBS` is released during JIT compilation to avoid blocking other library
-/// calls.
+/// calls. What is made then is given to the library only if its handle is still that of the same
+/// load (`same`).
 ///
 /// # Safety
 /// `kernel` must be writable. `name` must be a valid C string.
@@ -1151,17 +1235,21 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
                 libs = condvar.wait(libs).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
+            // The compilation of the whole module, for this lookup or another made meanwhile
+            // (this one may have waited for it), can have shown that the kernel cannot be given.
+            None if crate::kernels::refused(library, &name_str) => return crate::images::CUDA_ERROR_INVALID_PTX,
             None => break,
         }
     }
 
     let lazy_lib = libs.get_mut(&library).unwrap();
+    let id = lazy_lib.id;
 
     // If the library is already materialized, get the kernel from the materialized handle.
     if let Some(mat_handle) = lazy_lib.materialized_handle {
         drop(libs);
         // SAFETY: caller guarantees `kernel` and `name` are valid.
-        return unsafe { get_kernel_from(library, mat_handle, name, &name_str, kernel) };
+        return unsafe { get_kernel_from(library, id, mat_handle, name, &name_str, kernel) };
     }
 
     // Per-entry classification: independent entries compile on demand, dependent entries come
@@ -1181,17 +1269,16 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
         linked_leaf = image.linked_leaf(&name_str, &indices);
         libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
         // An unload and a new library can reuse the same handle while PTX is being analysed.
-        if !libs.contains_key(&library)
-            || !crate::images::retained(library).is_some_and(|current| std::sync::Arc::ptr_eq(&current, &image))
-        {
+        let Some(lazy_lib) = same(&mut libs, library, id) else {
+            condvar.notify_all();
             return CUDA_ERROR_NOT_FOUND;
-        }
-        if libs[&library].materialized_handle.is_some() {
+        };
+        if lazy_lib.materialized_handle.is_some() {
             drop(libs);
-            return unsafe { materialize_and_get_kernel(library, name, &name_str, kernel) };
+            return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
         }
     }
-    let lazy_lib = libs.get_mut(&library).unwrap();
+    let lazy_lib = same(&mut libs, library, id).unwrap();
     let is_independent = if lazy_lib.linked_entries.is_some() {
         linked_leaf.is_some()
     } else if let Some(ref entries) = lazy_lib.cached_entries {
@@ -1206,7 +1293,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
             "lazy: kernel {name_str} is dependent, materializing whole module"
         ));
         drop(libs);
-        return unsafe { materialize_and_get_kernel(library, name, &name_str, kernel) };
+        return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
     }
 
     // Extract the sub-module for this independent kernel: from the proxy cache if available,
@@ -1229,40 +1316,27 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
     let sub_ptx = match sub_ptx {
         Some(ptx) => ptx,
         None => {
-            let Some(original) = lazy_lib.original_bytes.clone() else {
+            if lazy_lib.info.is_some() || lazy_lib.original_bytes.is_none() {
                 log::trace(format_args!(
                     "lazy: kernel {name_str} not found in deferred module or cache"
                 ));
                 return CUDA_ERROR_NOT_FOUND;
-            };
-            log::info(format_args!(
-                "lazy: kernel {name_str} not cached, adapting original on demand"
-            ));
-            // Outside the lock, which is that of every lazy library, as `materialize` does: the
-            // adaptation and the analysis of a whole module take from tens of milliseconds to
-            // seconds. A thread that asks for this kernel meanwhile waits for it.
+            }
+            // By one thread for the whole library (`adapt_restored`); a thread that asks for this
+            // kernel meanwhile waits for this one.
             lazy_lib.kernels.insert(name_str.clone(), KernelState::Compiling);
-            drop(libs);
-            let adapted = ensure_adapted(&original);
-            libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-            // The library may have been unloaded meanwhile, and its handle given to another.
-            let Some(lazy_lib) = libs.get_mut(&library).filter(|lazy_lib| {
-                lazy_lib
-                    .original_bytes
-                    .as_ref()
-                    .is_some_and(|kept| Arc::ptr_eq(kept, &original))
-            }) else {
+            let adapted;
+            (libs, adapted) = adapt_restored(libs, library, id, Some(&name_str));
+            let Some(lazy_lib) = same(&mut libs, library, id) else {
                 condvar.notify_all();
                 return CUDA_ERROR_NOT_FOUND;
             };
-            let extracted = adapted.and_then(|(adapted, info)| {
-                let extracted = info.extract(&name_str);
-                // Store for future use.
-                lazy_lib.adapted_data = adapted;
-                lazy_lib.info = Some(info);
-                extracted
-            });
-            match extracted {
+            match lazy_lib
+                .info
+                .as_ref()
+                .filter(|_| adapted)
+                .and_then(|info| info.extract(&name_str))
+            {
                 Some(ptx) => ptx,
                 None => {
                     lazy_lib.kernels.remove(&name_str);
@@ -1275,7 +1349,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
     let t_extract = t_kernel_start.elapsed();
 
     // Mark as compiling and copy what we need for the driver call.
-    let lazy_lib = libs.get_mut(&library).unwrap();
+    let lazy_lib = same(&mut libs, library, id).unwrap();
     lazy_lib.kernels.insert(name_str.clone(), KernelState::Compiling);
     let jit_opts = lazy_lib.jit_options.clone();
     let jit_vals = lazy_lib.jit_values.clone();
@@ -1322,7 +1396,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
             first_messages(&lr.error_log)
         ));
         // SAFETY: caller guarantees `kernel` and `name` are valid.
-        return unsafe { materialize_and_get_kernel(library, name, &name_str, kernel) };
+        return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
     } else {
         lr.handle
     };
@@ -1363,16 +1437,16 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
              materializing full module as fallback"
         ));
         // Unload the sub-module and try materializing.
+        let _kept = crate::images::release(sub_handle);
         // SAFETY: sub_handle is a valid library handle.
         unsafe { real_unload_fn()(sub_handle as *mut c_void) };
-        crate::images::release(sub_handle);
         // SAFETY: caller guarantees `kernel` and `name` are valid.
-        return unsafe { materialize_and_get_kernel(library, name, &name_str, kernel) };
+        return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
     }
 
     // Store the result and notify waiters.
     let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(lazy_lib) = libs.get_mut(&library) {
+    if let Some(lazy_lib) = same(&mut libs, library, id) {
         lazy_lib.kernels.insert(
             name_str,
             KernelState::Ready(KernelEntry {
@@ -1381,10 +1455,11 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
             }),
         );
     } else {
-        // The library was unloaded while we were compiling. Clean up the orphaned sub-module.
+        // The library was unloaded while we were compiling (and its handle may be another's now).
+        // Clean up the orphaned sub-module.
+        let _kept = crate::images::release(sub_handle);
         // SAFETY: sub_handle is a valid library handle.
         unsafe { real_unload_fn()(sub_handle as *mut c_void) };
-        crate::images::release(sub_handle);
         condvar.notify_all();
         return CUDA_ERROR_NOT_FOUND;
     }
@@ -1421,9 +1496,9 @@ pub fn unload(library: usize) -> Option<CUresult> {
         if let KernelState::Ready(entry) = state {
             let is_materialized = lazy_lib.materialized_handle == Some(entry.lib_handle);
             if !is_materialized {
+                let _kept = crate::images::release(entry.lib_handle);
                 // SAFETY: lib_handle is a valid library handle from a prior load.
                 let result = unsafe { real_unload(entry.lib_handle as *mut c_void) };
-                crate::images::release(entry.lib_handle);
                 report_unload(format_args!("the sub-module of kernel {name}"), result);
             }
         }
@@ -1433,9 +1508,9 @@ pub fn unload(library: usize) -> Option<CUresult> {
 
     // Unload the materialized module.
     if let Some(mat_handle) = lazy_lib.materialized_handle {
+        let _kept = crate::images::release(mat_handle);
         // SAFETY: mat_handle is a valid library handle from materialization.
         let result = unsafe { real_unload(mat_handle as *mut c_void) };
-        crate::images::release(mat_handle);
         report_unload(format_args!("the whole module"), result);
     }
 

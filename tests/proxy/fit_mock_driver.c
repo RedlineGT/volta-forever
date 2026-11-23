@@ -13,7 +13,10 @@
 // refused too.
 //
 // Attributes are kept by handle, the name queries on enumerated kernels are counted, and a load
-// or a setting can be paused from another thread.
+// or a setting can be paused from another thread. The next load can be given a handle chosen by
+// the test (fit_mock_next_module), as the driver gives the handle of a module that is gone to
+// another. There is one context, current in every thread (fit_mock_context), which
+// cuCtxDestroy destroys only in name.
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -38,11 +41,20 @@ _Atomic int fit_mock_pause = 0;
 _Atomic int fit_mock_started = 0;
 _Atomic int fit_mock_release = 0;
 
+// The handle that the next load gives, when it is not 0.
+uintptr_t fit_mock_next_module = 0;
+#define fit_mock_context ((void *)0x7000)
+
 int cuInit(unsigned flags) { (void)flags; return 0; }
+int cuCtxGetCurrent(void **c) { *c = fit_mock_context; return 0; }
+int cuCtxDestroy_v2(void *c) { (void)c; return 0; }
+int cuCtxDestroy(void *c) { (void)c; return 0; }
 int cuModuleLoadData(void **m, const void *p) {
     (void)p;
-    *m = (void*)(uintptr_t)(++fit_mock_loads);
-    if (fit_mock_loads == 2 && fit_mock_pause) {
+    int n = ++fit_mock_loads;
+    *m = (void*)(fit_mock_next_module ? fit_mock_next_module : (uintptr_t)n);
+    fit_mock_next_module = 0;
+    if (n == 2 && fit_mock_pause) {
         fit_mock_started = 1;
         while (!fit_mock_release) usleep(1000);
     }
@@ -56,9 +68,11 @@ int cuLibraryLoadData(void **m, const void *p, int *a, void **b, unsigned c, int
     (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
     return cuModuleLoadData(m, p);
 }
+static void hold_second(uintptr_t handle, int call);
 int cuModuleGetFunction(void **f, void *m, const char *n) {
     (void)n;
     *f = (void*)((uintptr_t)m * 256 + 1);
+    hold_second((uintptr_t)m * 256, 3);
     return 0;
 }
 int cuLibraryGetKernel(void **f, void *m, const char *n) {
@@ -98,7 +112,8 @@ int cuModuleGetSurfRef(void **t, void *m, const char *n) {
 }
 
 // A call on a second image (an even module) that can be held: a setting when fit_mock_hold_second
-// is 1, a launch when it is 2. The first such call takes effect, then does not return until
+// is 1, a launch when it is 2, a lookup of a function when it is 3. The first such call takes
+// effect, then does not return until
 // fit_mock_second_release is set. An unload of that module meanwhile is counted (the driver may
 // then give its handle to another function, which the call would reach).
 _Atomic int fit_mock_hold_second = 0;

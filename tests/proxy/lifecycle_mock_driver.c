@@ -10,11 +10,29 @@
 // its own (cuFuncGetModule: function / 16; cuKernelGetLibrary: kernel / 16). A launch of a function of the first module
 // loaded after a context was made is refused with 701 (out of resources), as the driver refuses a
 // block that takes more registers than there are; a function of a later module is launched.
+//
+// What another thread may do once a context is destroyed (by cuCtxDestroy or the last release of a
+// primary context), before the call returns, is done there (`while_destroyed`, once); the next
+// context made, or the next module loaded, can be given a handle chosen by the test
+// (`next_context`, `next_module`), as the driver gives the handle of one that is gone.
 #include <stdint.h>
 
 static uintptr_t new_handle(void) {
     static uintptr_t next = 16;
     return __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED);
+}
+
+void (*while_destroyed)(void);
+uintptr_t next_context, next_module;
+static uintptr_t chosen(uintptr_t *next) {
+    uintptr_t handle = *next;
+    *next = 0;
+    return handle ? handle : new_handle();
+}
+static void destroyed(void) {
+    void (*meanwhile)(void) = while_destroyed;
+    while_destroyed = 0;
+    if (meanwhile) meanwhile();
 }
 
 int cuInit(unsigned flags) { (void)flags; return 0; }
@@ -27,13 +45,14 @@ static char first_in_context[4096];
 
 int cuCtxCreate_v2(void **context, unsigned flags, int device) {
     (void)flags; (void)device;
-    *context = (void *)new_handle();
+    *context = (void *)chosen(&next_context);
     current = (uintptr_t)*context;
     loads_in_context = 0;
     return 0;
 }
 int cuCtxDestroy_v2(void *context) {
     if (current == (uintptr_t)context) current = 0;
+    destroyed();
     return 0;
 }
 int cuCtxDestroy(void *context) { return cuCtxDestroy_v2(context); }
@@ -47,7 +66,10 @@ int cuDevicePrimaryCtxRetain(void **context, int device) {
 }
 int cuDevicePrimaryCtxRelease_v2(int device) {
     if (!retains[device]) return 201;
-    if (!--retains[device]) active[device] = 0;
+    if (!--retains[device]) {
+        active[device] = 0;
+        destroyed();
+    }
     return 0;
 }
 int cuDevicePrimaryCtxRelease(int device) { return cuDevicePrimaryCtxRelease_v2(device); }
@@ -61,7 +83,7 @@ int cuDevicePrimaryCtxGetState(int device, unsigned *flags, int *is_active) {
 
 int cuModuleLoadData(void **module, const void *image) {
     (void)image;
-    *module = (void *)new_handle();
+    *module = (void *)chosen(&next_module);
     first_in_context[(uintptr_t)*module % 4096] = loads_in_context++ == 0;
     return 0;
 }

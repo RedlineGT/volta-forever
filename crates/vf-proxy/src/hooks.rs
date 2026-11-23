@@ -19,6 +19,9 @@ const JIT_ERROR_LOG_BUFFER_SIZE: c_int = 6;
 /// `CUdevice_attribute` values of the compute capability.
 const ATTRIBUTE_CAPABILITY_MAJOR: c_int = 75;
 const ATTRIBUTE_CAPABILITY_MINOR: c_int = 76;
+/// `CUjit_option` value of the architecture of a link's output (`CUjit_target`: the SM number,
+/// with a flag above for the architecture-specific and family variants).
+const JIT_TARGET: c_int = 9;
 /// `CUjitInputType` values.
 const INPUT_CUBIN: c_int = 0;
 const INPUT_PTX: c_int = 1;
@@ -155,9 +158,17 @@ unsafe extern "C" fn device_capability(major: *mut c_int, minor: *mut c_int, dev
 const FUNCTION_BINARY_VERSION: c_int = 6;
 
 /// After NVIDIA's answer `result` to a question about a function: the architecture of its machine
-/// code may need to match the variant selected by the caller.
-unsafe fn binary_version(value: *mut c_int, attribute: c_int, result: CUresult, caller: usize) {
-    if result != CUDA_SUCCESS || value.is_null() || attribute != FUNCTION_BINARY_VERSION {
+/// code may need to match the variant selected by the caller, when the code is on this GPU
+/// (`on_this_gpu`): a later card in the same machine runs the program's own code, of which the
+/// driver tells the truth.
+unsafe fn binary_version(
+    value: *mut c_int,
+    attribute: c_int,
+    result: CUresult,
+    caller: usize,
+    on_this_gpu: impl FnOnce() -> bool,
+) {
+    if result != CUDA_SUCCESS || value.is_null() || attribute != FUNCTION_BINARY_VERSION || !on_this_gpu() {
         return;
     }
     if let Some((major, minor)) = callers::binary_capability(caller) {
@@ -182,7 +193,8 @@ unsafe extern "C" fn function_attribute(
 ) -> CUresult {
     let real = real!(cuFuncGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void) -> CUresult);
     let result = unsafe { real(value, attribute, function) };
-    unsafe { binary_version(value, attribute, result, caller) };
+    // (A function is asked about in its context, as a function is launched there.)
+    unsafe { binary_version(value, attribute, result, caller, context_needs_adapting) };
     result
 }
 
@@ -206,11 +218,59 @@ unsafe extern "C" fn kernel_attribute(
 ) -> CUresult {
     let real = real!(cuKernelGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void, c_int) -> CUresult);
     let result = unsafe { real(value, attribute, kernel, device) };
-    unsafe { binary_version(value, attribute, result, caller) };
+    unsafe { binary_version(value, attribute, result, caller, || device_needs_adapting(device)) };
     result
 }
 
 // ---- code loading ------------------------------------------------------------------------------------
+//
+// The code taken from an image follows what the caller of the load is told (`callers::told_sm`):
+// the exported functions pass on the address they will return to, as one more argument where a
+// register is left for it, else noted for the thread (`noting_caller`).
+
+thread_local! {
+    /// The address that the load this thread is making returns to (`noting_caller`).
+    static LOAD_CALLER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+extern "C" fn note_caller(address: usize) {
+    LOAD_CALLER.set(address);
+}
+
+/// The address that `noting_caller` noted for the load this thread is making.
+fn noted_caller() -> usize {
+    LOAD_CALLER.get()
+}
+
+/// The body of an exported function whose arguments leave no register for the address it will
+/// return to: that address is noted for the thread (`noted_caller`) by a call that keeps the
+/// arguments where they are, in their registers and on the stack, then `$body` is jumped to.
+macro_rules! noting_caller {
+    ($body:path) => {
+        core::arch::naked_asm!(
+            "push rdi",
+            "push rsi",
+            "push rdx",
+            "push rcx",
+            "push r8",
+            "push r9",
+            // The return address is above the six registers; the stack is aligned for the call.
+            "mov rdi, [rsp + 48]",
+            "sub rsp, 8",
+            "call {note}",
+            "add rsp, 8",
+            "pop r9",
+            "pop r8",
+            "pop rcx",
+            "pop rdx",
+            "pop rsi",
+            "pop rdi",
+            "jmp {body}",
+            note = sym note_caller,
+            body = sym $body,
+        )
+    };
+}
 
 type ModuleLoadEx =
     unsafe extern "C" fn(*mut *mut c_void, *const c_void, c_uint, *mut c_int, *mut *mut c_void) -> CUresult;
@@ -329,10 +389,17 @@ unsafe fn load_adapted(
 /// the entries of the other cards.)
 fn context_needs_adapting() -> bool {
     let device = real!(cuCtxGetDevice: unsafe extern "C" fn(*mut c_int) -> CUresult);
+    let mut ordinal = -1;
+    let known = unsafe { device(&mut ordinal) } == CUDA_SUCCESS;
+    !known || device_needs_adapting(ordinal)
+}
+
+/// Whether `device` is of the architecture this library adapts code for, or the driver does not
+/// say what it is.
+fn device_needs_adapting(device: c_int) -> bool {
     let capability = real!(cuDeviceComputeCapability: unsafe extern "C" fn(*mut c_int, *mut c_int, c_int) -> CUresult);
-    let (mut ordinal, mut major, mut minor) = (-1, -1, -1);
-    let known =
-        unsafe { device(&mut ordinal) == CUDA_SUCCESS && capability(&mut major, &mut minor, ordinal) == CUDA_SUCCESS };
+    let (mut major, mut minor) = (-1, -1);
+    let known = unsafe { capability(&mut major, &mut minor, device) } == CUDA_SUCCESS;
     !known || (major * 10 + minor) as u32 == config().policy.device_sm
 }
 
@@ -381,8 +448,14 @@ unsafe fn in_context(result: CUresult, module: *mut *mut c_void) -> CUresult {
     result
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *const c_void) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym module_load_data)
+}
+
+unsafe extern "C" fn module_load_data(module: *mut *mut c_void, image: *const c_void, caller: usize) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let real = real!(cuModuleLoadData: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
     let result = unsafe {
         load(
@@ -396,6 +469,7 @@ pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *cons
     unsafe { in_context(result, module) }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadDataEx(
     module: *mut *mut c_void,
@@ -404,6 +478,18 @@ pub unsafe extern "C" fn cuModuleLoadDataEx(
     options: *mut c_int,
     values: *mut *mut c_void,
 ) -> CUresult {
+    core::arch::naked_asm!("mov r9, [rsp]", "jmp {body}", body = sym module_load_data_ex)
+}
+
+unsafe extern "C" fn module_load_data_ex(
+    module: *mut *mut c_void,
+    image: *const c_void,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    caller: usize,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let real = real!(cuModuleLoadDataEx: ModuleLoadEx);
     let result = unsafe {
         load(
@@ -417,8 +503,14 @@ pub unsafe extern "C" fn cuModuleLoadDataEx(
     unsafe { in_context(result, module) }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadFatBinary(module: *mut *mut c_void, image: *const c_void) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym module_load_fat_binary)
+}
+
+unsafe extern "C" fn module_load_fat_binary(module: *mut *mut c_void, image: *const c_void, caller: usize) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let real = real!(cuModuleLoadFatBinary: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
     let result = unsafe {
         load(
@@ -432,8 +524,14 @@ pub unsafe extern "C" fn cuModuleLoadFatBinary(module: *mut *mut c_void, image: 
     unsafe { in_context(result, module) }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoad(module: *mut *mut c_void, path: *const c_char) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym module_load)
+}
+
+unsafe extern "C" fn module_load(module: *mut *mut c_void, path: *const c_char, caller: usize) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(caller));
     let result = unsafe { load_file(module, path) };
     unsafe { in_context(result, module) }
 }
@@ -479,8 +577,11 @@ unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
 
 /// A lookup of kernel `name` in the module or library `handle`: refused when the kernel cannot run on
 /// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced.
-/// A refusal leaves NULL in `kernel_out`, as NVIDIA's driver does for a name it does not have: a
-/// program that ignores the error then launches nothing, not what its variable held before.
+/// A refusal, and any lookup that fails, leaves NULL in `kernel_out`, as NVIDIA's driver does for a
+/// name it does not have: a program that ignores the error then launches nothing, not what its
+/// variable held before. (A lookup in a deferred library can fail where the driver is not asked: a
+/// name that the library does not have, a kernel that the compiler refuses while the whole module
+/// is loaded for it.)
 /// When `kernel_out` is not null and the lookup succeeds, the profiler records the kernel handle ->
 /// name mapping (since `cuFuncGetName` does not work for lazily compiled sub-modules).
 ///
@@ -504,6 +605,9 @@ unsafe fn lookup(
         return CUDA_ERROR_INVALID_PTX;
     }
     let result = find();
+    if result != CUDA_SUCCESS && !kernel_out.is_null() {
+        unsafe { *kernel_out = std::ptr::null_mut() };
+    }
     if result == CUDA_SUCCESS {
         kernels::given(handle, &name);
         // Record the kernel handle -> name mapping for the profiler: cuFuncGetName does not
@@ -538,9 +642,14 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     let real = real!(cuModuleUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    let result = unsafe { real(module) };
+    // What is kept for the module is forgotten before the driver unloads it: from then on, the
+    // driver may give its handle to a load in another thread, whose records are not to be dropped.
     fit::unload(module as usize);
-    images::release(module as usize);
+    let kept = images::release(module as usize);
+    let result = unsafe { real(module) };
+    if result != CUDA_SUCCESS {
+        images::unload_failed(module as usize, kept);
+    }
     result
 }
 
@@ -664,6 +773,7 @@ type LibraryLoad<Source> = unsafe extern "C" fn(
     c_uint,
 ) -> CUresult;
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryLoadData(
     library: *mut *mut c_void,
@@ -675,6 +785,21 @@ pub unsafe extern "C" fn cuLibraryLoadData(
     library_values: *mut *mut c_void,
     library_count: c_uint,
 ) -> CUresult {
+    noting_caller!(library_load_data)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn library_load_data(
+    library: *mut *mut c_void,
+    code: *const c_void,
+    jit_options: *mut c_int,
+    jit_values: *mut *mut c_void,
+    jit_count: c_uint,
+    library_options: *mut c_int,
+    library_values: *mut *mut c_void,
+    library_count: c_uint,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLibraryLoadData: LibraryLoad<*const c_void>);
     let call = |code: *const c_void| unsafe {
         real(
@@ -877,6 +1002,7 @@ unsafe fn load_library(
     Ok(())
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryLoadFromFile(
     library: *mut *mut c_void,
@@ -888,6 +1014,21 @@ pub unsafe extern "C" fn cuLibraryLoadFromFile(
     library_values: *mut *mut c_void,
     library_count: c_uint,
 ) -> CUresult {
+    noting_caller!(library_load_from_file)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn library_load_from_file(
+    library: *mut *mut c_void,
+    path: *const c_char,
+    jit_options: *mut c_int,
+    jit_values: *mut *mut c_void,
+    jit_count: c_uint,
+    library_options: *mut c_int,
+    library_values: *mut *mut c_void,
+    library_count: c_uint,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLibraryLoadFromFile: LibraryLoad<*const c_char>);
     let from_file = || unsafe {
         real(
@@ -947,15 +1088,21 @@ pub unsafe extern "C" fn cuLibraryLoadFromFile(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
     // Check if this is a lazy library: unload its sub-modules and stand-in.
-    if let Some(result) = lazy::unload(library as usize) {
+    // (Forgotten before the driver's unload: see `cuModuleUnload`.)
+    if lazy::is_lazy(library as usize) {
         fit::unload(library as usize);
-        images::release(library as usize);
-        return result;
+        let _kept = images::release(library as usize);
+        if let Some(result) = lazy::unload(library as usize) {
+            return result;
+        }
     }
     let real = real!(cuLibraryUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    let result = unsafe { real(library) };
     fit::unload(library as usize);
-    images::release(library as usize);
+    let kept = images::release(library as usize);
+    let result = unsafe { real(library) };
+    if result != CUDA_SUCCESS {
+        images::unload_failed(library as usize, kept);
+    }
     result
 }
 
@@ -1217,9 +1364,10 @@ pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *
 unsafe fn share_kernels(result: CUresult, module: *mut *mut c_void, library: usize) {
     if result == CUDA_SUCCESS && !module.is_null() {
         let module_handle = unsafe { *module } as usize;
+        // (The context's record first: see `contexts::destroyed`.)
+        contexts::loaded(module_handle);
         kernels::share(module_handle, library);
         fit::share_module(module_handle, library);
-        contexts::loaded(module_handle);
     }
 }
 
@@ -1337,8 +1485,9 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
     let get_module: GetHandle = unsafe { std::mem::transmute(REALS[idx::cuFuncGetModule].load(Relaxed)) };
     let mut module = std::ptr::null_mut();
     if unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS {
-        kernels::share(module as usize, owner);
+        // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module as usize);
+        kernels::share(module as usize, owner);
     }
     result
 }
@@ -1383,10 +1532,17 @@ unsafe fn link_add_data(
     size: usize,
     call: impl Fn(c_int, *mut c_void, usize) -> CUresult,
 ) -> CUresult {
+    // A link whose options name the architecture of its output links for that one, whatever the
+    // device of the current context.
+    let for_this_gpu = match images::link_target(state as usize) {
+        Some(sm) => sm == config().policy.device_sm,
+        None => context_needs_adapting(),
+    };
     let replacement = match input {
-        _ if !context_needs_adapting() => None,
+        _ if !for_this_gpu => None,
         INPUT_CUBIN | INPUT_PTX => unsafe { images::adapt(who, data, Some(size)) },
-        INPUT_FATBINARY => unsafe { images::adapt(who, data, None) },
+        // (Read within the size given, when there is one.)
+        INPUT_FATBINARY => unsafe { images::adapt(who, data, Some(size).filter(|&size| size > 0)) },
         _ => None,
     };
     let Some(replacement) = replacement else {
@@ -1417,6 +1573,7 @@ unsafe fn link_add_data(
     call(input, data, size)
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkAddData(
     state: *mut c_void,
@@ -1428,6 +1585,21 @@ pub unsafe extern "C" fn cuLinkAddData(
     options: *mut c_int,
     values: *mut *mut c_void,
 ) -> CUresult {
+    noting_caller!(link_add_data_v1)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn link_add_data_v1(
+    state: *mut c_void,
+    input: c_int,
+    data: *mut c_void,
+    size: usize,
+    name: *const c_char,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLinkAddData: LinkAddData);
     unsafe {
         link_add_data("cuLinkAddData", state, input, data, size, |input, data, size| {
@@ -1436,6 +1608,7 @@ pub unsafe extern "C" fn cuLinkAddData(
     }
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkAddData_v2(
     state: *mut c_void,
@@ -1447,6 +1620,21 @@ pub unsafe extern "C" fn cuLinkAddData_v2(
     options: *mut c_int,
     values: *mut *mut c_void,
 ) -> CUresult {
+    noting_caller!(link_add_data_v2)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn link_add_data_v2(
+    state: *mut c_void,
+    input: c_int,
+    data: *mut c_void,
+    size: usize,
+    name: *const c_char,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+) -> CUresult {
+    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
     let real = real!(cuLinkAddData_v2: LinkAddData);
     unsafe {
         link_add_data("cuLinkAddData", state, input, data, size, |input, data, size| {
@@ -1455,11 +1643,61 @@ pub unsafe extern "C" fn cuLinkAddData_v2(
     }
 }
 
+type LinkCreate = unsafe extern "C" fn(c_uint, *mut c_int, *mut *mut c_void, *mut *mut c_void) -> CUresult;
+
+/// `cuLinkCreate` through `real`, and the architecture that its options name for the output
+/// (`CU_JIT_TARGET`), recorded for its inputs (`link_add_data`).
+///
+/// # Safety
+/// The arguments of the program's `cuLinkCreate`.
+unsafe fn link_create(
+    real: LinkCreate,
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    state: *mut *mut c_void,
+) -> CUresult {
+    let result = unsafe { real(count, options, values, state) };
+    if result == CUDA_SUCCESS && !state.is_null() {
+        let target = (!options.is_null() && !values.is_null())
+            .then(|| (0..count as usize).find(|&i| unsafe { *options.add(i) } == JIT_TARGET))
+            .flatten()
+            .map(|i| (unsafe { *values.add(i) } as usize & 0xffff) as u32);
+        images::link_created(unsafe { *state } as usize, target);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLinkCreate(
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    state: *mut *mut c_void,
+) -> CUresult {
+    let real = real!(cuLinkCreate: LinkCreate);
+    unsafe { link_create(real, count, options, values, state) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLinkCreate_v2(
+    count: c_uint,
+    options: *mut c_int,
+    values: *mut *mut c_void,
+    state: *mut *mut c_void,
+) -> CUresult {
+    let real = real!(cuLinkCreate_v2: LinkCreate);
+    unsafe { link_create(real, count, options, values, state) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_void, size: *mut usize) -> CUresult {
     let real = real!(cuLinkComplete: unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> CUresult);
+    // The program need not ask for the size (`sizeOut` may be NULL): the image is known by it.
+    let mut own = 0usize;
+    let size = if size.is_null() { &raw mut own } else { size };
     let result = unsafe { real(state, image, size) };
-    if result == CUDA_SUCCESS && !image.is_null() && !size.is_null() {
+    if result == CUDA_SUCCESS && !image.is_null() {
         unsafe { images::link_output(state as usize, *image, *size) };
     }
     result
@@ -1468,9 +1706,10 @@ pub unsafe extern "C" fn cuLinkComplete(state: *mut c_void, image: *mut *mut c_v
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLinkDestroy(state: *mut c_void) -> CUresult {
     let real = real!(cuLinkDestroy: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    let result = unsafe { real(state) };
+    // Before the driver's: once it returns, the driver may give the state to a link in another
+    // thread, whose inputs are recorded under it.
     images::link_destroyed(state as usize);
-    result
+    unsafe { real(state) }
 }
 
 // ---- failed launches (diagnostics) -------------------------------------------------------------------
@@ -1911,12 +2150,17 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
 type ContextDestroy = unsafe extern "C" fn(*mut c_void) -> CUresult;
 type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
 
+// What is known of the modules of a context is taken before the driver's call (`contexts::of`):
+// once it returns, another thread can be given a context at the same address, and load modules
+// in it.
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
     let real = real!(cuCtxDestroy: ContextDestroy);
+    let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
-        contexts::destroyed(context as usize);
+        contexts::destroyed(modules);
     }
     result
 }
@@ -1924,9 +2168,10 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     let real = real!(cuCtxDestroy_v2: ContextDestroy);
+    let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
-        contexts::destroyed(context as usize);
+        contexts::destroyed(modules);
     }
     result
 }
@@ -1945,9 +2190,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, dev
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_released(device);
+        contexts::primary_released(device, modules);
     }
     result
 }
@@ -1955,9 +2201,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_released(device);
+        contexts::primary_released(device, modules);
     }
     result
 }
@@ -1965,9 +2212,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_reset(device);
+        contexts::primary_reset(modules);
     }
     result
 }
@@ -1975,9 +2223,10 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
+    let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
-        contexts::primary_reset(device);
+        contexts::primary_reset(modules);
     }
     result
 }

@@ -10,3 +10,6 @@ publish.workspace = true
 vf-fatbin.workspace = true
 vf-ptx.workspace = true
 vf-sass.workspace = true
+
+[dev-dependencies]
+lz4_flex.workspace = true
