@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 unsigned loads, unloads, preserved;
 uintptr_t next_handle;
@@ -17,9 +18,12 @@ static void *loaded(void) {
     return (void *)handle;
 }
 
+/* The compiler takes this long (milliseconds) to refuse. */
+unsigned refusal_delay;
 static int compile(const char *text, int *jo, void **jv, unsigned jc) {
     const char *hit = strstr(text, "12345");
     if (!hit) return 0;
+    if (refusal_delay) usleep(refusal_delay * 1000);
     int line = 1;
     for (const char *p = text; p < hit; ++p) line += *p == '\n';
     char *buffer = 0;

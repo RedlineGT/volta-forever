@@ -1154,6 +1154,9 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
                 libs = condvar.wait(libs).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
+            // The compilation of the whole module, for this lookup or another made meanwhile
+            // (this one may have waited for it), can have shown that the kernel cannot be given.
+            None if crate::kernels::refused(library, &name_str) => return crate::images::CUDA_ERROR_INVALID_PTX,
             None => break,
         }
     }

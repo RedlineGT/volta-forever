@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 
 def check(proxy, mock):
@@ -100,6 +102,25 @@ def check(proxy, mock):
         kernel = c.c_void_p(0xDEADBEEF)
         assert api.cuLibraryGetKernel(c.byref(kernel), library, name) == error, name
         assert (kernel.value is None) == (error != 0), (name, kernel.value)
+    assert api.cuLibraryUnload(library) == 0
+    # Two threads ask for that kernel at once: the second waits while the first compiles it alone,
+    # then the whole module, and is refused too, not given the kernel of the whole module.
+    assert api.cuLibraryLoadData(c.byref(library), refused, None, None, 0, None, None, 0) == 0
+    c.c_uint.in_dll(backend, "refusal_delay").value = 300
+    answers = []
+
+    def ask():
+        kernel = c.c_void_p(0xDEADBEEF)
+        answers.append((api.cuLibraryGetKernel(c.byref(kernel), library, b"refused"), kernel.value))
+
+    threads = [threading.Thread(target=ask) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+        time.sleep(0.1)
+    for thread in threads:
+        thread.join()
+    c.c_uint.in_dll(backend, "refusal_delay").value = 0
+    assert answers == [(218, None), (218, None)], answers
     assert api.cuLibraryUnload(library) == 0
     assert c.c_uint.in_dll(backend, "loads").value == c.c_uint.in_dll(backend, "unloads").value
 
