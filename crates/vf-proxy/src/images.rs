@@ -387,47 +387,82 @@ pub fn link_destroyed(state: usize) {
     links.targets.remove(&state);
 }
 
-/// The cubin at `bytes`, when a link made it from inputs in which kernels trap or run emulated
-/// instructions: the same bytes, to load with what is known of those kernels.
-///
-/// # Safety
-/// As for `adapt`, with `bytes` at a cubin.
-unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
+/// The kernels that the note of a cubin names, which the nvJitLink of this project made from code in
+/// which they trap (`vf_fatbin::cubin_with_refused`).
+fn marked(cubin: &[u8]) -> Vec<Refused> {
+    fatbin::cubin_refused(cubin)
+        .into_iter()
+        .map(|r| Refused {
+            kernel: r.kernel,
+            function: r.function,
+            reason: r.reason,
+        })
+        .collect()
+}
+
+/// What is known of the kernels of `cubin`, of `length` bytes: what its note names
+/// (`marked`), and what was found in the inputs of the driver's link that made it, if one did.
+fn known_of(cubin: &[u8], length: usize) -> Found {
+    let mut found = Found {
+        refused: marked(cubin),
+        emulated: Vec::new(),
+    };
     let links = links();
-    if links.outputs.is_empty() {
-        return None;
+    if !links.outputs.is_empty()
+        && let Some(known) = links.outputs.get(&(length, digest(cubin)))
+    {
+        found.refused.extend(known.refused.iter().cloned());
+        found.emulated.extend(known.emulated.iter().cloned());
     }
-    let length = unsafe { cubin_extent(bytes, len) }?;
-    let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
-    let found = links.outputs.get(&(length, digest(cubin)))?.clone();
-    drop(links);
+    found
+}
+
+/// Say where the kernels that cannot run in a cubin that was loaded as it is were found.
+fn say_known(who: &str, what: &str, found: &Found) {
     if let Some(first) = found.refused.first() {
         log::info(format_args!(
-            "{who}: cubin made by the driver's linker, in which {} kernels cannot run on this GPU (the first is {}: \
-             {}); they are refused if the program asks for them",
+            "{who}: {what}, in which {} kernels cannot run on this GPU (the first is {}: {}); they are refused if \
+             the program asks for them",
             found.refused.len(),
             first.kernel,
             first.reason
         ));
     }
+}
+
+/// The cubin at `bytes`, when kernels of it trap or run emulated instructions, as its note says or
+/// as the inputs of the driver's link that made it said: the same bytes, to load with what is known
+/// of those kernels.
+///
+/// # Safety
+/// As for `adapt`, with `bytes` at a cubin.
+unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
+    let length = unsafe { cubin_extent(bytes, len) }?;
+    let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
+    let found = known_of(cubin, length);
+    if found.refused.is_empty() && found.emulated.is_empty() {
+        return None;
+    }
+    say_known(who, "cubin made by a linker", &found);
     let mut replacement = Replacement::new(cubin.to_vec(), None);
     replacement.refused = found.refused;
     replacement.emulated = found.emulated;
     Some(replacement)
 }
 
-/// What is known of the image that a link made, when the machine code of `fat` that the driver
-/// takes on this GPU is that image: a program can put it in a fat binary of its own.
+/// What is known of the machine code of `fat` that the driver takes on this GPU (`known_of`): a
+/// program can put the image that a link made in a fat binary of its own. An entry stored
+/// compressed is read only when this process made links that have something to say: to read the
+/// note of every compressed entry, the code of every library loaded (hundreds of megabytes for
+/// cuBLAS) would be decompressed.
 fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
-    if links().outputs.is_empty() {
-        return None;
-    }
     let policy = &config().policy;
+    let outputs = !links().outputs.is_empty();
     let mut found: Option<Found> = None;
     for entry in fat
         .entries
         .iter()
-        .filter(|e| e.kind() == fatbin::KIND_ELF && policy.usable(e))
+        .filter(|e| e.kind() == fatbin::KIND_ELF && policy.usable(e) && (outputs || !e.is_compressed()))
     {
         let Ok(cubin) = entry.payload() else {
             continue;
@@ -435,11 +470,11 @@ fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
         let Some(length) = fatbin::cubin_len(&cubin).filter(|&length| length <= cubin.len()) else {
             continue;
         };
-        let key = (length, digest(&cubin[..length]));
-        if let Some(known) = links().outputs.get(&key) {
+        let known = known_of(&cubin[..length], length);
+        if !known.refused.is_empty() || !known.emulated.is_empty() {
             let found = found.get_or_insert_with(Found::default);
-            found.refused.extend(known.refused.iter().cloned());
-            found.emulated.extend(known.emulated.iter().cloned());
+            found.refused.extend(known.refused);
+            found.emulated.extend(known.emulated);
         }
     }
     found
@@ -680,15 +715,7 @@ fn adapt_fatbin(
     });
     match result {
         Ok((original, _, Some(found))) => {
-            if let Some(first) = found.refused.first() {
-                log::info(format_args!(
-                    "{who}: fat binary with a cubin made by the driver's linker, in which {} kernels cannot run on \
-                     this GPU (the first is {}: {}); they are refused if the program asks for them",
-                    found.refused.len(),
-                    first.kernel,
-                    first.reason
-                ));
-            }
+            say_known(who, "fat binary with a cubin made by a linker", &found);
             let mut replacement = Replacement::new(original.to_vec(), wrapper);
             replacement.refused = found.refused;
             replacement.emulated = found.emulated;

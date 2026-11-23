@@ -1,8 +1,11 @@
-"""CPU regression for kernels refused through the driver's linker.
+"""CPU regression for kernels refused through the driver's linker, and in the cubins of the layer's
+nvJitLink.
 
 A kernel that cannot run on the GPU, in an input of cuLinkAddData, is refused when the program asks
 for it in the image that cuLinkComplete made: as the program got it, and as a copy loaded after the
-link is gone. A stand-in driver (link_mock_driver.c) links into a fixed cubin and has every kernel.
+link is gone. A kernel that a cubin's note names (the layer's nvJitLink marks so a kernel that traps
+in the cubin it makes) is refused wherever the cubin is loaded. A stand-in driver
+(link_mock_driver.c) links into a fixed cubin and has every kernel.
 
 Run with python3 tests/proxy/link_refusals.py path/to/libcuda.so.1.
 """
@@ -15,11 +18,15 @@ import subprocess
 import sys
 import tempfile
 
+import refusal_note
+
 PTX = (b".version 8.8\n.target sm_75\n.address_size 64\n"
        b".visible .entry bad()\n{\n barrier.cluster.arrive;\n ret;\n}\n"
        b".visible .entry good()\n{\n ret;\n}\n")
+INPUT_CUBIN = 0
 INPUT_PTX = 1
 INPUT_FATBINARY = 2
+WRAPPER_MAGIC = 0x466243B1
 CUBIN = Path(__file__).resolve().parents[1] / "kernels" / "k_basic.128.sm70.cubin"
 
 
@@ -33,6 +40,92 @@ def load(api, image):
     module = c.c_void_p()
     assert api.cuModuleLoadData(c.byref(module), image) == 0
     return module
+
+
+def fat_binary(cubin):
+    """`cubin` as the sm_70 entry, stored as it is, of a fat binary (the header of the sm_70 entry of
+    a fat binary of the repository's, with this size)."""
+    native = (Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data/elf70-elf75-ptx70-lz4.fatbin")
+    header = bytearray(native.read_bytes()[16:16 + 64])
+    stored = cubin + bytes(-len(cubin) % 8)
+    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<Q", header, 0x28, struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000)
+    struct.pack_into("<Q", header, 0x38, 0)
+    assert struct.unpack_from("<HI", header, 0)[0] == 2 and struct.unpack_from("<I", header, 0x1C)[0] == 70
+    body = bytes(header) + stored
+    return struct.pack("<IHHQ", 0xBA55ED50, 1, 16, len(body)) + body
+
+
+class Wrapper(c.Structure):
+    """What the CUDA runtime gives the driver for a fat binary: version 1, or 2 with the relocatable
+    fat binaries to link if the first has nothing for the GPU (a list that ends with NULL)."""
+    _fields_ = [("magic", c.c_uint), ("version", c.c_uint), ("data", c.c_void_p), ("extra", c.c_void_p)]
+
+
+def wrappers(fat):
+    """`fat` behind a wrapper of each version, with what they point to."""
+    data = c.create_string_buffer(fat, len(fat))
+    members = (c.c_void_p * 1)(None)
+    made = []
+    for version, extra in ((1, None),):
+        made.append(Wrapper(WRAPPER_MAGIC, version, c.addressof(data), extra))
+    return made, (data, members)
+
+
+def marked_everywhere(api, tmp, marked):
+    """Each way of loading `marked` refuses the kernel `bad` that its note names, and gives `good`."""
+    names = {name for name, _, _ in refusal_note.read(marked)}
+    assert names == {"bad"}, names
+    path = Path(tmp) / "marked.cubin"
+    path.write_bytes(marked)
+    fat = fat_binary(marked)
+    (Path(tmp) / "marked.fatbin").write_bytes(fat)
+    held, keep = wrappers(fat)
+    wrong = []
+
+    def module_ways():
+        yield "cuModuleLoadData", lambda m: api.cuModuleLoadData(m, marked)
+        yield "cuModuleLoadDataEx", lambda m: api.cuModuleLoadDataEx(m, marked, 0, None, None)
+        yield "cuModuleLoad", lambda m: api.cuModuleLoad(m, os.fsencode(path))
+        yield "cuModuleLoadData of a fat binary", lambda m: api.cuModuleLoadData(m, fat)
+        yield "cuModuleLoad of a fat binary", lambda m: api.cuModuleLoad(m, os.fsencode(Path(tmp) / "marked.fatbin"))
+        for wrapper in held:
+            yield f"cuModuleLoadFatBinary of a wrapper {wrapper.version}", \
+                lambda m, w=wrapper: api.cuModuleLoadFatBinary(m, c.byref(w))
+
+    for way, call in module_ways():
+        module = c.c_void_p()
+        if call(c.byref(module)) != 0:
+            wrong.append(f"{way}: not loaded")
+            continue
+        if lookup(api, module, b"bad") != (218, None) or lookup(api, module, b"good")[0] != 0:
+            wrong.append(f"{way}: bad {lookup(api, module, b'bad')}, good {lookup(api, module, b'good')}")
+        assert api.cuModuleUnload(module) == 0
+    for way, call in (
+        ("cuLibraryLoadData", lambda l: api.cuLibraryLoadData(l, marked, None, None, 0, None, None, 0)),
+        ("cuLibraryLoadFromFile", lambda l: api.cuLibraryLoadFromFile(l, os.fsencode(path), None, None, 0, None, None, 0)),
+        ("cuLibraryLoadData of a fat binary", lambda l: api.cuLibraryLoadData(l, fat, None, None, 0, None, None, 0)),
+    ):
+        library = c.c_void_p()
+        if call(c.byref(library)) != 0:
+            wrong.append(f"{way}: not loaded")
+            continue
+        kernel = c.c_void_p(0xDEADBEEF)
+        bad = (api.cuLibraryGetKernel(c.byref(kernel), library, b"bad"), kernel.value)
+        good = api.cuLibraryGetKernel(c.byref(kernel), library, b"good")
+        if bad != (218, None) or good != 0:
+            wrong.append(f"{way}: bad {bad}, good {good}")
+        assert api.cuLibraryUnload(library) == 0
+    # As an input of the driver's linker: the image it makes refuses the kernel.
+    state, image, size = c.c_void_p(), c.c_void_p(), c.c_size_t()
+    assert api.cuLinkCreate_v2(0, None, None, c.byref(state)) == 0
+    assert api.cuLinkAddData_v2(state, INPUT_CUBIN, marked, len(marked), b"marked.cubin", 0, None, None) == 0
+    assert api.cuLinkComplete(state, c.byref(image), c.byref(size)) == 0
+    if lookup(api, load(api, image), b"bad") != (218, None):
+        wrong.append("a link of it: bad given")
+    assert api.cuLinkDestroy(state) == 0
+    del keep
+    assert not wrong, "\n".join(wrong)
 
 
 def check(proxy, mock):
@@ -137,6 +230,15 @@ def check(proxy, mock):
     assert api.cuModuleUnload(first) == 0
     c.c_void_p.in_dll(backend, "while_freed").value = None
     assert lookup(api, second, b"bad") == (218, None)
+
+    # A cubin that names its kernels that trap is refused them, loaded in any way. (Until
+    # 2026-11-23 they were given to the program.)
+    with tempfile.TemporaryDirectory() as tmp:
+        fifth = bytearray(output)
+        fifth[len(fifth) // 5] ^= 0xff
+        fifth_linked = c.create_string_buffer(bytes(fifth), len(fifth))
+        c.c_void_p.in_dll(backend, "linked").value = c.addressof(fifth_linked)
+        marked_everywhere(api, tmp, refusal_note.mark(output, [("bad", "bad", "an instruction without a Volta sequence")]))
 
     # A fat binary given with its size is read within it, whatever its header says: one cut short,
     # just before memory that cannot be read, is given to the linker as it is.

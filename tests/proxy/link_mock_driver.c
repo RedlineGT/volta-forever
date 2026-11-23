@@ -54,3 +54,22 @@ int cuModuleGetFunction(void **function, void *module, const char *name) {
     *function = (void *)((uintptr_t)module + 1);
     return 0;
 }
+int cuModuleLoadDataEx(void **module, const void *image, unsigned count, int *options, void **values) {
+    return cuModuleLoadData(module, image);
+}
+int cuModuleLoadFatBinary(void **module, const void *image) { return cuModuleLoadData(module, image); }
+int cuModuleLoad(void **module, const char *path) { return cuModuleLoadData(module, path); }
+/* Libraries, with every kernel they are asked for. */
+int cuLibraryLoadData(void **library, const void *image, int *jo, void **jv, unsigned jc, int *lo, void **lv,
+                      unsigned lc) {
+    return cuModuleLoadData(library, image);
+}
+int cuLibraryLoadFromFile(void **library, const char *path, int *jo, void **jv, unsigned jc, int *lo, void **lv,
+                          unsigned lc) {
+    return cuModuleLoadData(library, path);
+}
+int cuLibraryUnload(void *library) { return cuModuleUnload(library); }
+int cuLibraryGetKernel(void **kernel, void *library, const char *name) {
+    *kernel = (void *)((uintptr_t)library + 2);
+    return 0;
+}

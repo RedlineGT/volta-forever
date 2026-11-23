@@ -356,6 +356,23 @@ for lazy in 0 1; do
         different_signature=0 different_return=0 transitive_dispatch=218 >"$log" 2>&1
     check "indirect-lookup-$lazy" "^all lookup results match$"
 done
+# The cubin that the layer's nvJitLink makes from PTX in which one kernel cannot run and one can
+# names the first in a note (.note.vf.refused): NVIDIA's driver loads it and gives both kernels;
+# through the layer, the one that cannot run is refused (218 and NULL), by a module and a library,
+# eager and deferred. (Until 2026-11-23 the layer gave it to the program.)
+log=$out/logs/jitlink-marked.log
+VF_JITLINK_REAL=$T/cuda-12.9.2/lib/libnvJitLink.so.12 python3 "$W/tests/gpu/jitlink-marked.py" \
+    "$proxy/libnvJitLink.so.13" "$out/bin/jitlink-marked.cubin" >"$log" 2>&1
+check jitlink-marked "^marked cubin written$"
+log=$out/logs/jitlink-marked-driver.log
+DRVRUN_LIBCUDA=libcuda.so.1 python3 "$W/tests/gpu/lookup.py" "$out/bin/jitlink-marked.cubin" bad=0 good=0 >"$log" 2>&1
+check jitlink-marked-driver "^all lookup results match$"
+for lazy in 0 1; do
+    log=$out/logs/jitlink-marked-$lazy.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LAZY=$lazy python3 "$W/tests/gpu/lookup.py" \
+        "$out/bin/jitlink-marked.cubin" bad=218 good=0 >"$log" 2>&1
+    check "jitlink-marked-$lazy" "^all lookup results match$"
+done
 
 rt runtime-12.9 rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "own kernel: 0/65536 wrong" "sgemm check: 0 wrong" "half gemm check: 0 wrong"
 rt runtime-13.5-ptx rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "runtime 13050, driver API 13000" "rt_probe.135.sm75ptx is told compute capability 7.5: its code starts there" "device 0: .*sm_75" "PTX for sm_75 retargeted" "own kernel: 0/65536 wrong" "machine code for sm_75 translated" "kernel volta_sgemm_.* is not given to the program: its machine code for sm_75 is not translated" "cublasCreate -> 0 " "cublasSgemm -> 13 "

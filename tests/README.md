@@ -189,14 +189,18 @@ without the launcher's marker and `VF_CAPABILITY`; it needs gcc and objcopy. The
 the capability that NVML gives through the audit library, by `ctypes` (as `pynvml` asks) and
 to a library linked against it; it needs gcc. The fourth checks, with another stand-in, that
 a kernel refused in an input of the driver's linker is refused in the image the link makes,
-and in a copy of it, and that what is known of a link or a module made with a handle that the
-driver gives again, while the destruction or unload of the one before returns, is kept. The fifth
+and in a copy of it, that a kernel that the note of a cubin names (as the layer's nvJitLink
+writes it) is refused wherever the cubin is loaded (each loading function, a file, a fat binary,
+a wrapper, an input of the driver's linker), and that what is known of a link or a module made
+with a handle that the driver gives again, while the destruction or unload of the one before
+returns, is kept. The fifth
 checks that a refused kernel of NCCL makes the layer say once, at the default log level, that
 NCCL's CUDA 12 build is the remedy. The sixth links a native sm_70 device function from both a
 host object and a static library with the CUDA 12.9 toolkit, reads a file whose name is not
 UTF-8 by that name (not the one its text names), and checks that PTX in which every kernel
 traps is refused as text and in a fat binary alike (and Turing machine code whose every kernel
-the translator refuses), and that with one kernel that runs both are linked. The seventh
+the translator refuses), and that with one kernel that runs both are linked, into a cubin that
+names the kernel that traps in a note, which a link of that cubin keeps. The seventh
 checks, with a stand-in for nvJitLink 12.9.2, that a child made by `fork()` while another
 thread of the parent waits in a write of the adapter's log ends when it calls `exit()`; it
 needs a C compiler.

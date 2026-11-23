@@ -112,6 +112,13 @@ can still be refused if any linked object contains a trapped device function.
 The image that the driver's linker makes (`cuLinkComplete`) is known by its bytes, as it is or
 inside a fat binary, for the life of the process only: saved to a file and loaded in another
 process, its kernels that trap are given to the program, and launched, end its context.
+The cubin that the layer's nvJitLink (`libnvJitLink.so.13`) makes from inputs of which some
+kernels cannot run (and others can: when none can, the link is refused) names them in a note
+(`.note.vf.refused`). The layer reads it wherever the cubin is loaded, in any process: as a cubin,
+as an input of the driver's linker, or stored uncompressed in a fat binary. Stored compressed in a
+fat binary, it is not read (that would take decompressing the code of every library at every
+load), except in a process whose links through the driver had kernels to refuse. A cubin loaded without the layer keeps its kernels that trap: the warning that nvJitLink
+writes when it links them is then all there is.
 
 ## Kernels launched from a second translation
 

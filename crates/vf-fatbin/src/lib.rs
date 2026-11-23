@@ -547,6 +547,128 @@ pub fn cubin_has_assembler_helper(bytes: &[u8], index: usize) -> bool {
     cubin_symbols(bytes, sections).is_some_and(|symbols| symbols.assembler_helper(index, sections))
 }
 
+/// A kernel of a cubin that cannot run on the GPU it was made for: it is, or calls, `function`,
+/// which traps, for `reason` (`cubin_with_refused`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedKernel {
+    pub kernel: String,
+    pub function: String,
+    pub reason: String,
+}
+
+/// The section in which a cubin names the kernels that trap, and the name and type of its note.
+pub const REFUSED_SECTION: &str = ".note.vf.refused";
+const REFUSED_NOTE_NAME: &[u8] = b"volta-forever\0";
+const REFUSED_NOTE_TYPE: u32 = 1;
+
+/// `cubin` with a note section (`REFUSED_SECTION`) that names its kernels in `refused`, with
+/// their functions and reasons: a cubin made from code in which they trap, so that whoever loads it
+/// can refuse them (the layer, at the lookup of each). The cubin is kept as it is; the note, a new
+/// table of section names and a new table of sections that has the note in addition are put after
+/// it, and its header names the new tables. `None` when `cubin` is not a complete 64-bit cubin
+/// with a table of section names, or already has the note.
+pub fn cubin_with_refused(cubin: &[u8], refused: &[RefusedKernel]) -> Option<Vec<u8>> {
+    let sections = cubin_sections(cubin)?;
+    if cubin_len(cubin)? > cubin.len() || !cubin_refused(cubin).is_empty() {
+        return None;
+    }
+    let names_index = usize::from(u16_at(cubin, 62));
+    let names = section_data(cubin, sections.get(names_index)?)?;
+    if u32_at(sections.get(names_index)?, 4) != 3 || sections.len() >= 0xff00 {
+        return None;
+    }
+    let mut description = Vec::new();
+    for kernel in refused {
+        for text in [&kernel.kernel, &kernel.function, &kernel.reason] {
+            if text.as_bytes().contains(&0) {
+                return None;
+            }
+            description.extend_from_slice(text.as_bytes());
+            description.push(0);
+        }
+    }
+    let pad = |out: &mut Vec<u8>, to: usize| out.resize(out.len().next_multiple_of(to), 0);
+    let mut out = cubin.to_vec();
+    pad(&mut out, 4);
+    let note = out.len();
+    out.extend_from_slice(&(REFUSED_NOTE_NAME.len() as u32).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(description.len()).ok()?.to_le_bytes());
+    out.extend_from_slice(&REFUSED_NOTE_TYPE.to_le_bytes());
+    out.extend_from_slice(REFUSED_NOTE_NAME);
+    pad(&mut out, 4);
+    out.extend_from_slice(&description);
+    pad(&mut out, 4);
+    let note_size = out.len() - note;
+    let new_names = out.len();
+    out.extend_from_slice(names);
+    let name = u32::try_from(names.len()).ok()?;
+    out.extend_from_slice(REFUSED_SECTION.as_bytes());
+    out.push(0);
+    let new_names_size = out.len() - new_names;
+    pad(&mut out, 8);
+    let table = out.len();
+    for (index, section) in sections.iter().enumerate() {
+        let mut header = *section;
+        if index == names_index {
+            header[24..32].copy_from_slice(&(new_names as u64).to_le_bytes());
+            header[32..40].copy_from_slice(&(new_names_size as u64).to_le_bytes());
+        }
+        out.extend_from_slice(&header);
+    }
+    let mut header = [0u8; 64];
+    header[0..4].copy_from_slice(&name.to_le_bytes());
+    header[4..8].copy_from_slice(&7u32.to_le_bytes()); // SHT_NOTE
+    header[24..32].copy_from_slice(&(note as u64).to_le_bytes());
+    header[32..40].copy_from_slice(&(note_size as u64).to_le_bytes());
+    header[48..56].copy_from_slice(&4u64.to_le_bytes());
+    out.extend_from_slice(&header);
+    out[0x28..0x30].copy_from_slice(&(table as u64).to_le_bytes());
+    out[0x3c..0x3e].copy_from_slice(&(sections.len() as u16 + 1).to_le_bytes());
+    Some(out)
+}
+
+/// The kernels that the note of `cubin_with_refused` names in `cubin`; none when it has no such
+/// note, or when the cubin or the note cannot be read whole.
+pub fn cubin_refused(cubin: &[u8]) -> Vec<RefusedKernel> {
+    let read = || -> Option<Vec<RefusedKernel>> {
+        let sections = cubin_sections(cubin)?;
+        let names = section_data(cubin, sections.get(usize::from(u16_at(cubin, 62)))?)?;
+        let mut found = Vec::new();
+        for section in sections.iter().filter(|s| u32_at(*s, 4) == 7) {
+            if elf_string(names, u32_at(section, 0)) != Some(REFUSED_SECTION) {
+                continue;
+            }
+            let note = section_data(cubin, section)?;
+            let (name_size, size) = (u32_at(note.get(..12)?, 0) as usize, u32_at(note, 4) as usize);
+            let start = 12usize.checked_add(name_size.next_multiple_of(4))?;
+            if note.get(12..12usize.checked_add(name_size)?)? != REFUSED_NOTE_NAME
+                || u32_at(note, 8) != REFUSED_NOTE_TYPE
+            {
+                continue;
+            }
+            let description = note.get(start..start.checked_add(size)?)?;
+            let texts: Vec<&str> = description
+                .strip_suffix(&[0])?
+                .split(|&b| b == 0)
+                .map(std::str::from_utf8)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            for kernel in texts.chunks(3) {
+                let [kernel, function, reason] = kernel else {
+                    return None;
+                };
+                found.push(RefusedKernel {
+                    kernel: kernel.to_string(),
+                    function: function.to_string(),
+                    reason: reason.to_string(),
+                });
+            }
+        }
+        Some(found)
+    };
+    read().unwrap_or_default()
+}
+
 /// Entry points retained by the device linker in a little-endian 64-bit CUDA ELF.
 pub fn cubin_entries(bytes: &[u8]) -> Option<Vec<&str>> {
     let symbols = cubin_symbols(bytes, cubin_sections(bytes)?)?;
@@ -728,6 +850,60 @@ mod tests {
         }
         assert_eq!(cubin_tables_len(b"\x7fELF"), None);
         assert_eq!(cubin_tables_len(&[0; 0x40]), None);
+    }
+
+    #[test]
+    fn a_cubin_names_the_kernels_that_trap_in_a_note() {
+        let fat = parse(ELF70_ELF75_PTX70_LZ4).unwrap();
+        let cubin = fat.entries[0].payload().unwrap();
+        let cubin = &cubin[..cubin_len(&cubin).unwrap()];
+        let refused = [
+            RefusedKernel {
+                kernel: "warp_sum".into(),
+                function: "warp_sum".into(),
+                reason: "an instruction".into(),
+            },
+            RefusedKernel {
+                kernel: "add_one".into(),
+                function: "helper".into(),
+                reason: String::new(),
+            },
+        ];
+        assert_eq!(cubin_refused(cubin), []);
+        let marked = cubin_with_refused(cubin, &refused).unwrap();
+        assert_eq!(cubin_refused(&marked), refused);
+        // The cubin is as it was, with a section more, and a length that its tables tell.
+        assert_eq!(cubin_len(&marked), Some(marked.len()));
+        assert_eq!(&marked[0x40..cubin.len()], &cubin[0x40..]);
+        assert_eq!(cubin_entries(&marked), cubin_entries(cubin));
+        assert_eq!(cubin_sm(&marked), Some(70));
+        let (before, after) = (cubin_sections(cubin).unwrap(), cubin_sections(&marked).unwrap());
+        assert_eq!(after.len(), before.len() + 1);
+        let names = usize::from(u16_at(cubin, 62));
+        for (index, (old, new)) in before.iter().zip(after).enumerate() {
+            let (old, new) = (section_data(cubin, old).unwrap(), section_data(&marked, new).unwrap());
+            if index == names {
+                assert_eq!(new, [old, b".note.vf.refused\0"].concat());
+            } else {
+                assert_eq!(old, new);
+            }
+        }
+        // Marked once; nothing of what cannot be read.
+        assert_eq!(cubin_with_refused(&marked, &refused), None);
+        assert_eq!(cubin_with_refused(&cubin[..cubin.len() - 1], &refused), None);
+        let late = RefusedKernel {
+            kernel: "a\0b".into(),
+            ..refused[0].clone()
+        };
+        assert_eq!(cubin_with_refused(cubin, &[late]), None);
+        for cut in [marked.len() - 64, marked.len() - 70] {
+            assert_eq!(cubin_refused(&marked[..cut]), []);
+        }
+        let mut wrong_name = marked.clone();
+        let at = wrong_name.windows(13).position(|w| w == b"volta-forever").unwrap();
+        wrong_name[at] = b'V';
+        assert_eq!(cubin_refused(&wrong_name), []);
+        assert_eq!(cubin_refused(b"\x7fELF"), []);
     }
 
     #[test]
