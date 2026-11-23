@@ -464,12 +464,25 @@ mod tests {
         std::os::unix::fs::symlink(&compiler, renamed.join("cuda/bin/ptxas")).unwrap();
         std::os::unix::fs::symlink(kept.join("cuda/bin/nvlink"), renamed.join("cuda/bin/nvlink")).unwrap();
         days_ago(&renamed, 2);
+        // What this system's processes are making: one that ended, one that runs (this one); what
+        // another system that shares the cache is making, whose processes are not seen from here,
+        // and what one made a day ago; what an earlier version (without the system's identity)
+        // left a day ago, and what it is making.
+        let boot = runfiles::boot();
         let (ended, running) = (
-            cache.join(".tmp-4294967295-0"),
-            cache.join(format!(".tmp-{}-7", std::process::id())),
+            cache.join(format!(".tmp-{boot}-4294967295-0")),
+            cache.join(format!(".tmp-{boot}-{}-7", std::process::id())),
         );
-        fs::create_dir(&ended).unwrap();
-        fs::create_dir(&running).unwrap();
+        let (elsewhere, elsewhere_old) = (
+            cache.join(".tmp-00000000-0000-0000-0000-000000000000-4294967295-0"),
+            cache.join(".tmp-00000000-0000-0000-0000-000000000000-4294967295-1"),
+        );
+        let (earlier, earlier_old) = (cache.join(".tmp-4294967295-0"), cache.join(".tmp-4294967295-1"));
+        for staging in [&ended, &running, &elsewhere, &elsewhere_old, &earlier, &earlier_old] {
+            fs::create_dir(staging).unwrap();
+        }
+        days_ago(&elsewhere_old, 2);
+        days_ago(&earlier_old, 2);
         // A new view: what cannot work goes, with what it holds and nothing it points to. A view
         // that works stays, also when its runfiles changed since (an engine started before holds
         // it).
@@ -479,6 +492,10 @@ mod tests {
             (&kept_view, true),
             (&recent_view, true),
             (&running, true),
+            (&elsewhere, true),
+            (&earlier, true),
+            (&elsewhere_old, false),
+            (&earlier_old, false),
             (&changed_now, true),
             (&changed_view, true),
             (&renamed, true),

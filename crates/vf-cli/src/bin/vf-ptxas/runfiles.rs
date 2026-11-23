@@ -45,7 +45,7 @@ pub fn view(source: &Path, compiler: &Path, cache: &Path) -> io::Result<PathBuf>
     remove_stale(&cache);
     let staging = (0..)
         .find_map(|i: u32| {
-            let p = cache.join(format!(".tmp-{}-{i}", std::process::id()));
+            let p = cache.join(format!(".tmp-{}-{}-{i}", boot(), std::process::id()));
             match fs::DirBuilder::new().mode(0o700).create(&p) {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
                 result => Some(result.map(|()| p)),
@@ -184,19 +184,39 @@ fn remove_stale(cache: &Path) {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if let Some((pid, _)) = name.strip_prefix(".tmp-").and_then(|rest| rest.split_once('-')) {
-            if pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists() {
+        if let Some(staging) = name.strip_prefix(".tmp-") {
+            // `<boot>-<pid>-<n>`; `<pid>-<n>` from an earlier version.
+            let mut parts = staging.rsplitn(3, '-').skip(1);
+            let (pid, made_by) = (parts.next(), parts.next());
+            // A process of this system that ended; else (another system that shares the cache,
+            // whose processes cannot be seen from here, or this one before it was started again)
+            // one that would be making it for a day.
+            let ended = made_by == Some(boot().as_str())
+                && pid.is_some_and(|pid| pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists());
+            if ended || unused(&path) {
                 let _ = fs::remove_dir_all(&path);
             }
-        } else if view_name(&name)
-            && fs::symlink_metadata(&path)
-                .and_then(|m| m.modified())
-                .is_ok_and(|used| used.elapsed().is_ok_and(|age| age > UNUSED))
-            && dead(&path)
-        {
+        } else if view_name(&name) && unused(&path) && dead(&path) {
             let _ = fs::remove_dir_all(&path);
         }
     }
+}
+
+/// Whether `path` was last changed more than a day ago (`UNUSED`).
+fn unused(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|used| used.elapsed().is_ok_and(|age| age > UNUSED))
+}
+
+/// This system, as it runs now: the identity of its boot, which another system that shares the
+/// cache has not, nor this one once started again; `unknown` when it cannot be read.
+pub fn boot() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|id| id.trim().to_string())
+        .ok()
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Whether the view `dir` cannot work: one of its links leads nowhere. (One that cannot be read
