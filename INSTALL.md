@@ -358,7 +358,11 @@ On one Tesla V100, with no switch set (`LIMITS.md` has the counts and what does 
 A kernel that the layer cannot run is refused when the program asks for it (the program gets
 error 218 and a NULL handle, and on standard error a line names the kernel and says why:
 `LIMITS.md`, "Kernels refused"); it is never run wrong knowingly. The first run of a program translates its machine code and lets the driver compile
-what it compiles (`What the first run costs`, below).
+what it compiles (`What the first run costs`, below). Under `CUDA_MODULE_LOADING=EAGER` the CUDA
+runtimes ask for every kernel at their start: the CUDA 12.9 libraries start as without the
+layer, a program built with the CUDA 12 runtime starts without the kernels of a fat binary of its
+own in which one is refused, and all the code is translated and compiled at the start, which
+takes many minutes the first time for PyTorch (`LIMITS.md`, "Kernels refused").
 
 ## 5. Verify that it works
 

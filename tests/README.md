@@ -56,8 +56,8 @@ scripts of `tests/sass/`).
   (`CUDA_MODULE_LOADING`), and lookup tables asked for by name, answered as NVIDIA's driver
   answers them, except where the layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
-  functions through the forwarding library and gets the host's result (cuBLAS is exercised by
-  `run.sh`).
+  functions through the forwarding library and gets the host's result, five of them again under
+  `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL

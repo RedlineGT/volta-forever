@@ -1412,9 +1412,11 @@ fn eager_loading() -> bool {
     result == CUDA_SUCCESS && mode == MODULE_EAGER_LOADING
 }
 
-/// Whether the current context is given no module for `library` (`cuLibraryGetModule`), because
-/// the layer cannot give every kernel of its image there and modules are loaded eagerly. When so,
-/// says why (at level 2) and leaves NULL in `module`.
+/// Whether the current context is given no module for `library` (`cuLibraryGetModule`, asked by
+/// the code at `caller`), modules being loaded eagerly: because the layer cannot give every kernel
+/// of its image there, or because the image was made here from one without code for this GPU and
+/// the caller has code for this GPU of its own. When so, says why (at level 2) and leaves NULL in
+/// `module`.
 ///
 /// The CUDA 12 runtime takes the kernels of a fat binary that it registered from the module of its
 /// library: it asks for that module, then for each kernel of the image by name in it
@@ -1422,41 +1424,60 @@ fn eager_loading() -> bool {
 /// lookup that fails there ends its initialization: the program's next CUDA call fails (cuBLAS
 /// 12.9: `cublasCreate`). A module that the driver does not give, it does without: NVIDIA's driver
 /// gives none for an image without code for the GPU (`CUDA_ERROR_NO_BINARY_FOR_GPU`), and the
-/// runtime goes on without that image's kernels. Under eager loading the layer answers so for an
-/// image of which it cannot give every kernel; its other kernels are still given by
-/// `cuLibraryGetKernel`. Under lazy loading the runtime asks for the module at the first launch of
-/// a kernel of the image, takes the kernels that it is given and leaves the others: the module is
-/// given. (On a later card the library's own entries are taken, and run: the module is given.)
+/// runtime goes on without that image's kernels. Under eager loading the layer answers so:
+/// - for an image of which it cannot give every kernel; its other kernels are still given by
+///   `cuLibraryGetKernel`;
+/// - for an image that it adapted, to a caller with code for this GPU of its own (it is told the
+///   real capability, and chooses that code here, as the CUDA 12.9 libraries do): the module
+///   would have every kernel of the image compiled for nothing (for cuBLAS 12.9 and cuBLASLt,
+///   kernels for sm_80 and later, minutes each the first time). Its kernels are still given by
+///   `cuLibraryGetKernel`.
+///
+/// Under lazy loading the runtime asks for the module at the first launch of a kernel of the
+/// image, takes the kernels that it is given and leaves the others: the module is given. (On a
+/// later card the library's own entries are taken, and run: the module is given.)
 ///
 /// # Safety
 /// `module` must be null or writable.
-unsafe fn no_whole_module(module: *mut *mut c_void, library: usize) -> bool {
+unsafe fn no_whole_module(module: *mut *mut c_void, library: usize, caller: usize) -> bool {
     if !eager_loading() {
         return false;
     }
-    let Some((count, kernel, reason)) = kernels::first_refused(library) else {
-        return false;
-    };
-    if !context_needs_adapting() {
+    let refused = kernels::first_refused(library);
+    let unchosen = || (lazy::is_lazy(library) || images::loaded_adapted(library)) && callers::has_own_code(caller);
+    if (refused.is_none() && !unchosen()) || !context_needs_adapting() {
         return false;
     }
     if !module.is_null() {
         unsafe { *module = std::ptr::null_mut() };
     }
-    log::info(format_args!(
-        "cuLibraryGetModule: {count} {} of this library cannot run on this GPU (the first is {kernel}: {reason}); \
-         under eager loading no module is given for it (error {CUDA_ERROR_NO_BINARY_FOR_GPU}, as NVIDIA's driver \
-         answers for an image without code for the GPU), and its other kernels are given by cuLibraryGetKernel",
-        if count == 1 { "kernel" } else { "kernels" }
-    ));
+    match refused {
+        Some((count, kernel, reason)) => log::info(format_args!(
+            "cuLibraryGetModule: {count} {} of this library cannot run on this GPU (the first is {kernel}: \
+             {reason}); under eager loading no module is given for it (error {CUDA_ERROR_NO_BINARY_FOR_GPU}, as \
+             NVIDIA's driver answers for an image without code for the GPU), and its other kernels are given by \
+             cuLibraryGetKernel",
+            if count == 1 { "kernel" } else { "kernels" }
+        )),
+        None => log::info(format_args!(
+            "cuLibraryGetModule: under eager loading no module is given to a caller with code for this GPU of its \
+             own for a library whose image has none (error {CUDA_ERROR_NO_BINARY_FOR_GPU}, as NVIDIA's driver \
+             answers): its kernels made here are compiled only when asked for by cuLibraryGetKernel"
+        )),
+    }
     true
 }
 
+#[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *mut c_void) -> CUresult {
+    core::arch::naked_asm!("mov rdx, [rsp]", "jmp {body}", body = sym library_get_module)
+}
+
+unsafe extern "C" fn library_get_module(module: *mut *mut c_void, library: *mut c_void, caller: usize) -> CUresult {
     COUNTS[idx::cuLibraryGetModule].fetch_add(1, Relaxed);
     let handle = library as usize;
-    if unsafe { no_whole_module(module, handle) } {
+    if unsafe { no_whole_module(module, handle, caller) } {
         return CUDA_ERROR_NO_BINARY_FOR_GPU;
     }
     if lazy::is_lazy(handle) {
@@ -1464,7 +1485,7 @@ pub unsafe extern "C" fn cuLibraryGetModule(module: *mut *mut c_void, library: *
         match unsafe { lazy::materialize(handle) } {
             Ok(mat) => {
                 // The driver's compiler may have refused functions of the whole module.
-                if unsafe { no_whole_module(module, handle) } {
+                if unsafe { no_whole_module(module, handle, caller) } {
                     return CUDA_ERROR_NO_BINARY_FOR_GPU;
                 }
                 let real: unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult =

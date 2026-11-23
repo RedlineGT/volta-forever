@@ -467,6 +467,16 @@ CUDA_MODULE_LOADING=LAZY rt rt-refuse-12.9-lazy rt_refuse.129.ptx90 "$T/cuda-12.
 CUDA_MODULE_LOADING=EAGER rt rt-refuse-12.9-eager rt_refuse.129.ptx90 "$T/cuda-12.9.2/lib" "cudaMalloc -> cudaSuccess" \
     "cuLibraryGetModule: 1 kernel of this library cannot run on this GPU .* no module is given for it" \
     "bad launch -> cudaError[A-Za-z]+$"
+# cuBLAS 12.9 under eager loading, called by a program of the CUDA 12.9 runtime and through the
+# forwarder by one of CUDA 13.5. Its images without code for the V100 (and cuBLASLt's) are given
+# no module: those with a refused kernel, and the others too, since cuBLAS has code for the V100 of
+# its own and chooses it (the module would have every kernel of them compiled at cublasCreate, for
+# minutes each the first time). Until 2026-11-23 cublasCreate failed under eager loading.
+eager=("cublasCreate -> 0 " "cuBLAS version 120902" "sgemm check: 0 wrong" "half gemm check: 0 wrong"
+    "cuLibraryGetModule: under eager loading no module is given to a caller with code for this GPU of its own")
+CUDA_MODULE_LOADING=EAGER rt runtime-12.9-eager rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "${eager[@]}"
+CUDA_MODULE_LOADING=EAGER rt runtime-13.5-cublas-forwarded-eager rt_probe.135.sm75ptx "$W/dist/forward:$T/cuda-12.9.2/lib" \
+    "own kernel: 0/65536 wrong" "${eager[@]}"
 
 # Kernels that cannot run on the GPU are refused when the program asks for them and the others of
 # their module work, through both interfaces; a kernel with emulated instructions is announced. At

@@ -228,6 +228,16 @@ pub fn retained(handle: usize) -> Option<Arc<Replacement>> {
     KEPT.lock().unwrap_or_else(|e| e.into_inner()).get(&handle).cloned()
 }
 
+/// Whether the driver loaded for `handle` an image made here from one that had no code for this
+/// GPU (PTX retargeted, machine code translated). (A deferred library set up from the cache is not
+/// kept here: `lazy::is_lazy` tells it.)
+pub fn loaded_adapted(handle: usize) -> bool {
+    KEPT.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&handle)
+        .is_some_and(|kept| kept.origin.is_some())
+}
+
 /// The driver loaded `replacement` as `handle`: keep it, and what is known of its kernels.
 pub fn keep(handle: usize, mut replacement: Replacement) {
     given(handle);
