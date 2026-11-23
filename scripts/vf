@@ -469,8 +469,12 @@ cmd_env() {
 }
 
 # Bazel applications can select their own CUDA toolkit after startup. Give them a
-# runfiles directory with VF's assembler and links to their installed resources.
+# runfiles directory with VF's assembler and links to their installed resources: sets
+# $_runfiles_view to the runfiles to make a view of (empty: none), which cmd_run has the
+# assembler make, and run the command with it (vf-ptxas --vf-runfiles): the command and what it
+# starts hold the lock of the view, which is not removed while they run.
 setup_runfiles() {
+    _runfiles_view=
     [ -z "${RUNFILES_MANIFEST_FILE:-}" ] || return 0
     _compiler=${tool%/*}/vf-ptxas
     [ -x "$_compiler" ] || return 0
@@ -491,9 +495,10 @@ setup_runfiles() {
         if [ -f "$_candidate" ]; then _has_ptxas=1; break; fi
     done
     [ "$_has_ptxas" = 1 ] || return 0
-    _cache=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/runfiles-v1
-    RUNFILES_DIR=$("$_compiler" --vf-runfiles "$_runfiles" "$_cache") || exit 1
-    export RUNFILES_DIR
+    # (runfiles-v1 holds the views of releases before 0.1.3, which held no lock: an engine that
+    # one of them started may run with one, and they are not touched.)
+    _cache=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/runfiles-v2
+    _runfiles_view=$_runfiles
 }
 
 # Programs that compile CUDA at run time with nvcc (PyTorch extensions, FlashInfer, TileLang)
@@ -538,6 +543,7 @@ cmd_run() {
     fi
     export VOLTA_FOREVER="$_version"
     export VOLTA_FOREVER_HOME="$home"
+    [ -z "$_runfiles_view" ] || exec "$_compiler" --vf-runfiles "$_runfiles_view" "$_cache" "$@"
     exec "$@"
 }
 

@@ -274,29 +274,42 @@ fn renamed(line: &[u8], names: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// `--vf-runfiles SOURCE CACHE COMMAND [ARGS...]`: run COMMAND with `RUNFILES_DIR` set to the
+/// view of the runfiles SOURCE (in CACHE) that has this assembler (`runfiles::view`), and the
+/// lock of the view held by COMMAND and the processes it starts, which inherit it. Status 1 when
+/// the view cannot be made; 127 when COMMAND is not found, 126 when it cannot be run.
 fn run(args: Vec<OsString>) -> Result<ExitCode, String> {
     if args.first().is_none_or(|a| a != "--vf-runfiles") {
         return compile(args);
     }
-    let [_, source, cache] = args.as_slice() else {
-        return Err("--vf-runfiles requires a source and cache directory".into());
+    let [_, source, cache, command, arguments @ ..] = args.as_slice() else {
+        return Err("--vf-runfiles requires a source directory, a cache directory and a command".into());
     };
-    let write_view = || -> io::Result<()> {
-        let path = runfiles::view(Path::new(source), &std::env::current_exe()?, Path::new(cache))?;
-        let mut out = io::stdout().lock();
-        out.write_all(path.as_os_str().as_bytes())?;
-        out.write_all(b"\n")
+    let view = std::env::current_exe().and_then(|compiler| {
+        let (path, held) = runfiles::view(Path::new(source), &compiler, Path::new(cache))?;
+        if let Some(file) = &held {
+            runfiles::inherited(file)?;
+        }
+        Ok((path, held))
+    });
+    let (path, _held) = match view {
+        Ok(view) => view,
+        Err(error) => {
+            eprintln!("vf-ptxas: CUDA runfiles: {error}");
+            return Ok(ExitCode::from(1));
+        }
     };
-    write_view().map_err(|e| format!("CUDA runfiles: {e}"))?;
-    Ok(ExitCode::SUCCESS)
+    let error = Command::new(command).args(arguments).env("RUNFILES_DIR", &path).exec();
+    eprintln!("vf: {}: {error}", command.to_string_lossy());
+    Ok(ExitCode::from(if error.kind() == io::ErrorKind::NotFound {
+        127
+    } else {
+        126
+    }))
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os();
-    if let (Some(argv0), Ok(exe)) = (args.next(), std::env::current_exe()) {
-        runfiles::used(Path::new(&argv0), &exe);
-    }
-    match run(args.collect()) {
+    match run(std::env::args_os().skip(1).collect()) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("vf-ptxas: {error}");
@@ -345,26 +358,26 @@ mod tests {
         fs::write(src.join(bin).join("ptxas"), "NVIDIA").unwrap();
         fs::write(src.join(bin).join("nvlink"), "linker").unwrap();
         fs::write(src.join("_repo_mapping"), "repositories").unwrap();
-        let view = std::thread::scope(|s| {
+        let (view, _held) = std::thread::scope(|s| {
             let threads: Vec<_> = (0..4)
                 .map(|_| s.spawn(|| runfiles::view(&src, &compiler, &cache).unwrap()))
                 .collect();
-            let views: Vec<_> = threads.into_iter().map(|h| h.join().unwrap()).collect();
-            assert!(views.iter().all(|p| p == &views[0]));
-            views[0].clone()
+            let mut views: Vec<_> = threads.into_iter().map(|h| h.join().unwrap()).collect();
+            assert!(views.iter().all(|(p, _)| p == &views[0].0));
+            views.swap_remove(0)
         });
         assert_eq!(fs::read_to_string(view.join(bin).join("ptxas")).unwrap(), "VF");
         assert_eq!(fs::read_to_string(src.join(bin).join("ptxas")).unwrap(), "NVIDIA");
         assert_eq!(fs::read_to_string(view.join("_repo_mapping")).unwrap(), "repositories");
         assert_eq!(fs::read_to_string(view.join(bin).join("nvlink")).unwrap(), "linker");
         fs::write(src.join(bin).join("new-tool"), "new resource").unwrap();
-        let next = runfiles::view(&src, &compiler, &cache).unwrap();
+        let (next, _next_held) = runfiles::view(&src, &compiler, &cache).unwrap();
         assert_ne!(next, view);
         assert_eq!(
             fs::read_to_string(next.join(bin).join("new-tool")).unwrap(),
             "new resource"
         );
-        assert_eq!(runfiles::view(&next, &compiler, &cache).unwrap(), next);
+        assert_eq!(runfiles::view(&next, &compiler, &cache).unwrap().0, next);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -396,118 +409,8 @@ mod tests {
                 }
             }
         }
-        let view = runfiles::view(&src, &compiler, &dir.join("cache")).unwrap();
+        let (view, _held) = runfiles::view(&src, &compiler, &dir.join("cache")).unwrap();
         assert_eq!(view, dir.join("cache").join(format!("{hash:016x}")));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn runfiles_views_that_cannot_work_are_removed_and_no_other() {
-        let tmp = std::process::Command::new("mktemp").arg("-d").output().unwrap();
-        assert!(tmp.status.success());
-        let dir = Path::new(std::str::from_utf8(&tmp.stdout).unwrap().trim())
-            .canonicalize()
-            .unwrap();
-        let (cache, compiler) = (dir.join("cache"), dir.join("vf-ptxas"));
-        fs::write(&compiler, "VF").unwrap();
-        let app = |name: &str| {
-            let src = dir.join(name);
-            fs::create_dir_all(src.join("cuda/bin")).unwrap();
-            fs::write(src.join("cuda/bin/ptxas"), "NVIDIA").unwrap();
-            fs::write(src.join("cuda/bin/nvlink"), "linker").unwrap();
-            src
-        };
-        let days_ago = |path: &Path, days: u64| {
-            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 60 * 60);
-            File::open(path).unwrap().set_modified(when).unwrap();
-        };
-        let recently = |path: &Path| {
-            fs::metadata(path).unwrap().modified().unwrap().elapsed().unwrap() < std::time::Duration::from_secs(3600)
-        };
-        // Views of three applications, made two days ago; one is asked for again today, and the
-        // assembler is started through another (its engine compiles).
-        let (kept, changed, recent) = (app("kept.runfiles"), app("changed.runfiles"), app("recent.runfiles"));
-        let kept_view = runfiles::view(&kept, &compiler, &cache).unwrap();
-        let changed_view = runfiles::view(&changed, &compiler, &cache).unwrap();
-        let recent_view = runfiles::view(&recent, &compiler, &cache).unwrap();
-        for view in [&kept_view, &changed_view, &recent_view] {
-            days_ago(view, 2);
-        }
-        assert_eq!(runfiles::view(&recent, &compiler, &cache).unwrap(), recent_view);
-        assert!(recently(&recent_view));
-        runfiles::used(&changed_view.join("cuda/bin/ptxas"), &compiler);
-        assert!(recently(&changed_view));
-        // Not through a view, or not to this assembler: nothing is used.
-        runfiles::used(&changed.join("cuda/bin/ptxas"), &compiler);
-        runfiles::used(&kept_view.join("cuda/bin/nvlink"), &compiler);
-        runfiles::used(&kept_view.join("cuda/bin/ptxas"), &dir.join("another"));
-        assert!(!recently(&kept_view));
-        days_ago(&changed_view, 2);
-        // Two of them change; a view of runfiles that are gone; one of an assembler that is gone
-        // (a release removed); what a process that ended left, and what one that runs (this one)
-        // is making.
-        fs::write(changed.join("cuda/bin/nvcc"), "compiler driver").unwrap();
-        fs::write(recent.join("cuda/bin/nvcc"), "compiler driver").unwrap();
-        let gone = cache.join("0123456789abcdef");
-        fs::create_dir(&gone).unwrap();
-        std::os::unix::fs::symlink(dir.join("gone.runfiles/cuda/bin/nvcc"), gone.join("nvcc")).unwrap();
-        days_ago(&gone, 2);
-        let removed = cache.join("00112233445566ff");
-        fs::create_dir_all(removed.join("cuda/bin")).unwrap();
-        std::os::unix::fs::symlink(dir.join("removed/vf-ptxas"), removed.join("cuda/bin/ptxas")).unwrap();
-        std::os::unix::fs::symlink(kept.join("cuda/bin/nvlink"), removed.join("cuda/bin/nvlink")).unwrap();
-        days_ago(&removed, 2);
-        // The view of the first, as a version that named views otherwise made it, and which an
-        // engine started by that version may hold: it works, and is left.
-        let renamed = cache.join("fedcba9876543210");
-        fs::create_dir_all(renamed.join("cuda/bin")).unwrap();
-        std::os::unix::fs::symlink(&compiler, renamed.join("cuda/bin/ptxas")).unwrap();
-        std::os::unix::fs::symlink(kept.join("cuda/bin/nvlink"), renamed.join("cuda/bin/nvlink")).unwrap();
-        days_ago(&renamed, 2);
-        // What this system's processes are making: one that ended, one that runs (this one); what
-        // another system that shares the cache is making, whose processes are not seen from here,
-        // and what one made a day ago; what an earlier version (without the system's identity)
-        // left a day ago, and what it is making.
-        let boot = runfiles::boot();
-        let (ended, running) = (
-            cache.join(format!(".tmp-{boot}-4294967295-0")),
-            cache.join(format!(".tmp-{boot}-{}-7", std::process::id())),
-        );
-        let (elsewhere, elsewhere_old) = (
-            cache.join(".tmp-00000000-0000-0000-0000-000000000000-4294967295-0"),
-            cache.join(".tmp-00000000-0000-0000-0000-000000000000-4294967295-1"),
-        );
-        let (earlier, earlier_old) = (cache.join(".tmp-4294967295-0"), cache.join(".tmp-4294967295-1"));
-        for staging in [&ended, &running, &elsewhere, &elsewhere_old, &earlier, &earlier_old] {
-            fs::create_dir(staging).unwrap();
-        }
-        days_ago(&elsewhere_old, 2);
-        days_ago(&earlier_old, 2);
-        // A new view: what cannot work goes, with what it holds and nothing it points to. A view
-        // that works stays, also when its runfiles changed since (an engine started before holds
-        // it).
-        let changed_now = runfiles::view(&changed, &compiler, &cache).unwrap();
-        assert_ne!(changed_now, changed_view);
-        for (path, there) in [
-            (&kept_view, true),
-            (&recent_view, true),
-            (&running, true),
-            (&elsewhere, true),
-            (&earlier, true),
-            (&elsewhere_old, false),
-            (&earlier_old, false),
-            (&changed_now, true),
-            (&changed_view, true),
-            (&renamed, true),
-            (&gone, false),
-            (&removed, false),
-            (&ended, false),
-        ] {
-            assert_eq!(path.exists(), there, "{}", path.display());
-        }
-        assert_eq!(fs::read_to_string(changed.join("cuda/bin/ptxas")).unwrap(), "NVIDIA");
-        assert_eq!(fs::read_to_string(kept.join("cuda/bin/nvlink")).unwrap(), "linker");
-        assert_eq!(fs::read_to_string(&compiler).unwrap(), "VF");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -531,7 +434,9 @@ mod tests {
                 scope.spawn(move || {
                     start.wait();
                     for round in 0..24 {
-                        let view = runfiles::view(&src, compiler, &root.join(round.to_string())).unwrap();
+                        // (Held while it is read: the views of the others, made meanwhile, may
+                        // remove one that nothing holds.)
+                        let (view, _held) = runfiles::view(&src, compiler, &root.join(round.to_string())).unwrap();
                         assert_eq!(fs::read_to_string(view.join("cuda/bin/nvlink")).unwrap(), i.to_string());
                         assert_eq!(fs::read_to_string(view.join("cuda/bin/ptxas")).unwrap(), "VF");
                     }

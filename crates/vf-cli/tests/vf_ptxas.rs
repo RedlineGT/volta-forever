@@ -122,3 +122,77 @@ fn the_status_is_the_assemblers_or_255_as_ptxas_has_it() {
     assert_eq!(output.status.code(), Some(255));
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_runfiles_view_is_kept_while_the_program_started_with_it_runs() {
+    // `--vf-runfiles SOURCE CACHE COMMAND...` runs COMMAND with RUNFILES_DIR set to the view, and
+    // the lock of the view held by COMMAND and what it becomes or starts. (Until 2026-11-23 the
+    // view was printed and nothing held it.)
+    let dir = directory();
+    let cache = dir.join("cache");
+    for app in ["a", "b", "c"] {
+        let bin = dir.join(format!("{app}.runfiles/cuda/bin"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("ptxas"), "NVIDIA").unwrap();
+        fs::write(bin.join("nvlink"), app).unwrap();
+    }
+    let with_view = |app: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vf-ptxas"));
+        command
+            .arg("--vf-runfiles")
+            .arg(dir.join(format!("{app}.runfiles")))
+            .arg(&cache);
+        command
+    };
+    // A program started with the view of a says its RUNFILES_DIR, then becomes `sleep`.
+    let said = dir.join("said");
+    let mut program = with_view("a")
+        .args([
+            "sh",
+            "-c",
+            "printf %s \"$RUNFILES_DIR\" > \"$0.part\"; mv \"$0.part\" \"$0\"; exec sleep 60",
+        ])
+        .arg(&said)
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while !said.exists() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "the program said nothing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let view_a = PathBuf::from(fs::read_to_string(&said).unwrap());
+    assert!(view_a.starts_with(&cache), "{}", view_a.display());
+    assert_eq!(fs::read_to_string(view_a.join("cuda/bin/nvlink")).unwrap(), "a");
+    assert_eq!(
+        fs::read_link(view_a.join("cuda/bin/ptxas")).unwrap(),
+        Path::new(env!("CARGO_BIN_EXE_vf-ptxas")).canonicalize().unwrap()
+    );
+    // Another program with the view of b, while a's runs: a's is left.
+    assert!(with_view("b").arg("true").status().unwrap().success());
+    assert!(view_a.is_dir());
+    // Once a's has ended, the next view made removes its view.
+    program.kill().unwrap();
+    program.wait().unwrap();
+    assert!(with_view("c").arg("true").status().unwrap().success());
+    assert!(!view_a.exists());
+    // What a command that cannot be run ends with, as a shell has it.
+    let output = with_view("c").arg("no-such-command-here").output().unwrap();
+    assert_eq!(output.status.code(), Some(127));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no-such-command-here"));
+    let output = with_view("c").arg(dir.join("said")).output().unwrap();
+    assert_eq!(output.status.code(), Some(126));
+    // Runfiles that are not there: 1, and the command is not run.
+    let output = Command::new(env!("CARGO_BIN_EXE_vf-ptxas"))
+        .arg("--vf-runfiles")
+        .arg(dir.join("none.runfiles"))
+        .arg(&cache)
+        .arg("true")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("vf-ptxas: CUDA runfiles: "));
+    fs::remove_dir_all(dir).unwrap();
+}

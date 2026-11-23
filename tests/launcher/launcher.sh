@@ -1208,6 +1208,30 @@ case $_d80$_d120 in
     *) fail "$name" "8.0: $_d80" ;;
 esac
 
+# A Bazel program (NAME.runfiles beside it, in which a toolkit has bin/ptxas) is started by the
+# assembler, which makes the view of its runfiles and runs it with the lock of the view held:
+# vf-ptxas --vf-runfiles RUNFILES CACHE COMMAND ARGS... (here a stand-in that says what it was
+# given and runs the command). Another command is run as it is. (Until 2026-11-23 the launcher
+# took the view's path from the assembler, and nothing held the view.)
+name="runfiles-through-the-assembler"
+bz=$tmp/bazel-install
+mk_archive "$bz" cuda12
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "$VF_TEST_SAID"\nshift 3\nexec "$@"\n' >"$bz/bin/vf-ptxas"
+chmod +x "$bz/bin/vf-ptxas"
+mkdir -p "$tmp/app.runfiles/toolkit/bin"
+: >"$tmp/app.runfiles/toolkit/bin/ptxas"
+printf '#!/bin/sh\necho "app $*"\n' >"$tmp/app"
+chmod +x "$tmp/app"
+_out=$(VF_TEST_SAID=$tmp/said XDG_CACHE_HOME=$tmp/xdg VF_QUIET=1 "$bz/bin/vf" "$tmp/app" 'one two' three)
+_said=$(tr '\n' '|' <"$tmp/said")
+_plain=$(VF_TEST_SAID=$tmp/said-plain VF_QUIET=1 "$bz/bin/vf" sh -c 'echo plain')
+_want="--vf-runfiles|$tmp/app.runfiles|$tmp/xdg/volta-forever/runfiles-v2|$tmp/app|one two|three|"
+if [ "$_out" = "app one two three" ] && [ "$_said" = "$_want" ] && [ "$_plain" = plain ] && [ ! -e "$tmp/said-plain" ]; then
+    pass "$name"
+else
+    fail "$name" "out '$_out' said '$_said' plain '$_plain'"
+fi
+
 # --- done -----------------------------------------------------------------------
 
 if [ "$failed" = 0 ]; then
