@@ -18,8 +18,12 @@ cargo build --release -p vf-cli
 scripts/fetch-all.sh denvdis     # the instruction descriptions that reference/ reads
 tests/sass/compare.sh            # the Rust translator against the Python reference
 tests/proxy/fit_api.sh           # the second translation at launch, by every way to it
+tests/proxy/lifecycle.sh         # what the proxy keeps of modules and contexts, fork, the cache
 dash tests/launcher/launcher.sh  # the launcher (and under bash --posix)
 ```
+
+`tests/README.md`, "What the CI runs", lists what every push runs; the host tests of
+`tests/proxy/` that it does not run are listed there too.
 
 ## What a change must keep
 
@@ -27,10 +31,11 @@ dash tests/launcher/launcher.sh  # the launcher (and under bash --posix)
 program asks for it, with a reason that names what is missing. A translation or an emulation
 that may be wrong is not offered.
 
-**Two translators, one result.** `reference/translate.py` is the reference of the machine-code
-translator and `crates/vf-sass` its implementation in the layer: for every input they give
-the same bytes, the same map and the same refusals (`tests/sass/compare.sh` on real code,
-`tests/sass/fuzz.py` on damaged code). A change to what is translated is a change to both.
+**Two translators, one result.** `reference/translate.py` (with `reference/ampere.py` for
+sm_80 code) is the reference of the machine-code translator and `crates/vf-sass` its
+implementation in the layer: for every input they give the same bytes, the same map, the same
+`MAP.lives` and the same refusals (`tests/sass/compare.sh` on real code, `tests/sass/fuzz.py`
+on damaged code). A change to what is translated is a change to both.
 
 **The validator is another program.** `reference/validate.py` checks a translation without
 sharing the translator's decisions. A new kind of rewriting needs its rule there and, in
@@ -38,7 +43,9 @@ sharing the translator's decisions. A new kind of rewriting needs its rule there
 check that was never seen to fail has not been shown to check (`docs/validation.md`).
 `tests/sass/controls.sh` runs every control, each in a process of its own, and says which
 change nothing: a control must be seen to change the translation and to be objected to for its
-own reason.
+own reason. The translation of sm_80 code has no rule there yet: it is not independently
+validated (`docs/validation.md`, section 8), and a change to it rests on `compare.sh`, unit
+tests and the GPU cases.
 
 **A test must be able to fail.** A new mechanism comes with a test that fails when the mechanism
 is turned off, and the commit says that it was seen to. A test that computes on constants, or
@@ -65,8 +72,9 @@ libraries are generated on the user's machine from the toolkits that the user fe
 ## Reporting a wrong result
 
 A program that computes something else through the layer than on the CPU or on a newer GPU is
-the report that matters most. Useful with it: the program and its version, the driver, what
-`VF_LOG_LEVEL=2` prints (which images were adapted or translated, which kernels have
-emulated instructions), and, for machine code, the directory that `VF_TRANSLATE_DUMP=DIR`
-fills with every unit of machine code given to the translator: `reference/validate.py` can
-then be run on it.
+the report that matters most. Useful with it: the program and its version, the driver, the
+`VF_*` variables that were set (`VF_CAPABILITY` above all), what `VF_LOG_LEVEL=2` prints
+(which images were adapted or translated, which kernels have emulated instructions, what each
+caller is told), and, for machine code, the directory that `VF_TRANSLATE_DUMP=DIR` fills with
+every unit of machine code given to the translator: `reference/validate.py` can then be run on
+its sm_75 units.
