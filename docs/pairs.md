@@ -19,7 +19,9 @@ says "the translator chooses".
 Both translators make pairs by default; `VF_PAIRS=0` turns them off, and every product is then
 translated by itself. `VF_PAIRS_SAY=1` makes the Python reference say on standard error where it
 gives pairs up and why. Pairs are made for sm_75 code only: the sm_80 forms that the translator
-accepts have no tensor-core instruction.
+accepts have no tensor-core instruction. The lowering of program text (PTX) makes pairs of its own,
+on the same arrangement, with the results of each product by itself (section 13); the same
+`VF_PAIRS=0` turns them off.
 
 ## 1. Terms
 
@@ -379,3 +381,106 @@ in the loop from two registers the loop writes (`IMAD R, R20, 0x10, R3`): not ha
 5. The validator, the checker of plans (which must be told the roots, the companions' registers,
    where they are made and which loads go through them, and check that companions stand at every
    such load on every way), the controls, the Rust translator.
+
+## 13. In program text (PTX)
+
+The lowering of PTX (`crates/vf-ptx/src/lower/pairs.rs`, which decides; `matrix.rs`, `products.rs`
+and `body.rs`, which write) computes two products in the arrangement of section 2 where it can show
+that the result is, bit for bit, the one of each product by itself. Measured on a V100, Triton
+3.8 told 8.0, fp16 GEMMs with B by plain `ldmatrix` (`nt`), one session each, 2026-11-23: the
+128x128x32 tile of one stage and 8 warps, 351 instructions a turn of its loop instead of 671 (256
+HMMA steps instead of 512, no choice of results), 161 registers instead of 217, 1.27 to 1.47 times
+the speed (31.4 to 41.2 TFLOPS on 4096^3); 64x128x32 of 4 warps, 165 registers instead of 221 (3
+blocks a multiprocessor instead of 2), 1.39 to 1.44 times (35.0 to 48.8); 128x128x32 of 4 warps,
+whose loop spilled 191 loads and 102 stores of local memory a turn and now 1, 10 to 11 times (5.3
+to 57.5). The output hashes of the 36 GEMMs measured (6 configurations, 2 layouts, 3 shapes) are
+those without pairs; the configurations with nothing paired run as before.
+
+**What is paired.** Two `mma.sync.aligned.m16n8k16` or `m16n8k8` with f16 operands and f32
+accumulators, not under a predicate, each adding to its own four accumulator registers in place
+(D the same registers as C, in the same order), with the same A registers, x before y in the text:
+
+1. each product is computed by itself today on the halves of k (`Plan::in_halves`): both registers
+   of each A pair from one `ldmatrix` without `.trans`, each B register from an `ldmatrix` without
+   `.trans`, each written by its `ldmatrix` alone and declared once; not a product of a chain;
+2. x and y have no accumulator register in common;
+3. from x to y, straight-line code: no label that anything names, no bound of a block, no branch,
+   call or return; nothing between them names x's accumulators or is the `ldmatrix` that loads x's
+   A or B (x is computed at y, on the same values: those registers are written by their `ldmatrix`
+   alone). Pairs are taken greedily in the order of the text.
+
+**Arithmetic.** For each `m16n8k8` (two of an `m16n8k16`, k 0..7 then 8..15), two of Volta's
+`mma.m8n8k4.row.col.f32.f16.f16.f32` on the eight accumulator registers of the program, x's then
+y's: the first on k 0..3, the second on k 4..7. A lane gives row `kA` of A (section 2: matrix .0 of
+the A pair for `kA < 8`, .1 above) and the column `L & 7` of x's B where `h` is clear, of y's where
+it is set, 16 bytes of shared memory each, loaded at the `ldmatrix` (a B of y's from another
+`ldmatrix` than x's goes into the same registers under the predicate `h`, a B of the same one with
+the row lane chosen by `h`). A product by itself does the same two instructions on the same rows of
+A and columns of B, every term of k in the same slot, from the same accumulator: each result is the
+same sum of the same terms, `(C + sum of k 0..3) + sum of k 4..7`, by the same instruction. B from
+`ldmatrix.trans` is not paired: there the product by itself adds the even k, then the odd k
+(`mma.m8n8k4.col.row`), and the halves of k would round otherwise. Nor are f16 accumulators (with
+f16 results each register of the arrangement is one register of one of Turing's lanes, but which of
+its two depends on the lane: a conversion takes two shuffles and a choice per register, and the
+lowering keeps f16 accumulators in Volta's layout between products by a scheme of its own,
+`kept_halves`), chains (whose sums are split across octets), and integer, bf16 and other products:
+they are computed as before.
+
+**State.** The accumulator registers of the pairs that stand (the set S) hold Turing's values
+permuted between lanes, `T[pi(L)]` in lane L, at every place: they are written by nothing but the
+products of pairs and by unguarded `mov` of 32 bits whose source is a literal, a register of S, or a
+register that holds one literal wherever it is read (written once, by such a `mov`); each of these
+keeps the permutation (zero, a literal, is the same in both layouts). A function with an indirect
+branch, a register of S declared again in a block, or of another width, has no pairs. A pair one of
+whose registers is written otherwise is dropped, and S is looked at again until nothing changes.
+
+**Conversions.** Every other statement that reads a register of S has one `shfl.sync.idx` of the
+register in place by `pi^-1(L)` before it, and, where the register may be read again on some way
+(liveness on the control-flow graph), one by `pi(L)` after it. A pair whose register is read at a
+place that is not whole, or by a branch or a call, is dropped. (A register read twice outside a loop
+is converted twice; inside the loop of its products, each read costs two shuffles a turn.)
+
+**Whole places** (section 7, for program text, where lanes that part at a branch are joined again
+by the compiler and not by a `BSYNC`): the rules, applied until nothing changes:
+
+- **aligned**: an unguarded `mma`, `ldmatrix`, `stmatrix`, `movmatrix` or `wmma` with
+  `.sync.aligned`: the PTX manual has the 32 lanes run it together;
+- **lead**: an instruction after which control goes to one place only (no branch under a predicate,
+  no return, no call), that place entered from nowhere else and whole;
+- **join**: every way into an instruction comes from a whole instruction and is taken by all its
+  lanes or none (control goes to one place only, or the way is one of a uniform branch); the entry
+  of the function is not such a way;
+- **uniform**: a branch under a predicate at a whole place, when an aligned instruction I depends on
+  it: I post-dominates one of its two ways (every path from there to the end passes I; a call counts
+  as a way to the end) and the other way can reach the end without I. The manual asks that the lanes
+  evaluate the condition of such a branch alike ("in conditionally executed code, an mma
+  instruction should only be used if it is known that all threads in the warp evaluate the condition
+  identically"); all 32 are there, so all 32 go the same way. A branch that I follows on both ways
+  (the lanes may part and meet again before I) is not uniform.
+
+The back edge of a loop of products is uniform by the last rule, and the code after the loop, where
+compilers read the accumulators, is whole.
+
+**Registers.** The accumulators stay in the program's four registers each (a product by itself
+keeps eight for its accumulator between products, `Form::Wide`); the rows of an A pair are four
+registers, as for a product by itself; the columns of a pair's B are four registers for two B
+registers (a product by itself: four for each). Nothing else is kept. In the 128x128x32 Triton
+kernel: 161 registers (one block of 8 warps a multiprocessor, as before: two need 128 or fewer).
+
+**Falls back.** Without `Options::aligned_rows` (`VF_ALIGNED_ROWS=0`) or with `VF_PAIRS=0`, no pair
+is made, and the lowering writes what it wrote before pairs existed. What a pair needs and cannot
+be shown leaves its products to be computed by themselves; nothing is refused for it. Not paired
+today, by the conditions above: Triton's pipelined kernels (`num_stages` 2 or more: the products of
+the first k-step of a turn take operands that `mov` copied, which a product by itself adds in even
+and odd k, and they write the same accumulators), B by `ldmatrix.trans` (Triton's `nn` layouts),
+accumulators loaded from memory or written by other instructions, f16 accumulators.
+
+**Tests.** Unit tests in `lower/tests.rs` (the accepted forms; one mutation for each condition, which
+must leave the output as it is without pairs; a host model of the layouts that interprets the lane
+values the lowering computes); `tests/gpu/run.sh`, `pairs-adversarial` (a loop of three pairs, B
+from one and from two `ldmatrix`, on subnormals, infinities, NaN, the largest half and cancelling
+turns: the words of each product by itself, with and without pairs, for 1, 2 and 37 turns; a build
+that only adds the two halves of k the other way round gives other words), `trans-order` (the same
+product with B by plain `ldmatrix` and by `ldmatrix.trans`: 52 to 78 of its 128 results differ, which
+is why the second is not paired); the tensor-core cases of the suite, and Triton's dot and attention
+cases at capability 8.0 with `VF_PAIRS=0` and without.

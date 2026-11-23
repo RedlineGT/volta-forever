@@ -287,8 +287,47 @@ impl<'a> Body<'a> {
     }
 
     /// Replace the statement at `range` if it is one this module rewrites. `followed`: an instruction
-    /// comes after it in its block.
+    /// comes after it in its block. The registers of pairs it reads are in Turing's layout while it
+    /// runs (`Plan::pairs`).
     pub(super) fn statement(
+        &mut self,
+        range: Range<usize>,
+        guarded: bool,
+        opcode: &str,
+        operands: &str,
+        followed: bool,
+    ) -> Result<(), Unsupported> {
+        if let Some(registers) = self.plan.pairs.before.get(&self.current_index).cloned() {
+            self.out.push_str(&self.text[self.copied..range.start]);
+            self.copied = range.start;
+            self.first_line = true;
+            self.pair_conversions(&registers, Lane::QBack);
+            // (The statement starts a line of its own, copied or replaced.)
+            self.out.push_str("\n\t");
+            self.first_line = true;
+        }
+        self.rewrite(range.clone(), guarded, opcode, operands, followed)?;
+        if let Some(registers) = self.plan.pairs.after.get(&self.current_index).cloned() {
+            self.out.push_str(&self.text[self.copied..range.end]);
+            self.copied = range.end;
+            self.first_line = false;
+            self.pair_conversions(&registers, Lane::QForward);
+        }
+        Ok(())
+    }
+
+    /// Registers of pairs shuffled in place: to Turing's layout (`Lane::QBack`) or back.
+    fn pair_conversions(&mut self, registers: &[&str], index: Lane) {
+        let index = self.lane(index);
+        for register in registers {
+            self.written(register);
+            emit!(self, "shfl.sync.idx.b32 {register}, {register}, {index}, 31, -1;");
+            self.shuffles += 1;
+            self.split();
+        }
+    }
+
+    fn rewrite(
         &mut self,
         range: Range<usize>,
         guarded: bool,
@@ -400,6 +439,16 @@ impl<'a> Body<'a> {
             _ => {}
         }
         self.split();
+        if self.plan.pairs.first.contains(&self.current_index) {
+            // Computed with its partner, further on.
+            self.counts.tensor += 1;
+            return Ok(());
+        }
+        if self.plan.pairs.second.contains_key(&self.current_index) {
+            self.mma_pair();
+            self.counts.tensor += 1;
+            return Ok(());
+        }
         match tensor {
             None => return self.tanh(operands),
             Some(Tensor::Copy { .. } | Tensor::Copied | Tensor::Pack { .. } | Tensor::Bound { .. }) => {

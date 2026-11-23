@@ -122,6 +122,40 @@ impl<'a> Body<'a> {
         result
     }
 
+    /// The two products of a pair (`Plan::pairs`), at the second: for each `m16n8k8`, two of Volta's
+    /// products on the rows of A and the columns of B of the pair, k 0..3 then k 4..7, in place on
+    /// the eight accumulator registers of the program (`docs/pairs.md`, sections 2 and 13).
+    pub(super) fn mma_pair(&mut self) {
+        let Some(pair) = self.plan.pairs.second.get(&self.current_index) else {
+            return;
+        };
+        let accumulators = pair.x.iter().chain(&pair.y).copied().collect::<Vec<&str>>().join(", ");
+        let operands: Vec<([&str; 2], [&str; 2])> = pair
+            .a
+            .chunks(2)
+            .zip(pair.bx.iter().zip(&pair.by))
+            .map(|(a, (bx, by))| ([a[0], a[1]], [*bx, *by]))
+            .collect();
+        let written: Vec<&str> = pair.x.iter().chain(&pair.y).copied().collect();
+        for (a, b) in operands {
+            let rows = self.operand(Form::QRows, &a, false);
+            let cols = self.operand(Form::QCols, &b, false);
+            for half in 0..2 {
+                emit!(
+                    self,
+                    "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 {{{accumulators}}}, {{{}, {}}}, {{{}, {}}}, {{{accumulators}}};",
+                    rows[2 * half],
+                    rows[2 * half + 1],
+                    cols[2 * half],
+                    cols[2 * half + 1]
+                );
+            }
+        }
+        for name in written {
+            self.written(name);
+        }
+    }
+
     /// `mma.m16n8k8` with f32 accumulators, or `mma.m16n8k16` as two of them in a row (`a` and `b`
     /// hold the operands of one after the other).
     pub(super) fn mma_f32(&mut self, d: &[&str], a: &[&str], b: &[&str], c: &[&str]) {

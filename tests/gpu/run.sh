@@ -152,6 +152,37 @@ px ptx-reduction-one-lane-f32 "$G/ptx-cases/reduction-one-lane-f32.ptx" 7fffffff
 px ptx-reduction-mask-reaching "$G/ptx-cases/reduction-mask-reaching.ptx" 210 1 20 2d
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
 px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
+# An amount chosen once between nothing and all (Triton's pipelined loads): one predicated load.
+px chosen-copy "$G/ptx-cases/chosen-copy.ptx" 0 0 0 0
+# Pairs of FP16 products on one A (docs/pairs.md, section 13) on values that make the order of the
+# additions show (subnormals, infinities, NaN, the largest half, cancellation), in a loop of 1, 2
+# and 37 turns: each product computed by itself (VF_PAIRS=0) and the pairs give the same words. (A
+# build that only adds the two halves of k in the other order gives other words at every count.)
+while read -r turns w0 w1 w2 w3; do
+    for pairs in 0 1; do
+        name=pairs-adversarial-$turns-$pairs
+        log=$out/logs/$name.log
+        VF_PAIRS=$pairs DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -i "$turns" "$G/ptx-cases/pairs-adversarial.ptx" k "$w0" "$w1" "$w2" "$w3" >"$log" 2>&1
+        check "$name" "^PASS k of .*: 32 of 32 lanes as expected"
+    done
+done <<'TURNS'
+1 a556a958 d66347fa 814664c2 0000000c
+2 dd7fa33d cf83424e 6537527c 00000032
+37 858142b0 54074692 63b15f97 00000032
+TURNS
+# The same product with B by plain ldmatrix (summed on k 0..3, then 4..7) and by ldmatrix.trans
+# (even k, then odd k): 52, 53 and 78 of the 128 results differ in their bits. Why products with B
+# by ldmatrix.trans are not paired; a lowering that summed them in the halves of k would give 0.
+while read -r turns w0 w1 w2 w3; do
+    name=trans-order-$turns
+    log=$out/logs/$name.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -i "$turns" "$G/ptx-cases/trans-order.ptx" k "$w0" "$w1" "$w2" "$w3" >"$log" 2>&1
+    check "$name" "^PASS k of .*: 32 of 32 lanes as expected"
+done <<'TURNS'
+1 00000034 b28c04cc 8117e4ae 00000001
+2 00000035 c21ec7db a2c0de75 00000002
+37 0000004e b1a314a3 cc4bf5eb 00000025
+TURNS
 # Built from the same sources with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
 px cubin-embedded-ptx "$G/ptx-cases/copy-octal.sm80.cubin" 12345678 abcdef01 0 0
 px cubin-embedded-division "$G/ptx-cases/signed-division.sm80.cubin" 0 0 0 0

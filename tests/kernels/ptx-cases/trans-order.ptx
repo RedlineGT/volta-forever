@@ -1,0 +1,191 @@
+.version 8.4
+.target sm_80
+.address_size 64
+// The same FP16 product (m16n8k16, f32 accumulators, a loop of turns) with its B loaded by a plain
+// ldmatrix from rows of n and by ldmatrix.trans from rows of k: the two B registers hold the same
+// values. A product whose B comes by ldmatrix.trans is computed on the even k, then the odd k; one
+// whose operands both come from plain ldmatrix on k 0..3, then k 4..7 (docs/emulations.md,
+// section 2). On values of every magnitude and sign the two orders round differently: every lane
+// stores the number of results (of the warp's 128) whose bits differ, and a hash of each. A
+// lowering that added the transposed product in the halves of k (as pairs do, docs/pairs.md
+// section 13) would give zero differences. The second parameter is the number of turns.
+.visible .entry k(.param .u64 output, .param .u32 turns) .reqntid 32,1,1 {
+    .reg .b32 lane, count, turn, slot, place, seed, hash, word, bits, rnd, half0, value, sign, power;
+    .reg .b32 tile0, at, rowa, rowp, rowt, n, kk, differ, foldp, foldt, low, high;
+    .reg .b32 a<4>, p<2>, t<2>, dp<4>, dt<4>;
+    .reg .b64 out, addr;
+    .reg .b16 %rs<3>;
+    .reg .pred more, same;
+    .shared .align 16 .b8 tile[1024];
+    ld.param.u32 count, [turns];
+    mov.u32 lane, %laneid;
+    mov.u32 tile0, tile;
+    // A: rows 0..15 of 32 bytes. B by rows of n (bytes 512..767, 32 bytes each, k 0..15) and by
+    // rows of k (bytes 768..1023, 16 bytes each, n 0..7).
+    and.b32 at, lane, 15;
+    shl.b32 at, at, 5;
+    shr.u32 bits, lane, 4;
+    shl.b32 bits, bits, 4;
+    add.u32 rowa, tile0, at;
+    add.u32 rowa, rowa, bits;
+    and.b32 at, lane, 7;
+    shl.b32 at, at, 5;
+    shr.u32 bits, lane, 3;
+    and.b32 bits, bits, 1;
+    shl.b32 bits, bits, 4;
+    add.u32 rowp, tile0, at;
+    add.u32 rowp, rowp, bits;
+    add.u32 rowp, rowp, 512;
+    and.b32 at, lane, 15;
+    shl.b32 at, at, 4;
+    add.u32 rowt, tile0, at;
+    add.u32 rowt, rowt, 768;
+    mov.b32 dp0, 0;
+    mov.b32 dp1, 0;
+    mov.b32 dp2, 0;
+    mov.b32 dp3, 0;
+    mov.b32 dt0, 0;
+    mov.b32 dt1, 0;
+    mov.b32 dt2, 0;
+    mov.b32 dt3, 0;
+    mov.u32 turn, 0;
+$L__turn:
+    // 256 halves of A and 128 of B (n, k): each lane makes four words of A and two of B.
+    mov.u32 slot, 0;
+$L__fill:
+    mad.lo.u32 place, slot, 32, lane;
+    mad.lo.u32 seed, turn, 192, place;
+    add.u32 seed, seed, 977;
+    mul.lo.u32 hash, seed, 0x9e3779b1;
+    shr.u32 bits, hash, 16;
+    xor.b32 hash, hash, bits;
+    mul.lo.u32 hash, hash, 0x85ebca6b;
+    shr.u32 bits, hash, 13;
+    xor.b32 hash, hash, bits;
+    mul.lo.u32 hash, hash, 0xc2b2ae35;
+    shr.u32 bits, hash, 16;
+    xor.b32 hash, hash, bits;
+    mov.u32 rnd, hash;
+    mov.u32 word, 0;
+    mov.u32 half0, 0;
+$L__half:
+    // A normal half of any magnitude and sign.
+    and.b32 sign, rnd, 0x8000;
+    shr.u32 power, rnd, 10;
+    and.b32 power, power, 31;
+    rem.u32 power, power, 30;
+    add.u32 power, power, 1;
+    shl.b32 power, power, 10;
+    and.b32 value, rnd, 0x3ff;
+    or.b32 value, value, sign;
+    or.b32 value, value, power;
+    shl.b32 word, word, 16;
+    or.b32 word, word, value;
+    shr.u32 rnd, rnd, 16;
+    add.u32 half0, half0, 1;
+    setp.lt.u32 more, half0, 2;
+    @more bra $L__half;
+    // Words 0..127: A; words 128..191: B[n][k], k in pairs; each also stored at B[k][n].
+    shl.b32 at, place, 2;
+    add.u32 at, at, tile0;
+    st.shared.u32 [at], word;
+    setp.ge.u32 more, place, 128;
+    @!more bra $L__next;
+    sub.u32 bits, place, 128;
+    shr.u32 n, bits, 3;
+    and.b32 kk, bits, 7;
+    shl.b32 kk, kk, 1;
+    // B[k][n] at 768 + 16 k + 2 n, B[k+1][n] 16 bytes further.
+    shl.b32 at, kk, 4;
+    shl.b32 bits, n, 1;
+    add.u32 at, at, bits;
+    add.u32 at, at, tile0;
+    and.b32 low, word, 0xffff;
+    shr.u32 high, word, 16;
+    cvt.u16.u32 %rs1, low;
+    cvt.u16.u32 %rs2, high;
+    st.shared.u16 [at+768], %rs1;
+    st.shared.u16 [at+784], %rs2;
+$L__next:
+    add.u32 slot, slot, 1;
+    setp.lt.u32 more, slot, 6;
+    @more bra $L__fill;
+    bar.sync 0;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {a0, a1, a2, a3}, [rowa];
+    ldmatrix.sync.aligned.m8n8.x2.shared.b16 {p0, p1}, [rowp];
+    ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {t0, t1}, [rowt];
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {dp0, dp1, dp2, dp3}, {a0, a1, a2, a3}, {p0, p1}, {dp0, dp1, dp2, dp3};
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {dt0, dt1, dt2, dt3}, {a0, a1, a2, a3}, {t0, t1}, {dt0, dt1, dt2, dt3};
+    bar.sync 0;
+    add.u32 turn, turn, 1;
+    setp.lt.u32 more, turn, count;
+    @more bra $L__turn;
+    // The results whose bits differ, and a hash of each product's, over the warp.
+    mov.u32 differ, 0;
+    setp.eq.b32 same, dp0, dt0;
+    selp.u32 bits, 0, 1, same;
+    add.u32 differ, differ, bits;
+    setp.eq.b32 same, dp1, dt1;
+    selp.u32 bits, 0, 1, same;
+    add.u32 differ, differ, bits;
+    setp.eq.b32 same, dp2, dt2;
+    selp.u32 bits, 0, 1, same;
+    add.u32 differ, differ, bits;
+    setp.eq.b32 same, dp3, dt3;
+    selp.u32 bits, 0, 1, same;
+    add.u32 differ, differ, bits;
+    mul.lo.u32 foldp, lane, 0x9e3779b9;
+    mov.u32 foldt, foldp;
+    xor.b32 foldp, foldp, dp0;
+    mul.lo.u32 foldp, foldp, 0x01000193;
+    xor.b32 foldp, foldp, dp1;
+    mul.lo.u32 foldp, foldp, 0x01000193;
+    xor.b32 foldp, foldp, dp2;
+    mul.lo.u32 foldp, foldp, 0x01000193;
+    xor.b32 foldp, foldp, dp3;
+    mul.lo.u32 foldp, foldp, 0x01000193;
+    xor.b32 foldt, foldt, dt0;
+    mul.lo.u32 foldt, foldt, 0x01000193;
+    xor.b32 foldt, foldt, dt1;
+    mul.lo.u32 foldt, foldt, 0x01000193;
+    xor.b32 foldt, foldt, dt2;
+    mul.lo.u32 foldt, foldt, 0x01000193;
+    xor.b32 foldt, foldt, dt3;
+    mul.lo.u32 foldt, foldt, 0x01000193;
+    shfl.sync.bfly.b32 bits, differ, 16, 31, -1;
+    add.u32 differ, differ, bits;
+    shfl.sync.bfly.b32 bits, differ, 8, 31, -1;
+    add.u32 differ, differ, bits;
+    shfl.sync.bfly.b32 bits, differ, 4, 31, -1;
+    add.u32 differ, differ, bits;
+    shfl.sync.bfly.b32 bits, differ, 2, 31, -1;
+    add.u32 differ, differ, bits;
+    shfl.sync.bfly.b32 bits, differ, 1, 31, -1;
+    add.u32 differ, differ, bits;
+    shfl.sync.bfly.b32 bits, foldp, 16, 31, -1;
+    xor.b32 foldp, foldp, bits;
+    shfl.sync.bfly.b32 bits, foldp, 8, 31, -1;
+    xor.b32 foldp, foldp, bits;
+    shfl.sync.bfly.b32 bits, foldp, 4, 31, -1;
+    xor.b32 foldp, foldp, bits;
+    shfl.sync.bfly.b32 bits, foldp, 2, 31, -1;
+    xor.b32 foldp, foldp, bits;
+    shfl.sync.bfly.b32 bits, foldp, 1, 31, -1;
+    xor.b32 foldp, foldp, bits;
+    shfl.sync.bfly.b32 bits, foldt, 16, 31, -1;
+    xor.b32 foldt, foldt, bits;
+    shfl.sync.bfly.b32 bits, foldt, 8, 31, -1;
+    xor.b32 foldt, foldt, bits;
+    shfl.sync.bfly.b32 bits, foldt, 4, 31, -1;
+    xor.b32 foldt, foldt, bits;
+    shfl.sync.bfly.b32 bits, foldt, 2, 31, -1;
+    xor.b32 foldt, foldt, bits;
+    shfl.sync.bfly.b32 bits, foldt, 1, 31, -1;
+    xor.b32 foldt, foldt, bits;
+    ld.param.u64 out, [output];
+    cvta.to.global.u64 out, out;
+    mul.wide.u32 addr, lane, 16;
+    add.u64 out, out, addr;
+    st.global.v4.u32 [out], {differ, foldp, foldt, count};
+    ret;
+}

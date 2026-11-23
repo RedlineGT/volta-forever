@@ -75,6 +75,28 @@ pub(super) enum Lane {
     /// thread's accumulator, `(lane & 24) | ((lane >> 2) & 1) | ((lane & 1) << 1)`; for registers
     /// 2 and 3 (`true`), the same plus 4.
     ChainOut(bool),
+    /// `lane >> n`.
+    Shift(u32),
+    /// For a pair of products (`docs/pairs.md`, section 2; the lane is `16h + 8sr + 4sc + 2k1 + k0`):
+    /// the row of an A matrix this lane gives to both products, `kA & 7 = 4sr + 2h + k0`.
+    QRow,
+    /// `QRow + 8n`: the lane that gives `ldmatrix` the address of that row in matrix `n`.
+    QRowOf(u32),
+    /// The lane with the address of that row of the A operand whose rows 0..7 are matrix `.0` and
+    /// rows 8..15 matrix `.1` (`kA >= 8` where `k1` is set): `QRowOf(.0)` or `QRowOf(.1)`.
+    QRows(u32, u32),
+    /// For a pair: the lane with the address of the row of matrix `n` that is the column of B this
+    /// lane gives, `(lane & 7) + 8n` (the product x's B in lanes with `h` clear, y's with `h` set).
+    QColumnOf(u32),
+    /// The same when x's B is matrix `.0` and y's matrix `.1` of one `ldmatrix`: `QColumnOf(.0)`
+    /// where `h` is clear, `QColumnOf(.1)` where it is set.
+    QColumns(u32, u32),
+    /// `pi(lane) = 16sr + 8h + 4k0 + 2sc + k1`: the lane whose value in Turing's layout a lane holds
+    /// for a pair (the index that takes a register to that state).
+    QForward,
+    /// `pi^-1(lane)`, with `bn` bit n of the lane: `16 b3 + 8 b4 + 4 b1 + 2 b0 + b2`: the index that
+    /// takes a register of a pair back to Turing's layout.
+    QBack,
 }
 
 impl Lane {
@@ -111,6 +133,15 @@ impl Lane {
             Lane::ChainARow0 => "%vf_car0".to_string(),
             Lane::ChainBCol => "%vf_cbc".to_string(),
             Lane::ChainOut(upper) => format!("%vf_co{}", upper as u32),
+            Lane::Shift(n) => format!("%vf_ys{n}"),
+            Lane::QRow => "%vf_ya".to_string(),
+            Lane::QRowOf(0) => Lane::QRow.name(),
+            Lane::QRowOf(n) => format!("%vf_ya{n}"),
+            Lane::QRows(first, second) => format!("%vf_yp{first}{second}"),
+            Lane::QColumnOf(n) => format!("%vf_yb{n}"),
+            Lane::QColumns(first, second) => format!("%vf_yc{first}{second}"),
+            Lane::QForward => "%vf_yq".to_string(),
+            Lane::QBack => "%vf_yt".to_string(),
         }
     }
 
@@ -122,6 +153,10 @@ impl Lane {
             Lane::RowOf(0) => Lane::Group,
             Lane::ColumnOf(0) => Lane::Thread2,
             Lane::PairRow(first, second) if first == second => Lane::RowOf(first).canonical(),
+            Lane::QRowOf(0) => Lane::QRow,
+            Lane::QRows(first, second) if first == second => Lane::QRowOf(first).canonical(),
+            Lane::QColumns(first, second) if first == second => Lane::QColumnOf(first),
+            Lane::Shift(4) => Lane::Half,
             other => other,
         }
     }
@@ -153,6 +188,17 @@ impl Lane {
             Lane::ChainBCol => vec![Lane::Half, Lane::Thread],
             Lane::ChainOut(false) => vec![Lane::Bit(4), Lane::Bit(16), Lane::Bit(8), Lane::Bit(1)],
             Lane::ChainOut(true) => vec![Lane::ChainOut(false)],
+            Lane::Shift(_) => vec![Lane::Id],
+            Lane::QRow => vec![Lane::Id, Lane::Half, Lane::Shift(3)],
+            Lane::QRowOf(_) => vec![Lane::QRow],
+            Lane::QRows(first, second) => vec![Lane::QRowOf(first), Lane::QRowOf(second), Lane::Has(2)],
+            Lane::QColumnOf(0) => vec![Lane::Id],
+            Lane::QColumnOf(_) => vec![Lane::QColumnOf(0)],
+            Lane::QColumns(first, second) => {
+                vec![Lane::QColumnOf(first), Lane::QColumnOf(second), Lane::Has(16)]
+            }
+            Lane::QForward => vec![Lane::Id, Lane::Shift(3)],
+            Lane::QBack => vec![Lane::Id, Lane::Shift(1), Lane::Half, Lane::Shift(3)],
         }
     }
 
@@ -245,6 +291,40 @@ impl Lane {
                 )
             }
             Lane::ChainOut(true) => format!("or.b32 {d}, {}, 4;", Lane::ChainOut(false).name()),
+            Lane::Shift(n) => format!("shr.u32 {d}, {l}, {n};"),
+            // k0, then h in bit 1 and sr in bit 2.
+            Lane::QRow => format!(
+                "and.b32 {d}, {l}, 1;\n\tbfi.b32 {d}, {}, {d}, 1, 1;\n\tbfi.b32 {d}, {}, {d}, 2, 1;",
+                Lane::Half.name(),
+                Lane::Shift(3).name()
+            ),
+            Lane::QRowOf(n) => format!("or.b32 {d}, {}, {};", Lane::QRow.name(), 8 * n),
+            Lane::QRows(first, second) => format!(
+                "selp.b32 {d}, {}, {}, {};",
+                Lane::QRowOf(second).canonical().name(),
+                Lane::QRowOf(first).canonical().name(),
+                Lane::Has(2).name()
+            ),
+            Lane::QColumnOf(0) => format!("and.b32 {d}, {l}, 7;"),
+            Lane::QColumnOf(n) => format!("or.b32 {d}, {}, {};", Lane::QColumnOf(0).name(), 8 * n),
+            Lane::QColumns(first, second) => format!(
+                "selp.b32 {d}, {}, {}, {};",
+                Lane::QColumnOf(second).name(),
+                Lane::QColumnOf(first).name(),
+                Lane::Has(16).name()
+            ),
+            // `lane >> 1` has b1, b2, b3, b4 in bits 0 to 3: b0 goes to bit 2, b3 to bit 4.
+            Lane::QForward => format!(
+                "shr.u32 {d}, {l}, 1;\n\tbfi.b32 {d}, {l}, {d}, 2, 1;\n\tbfi.b32 {d}, {}, {d}, 4, 1;",
+                Lane::Shift(3).name()
+            ),
+            // `lane >> 2` has b2, b3, b4 in bits 0 to 2: then b0 to bit 1, b1 to 2, b4 to 3, b3 to 4.
+            Lane::QBack => format!(
+                "shr.u32 {d}, {l}, 2;\n\tbfi.b32 {d}, {l}, {d}, 1, 1;\n\tbfi.b32 {d}, {}, {d}, 2, 1;\n\tbfi.b32 {d}, {}, {d}, 3, 1;\n\tbfi.b32 {d}, {}, {d}, 4, 1;",
+                Lane::Shift(1).name(),
+                Lane::Half.name(),
+                Lane::Shift(3).name()
+            ),
         }
     }
 }
