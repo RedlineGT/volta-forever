@@ -197,8 +197,31 @@ CUresult cuCtxDestroy(void *context) { return destroy(context); }
 CUresult cuGreenCtxDestroy(void *context) { return destroy(context); }
 // (A green context is its own context here: what is loaded through the one given for it is its.)
 CUresult cuCtxFromGreenCtx(void **context, void *green) { *context = green; return 0; }
-// (The last detach of a context made with cuCtxCreate destroys it.)
-CUresult cuCtxDetach(void *context) { return destroy(context); }
+// The last detach of a context destroys it; each attach takes one detach more.
+static uintptr_t attached_to[64];
+CUresult cuCtxAttach(void **context, unsigned flags) {
+    (void)flags;
+    LOCK;
+    for (int i = 0; i < 64; ++i)
+        if (!attached_to[i]) {
+            attached_to[i] = current;
+            break;
+        }
+    UNLOCK;
+    *context = (void *)current;
+    return current ? 0 : INVALID_CONTEXT;
+}
+CUresult cuCtxDetach(void *context) {
+    LOCK;
+    for (int i = 0; i < 64; ++i)
+        if (attached_to[i] == (uintptr_t)context) {
+            attached_to[i] = 0;
+            UNLOCK;
+            return 0;
+        }
+    UNLOCK;
+    return destroy(context);
+}
 CUresult cuCtxGetCurrent(void **context) { *context = (void *)current; return 0; }
 CUresult cuCtxSetCurrent(void *context) { current = (uintptr_t)context; return 0; }
 CUresult cuCtxGetDevice(int *device) {

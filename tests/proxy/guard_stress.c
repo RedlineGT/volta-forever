@@ -27,6 +27,12 @@
  *             generation moves by exactly 65,536 (read through its symbol: GENERATION_OFFSET and
  *             INIT_OFFSET, of `cuda::kernels::GENERATION` and of `cuInit`, in hexadecimal); the
  *             thread goes on, and then the refused kernel is launched: refused.
+ *   detach    a context is destroyed by its last cuCtxDetach: the function of a library's kernel that
+ *             runs, found allowed there, and then the function of its refused kernel in a new context
+ *             at the same handle, launched: refused. Then a context with a module of a refused kernel,
+ *             attached to once (cuCtxAttach): detached once, the kernel is still refused; detached
+ *             again (destroyed), the handle of the module that went is the module that the driver
+ *             makes for another library, whose kernel `bad` runs: it is launched.
  *   nocontext the function of a library's refused kernel in context A, taken from the driver, asked
  *             about while no context is current, then while another is; then, in A, asked about and
  *             launched: refused there, whatever was concluded in the other contexts.
@@ -286,6 +292,52 @@ int main(int argc, char **argv) {
                  "reached the driver",
                  same ? "yes" : "no", (unsigned long)moved, r, *launched_bad - before);
         check(line, same && moved == 65536 && r == REFUSED && *launched_bad == before);
+    } else if (!strcmp(scenario, "detach")) {
+        static const char LIB_RUNS[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
+                                       ".visible .entry bad()\n{\n ret;\n}\n";
+        CUresult (*l_detach)(void *) = L("cuCtxDetach"), (*l_attach)(void **, unsigned) = L("cuCtxAttach");
+        CUresult (*d_func_module)(void **, void *) = D("cuFuncGetModule");
+        void *library, *runs, *k_runs, *a, *b, *c, *d, *good_f, *bad_f, *m, *in_c, *again, *h, *module_of_h;
+        char line[300];
+        if (l_lib_load(&library, PTX, NULL, NULL, 0, NULL, NULL, 0) ||
+            l_lib_load(&runs, LIB_RUNS, NULL, NULL, 0, NULL, NULL, 0))
+            return 2;
+        d_lib_kernel(&bad_kernel, library, "bad");
+        d_lib_kernel(&good_kernel, library, "good");
+        d_lib_kernel(&k_runs, runs, "bad");
+        l_ctx_create(&a, 0, 0);
+        d_kernel_function(&good_f, good_kernel);
+        CUresult r1 = go(good_f);
+        l_detach(a);
+        l_ctx_create(&b, 0, 0);
+        d_kernel_function(&bad_f, bad_kernel);
+        unsigned long before = *launched_bad;
+        CUresult r2 = go(bad_f);
+        snprintf(line, sizeof line,
+                 "detach: the kernel that runs -> %d; after the last cuCtxDetach, the refused kernel's function at "
+                 "its handle: %s, launched -> %d, %lu reached the driver",
+                 r1, bad_f == good_f ? "yes" : "no", r2, *launched_bad - before);
+        check(line, r1 == 0 && bad_f == good_f && r2 == REFUSED && *launched_bad == before);
+        l_ctx_create(&c, 0, 0);
+        l_load(&m, PTX);
+        d_get_function(&in_c, m, "bad");
+        l_attach(&again, 0);
+        l_detach(c);
+        before = *launched_bad;
+        CUresult r3 = go(in_c);
+        unsigned long reached = *launched_bad - before;
+        l_detach(c);
+        l_ctx_create(&d, 0, 0);
+        d_kernel_function(&h, k_runs);
+        d_func_module(&module_of_h, h);
+        unsigned long launches = *launched;
+        CUresult r4 = go(h);
+        snprintf(line, sizeof line,
+                 "detach: attached once, detached once: the refused kernel -> %d (%lu reached the driver); detached "
+                 "again: the handle of its module given to another library's: %s, whose kernel `bad` runs -> %d",
+                 r3, reached, module_of_h == m ? "yes" : "no", r4);
+        check(line,
+              again == c && r3 == REFUSED && reached == 0 && module_of_h == m && r4 == 0 && *launched - launches == 1);
     } else if (!strcmp(scenario, "greenstale")) {
         static const char LIB_RUNS[] = ".version 7.0\n.target sm_70\n.address_size 64\n"
                                        ".visible .entry bad()\n{\n ret;\n}\n";

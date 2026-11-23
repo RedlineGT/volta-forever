@@ -328,7 +328,8 @@ What the proxy keeps of a module (its adapted image, its kernels and their refus
 original kept for a second translation, the second translation) is dropped when the
 program unloads it (`cuModuleUnload`, `cuLibraryUnload`), and when its context goes:
 `cuCtxDestroy`, `cuDevicePrimaryCtxReset`, and the last `cuDevicePrimaryCtxRelease`, by
-both names of each (`crates/vf-proxy/src/contexts.rs`). Nothing is unloaded in the driver
+both names of each, and the last `cuCtxDetach` (an attach, `cuCtxAttach`, takes one detach more)
+(`crates/vf-proxy/src/contexts.rs`). Nothing is unloaded in the driver
 then: it dropped them itself. A library (`cuLibraryLoadData`) is in every context and stays
 until it is unloaded; only the modules that the driver gives for it in a context go with
 that context. A green context is used through the context that `cuCtxFromGreenCtx` gives for

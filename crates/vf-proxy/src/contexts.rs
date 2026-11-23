@@ -40,6 +40,9 @@ static NUMBERS: AtomicU64 = AtomicU64::new(0);
 static MODULES: LazyLock<Mutex<HashMap<usize, Record>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// The primary context of each device, as the driver gave it to the program.
 static PRIMARY: LazyLock<Mutex<HashMap<c_int, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// For each context, the number of times the program attached to it (`cuCtxAttach`): the
+/// detaches that it takes more before the last one, which destroys it (`cuCtxDetach`).
+static ATTACHED: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn modules() -> MutexGuard<'static, HashMap<usize, Record>> {
     MODULES.lock().unwrap_or_else(|e| e.into_inner())
@@ -141,6 +144,31 @@ pub fn destroyed(modules: Modules) {
         crate::fit::forget(module);
         crate::images::dropped(module);
         crate::lazy::forget_module(module);
+    }
+}
+
+/// The program attached to `context` once more (`cuCtxAttach`).
+pub fn attached(context: usize) {
+    *ATTACHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(context)
+        .or_default() += 1;
+}
+
+/// The program detaches from `context` (`cuCtxDetach`): whether that is the last detach, which
+/// destroys it. (An attach is counted off when it is not.)
+pub fn last_detach(context: usize) -> bool {
+    let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
+    match attached.get_mut(&context) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            if *count == 0 {
+                attached.remove(&context);
+            }
+            false
+        }
+        _ => true,
     }
 }
 

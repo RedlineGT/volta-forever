@@ -2911,6 +2911,33 @@ pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
     result
 }
 
+/// An attach to a context takes one more detach before the last, which destroys it (`cuCtxDetach`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxAttach(context: *mut *mut c_void, flags: c_uint) -> CUresult {
+    let real = real!(cuCtxAttach: unsafe extern "C" fn(*mut *mut c_void, c_uint) -> CUresult);
+    let result = unsafe { real(context, flags) };
+    if result == CUDA_SUCCESS && !context.is_null() {
+        contexts::attached(unsafe { *context } as usize);
+    }
+    result
+}
+
+/// The last detach of a context destroys it, as `cuCtxDestroy` does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxDetach(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
+    let real = real!(cuCtxDetach: ContextDestroy);
+    if !contexts::last_detach(context as usize) {
+        return unsafe { real(context) };
+    }
+    let modules = contexts::of(context as usize);
+    let result = unsafe { real(context) };
+    if result == CUDA_SUCCESS {
+        contexts::destroyed(modules);
+    }
+    result
+}
+
 /// Modules are loaded in a green context through the context that `cuCtxFromGreenCtx` gives for
 /// it, and go with it, as at `cuCtxDestroy`.
 #[unsafe(no_mangle)]
