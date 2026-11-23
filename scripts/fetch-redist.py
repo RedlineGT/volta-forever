@@ -54,6 +54,12 @@ NCCL_WHEEL = {
 # matches it. (Earlier releases wrote the NCCL runtime as lib/libnccl.so.2.vf-part.)
 STAGE_PREFIX = ".vf-stage-"
 
+# While a component is moved into place, file by file, TREE_DIR/JOURNAL says which staging
+# directory it comes from and what its receipt is: the launcher refuses a tree where it is (its
+# files may be of two versions), and the next fetch completes what it says before anything else.
+# It is removed once all is in place.
+JOURNAL = ".vf-publishing"
+
 
 def sha256(path):
     h = hashlib.sha256()
@@ -247,9 +253,11 @@ def write_receipts(path, receipts):
 
 
 def remove_leftovers(tree, dl_dir):
-    """What an interrupted fetch left. The caller holds the locks: nothing else writes there."""
+    """What an interrupted fetch left. The caller holds the locks: nothing else writes there.
+    (Called after complete_publication: no staging directory is still to be moved into place.)"""
     for stage in Path(tree).glob(STAGE_PREFIX + "*"):
         shutil.rmtree(stage, ignore_errors=True)
+    Path(tree, JOURNAL + ".tmp").unlink(missing_ok=True)
     for part in [*Path(tree).glob("*.vf-part"), *Path(tree, "lib").glob("*.vf-part")]:
         part.unlink(missing_ok=True)
     for part in Path(dl_dir).glob(".dl-*"):
@@ -277,6 +285,50 @@ def move_into_place(stage, tree):
         os.replace(source, dest)
 
 
+def complete_publication(tree, record, receipts):
+    """Complete the publication that TREE/JOURNAL records: move into place what is left in its
+    staging directory, write its receipt, remove the journal. Returns None, or the name of the
+    component whose publication cannot be completed: its staging directory is gone. The caller
+    holds the tree lock."""
+    journal = os.path.join(tree, JOURNAL)
+    try:
+        with open(journal) as f:
+            entry = json.load(f)
+    except FileNotFoundError:
+        return None
+    name = entry["receipt"][0]
+    stage = os.path.join(tree, entry["stage"])
+    if not os.path.isdir(stage):
+        return name
+    if receipts.pop(name, None):
+        write_receipts(record, receipts)
+    move_into_place(stage, tree)
+    receipts[name] = entry["receipt"]
+    write_receipts(record, receipts)
+    os.unlink(journal)
+    shutil.rmtree(stage, ignore_errors=True)
+    return None
+
+
+def publish(tree, record, receipts, stage, receipt):
+    """Move what is staged under stage into tree, and write the receipt of its component: the
+    journal first (TREE/JOURNAL), which says what is moved, then the moves (complete_publication).
+    Ctrl-C, SIGTERM and SIGHUP wait until it is done; after SIGKILL, or a failure on the way,
+    the journal stays, the launcher refuses the tree, and the next fetch completes it."""
+    signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    try:
+        tmp = os.path.join(tree, JOURNAL + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump({"stage": os.path.basename(stage), "receipt": receipt}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, os.path.join(tree, JOURNAL))
+        complete_publication(tree, record, receipts)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
 def stage_nccl_runtime(wheel, stage, version):
     files = [
         (f"nvidia_nccl_cu12-{version}.dist-info/licenses/License.txt", "NCCL-LICENSE.txt"),
@@ -291,9 +343,20 @@ def stage_nccl_runtime(wheel, stage, version):
 
 
 def install_components(a, rows, lock_fds):
-    remove_leftovers(a.tree_dir, a.dl_dir)
     record = os.path.join(a.tree_dir, "COMPONENTS.tsv")
     receipts = read_receipts(record)
+    stuck = complete_publication(a.tree_dir, record, receipts)
+    if stuck:
+        # Its files may be of two versions, and what was to replace them is gone: it is put in
+        # place again, first (its publication replaces the journal), or the fetch stops here.
+        if stuck not in [name for name, _, _ in rows]:
+            sys.exit(f"{a.tree_dir}: an interrupted fetch was putting {stuck} in place, and what it "
+                     f"unpacked is gone: fetch {stuck} again (--only '^{stuck}$')")
+        print(f"note: {stuck} is put in place again: an interrupted fetch left it half done", file=sys.stderr)
+        if receipts.pop(stuck, None):
+            write_receipts(record, receipts)
+        rows.sort(key=lambda row: row[0] != stuck)
+    remove_leftovers(a.tree_dir, a.dl_dir)
     requested = "runtime" if a.runtime else "full"
     extract = ["--strip-components=1"]
     if a.runtime:
@@ -320,23 +383,20 @@ def install_components(a, rows, lock_fds):
             print(f"have {name} {version}", flush=True)
         # Unpacked in a directory of the tree, then moved into place: a failure on the way (a
         # full disk, a damaged archive) leaves the tree as it was. Writers hold the tree lock;
-        # what a killed fetch staged (the 421 MB NCCL runtime, say), the next one removes.
+        # what a killed fetch staged (the 421 MB NCCL runtime, say), the next one removes. Once
+        # the moves have begun (publish), the staging directory is the journal's, and stays.
+        installed = "full" if same_archive and prior[4] == "full" else requested
         stage = tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=a.tree_dir)
         try:
             if name == "libnccl" and dest.endswith(".whl"):
                 stage_nccl_runtime(dest, stage, version)
             elif subprocess.run(["tar", "-xf", dest, "-C", stage] + extract, pass_fds=lock_fds).returncode != 0:
                 sys.exit(f"cannot unpack {dest} into {a.tree_dir}")
-            # The files of the previous version are replaced from here: its receipt goes first.
-            if prior:
-                del receipts[name]
-                write_receipts(record, receipts)
-            move_into_place(stage, a.tree_dir)
+            publish(a.tree_dir, record, receipts, stage,
+                    [name, version, os.path.basename(dest), expected, installed])
         finally:
-            shutil.rmtree(stage, ignore_errors=True)
-        installed = "full" if same_archive and prior[4] == "full" else requested
-        receipts[name] = [name, version, os.path.basename(dest), expected, installed]
-        write_receipts(record, receipts)
+            if not os.path.exists(os.path.join(a.tree_dir, JOURNAL)):
+                shutil.rmtree(stage, ignore_errors=True)
         if a.discard:
             os.remove(dest)
 

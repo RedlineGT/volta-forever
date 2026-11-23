@@ -1232,6 +1232,33 @@ else
     fail "$name" "out '$_out' said '$_said' plain '$_plain'"
 fi
 
+# A tree that vf fetch is putting a component in, or was stopped in (its journal, .vf-publishing,
+# is there), is refused: its files may be of two versions; doctor says so. The CUDA 12.9.2
+# directory's tree, and the installation's own when another directory is taken (its NCCL may be).
+# (Until 2026-11-23 nothing marked it.)
+name="cuda12-being-fetched"
+pub=$tmp/publishing
+mk_archive "$pub" cuda12
+: >"$pub/cuda-12.9.2/.vf-publishing"
+_st=0
+_err=$(VF_QUIET=1 "$pub/bin/vf" env 2>&1 >/dev/null) || _st=$?
+_st2=0
+"$pub/bin/vf" --cuda12 "$arch/cuda-12.9.2/lib" true 2>/dev/null || _st2=$?
+_st3=0
+_doc=$("$pub/bin/vf" doctor 2>&1) || _st3=$?
+rm "$pub/cuda-12.9.2/.vf-publishing"
+_st4=0
+VF_QUIET=1 "$pub/bin/vf" true 2>/dev/null || _st4=$?
+case $_err/$_doc in
+    *"a vf fetch is putting libraries in place in $pub/cuda-12.9.2"*/*"MISSING complete CUDA 12.9.2 libraries in $pub/cuda-12.9.2"*)
+        if [ "$_st" = 2 ] && [ "$_st2" = 2 ] && [ "$_st3" = 1 ] && [ "$_st4" = 0 ]; then
+            pass "$name"
+        else
+            fail "$name" "status env $_st, --cuda12 $_st2, doctor $_st3, after $_st4"
+        fi ;;
+    *) fail "$name" "env said: $_err; doctor said: $_doc" ;;
+esac
+
 # --- done -----------------------------------------------------------------------
 
 if [ "$failed" = 0 ]; then

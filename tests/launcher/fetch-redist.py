@@ -32,6 +32,21 @@ sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 """
 
+# The script, given the signal VF_TEST_SIGNAL once it has moved the first staged file into place.
+PUBLISHING = """
+import os, runpy, signal, sys
+real = os.replace
+def replace(source, *args, **kwargs):
+    result = real(source, *args, **kwargs)
+    if "/.vf-stage-" in str(source) and not os.environ.get("VF_TEST_SENT"):
+        os.environ["VF_TEST_SENT"] = "1"
+        os.kill(os.getpid(), getattr(signal, os.environ["VF_TEST_SIGNAL"]))
+    return result
+os.replace = replace
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
 
 class FetchTest(unittest.TestCase):
     def setUp(self):
@@ -72,10 +87,10 @@ class FetchTest(unittest.TestCase):
         }}
         (self.root / "manifest.json").write_text(json.dumps(self.manifest))
 
-    def launch(self, *options, interrupt=None, manifest=None, base=None):
+    def launch(self, *options, interrupt=None, manifest=None, base=None, wrapper=INTERRUPTED):
         command, env = [sys.executable, str(SCRIPT)], {**os.environ, "PATH": str(self.commands)}
         if interrupt:
-            command[1:1] = ["-c", INTERRUPTED]
+            command[1:1] = ["-c", wrapper]
             env["VF_TEST_SIGNAL"] = interrupt
         return subprocess.Popen(
             [*command, base or self.root.as_uri(), manifest or str(self.root / "manifest.json"),
@@ -203,6 +218,50 @@ class FetchTest(unittest.TestCase):
         self.finish(self.launch("--runtime", "--only", "libnccl"))
         self.assertEqual((self.tree / "lib/libnccl.so.2").read_bytes(), b"NCCL runtime")
         self.assertEqual(list(self.tree.glob(".vf-stage-*")), [])
+
+    def test_interrupted_publication(self):
+        # Killed once the first file of a new version is in place: the journal says that the
+        # tree is being changed (the launcher refuses it), and the next fetch completes it. Given
+        # SIGTERM there, the fetch puts the whole version in place first. (Until 2026-11-23 the
+        # tree was left with files of two versions, and nothing said so.)
+        self.component("a")
+        self.finish(self.launch("--runtime"))
+        journal, record = self.tree / ".vf-publishing", self.tree / "COMPONENTS.tsv"
+        for name, status in (("SIGKILL", -signal.SIGKILL), ("SIGTERM", 128 + signal.SIGTERM)):
+            data = name.encode()
+            archive = self.component("a", data=data)
+            proc = self.launch("--runtime", interrupt=name, wrapper=PUBLISHING)
+            output = proc.communicate(timeout=15)[0]
+            self.assertEqual(proc.returncode, status, output)
+            files = {(self.tree / "lib/a.so").read_bytes(), (self.tree / "LICENSE").read_bytes()}
+            if name == "SIGKILL":
+                self.assertEqual(len(files), 2, "the first file is not in place: the test tests nothing")
+                self.assertTrue(journal.exists(), "files of two versions in the tree, and nothing says so")
+                self.finish(self.launch("--runtime"))
+            self.assertFalse(journal.exists(), name)
+            self.assertEqual((self.tree / "lib/a.so").read_bytes(), data, name)
+            self.assertEqual((self.tree / "LICENSE").read_bytes(), data, name)
+            self.assertEqual(list(self.tree.glob(".vf-stage-*")), [], name)
+            sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+            self.assertEqual(record.read_text().split("\t")[3], sha, name)
+            self.assertIn("unpacked before", self.finish(self.launch("--runtime")), name)
+
+    def test_publication_whose_staging_is_gone(self):
+        # A journal whose staging directory is gone (removed by hand): the component is put in
+        # place again, first, when it is fetched; another fetch stops and says what to fetch.
+        self.component("a")
+        self.component("b")
+        self.finish(self.launch("--runtime"))
+        journal = self.tree / ".vf-publishing"
+        journal.write_text(json.dumps({"stage": ".vf-stage-gone", "receipt": ["a", "1", "a.tar", "0" * 64, "runtime"]}))
+        self.assertIn("fetch a again (--only '^a$')", self.finish(self.launch("--runtime", "--only", "^b$"), success=False))
+        self.assertTrue(journal.exists())
+        output = self.finish(self.launch("--runtime"))
+        self.assertIn("a is put in place again", output)
+        self.assertIn("get  a", output)
+        self.assertIn("have b 1 (unpacked before)", output)
+        self.assertFalse(journal.exists())
+        self.assertEqual((self.tree / "lib/a.so").read_bytes(), b"library")
 
     def test_leftovers_are_removed(self):
         self.component("a")

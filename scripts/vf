@@ -313,6 +313,21 @@ path_prepend() {
 
 setup_env() {
     find_cuda12
+    # A tree into which vf fetch is putting a component, file by file, or was stopped while it
+    # did, has its journal (scripts/fetch-redist.py): its files may be of two versions until the
+    # next vf fetch completes it. Refused, in the tree of the CUDA 12.9.2 directory and in the
+    # installation's own (its NCCL may be taken). (_publishing: that tree; vf doctor says so.)
+    _publishing=
+    for _tree in "${_cuda12%/*}" "$home/cuda-12.9.2"; do
+        if [ -n "$_tree" ] && [ -e "$_tree/.vf-publishing" ]; then
+            _publishing=$_tree
+            break
+        fi
+    done
+    if [ -n "$_publishing" ] && [ "${_doctor:-0}" != 1 ]; then
+        echo "vf: a vf fetch is putting libraries in place in $_publishing, or was stopped while it did: its libraries may be of two versions. Wait for it to end, or run vf fetch again, which completes it (for a directory given to vf fetch --to, the same --to)." >&2
+        exit 2
+    fi
     # (LD_LIBRARY_PATH, LD_AUDIT and VF_AUDIT_MAP are lists whose entries a ':' separates, and
     # the loader splits LD_LIBRARY_PATH at a ';' too: a directory with one in its path would be
     # split there.)
@@ -678,7 +693,12 @@ cmd_doctor() {
     opt_no_audit=0
     opt_map_file=
     VF_QUIET=1
+    _doctor=1
     setup_env
+    if [ -n "$_publishing" ]; then
+        echo "MISSING complete CUDA 12.9.2 libraries in $_publishing: a vf fetch is putting them in place there, or was stopped while it did (run vf fetch again, which completes it; the launcher refuses the directory meanwhile)"
+        _ok=0
+    fi
     if [ -n "$_cuda12_left" ]; then
         echo "NOTICE in $home/cuda-12.9.2/lib, not counted as libraries:$_cuda12_left"
         echo "       (a .vf-part file is what an interrupted vf fetch left; the next vf fetch removes it)"

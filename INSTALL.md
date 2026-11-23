@@ -84,8 +84,12 @@ NCCL comes from NVIDIA's `nvidia-nccl-cu12` wheel. VF verifies its SHA-256 and i
 It needs `python3` and GNU `tar` (and uses `aria2c` when there is one). It unpacks the shared
 libraries and NVIDIA's licence, nothing else, and removes each archive once it is unpacked.
 Each archive, and the NCCL library, is unpacked in a staging directory and moved into place: a
-fetch that fails or is stopped (Ctrl-C, SIGTERM, SIGHUP) leaves the files that were there before,
-and the next one removes what it left. It can be run again: what is unpacked already is not
+fetch that fails or is stopped (Ctrl-C, SIGTERM, SIGHUP) while it unpacks leaves the files that
+were there before, and the next one removes what it left; once it has begun to move a component
+into place, it finishes before it stops. While it moves one, or when it was killed (SIGKILL, a
+power cut) or failed meanwhile, a journal (`.vf-publishing`) is in the directory: the launcher
+refuses that directory (its files may be of two versions), `vf doctor` says so, and the next
+fetch completes the move. It can be run again: what is unpacked already is not
 downloaded again. `--only REGEX` chooses the
 packages of NVIDIA's manifest by name, `--to DIR` another directory (then tell the launcher
 where: `--cuda12 DIR/lib`, or `VF_CUDA12=DIR/lib`).
