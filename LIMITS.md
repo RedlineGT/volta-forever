@@ -71,7 +71,8 @@ have code for Volta, behind their names (`INSTALL.md`).
 **Cubins for sm_80 and later.** VF can use the PTX that NVIDIA's assembler retains in
 `.nv_debug_ptx_txt` with line information. It checks the architecture and the kernel names
 before compiling that PTX for Volta. This covers standalone cubins from Triton and cubins in
-fat binaries. For sm_75, VF also tries retained PTX when its default machine-code translation
+fat binaries. Calls that the executable leaves to the driver (`__assertfail`, `vprintf`,
+`malloc`, `free`) are accepted when the retained source declares them `.extern .func`. For sm_75, VF also tries retained PTX when its default machine-code translation
 refuses every kernel in the image.
 
 Builds from `main` also translate a subset of stripped `sm_80` executables. VF checks each function's

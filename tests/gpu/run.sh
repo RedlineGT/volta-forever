@@ -141,9 +141,10 @@ px ptx-reduction-exited "$G/ptx-cases/reduction-exited.ptx" 5 1 4 5
 px ptx-reduction-exited-f32 "$G/ptx-cases/reduction-exited-f32.ptx" 80000000 00000000 7fffffff 7fffffff
 px ptx-copy-octal "$G/ptx-cases/copy-octal.ptx" 12345678 abcdef01 0 0
 px guarded-copy "$G/ptx-cases/guarded-copy.ptx" 0 0 0 0
-# Built from the same source with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
+# Built from the same sources with CUDA 12.9 ptxas -lineinfo -arch=sm_80.
 px cubin-embedded-ptx "$G/ptx-cases/copy-octal.sm80.cubin" 12345678 abcdef01 0 0
 px cubin-embedded-division "$G/ptx-cases/signed-division.sm80.cubin" 0 0 0 0
+px cubin-embedded-import "$G/ptx-cases/assert-import.sm80.cubin" 12345678 9abcdef0 0badf00d 00c0ffee
 # CUDA 12.9 ptxas -lineinfo -arch=sm_75 predicates the HMMA; the PTX keeps its uniform branch.
 px cubin-turing-ptx-retry "$G/ptx-cases/guarded-mma.sm75.cubin" 41300000 41400000 41500000 41600000
 tc ampere "$G/k_ampere.135.sm80.ptx" "PTX for sm_80 retargeted \(1 module, 25 tensor-core instructions rewritten\)" "31 kernels, 0 wrong"

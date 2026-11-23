@@ -278,6 +278,18 @@ fn embedded_ptx(cubin: &[u8], sm: u32) -> Option<(Vec<u8>, vf_ptx::Header)> {
     if entries.is_empty() || !names.iter().map(|name| name.as_bytes()).eq(entries) {
         return None;
     }
+    // Compiled again, the source must call what the machine code calls (`__assertfail` in Triton's
+    // bounds checks): every function the cubin leaves to the loader is one the source declares.
+    let imports = fatbin::cubin_imports(cubin)?;
+    if !imports.is_empty() {
+        let declared: Vec<_> = vf_ptx::extern_functions(&text)
+            .into_iter()
+            .map(|name| &text[name])
+            .collect();
+        if !imports.iter().all(|name| declared.contains(&name.as_bytes())) {
+            return None;
+        }
+    }
     Some((text, header))
 }
 
@@ -1741,6 +1753,49 @@ mod tests {
             }
             elf.set_symbols(&symbols);
             assert!(policy.adapt_cubin(&elf.write()).image.is_none());
+        }
+    }
+
+    #[test]
+    fn retained_ptx_may_call_what_its_source_declares_extern() {
+        let input = include_bytes!("../../../tests/kernels/ptx-cases/assert-import.sm80.cubin");
+        assert_eq!(fatbin::cubin_imports(input).unwrap(), ["__assertfail"]);
+        for policy in [
+            Policy::default(),
+            Policy {
+                translate: Translate::Never,
+                ..Policy::default()
+            },
+        ] {
+            assert!(matches!(
+                policy.adapt_cubin(input).outcome,
+                Outcome::Retargeted { from_sm: 80, .. }
+            ));
+        }
+        let policy = Policy {
+            translate: Translate::Never,
+            ..Policy::default()
+        };
+        for edit in 0..7 {
+            let mut elf = vf_sass::elf::Elf::parse(input).unwrap();
+            let mut symbols = elf.symbols().unwrap();
+            let index = symbols.iter().position(|s| s.name == "__assertfail").unwrap();
+            let import = &mut symbols[index];
+            assert_eq!((import.info, import.other, import.shndx), (0x12, 0, 0));
+            match edit {
+                0 => import.name_offset += 2, // `assertfail`, which the source does not declare
+                1 => import.shndx = 1,        // a definition: part of the module's interface
+                2 => import.other = 2,        // hidden: not a plain call to the loader
+                3 => import.info = 0x11,      // an undefined object, not a function
+                4 => import.info = 0x22,      // weak: not a plain call to the loader
+                5 => import.value = 0x10,     // a value: not an import
+                _ => {
+                    let symtab = elf.section(".symtab").unwrap();
+                    elf.sections[symtab].info = index as u32 + 1; // in the local part
+                }
+            }
+            elf.set_symbols(&symbols);
+            assert!(policy.adapt_cubin(&elf.write()).image.is_none(), "edit {edit}");
         }
     }
 

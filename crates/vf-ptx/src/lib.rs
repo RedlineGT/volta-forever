@@ -266,8 +266,35 @@ pub fn functions(text: &[u8]) -> Vec<Function> {
     found
 }
 
+/// The functions a module declares `.extern` and calls without defining them (a declaration ended
+/// by `;`), such as `__assertfail` and `vprintf`, which the driver provides when it loads the module.
+pub fn extern_functions(text: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut found = Vec::new();
+    scan_functions(text, |directive, name, body, entry| {
+        let linkage = text[..directive].trim_ascii_end();
+        let after_word = |i: usize| i == 0 || !is_name_byte(linkage[i - 1]);
+        if body.is_none() && !entry && linkage.ends_with(b".extern") && after_word(linkage.len() - b".extern".len()) {
+            found.push(name);
+        }
+    });
+    found
+}
+
 // Also expose the position of the .entry or .func directive to the module analysis.
 fn visit_functions(text: &[u8], mut visit: impl FnMut(usize, Function)) {
+    scan_functions(text, |directive, name, body, entry| {
+        if let Some(body) = body {
+            visit(directive, Function { name, body, entry });
+        }
+    });
+}
+
+// Every `.entry` or `.func` at module level: its directive's position, its name, its body (none
+// for a declaration) and whether it is a kernel.
+fn scan_functions(
+    text: &[u8],
+    mut visit: impl FnMut(usize, std::ops::Range<usize>, Option<std::ops::Range<usize>>, bool),
+) {
     let mut at = 0;
     while at < text.len() {
         if let Some(next) = skip_comment(text, at) {
@@ -315,18 +342,16 @@ fn visit_functions(text: &[u8], mut visit: impl FnMut(usize, Function)) {
                 cursor += 1;
             }
         }
+        let entry = keyword == b".entry";
         match (name, body) {
             (Some(name), Some(body)) => {
                 let directive = at;
                 at = body.end;
-                visit(
-                    directive,
-                    Function {
-                        name,
-                        body,
-                        entry: keyword == b".entry",
-                    },
-                );
+                visit(directive, name, Some(body), entry);
+            }
+            (Some(name), None) if text.get(cursor) == Some(&b';') => {
+                visit(at, name, None, entry);
+                at = cursor.max(at + 1);
             }
             _ => at = cursor.max(at + 1),
         }
@@ -928,5 +953,22 @@ mod tests {
         let (lowered, lowering) = lower_to_volta(text);
         assert_eq!(lowered, text);
         assert_eq!(lowering, Lowering::default());
+    }
+
+    #[test]
+    fn extern_functions_are_the_declarations_marked_extern() {
+        let text = b".version 8.0\n.target sm_80\n.address_size 64\n\
+            .extern .func (.param .b32 r) vprintf (.param .b64 f, .param .b64 a);\n\
+            .extern .func __assertfail\n(\n.param .b64 m\n)\n.noreturn;\n\
+            .func local_declared (.param .b32 x);\n\
+            .my.extern .func not_extern ();\n\
+            .extern .entry declared_entry ();\n\
+            // .extern .func commented ();\n\
+            .extern .func defined () { ret; }\n\
+            .visible .entry k () { ret; }\n";
+        let names: Vec<_> = extern_functions(text).into_iter().map(|n| &text[n]).collect();
+        assert_eq!(names, [&b"vprintf"[..], b"__assertfail"]);
+        let defined: Vec<_> = functions(text).into_iter().map(|f| &text[f.name]).collect();
+        assert_eq!(defined, [&b"defined"[..], b"k"]);
     }
 }
