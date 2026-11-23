@@ -75,8 +75,8 @@ struct Decision {
 struct Cache {
     unloads: u64,
     by_base: HashMap<usize, Decision>,
-    /// `vf_adapt::Policy::told_limit_in` of the files read, by path.
-    limits: HashMap<CString, Option<u32>>,
+    /// `vf_adapt::Policy::told_limit_in` of the files read, by path and what is told.
+    limits: HashMap<(CString, Option<u32>), Option<u32>>,
 }
 
 /// Held only to read or write the cache: not over a walk of the loader's list (`dl_iterate_phdr`
@@ -284,21 +284,22 @@ fn classify(path: &CStr) -> Caller {
 }
 
 /// The limit that the code embedded in the file at `path` sets to what a caller that runs it is
-/// told (`vf_adapt::Policy::told_limit_in`), with the file. Each file is read once while the
-/// loader's count of unloads is `unloads`.
-fn file_limit(path: &CStr, unloads: u64) -> Option<(u32, CString)> {
+/// told (`vf_adapt::Policy::told_limit_in`, with `policy`, which tells what the caller is told so
+/// far), with the file. Each file is read once for what is told while the loader's count of
+/// unloads is `unloads`.
+fn file_limit(path: &CStr, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
+    let key = (path.to_owned(), policy.told_sm);
     let known = {
         let cache = callers();
         (cache.unloads == unloads)
-            .then(|| cache.limits.get(path).copied())
+            .then(|| cache.limits.get(&key).copied())
             .flatten()
     };
     let limit = known.unwrap_or_else(|| {
-        let limit =
-            Mapped::open(path).and_then(|file| unpanicked(path, || config().policy.told_limit_in(file.bytes())));
+        let limit = Mapped::open(path).and_then(|file| unpanicked(path, || policy.told_limit_in(file.bytes())));
         let mut cache = callers();
         if cache.unloads == unloads {
-            cache.limits.insert(path.to_owned(), limit);
+            cache.limits.insert(key, limit);
         }
         limit
     });
@@ -333,10 +334,10 @@ fn file_name(path: &[u8]) -> &[u8] {
 
 /// The limit that the code in the file of the caller of class `caller` at `path` sets, when it
 /// embeds code.
-fn own_limit(path: &CStr, caller: Caller, unloads: u64) -> Option<(u32, CString)> {
+fn own_limit(path: &CStr, caller: Caller, policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
     let own = matches!(caller, Caller::From(_))
         && runtime_version(&String::from_utf8_lossy(file_name(path.to_bytes()))).is_none();
-    own.then(|| file_limit(path, unloads)).flatten()
+    own.then(|| file_limit(path, policy, unloads)).flatten()
 }
 
 /// The names in the dynamic section of a shared object.
@@ -525,7 +526,7 @@ fn beside_limit(path: &CStr, caller: Caller, objects: &[Object]) -> Option<(u32,
 /// that name one of these, and so on (a CUDA runtime answers for the programs that use it, also
 /// through a library of their own that has no GPU code). Their files are read once each. A
 /// library loaded after the caller first asks is not seen.
-fn dependents_limit(objects: &[Object], unloads: u64) -> Option<(u32, CString)> {
+fn dependents_limit(objects: &[Object], policy: &vf_adapt::Policy, unloads: u64) -> Option<(u32, CString)> {
     let names_of = |object: &Object| {
         let file_name = object.path.as_ref().map(|path| {
             path.to_bytes()
@@ -549,7 +550,7 @@ fn dependents_limit(objects: &[Object], unloads: u64) -> Option<(u32, CString)> 
             }
             (seen[at], more) = (true, true);
             if let Some(path) = &object.path {
-                lowest = lower(lowest, file_limit(path, unloads));
+                lowest = lower(lowest, file_limit(path, policy, unloads));
             }
             names.extend(names_of(object));
         }
@@ -604,8 +605,24 @@ fn caller(return_address: usize) -> Decision {
     let caller = classify(path);
     let mut limit = None;
     if limits_apply() && caller != Caller::Native {
-        limit = lower(own_limit(path, caller, unloads), beside_limit(path, caller, &objects));
-        limit = lower(limit, dependents_limit(&objects, unloads));
+        // Told the lowest limit that its code and the code it answers for set, the caller is given
+        // the code for it, which can set a lower one: lowered until nothing lowers it more
+        // (`vf_adapt::Policy::lowered`), keeping the file that sets it.
+        let beside = beside_limit(path, caller, &objects);
+        let mut policy = config().policy;
+        loop {
+            let found = lower(
+                lower(own_limit(path, caller, &policy, unloads), beside.clone()),
+                dependents_limit(&objects, &policy, unloads),
+            );
+            match found {
+                Some((sm, file)) if policy.told_sm.is_some_and(|told| sm < told) => {
+                    policy.told_sm = Some(sm);
+                    limit = Some((sm, file));
+                }
+                _ => break,
+            }
+        }
     }
     let decision = Decision {
         caller,

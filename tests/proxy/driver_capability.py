@@ -179,6 +179,20 @@ def machine_code(header, cubin, sm, lz4=False):
     return bytes(header), stored
 
 
+def ptx(header, sm):
+    """An entry of PTX for `sm` (a module without functions), stored as it is, with the other
+    fields of `header`."""
+    text = f".version 9.5\n.target sm_{sm}\n.address_size 64\n".encode()
+    stored = text + bytes(8 - len(text) % 8)
+    header = bytearray(header)
+    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<I", header, 0x1C, sm)
+    struct.pack_into("<HH", header, 0x18, 5, 9)
+    struct.pack_into("<Q", header, 0x28, struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000)
+    struct.pack_into("<Q", header, 0x38, 0)
+    return bytes(header), stored
+
+
 def limited(given, code_sm):
     """What a caller whose code runs from machine code for `code_sm` is told when VF_CAPABILITY is
     `given`: no later generation than that code's, unless VF_CAPABILITY_ALL=1."""
@@ -296,12 +310,19 @@ def run_beside(proxy, directory, case):
 
 
 def run_runtimes(proxy, directory):
-    """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED)."""
+    """A CUDA runtime answers for the code of the libraries loaded with it (DT_NEEDED). With two
+    of them, one with PTX for sm_80 and one with PTX for sm_75 and sm_90 (libcudart.so.17): told
+    8.0 for the first, the runtime would be given the PTX for sm_75 of the second: 7.5 (until
+    2026-11-23, 8.0 at 9.0 and 12.0)."""
     api = c.CDLL(str(proxy))
     given = asked()
-    for runtime, user, code_sm in (("libcudart.so.13", "user_turing.so", 75), ("libcudart.so.14", "user_ptx.so", 75),
-                                   ("libcudart.so.15", "user_ampere.so", 80), ("libcudart.so.16", "user_chain.so", 75)):
-        c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
+    for runtime, users, code_sm in (("libcudart.so.13", ["user_turing.so"], 75),
+                                    ("libcudart.so.14", ["user_ptx.so"], 75),
+                                    ("libcudart.so.15", ["user_ampere.so"], 80),
+                                    ("libcudart.so.16", ["user_chain.so"], 75),
+                                    ("libcudart.so.17", ["user_ptx80.so", "user_ptx75_90.so"], 75)):
+        for user in users:
+            c.CDLL(str(directory / "runtimes" / user))  # and the runtime it needs
         sm = limited(given, code_sm) or 75
         probe(api, c.CDLL(str(directory / "runtimes" / runtime)), sm, sm)
 
@@ -365,11 +386,17 @@ def build(directory):
         (directory / f"kernels-{code}/libfront.so").unlink()
     runtimes = directory / "runtimes"
     runtimes.mkdir()
+    ptx_header = entries((data / "elf75-ptx75-zstd.fatbin").read_bytes())[1][0]
+    (directory / "ptx80.fatbin").write_bytes(fat_binary([ptx(ptx_header, 80)]))
+    (directory / "ptx75_90.fatbin").write_bytes(fat_binary([ptx(ptx_header, 75), ptx(ptx_header, 90)]))
     for runtime, user, fixture in (("libcudart.so.13", "user_turing.so", directory / "turing_only.fatbin"),
                                    ("libcudart.so.14", "user_ptx.so", data / "elf75-ptx75-zstd.fatbin"),
-                                   ("libcudart.so.15", "user_ampere.so", directory / "ampere_only.fatbin")):
-        subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", f"-Wl,-soname,{runtime}", "-x", "c", "-",
-                        "-o", str(runtimes / runtime)], input=CLIENT, text=True, check=True)
+                                   ("libcudart.so.15", "user_ampere.so", directory / "ampere_only.fatbin"),
+                                   ("libcudart.so.17", "user_ptx80.so", directory / "ptx80.fatbin"),
+                                   ("libcudart.so.17", "user_ptx75_90.so", directory / "ptx75_90.fatbin")):
+        if not (runtimes / runtime).exists():
+            subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-Wl,-Bsymbolic", f"-Wl,-soname,{runtime}", "-x", "c",
+                            "-", "-o", str(runtimes / runtime)], input=CLIENT, text=True, check=True)
         subprocess.run(["cc", "-shared", "-fPIC", "-x", "c", "-", "-o", str(runtimes / user), "-L", str(runtimes),
                         "-Wl,--no-as-needed", f"-l:{runtime}", "-Wl,-rpath,$ORIGIN"],
                        input="int user(void) { return 0; }\n", text=True, check=True)

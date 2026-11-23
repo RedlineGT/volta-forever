@@ -728,8 +728,29 @@ impl Policy {
     }
 
     /// `told_limit` for the code embedded in `file` (a shared library, an executable): the lowest
-    /// over its fat binaries.
+    /// over its fat binaries, lowered until nothing lowers it more (`lowered`).
     pub fn told_limit_in(&self, file: &[u8]) -> Option<u32> {
+        self.lowered(|policy| policy.told_limit_once_in(file))
+    }
+
+    /// What a program is told when `limit_at`, the limit that its code sets for a policy that tells
+    /// `told_sm` (`told_limit` over all of that code), is below what this policy tells: told the
+    /// limit, the program is given the code for the limit (the images it loads are adapted with
+    /// `told_sm` set to it), which can set a lower one. Told 9.0, code with PTX for sm_80 sets 8.0;
+    /// told 8.0, an image with PTX for sm_75 and sm_90 is given its PTX for sm_75, which sets 7.5.
+    /// So the limit is lowered until nothing lowers it more. `None`: nothing lowers what is told.
+    pub fn lowered(&self, mut limit_at: impl FnMut(&Policy) -> Option<u32>) -> Option<u32> {
+        let mut policy = *self;
+        let mut limit = None;
+        while let Some(sm) = limit_at(&policy).filter(|&sm| policy.told_sm.is_some_and(|told| sm < told)) {
+            limit = Some(sm);
+            policy.told_sm = Some(sm);
+        }
+        limit
+    }
+
+    /// `told_limit` over the fat binaries of `file`, once.
+    fn told_limit_once_in(&self, file: &[u8]) -> Option<u32> {
         // Nothing limits what Volta's generation is told.
         if self.told_sm? / 10 <= TRANSLATED_FROM / 10 {
             return None;
@@ -1757,6 +1778,42 @@ mod tests {
         assert_eq!(policy.told_limit_in(&file), Some(75));
         assert_eq!(Policy::default().told_limit_in(&file), None);
         assert_eq!(policy.told_limit_in(b"\x7fELF no fat binary here"), None);
+        // PTX for sm_75 and sm_90 sets no limit at 9.0, and PTX for sm_80 sets 8.0; told 8.0, the
+        // first is given its PTX for sm_75, which sets 7.5. Together, in either order, the limit is
+        // 7.5, whatever the generation asked after Turing's (until 2026-11-23: 8.0 at 9.0 and 12.0,
+        // and the program told 8.0 was given the code for sm_75 of the first).
+        let ptx_75_90 = fatbin::build(&[ptx_for(75), ptx_for(90)]);
+        let ptx_80 = fatbin::build(&[ptx_for(80)]);
+        assert_eq!(limit(Some(90), default, &ptx_75_90), None);
+        assert_eq!(limit(Some(90), default, &ptx_80), Some(80));
+        assert_eq!(limit(Some(80), default, &ptx_75_90), Some(75));
+        for images in [[&ptx_75_90, &ptx_80], [&ptx_80, &ptx_75_90]] {
+            let mut file = b"\x7fELF....".to_vec();
+            for image in images {
+                file.extend_from_slice(image);
+            }
+            for told in [80, 86, 90, 120] {
+                let asked = Policy {
+                    told_sm: Some(told),
+                    ..policy
+                };
+                assert_eq!(asked.told_limit_in(&file), Some(75), "{told}");
+            }
+        }
+        // The fixed point itself: lowered while the limit is below what is told.
+        let steps = |told: Option<u32>| match told {
+            Some(120) => Some(90),
+            Some(90) => Some(80),
+            Some(80) => Some(75),
+            _ => None,
+        };
+        let asked_12 = Policy {
+            told_sm: Some(120),
+            ..policy
+        };
+        assert_eq!(asked_12.lowered(|p| steps(p.told_sm)), Some(75));
+        assert_eq!(asked_12.lowered(|p| p.told_sm), None);
+        assert_eq!(Policy::default().lowered(|_| Some(75)), None);
         // A file with code that limits what its program is told to 7.5, and code for sm_75 and
         // sm_80 that alone would not: the program, told 7.5, is given the sm_75 code of both.
         let mut file = b"\x7fELF....".to_vec();
