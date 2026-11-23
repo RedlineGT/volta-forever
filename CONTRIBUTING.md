@@ -23,7 +23,9 @@ dash tests/launcher/launcher.sh  # the launcher (and under bash --posix)
 ```
 
 `tests/README.md`, "What the CI runs", lists what every push runs; the host tests of
-`tests/proxy/` that it does not run are listed there too.
+`tests/proxy/` that it does not run are listed there too. Before a release, `tests/release-check.sh`
+runs all of the host part in order and prints the commands of the GPU part (`tests/README.md`,
+"Checking a release").
 
 ## What a change must keep
 

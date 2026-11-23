@@ -320,6 +320,37 @@ needs the CUDA 12.9.2 toolkit, nor
 toolkits (`scripts/fetch-all.sh redist`, `scripts/build-forwarders.sh`): it fetches neither.
 The tests on a GPU and the SASS tests over whole corpora are run by hand.
 
+### Checking a release
+
+`tests/release-check.sh` runs, one after the other, what needs no GPU, and ends with a table (each
+step, PASS, FAIL or SKIP, its time, and the log of a step that failed) and the exit status 1 when a
+step failed, 2 when none failed but one could not run here (what it needs is missing: the CUDA
+12.9.2 toolkit, the forwarding libraries, the instruction descriptions), 0 otherwise:
+
+- the CI's host steps (formatting, lints with warnings as errors, the unit tests, `scripts/build.sh`
+  and every host suite of the list above); the host suites that the CI does not run, when what
+  they need is here (`jitlink_objects.py`, `package-refusals.sh`, `scripts/build-bf16-kernels.sh
+  --check`); and `compare.sh`, on the test kernels and on PyTorch's cubins when `TORCH` names them
+  (about ten minutes in all with `JOBS=6`, eight of them for `compare.sh`);
+- with `--full`, then the validator over the corpora: `validate-corpus.sh` on `TORCH`,
+  `heldout-validate.sh` on `HELDOUT` and `controls.sh` (hours; a step whose corpus is missing is
+  skipped).
+
+The GPU part is printed, not run: the commands of `tests/gpu/`, from the tree, with the settings a
+release is checked with (`run.sh` at the default capability and at `VF_CAPABILITY=8.0`;
+`forward.sh`, `forward-bf16.sh`; `torch.sh` and `torch-models.sh` at the default, at
+`VF_CAPABILITY=8.0` and at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`; `triton.sh`,
+`vllm-topk-topp-run.sh`, `llamacpp.sh`, `launcher.sh`; `vllm.sh` and `sglang.sh` with
+`VF_VLLM_VENV` and `VF_SGLANG_VENV` when they are set; `zml.sh`), then how to run them on an
+installed archive instead of the tree: the GPU scripts take the tree's `dist/` (the forwarding
+libraries of `dist/forward`, the launcher that `launcher.sh` runs), so the archive's directories
+and launcher have to stand in a copy of the tree, with a new `VF_OUT`. With
+`VF_RELEASE_GPU_RUN='PREFIX'`, each command of the tree is also run, as `PREFIX 'COMMAND'` (a
+runner of jobs that takes a shell command line and holds a GPU for it), one after the other, and
+put in the table; `VF_RELEASE_GPU_TREE` is the path of the tree where the command runs, and
+`VF_GPU` the GPU's index there (by default the first of `CUDA_VISIBLE_DEVICES`, else 0). Every step
+writes its output to `$VF_OUT/release-check/`.
+
 ## Preparing the dependencies
 
 ### Toolkits and test models
