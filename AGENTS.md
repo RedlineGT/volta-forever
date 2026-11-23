@@ -22,8 +22,12 @@ Steps, in this order:
 
 1. **Check the machine.** A Tesla V100, the NVIDIA R580 driver, Linux x86-64 with glibc 2.34 or
    later. Install with the command of the README, then run `vf doctor` and read every line.
-2. **Look for a guide.** If `docs/guides/` has the program, follow it as written before
-   improvising: the settings there were measured.
+2. **Read the guides.** `docs/guides/` has one worked example for each engine that runs today
+   (vLLM, SGLang, llama.cpp-based engines, ZML and others), from a clean Ubuntu to a measured
+   result. If your program is there, follow its guide as written before improvising: the
+   settings were measured. If it is not, read the guide of the nearest program anyway (same
+   framework, same way of building or loading kernels): it shows which settings exist, in which
+   order to try them, and what a working run looks like.
 3. **Run it plainly first:** `vf PROGRAM ARGS`, or `vf venv DIR` for a Python environment that
    takes ordinary CUDA 13 wheels. Do not set `VF_*` variables you have no reason for.
 4. **Read standard error.** Every line that starts with `[volta-forever]` is information meant
@@ -59,7 +63,20 @@ refusal by patching the program to skip the kernel unless the user asks for that
 ## 2. Changing VF
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) whole: it is short and every rule in it was paid for.
-The ones agents break most often:
+
+**Fix the general problem, not your program.** A change to VF must make a class of programs
+work: an instruction lowered for every kernel that uses it, a driver entry point that behaves
+as NVIDIA's does for every caller, a kind of image that is read right wherever it comes from.
+A change that recognises one program is not taken: no test on a program's name, a library's
+file name or a kernel's name to switch behaviour; no replacement of one particular kernel's
+body by a hand-written one; no setting whose only use is one engine. The project removed such
+code once already. If you find yourself writing "if this is X", stop and look for what X does
+that VF does not handle; describe that in the pull request, with a small test that shows it
+without X. What is specific to a program belongs in its guide under `docs/guides/`, as
+settings and commands, and a new guide for a program you got running is a welcome pull
+request.
+
+The rules agents break most often:
 
 - **A test must be able to fail.** Every fix comes with a test that fails before it and passes
   after, and the commit says it was seen to fail.
