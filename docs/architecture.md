@@ -476,26 +476,35 @@ of the driver (cuFFT launches with `cuLaunchKernel`).
 
 What a handle is takes calls of the driver and a lock. It is asked once for each handle in each
 generation of the layer's records; what was found allowed is kept in a table read without a lock
-(4,096 sets of four slots, by a hash of the handle; a slot holds the handle and the whole
-generation it was found in, with a version that a writer makes odd). A generation ends whenever
-the records of refusals change, at every load and every unload of a module or a library, and
-whenever a context goes (an unload and a context that goes end two: one before the driver's call
-and one after), so a program that loads code as it runs asks again after each load: over the 925
-cases of `tests/gpu/torch.sh`, run by one process, the driver was asked 1,380 times in 911
-generations, for 5,992 launches by `cuLaunchKernel` (`VF_STATS`, which says at exit how many times
-the driver was asked, how many calls were refused and how many generations there were). A question
-costs 1.4 to 2.0 microseconds more than the launch: the first launch of each of 2,000 kernels in
-turn took 3.7 to 4.2 microseconds, against 2.3 without the refusal, and the launches of the next
-turns as much as without it (2.15 to 2.20, `launch_rate many-refusing`, two rounds alternated with
-the build before, 2026-11-23). While no module or library has a refused kernel, nothing is asked
-and a launch costs one load of a counter more; otherwise a launch of a handle already seen costs a
-few loads: the counter, the generation, and the slots of its set. Measured on a V100 (one session,
-three rounds alternated, 2026-11-23; `tests/kernels/launch_rate.c`, the median of 2,000 bursts of
-64 launches of an empty kernel): one `cuLaunchKernel` call takes 2.20 to 2.23 microseconds on the
-CPU through the layer before the change and 2.23 to 2.25 after; with a module with a refused kernel
-loaded, 2.23 to 2.28 before (where it changes nothing) and 2.23 after; through NVIDIA's driver
-alone, 2.19 and 2.22 (another session). In a loop of 40,000 small PyTorch operations (60,003
-launches; PyTorch's libraries have refused kernels), the driver was asked what a handle is 4 times.
+(4,096 sets of four slots, by a hash of the handle; a slot holds the handle and the whole generation
+it was found in, with a version that a writer makes odd). A generation ends whenever the records of
+refusals change, at every load and every unload of a module or a library, and whenever a context
+goes: a load ends one (two when its image has refused or emulated kernels), an unload three (one
+before the driver's call, one when what is known of the module or library goes, one after the call;
+and one more for each kernel of a deferred library compiled alone), a context that goes two and one
+more for each of its modules, and the release of a primary context or a `cuCtxDetach` that is not
+the last two (the layer cannot tell before the call that it is not). So a program that loads code as
+it runs asks again after each load: over the 925 cases of `tests/gpu/torch.sh`, run by one process,
+the driver was asked 1,380 times in 911 generations, for 5,992 launches by `cuLaunchKernel`
+(`VF_STATS`, which says at exit how many times the driver was asked, how many calls were refused and
+how many generations there were). A question costs 1.4 to 2.0 microseconds more than the launch: the
+first launch of each of 2,000 kernels in turn took 3.7 to 4.2 microseconds, against 2.3 without the
+refusal, and the launches of the next turns as much as without it (2.15 to 2.20, `launch_rate
+many-refusing`, two rounds alternated with the build before, 2026-11-23). And while a thread is
+inside a call that ends a module, a library or a context (an unload, a destroy), nothing that is
+concluded is kept: every launch of the other threads asks the driver again for as long as the call
+lasts, each time the cost of a question, about 1.5 microseconds more a launch (an independent review
+measured it). While no module or library has a refused kernel, nothing is asked and a launch costs
+one load of a counter more; otherwise a launch of a handle already seen costs a few loads: the
+counter, the generation, and the slots of its set. Measured on a V100 at the build of these lines
+(2026-11-23, one job, after six runs to warm the GPU's clocks, three rounds alternated;
+`tests/kernels/launch_rate.c`, the median of 2,000 bursts of 64 launches of an empty kernel): one
+`cuLaunchKernel` call took 2.18 to 2.24 microseconds on the CPU through the layer without the
+refusal and 2.18 to 2.19 with it; with a module with a refused kernel loaded, 2.20 to 2.25 without
+(where it changes nothing) and 2.18 to 2.21 with; through NVIDIA's driver alone, 2.19 to 2.21. An
+independent review measured 1.85 to 1.90 on another V100 with and without the refusal, in one job
+after warming the clocks. In a loop of 40,000 small PyTorch operations (60,003 launches; PyTorch's
+libraries have refused kernels), the driver was asked what a handle is 4 times.
 
 ### A second translation for a kernel that does not fit
 
