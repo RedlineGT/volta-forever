@@ -45,6 +45,12 @@ struct VarDecl {
     /// Whether this is a `.global` or `.const` variable (persists across launches). `.shared` is
     /// per-block per-launch and does not cause coherence issues when split.
     persistent: bool,
+    /// Whether its bytes are all given by the module, which keeps its name to itself: a definition
+    /// of plain data with an initializer and no linkage directive (not `.visible`, `.weak`,
+    /// `.extern` or `.common`: a name that other translation units may use for shared state), not
+    /// managed memory, not a texture, sampler or surface reference. Every copy of it starts with the
+    /// same bytes.
+    initialized_data: bool,
 }
 
 /// A module-level function declaration (no body).
@@ -100,6 +106,10 @@ pub struct ModuleInfo {
     /// Persistent variables that any function loads data from (the variable's name or a register
     /// tainted by it appears in the address operand of a load instruction).
     loaded_vars: HashSet<String>,
+    /// Persistent variables that kernels can only read, and whose bytes the module gives: each
+    /// sub-module can have a copy of its own, which holds what the others hold for as long as the
+    /// program does not write one (it cannot without asking for its address by name).
+    read_only_vars: HashSet<String>,
     /// Names of persistent (.global, .const) variables.
     persistent_names: HashSet<String>,
     /// True when the module contains text at module level that the parser does not recognise.
@@ -185,14 +195,37 @@ fn find_referenced_names(text: &str, declared: impl Fn(&str) -> bool) -> HashSet
 /// in the module).
 const READONLY_EXTERN_CALLEES: &[&str] = &["vprintf", "__assertfail"];
 
-fn find_writes_to_globals(
-    code: &str,
-    global_names: &HashSet<String>,
-    safe_callees: &HashSet<String>,
-) -> (HashSet<String>, HashSet<String>) {
+/// The instructions through which an address only becomes another value: what they give is tainted
+/// by what they are given, and they read and write no memory (by the opcode's first word).
+const ADDRESS_ARITHMETIC: &[&str] = &[
+    "mov", "cvta", "cvt", "add", "sub", "mul", "mad", "mul24", "mad24", "and", "or", "xor", "not", "shl", "shr", "shf",
+    "selp", "prmt", "min", "max", "neg", "setp", "bfe", "bfi", "lop3",
+];
+
+/// What the taint analysis of a function body found: the variables written, loaded from, and not
+/// only read.
+struct Accesses {
+    written: HashSet<String>,
+    loaded: HashSet<String>,
+    /// Variables whose address, or a value made from it, reaches anything but the address of a load
+    /// or the instructions of `ADDRESS_ARITHMETIC`: a store of any kind (`st.local` and `st.param`
+    /// too, as data or as the address), an atomic, a reduction, a call, a copy, a prefetch, or any
+    /// other instruction. The bytes of a variable that is not in this set can only be read by the
+    /// function.
+    not_only_read: HashSet<String>,
+}
+
+fn find_writes_to_globals(code: &str, global_names: &HashSet<String>, safe_callees: &HashSet<String>) -> Accesses {
     let items = match scan::items(code.as_bytes(), 0..code.len()) {
         Some(items) => items,
-        None => return (HashSet::new(), HashSet::new()),
+        // (What the body does with a variable is not known: none of them is only read.)
+        None => {
+            return Accesses {
+                written: HashSet::new(),
+                loaded: HashSet::new(),
+                not_only_read: global_names.clone(),
+            };
+        }
     };
 
     // Collect (opcode_str, operands_str) for every statement.
@@ -349,7 +382,29 @@ fn find_writes_to_globals(
         }
     }
 
-    (written, loaded_from)
+    // Determine which variables are not only read: a tainted name anywhere but in the address of a
+    // load or in an instruction that only computes a value from it.
+    // (A tainted name can be in a load only in its address: the load reads. A store of the address
+    // to local or parameter space is a store like any other here, so what is loaded back from there
+    // is never needed to be followed.)
+    let mut not_only_read = HashSet::new();
+    for stmt in &stmts {
+        let is_load = stmt.opcode.starts_with("ld.") || stmt.opcode.starts_with("ldu.");
+        if is_load || ADDRESS_ARITHMETIC.contains(&stmt.opcode.split('.').next().unwrap_or_default()) {
+            continue;
+        }
+        for name in &stmt.names {
+            if let Some(vars) = name_to_vars.get(name) {
+                not_only_read.extend(vars.iter().cloned());
+            }
+        }
+    }
+
+    Accesses {
+        written,
+        loaded: loaded_from,
+        not_only_read,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,11 +672,19 @@ fn find_module_level_items(text: &[u8], header_end: usize, func_defs: &[FuncDef]
                         } else {
                             Linkage::Private
                         };
+                    let initialized_data = linkage == Linkage::Private
+                        && !shared
+                        && decl_text.contains('=')
+                        && !decl_text.contains(".managed")
+                        && ![".texref", ".samplerref", ".surfref"]
+                            .iter()
+                            .any(|kind| decl_text.contains(kind));
                     result.vars.push(VarDecl {
                         range: start..at,
                         name,
                         linkage,
                         persistent: !shared,
+                        initialized_data,
                     });
                 } else if shared {
                     result.has_unindexed_shared = true;
@@ -1024,6 +1087,7 @@ impl ModuleInfo {
         let mut var_refs_map: HashMap<String, HashSet<String>> = HashMap::new();
         let mut written_vars = HashSet::new();
         let mut loaded_vars = HashSet::new();
+        let mut not_only_read: HashSet<String> = HashSet::new();
 
         // A referenced variable brings every symbol used to initialize it. A persistent
         // address in an initializer can also be loaded and written through.
@@ -1086,13 +1150,26 @@ impl ModuleInfo {
             }
             let vr: HashSet<String> = all_names.intersection(&all_var_names).cloned().collect();
             if need_taint {
-                let (var_writes, var_loads) = find_writes_to_globals(body_text, &persistent_names, &safe_callees);
-                written_vars.extend(var_writes);
-                loaded_vars.extend(var_loads);
+                let accesses = find_writes_to_globals(body_text, &persistent_names, &safe_callees);
+                written_vars.extend(accesses.written);
+                loaded_vars.extend(accesses.loaded);
+                not_only_read.extend(accesses.not_only_read);
             }
             func_refs_map.insert(func.name.clone(), fn_refs);
             var_refs_map.insert(func.name.clone(), vr);
         }
+
+        // The variables of which every copy keeps the bytes the module gives it: plain data with an
+        // initializer that names nothing, whose address no function stores, passes, copies or gives
+        // to anything but a load, and no other variable holds.
+        let read_only_vars: HashSet<String> = variables
+            .iter()
+            .filter(|v| v.persistent && v.initialized_data)
+            .filter(|v| !initializer_refs.contains_key(v.name.as_str()))
+            // (`written_vars` holds `escaped_vars`.)
+            .filter(|v| !written_vars.contains(&v.name) && !not_only_read.contains(&v.name))
+            .map(|v| v.name.clone())
+            .collect();
 
         ModuleInfo {
             text: source.to_vec(),
@@ -1108,6 +1185,7 @@ impl ModuleInfo {
             written_vars,
             escaped_vars,
             loaded_vars,
+            read_only_vars,
             persistent_names,
             has_unrecognised_items,
             has_module_pragma: module_items.has_module_pragma,
@@ -1205,10 +1283,13 @@ impl ModuleInfo {
     }
 
     /// Whether an entry has statically known callees and references no persistent variable (.global, .const)
-    /// transitively, except for message strings whose address flows only into vprintf/__assertfail.
+    /// transitively, except for message strings whose address flows only into vprintf/__assertfail
+    /// and read-only data (`read_only_vars`).
     ///
-    /// An independent entry compiles on demand in its own sub-module (with any message strings
-    /// duplicated). A dependent entry comes from the whole module (materialized once).
+    /// An independent entry compiles on demand in its own sub-module (with any message strings and
+    /// read-only data duplicated: `copied_tables` names the latter, which the program must not be
+    /// given by name once a sub-module holds a copy). A dependent entry comes from the whole module
+    /// (materialized once).
     pub fn is_entry_independent(&self, entry: &str) -> bool {
         let callees = self.transitive_callees(entry);
         if self.has_module_pragma || self.may_call_unknown(entry, &callees) {
@@ -1219,10 +1300,25 @@ impl ModuleInfo {
         if persistent_refs.is_empty() {
             return true;
         }
-        // Check if all persistent references are message strings: variables whose address flows
-        // only into safe callees (vprintf, __assertfail) and is never the address of a load or
-        // store in kernel code.
-        persistent_refs.iter().all(|v| self.is_message_string_only(v))
+        // Check if all persistent references are message strings (variables whose address flows
+        // only into safe callees, vprintf and __assertfail, and is never the address of a load or
+        // store in kernel code) or read-only data.
+        persistent_refs
+            .iter()
+            .all(|v| self.is_message_string_only(v) || self.read_only_vars.contains(*v))
+    }
+
+    /// The read-only data (`read_only_vars`) that the sub-module of `entry` holds a copy of, in the
+    /// order of their names: the variables that kernels compiled alone and the whole module each
+    /// have a copy of, which stay the same only while the program writes none.
+    pub fn copied_tables(&self, entry: &str) -> Vec<String> {
+        let mut tables: Vec<String> = self
+            .transitive_vars(entry, &self.transitive_callees(entry))
+            .into_iter()
+            .filter(|v| self.read_only_vars.contains(v) && !self.is_message_string_only(v))
+            .collect();
+        tables.sort();
+        tables
     }
 
     /// Extract a leaf kernel from a relocatable object. A call (including an indirect call),
@@ -1376,7 +1472,7 @@ impl ModuleInfo {
         let vars = self.transitive_vars(entry, &self.transitive_callees(entry));
         vars.iter()
             .filter(|v| self.persistent_names.contains(*v))
-            .filter(|v| !self.is_message_string_only(v))
+            .filter(|v| !self.is_message_string_only(v) && !self.read_only_vars.contains(*v))
             .cloned()
             .collect()
     }
@@ -2127,22 +2223,25 @@ $str:
     }
 
     #[test]
-    fn entries_loading_from_persistent_vars_are_dependent() {
-        // MODULE: kernel_a and kernel_b load from `table` (a .global), so they are dependent.
-        // kernel_c atomically writes `counter`, so it is also dependent (counter is written).
+    fn entries_reading_a_table_are_independent_and_a_writer_is_not() {
+        // MODULE: kernel_a and kernel_b load from `table` (a .global with an initializer that no
+        // function writes): each can have a copy of its own. kernel_c atomically writes `counter`,
+        // so it is dependent. (Until 2026-11-23 every load from a persistent variable made its
+        // kernel dependent.)
         let info = ModuleInfo::analyse(MODULE.as_bytes());
-        assert!(
-            !info.is_entry_independent("kernel_a"),
-            "kernel_a loads from table, should be dependent"
-        );
-        assert!(
-            !info.is_entry_independent("kernel_b"),
-            "kernel_b loads from table, should be dependent"
-        );
+        assert!(info.is_entry_independent("kernel_a"), "kernel_a only reads table");
+        assert!(info.is_entry_independent("kernel_b"), "kernel_b only reads table");
+        assert_eq!(info.copied_tables("kernel_a"), ["table"]);
         assert!(
             !info.is_entry_independent("kernel_c"),
             "kernel_c writes counter, should be dependent"
         );
+        assert!(info.copied_tables("kernel_c").is_empty());
+        assert_eq!(info.dependent_vars("kernel_c"), ["counter"]);
+        assert!(info.dependent_vars("kernel_a").is_empty());
+        let sub = String::from_utf8(info.extract("kernel_a").unwrap()).unwrap();
+        assert!(sub.contains(".global .align 4 .b8 table[4] = {1, 2, 3, 4};"), "{sub}");
+        assert!(!sub.contains("counter") && !sub.contains("kernel_b"), "{sub}");
     }
 
     #[test]
@@ -2767,34 +2866,134 @@ $str:
         );
     }
 
-    #[test]
-    fn lookup_table_loaded_from_is_dependent() {
-        // An entry loads from a .global lookup table: the entry is dependent.
-        let text = "\
+    /// A module with one table, `t`, read by `reader` and touched by `other` as `OTHER` says.
+    fn table_module(declaration: &str, other: &str) -> String {
+        format!(
+            "\
 .version 9.0
 .target sm_70
 .address_size 64
 
-.global .align 4 .b8 lut[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+{declaration}
 
-.visible .entry reader()
-{
-\t.reg .b32 %r<2>;
-\tld.global.u32 %r1, [lut];
+.visible .entry reader(
+\t.param .u64 reader_param_0
+)
+{{
+\t.reg .b32 %r<3>;
+\t.reg .b64 %rd<6>;
+\tld.param.u64 %rd1, [reader_param_0];
+\tcvta.to.global.u64 %rd2, %rd1;
+\tmov.u64 %rd3, t;
+\tmov.u32 %r1, %tid.x;
+\tmul.wide.u32 %rd4, %r1, 4;
+\tadd.s64 %rd5, %rd3, %rd4;
+\tld.global.nc.u32 %r2, [%rd5];
+\tst.global.u32 [%rd2], %r2;
 \tret;
-}
+}}
 
-.visible .entry noop() { ret; }
-";
+.visible .entry other()
+{{
+\t.reg .b32 %r<3>;
+\t.reg .b64 %rd<4>;
+{other}
+\tret;
+}}
+"
+        )
+    }
+
+    const TABLE: &str = ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};";
+
+    #[test]
+    fn lookup_table_loaded_from_is_copied() {
+        // An entry loads from a .global lookup table that nothing writes: the entry is independent
+        // and its sub-module holds the table, with its bytes. (Until 2026-11-23: dependent.)
+        let text = table_module(TABLE, "\tld.global.u32 %r1, [t+4];");
         let info = ModuleInfo::analyse(text.as_bytes());
-        assert!(
-            !info.is_entry_independent("reader"),
-            "reader loads from lut, should be dependent"
-        );
-        assert!(
-            info.is_entry_independent("noop"),
-            "noop references nothing, should be independent"
-        );
+        assert!(info.is_entry_independent("reader"));
+        assert!(info.is_entry_independent("other"));
+        assert_eq!(info.copied_tables("reader"), ["t"]);
+        let sub = String::from_utf8(info.extract("reader").unwrap()).unwrap();
+        assert!(sub.contains(TABLE), "{sub}");
+        assert!(!sub.contains(".entry other"), "{sub}");
+        // The same in the constant space.
+        let constant = ".const .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};";
+        let text = table_module(constant, "\tld.const.u32 %r1, [t];");
+        let info = ModuleInfo::analyse(text.replace("ld.global.nc", "ld.const").as_bytes());
+        assert!(info.is_entry_independent("reader"));
+        assert_eq!(info.copied_tables("other"), ["t"]);
+    }
+
+    #[test]
+    fn table_that_can_change_is_not_copied() {
+        // Each of these makes `t` a variable whose copies could come to differ, or one whose bytes
+        // the module does not give: `reader`, which only reads it, is then dependent.
+        let cases = [
+            ("a store into it", TABLE, "\tst.global.u32 [t+4], %r1;"),
+            ("an atomic on it", TABLE, "\tatom.global.add.u32 %r1, [t], 1;"),
+            (
+                "a store through an address made from it",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tadd.s64 %rd2, %rd1, 4;\n\tst.global.u32 [%rd2], %r1;",
+            ),
+            (
+                "its address kept in local memory and loaded back",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tst.local.u64 [%rd3], %rd1;\n\tld.local.u64 %rd2, [%rd3];\n\tst.global.u32 [%rd2], %r1;",
+            ),
+            (
+                "its address stored as data",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tst.global.u64 [%rd3], %rd1;",
+            ),
+            (
+                "an asynchronous copy from it",
+                TABLE,
+                "\tmov.u64 %rd1, t;\n\tcp.async.ca.shared.global [%r1], [%rd1], 4;",
+            ),
+            (
+                "no initializer",
+                ".global .align 4 .b8 t[8];",
+                "\tld.global.u32 %r1, [t];",
+            ),
+            (
+                "a visible name",
+                ".visible .global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};",
+                "\tld.global.u32 %r1, [t];",
+            ),
+            (
+                "a weak name",
+                ".weak .global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};",
+                "\tld.global.u32 %r1, [t];",
+            ),
+            (
+                "managed memory",
+                ".global .attribute(.managed) .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};",
+                "\tld.global.u32 %r1, [t];",
+            ),
+            (
+                "an initializer that names a function",
+                ".func f()\n{\n\tret;\n}\n.global .align 8 .u64 t[1] = {f};",
+                "\tld.global.u64 %rd1, [t];",
+            ),
+            (
+                "its address in another variable",
+                ".global .align 4 .b8 t[8] = {1, 0, 0, 0, 2, 0, 0, 0};\n.global .align 8 .u64 p = generic(t);",
+                "\tld.global.u64 %rd1, [p];",
+            ),
+        ];
+        for (what, declaration, other) in cases {
+            let text = table_module(declaration, other);
+            let info = ModuleInfo::analyse(text.as_bytes());
+            assert!(
+                !info.is_entry_independent("reader"),
+                "{what}: reader should be dependent"
+            );
+            assert!(info.copied_tables("reader").is_empty(), "{what}");
+            assert!(info.dependent_vars("reader").contains(&"t".to_string()), "{what}");
+        }
     }
 
     #[test]

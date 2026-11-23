@@ -54,7 +54,7 @@ use crate::{generated, log};
 /// Magic at the start of every cached file.
 const FILE_MAGIC: [u8; 4] = *b"S70C";
 /// Format version; bump to invalidate all entries when the on-disk layout changes.
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 /// File header: magic(4) + format_version(4) + key(16) + content_len(4) + checksum(8) = 36.
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
@@ -385,6 +385,9 @@ pub struct CachedManifest {
 pub struct ManifestEntry {
     pub name: String,
     pub independent: bool,
+    /// The read-only data that the sub-module of the entry holds a copy of
+    /// (`vf_ptx::deps::ModuleInfo::copied_tables`).
+    pub tables: Vec<String>,
     /// When the entry is refused: `(function, reason)`.
     pub refused: Option<(String, String)>,
     /// When the entry has emulated instructions.
@@ -410,7 +413,18 @@ fn encode_manifest(m: &CachedManifest) -> Vec<u8> {
         if e.emulated.is_some() {
             flags |= 4;
         }
+        if !e.tables.is_empty() {
+            flags |= 8;
+        }
         buf.push(flags);
+        // tables
+        if !e.tables.is_empty() {
+            buf.extend_from_slice(&(e.tables.len() as u32).to_le_bytes());
+            for table in &e.tables {
+                buf.extend_from_slice(&(table.len() as u32).to_le_bytes());
+                buf.extend_from_slice(table.as_bytes());
+            }
+        }
         // refused
         if let Some((ref func, ref reason)) = e.refused {
             buf.extend_from_slice(&(func.len() as u32).to_le_bytes());
@@ -473,6 +487,17 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
         let flags = data[pos];
         pos += 1;
         let independent = flags & 1 != 0;
+        let mut tables = Vec::new();
+        if flags & 8 != 0 {
+            let count = read_u32(&mut pos)? as usize;
+            // (A name takes 4 bytes at least.)
+            if count > (data.len() - pos) / 4 {
+                return None;
+            }
+            for _ in 0..count {
+                tables.push(read_str(&mut pos)?);
+            }
+        }
         let refused = if flags & 2 != 0 {
             let func = read_str(&mut pos)?;
             let reason = read_str(&mut pos)?;
@@ -508,6 +533,7 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
         entries.push(ManifestEntry {
             name,
             independent,
+            tables,
             refused,
             emulated,
         });
@@ -775,6 +801,7 @@ mod tests {
                 ManifestEntry {
                     name: "kernel_a".to_string(),
                     independent: true,
+                    tables: vec!["grid".to_string(), "signs".to_string()],
                     refused: None,
                     emulated: Some({
                         let mut c = vf_ptx::EmulatedCounts::default();
@@ -786,12 +813,14 @@ mod tests {
                 ManifestEntry {
                     name: "kernel_b".to_string(),
                     independent: false,
+                    tables: Vec::new(),
                     refused: Some(("bad_func".to_string(), "unknown instruction".to_string())),
                     emulated: None,
                 },
                 ManifestEntry {
                     name: "kernel_c".to_string(),
                     independent: true,
+                    tables: Vec::new(),
                     refused: None,
                     emulated: None,
                 },
@@ -808,6 +837,8 @@ mod tests {
         assert_eq!(decoded.entries[0].name, "kernel_a");
         assert!(decoded.entries[0].independent);
         assert!(decoded.entries[0].refused.is_none());
+        assert_eq!(decoded.entries[0].tables, ["grid", "signs"]);
+        assert!(decoded.entries[1].tables.is_empty());
         let emu = decoded.entries[0].emulated.as_ref().unwrap();
         assert_eq!(emu.tanh, 3);
         assert_eq!(emu.fp16_tensor, 10);

@@ -14,10 +14,13 @@
 //!   `cuLibraryGetModule`, `cuLibraryGetUnifiedFunction`, `cuLibraryEnumerateKernels`) materialize
 //!   the full adapted image through the driver (one compilation) and forward to it.
 //! - When a sub-module fails to compile, the full module is materialized as a fallback.
+//! - A kernel that reads read-only data of its module (lookup tables: `ModuleInfo::copied_tables`)
+//!   is compiled alone with a copy of it; while a copy is loaded, the program is not given that
+//!   data by name (`name_global`), and data it was given first keeps its readers in the whole module.
 //!
 //! `VF_LAZY=0` disables the mechanism entirely.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
@@ -76,8 +79,9 @@ struct LazyLibrary {
     jit_values: Vec<usize>,
     library_options: Vec<c_int>,
     library_values: Vec<usize>,
-    /// Entry names with independence flags, for libraries restored from cache.
-    cached_entries: Option<Vec<(String, bool)>>,
+    /// Entry names with independence flags and the read-only data that the sub-module of each
+    /// holds a copy of (`ModuleInfo::copied_tables`), for libraries restored from cache.
+    cached_entries: Option<Vec<CachedEntry>>,
     /// For each retained kernel, the relocatable objects that define it, in link order.
     linked_entries: Option<HashMap<String, Vec<usize>>>,
     /// Proxy cache key, for saving sub-modules when they are first compiled.
@@ -95,7 +99,18 @@ struct LazyLibrary {
     /// Threads that call the driver with the materialized handle (`Pinned`): the library's unload
     /// waits for them.
     pins: usize,
+    /// For each read-only variable of the module (`ModuleInfo::copied_tables`), the sub-modules that
+    /// hold a copy of it, loaded or being compiled. While one does, the program is not given the
+    /// variable by name (`name_global`): what it wrote there would not reach the copies.
+    copies: HashMap<String, usize>,
+    /// The variables that the program was given by name: a kernel that reads one comes from the
+    /// whole module, where the program's copy is.
+    named: HashSet<String>,
 }
+
+/// An entry of a library restored from the cache: its name, whether it compiles alone, and the
+/// read-only data that its sub-module holds a copy of.
+type CachedEntry = (String, bool, Vec<String>);
 
 /// The number of the next load of a lazy library (`LazyLibrary::id`).
 static LOADS: AtomicU64 = AtomicU64::new(0);
@@ -363,6 +378,7 @@ fn save_manifest_from_info(
             ManifestEntry {
                 name: name.clone(),
                 independent: info.is_entry_independent(name),
+                tables: info.copied_tables(name),
                 refused: ref_info.map(|r| (r.function.clone(), r.reason.clone())),
                 emulated: emu_info.map(|e| e.counts.clone()),
             }
@@ -403,10 +419,10 @@ pub unsafe fn setup_from_cache(
         return false;
     };
 
-    let cached_entries: Vec<(String, bool)> = manifest
+    let cached_entries: Vec<CachedEntry> = manifest
         .entries
         .iter()
-        .map(|e| (e.name.clone(), e.independent))
+        .map(|e| (e.name.clone(), e.independent, e.tables.clone()))
         .collect();
 
     // SAFETY: options pointers are the originals from the caller, still valid.
@@ -582,7 +598,7 @@ unsafe fn setup_common(
     ptx: &[u8],
     adapted_data: Vec<u8>,
     info: Option<ModuleInfo>,
-    cached_entries: Option<Vec<(String, bool)>>,
+    cached_entries: Option<Vec<CachedEntry>>,
     cache_key: Option<crate::cache::CacheKey>,
     original_bytes: Option<Vec<u8>>,
     linked_entries: Option<HashMap<String, Vec<usize>>>,
@@ -663,6 +679,8 @@ unsafe fn setup_common(
         id: LOADS.fetch_add(1, Relaxed),
         adapting: false,
         pins: 0,
+        copies: HashMap::new(),
+        named: HashSet::new(),
     };
 
     let (mutex, _) = &*LAZY_LIBS;
@@ -1252,6 +1270,79 @@ unsafe fn materialize_and_get_kernel(
     }
 }
 
+impl LazyLibrary {
+    /// Count `change` (1 or -1) more sub-modules holding a copy of each of `tables`.
+    fn hold_copies(&mut self, tables: &[String], change: isize) {
+        for table in tables {
+            let count = self.copies.entry(table.clone()).or_default();
+            *count = count.saturating_add_signed(change);
+            if *count == 0 {
+                self.copies.remove(table);
+            }
+        }
+    }
+}
+
+/// A sub-module that was to hold copies of `tables` was not loaded (`hold_copies`).
+fn release_copies(library: usize, id: u64, tables: &[String]) {
+    if tables.is_empty() {
+        return;
+    }
+    let (mutex, _) = &*LAZY_LIBS;
+    let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(lazy_lib) = same(&mut libs, library, id) {
+        lazy_lib.hold_copies(tables, -1);
+    }
+}
+
+/// The program asks for the variable `name` of the deferred library `library` (by
+/// `cuLibraryGetGlobal`, or `cuModuleGetGlobal` on a module of it). Whether it may be given: not
+/// when a sub-module holds a copy of it (read-only data, `ModuleInfo::copied_tables`), because the
+/// program could write the copy it is given and the kernels of those sub-modules would not see it.
+/// Otherwise it is given from the whole module, and a kernel that reads it, asked for later, comes
+/// from there too. `true` for a library that is not deferred.
+pub fn name_global(library: usize, name: &str) -> bool {
+    let (mutex, _) = &*LAZY_LIBS;
+    let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(lazy_lib) = libs.get_mut(&library) else {
+        return true;
+    };
+    if lazy_lib.copies.contains_key(name) {
+        return false;
+    }
+    lazy_lib.named.insert(name.to_string());
+    true
+}
+
+/// The modules that the driver gave for a deferred library in a context (`cuLibraryGetModule`, and
+/// the module of a function of one of its kernels), by handle: the library they belong to.
+static MODULE_OWNERS: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The driver gave `module` for the library `library`; kept when that library is deferred.
+pub fn module_of(module: usize, library: usize) {
+    let lazy = is_lazy(library);
+    let mut owners = MODULE_OWNERS.lock().unwrap_or_else(|e| e.into_inner());
+    if lazy {
+        owners.insert(module, library);
+    } else {
+        owners.remove(&module);
+    }
+}
+
+/// The deferred library that `module` was given for, if it is one of its modules.
+pub fn module_owner(module: usize) -> Option<usize> {
+    MODULE_OWNERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&module)
+        .copied()
+}
+
+/// `module` went with its context, or its handle was given again.
+pub fn forget_module(module: usize) {
+    MODULE_OWNERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&module);
+}
+
 /// Get a kernel from a lazy library, compiling its sub-module on demand. If the library is
 /// materialized, the kernel is obtained from the materialized handle. If sub-module compilation
 /// fails, the full module is materialized as a fallback. The caller has checked that the kernel is
@@ -1340,22 +1431,36 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
         }
     }
     let lazy_lib = same(&mut libs, library, id).unwrap();
-    let is_independent = if lazy_lib.linked_entries.is_some() {
-        linked_leaf.is_some()
+    let (is_independent, tables) = if lazy_lib.linked_entries.is_some() {
+        (linked_leaf.is_some(), Vec::new())
     } else if let Some(ref entries) = lazy_lib.cached_entries {
-        entries.iter().any(|(n, ind)| n == &name_str && *ind)
+        entries
+            .iter()
+            .find(|(n, ..)| n == &name_str)
+            .map_or((false, Vec::new()), |(_, ind, tables)| (*ind, tables.clone()))
     } else if let Some(ref info) = lazy_lib.info {
-        info.is_entry_independent(&name_str)
+        (info.is_entry_independent(&name_str), info.copied_tables(&name_str))
     } else {
-        false
+        (false, Vec::new())
     };
-    if !is_independent {
-        log::info(format_args!(
-            "lazy: kernel {name_str} is dependent, materializing whole module"
-        ));
+    // A kernel that reads a variable the program was given by name must read what the program
+    // writes there: it comes from the whole module, whose copy the program was given.
+    let named = tables.iter().find(|table| lazy_lib.named.contains(*table));
+    if !is_independent || named.is_some() {
+        match named {
+            Some(table) => log::info(format_args!(
+                "lazy: kernel {name_str} reads {table}, which the program was given by name: materializing whole module"
+            )),
+            None => log::info(format_args!(
+                "lazy: kernel {name_str} is dependent, materializing whole module"
+            )),
+        }
         drop(libs);
         return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
     }
+    // Its copies are counted before the lock is released: from now on the program is not given
+    // these variables by name (`name_global`).
+    lazy_lib.hold_copies(&tables, 1);
 
     // Extract the sub-module for this independent kernel: from the proxy cache if available,
     // otherwise from the in-memory analysis.  When neither is available (cache hit path, kernel
@@ -1381,6 +1486,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
                 log::trace(format_args!(
                     "lazy: kernel {name_str} not found in deferred module or cache"
                 ));
+                lazy_lib.hold_copies(&tables, -1);
                 return CUDA_ERROR_NOT_FOUND;
             }
             // By one thread for the whole library (`adapt_restored`); a thread that asks for this
@@ -1401,6 +1507,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
                 Some(ptx) => ptx,
                 None => {
                     lazy_lib.kernels.remove(&name_str);
+                    lazy_lib.hold_copies(&tables, -1);
                     condvar.notify_all();
                     return CUDA_ERROR_NOT_FOUND;
                 }
@@ -1456,6 +1563,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
             lr.code,
             first_messages(&lr.error_log)
         ));
+        release_copies(library, id, &tables);
         // SAFETY: caller guarantees `kernel` and `name` are valid.
         return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
     } else {
@@ -1501,6 +1609,7 @@ pub unsafe fn get_kernel(library: usize, name: *const c_char, kernel: *mut *mut 
         let _kept = crate::images::release(sub_handle);
         // SAFETY: sub_handle is a valid library handle.
         unsafe { real_unload_fn()(sub_handle as *mut c_void) };
+        release_copies(library, id, &tables);
         // SAFETY: caller guarantees `kernel` and `name` are valid.
         return unsafe { materialize_and_get_kernel(library, id, name, &name_str, kernel) };
     }
@@ -1568,6 +1677,10 @@ pub fn unload(library: usize) -> Option<CUresult> {
     }
     k2l.retain(|_, owner| *owner != library);
     drop(k2l);
+    MODULE_OWNERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|_, owner| *owner != library);
 
     // Unload the materialized module.
     if let Some(mat_handle) = lazy_lib.materialized_handle {

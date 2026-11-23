@@ -142,6 +142,18 @@ fat binary, it is not read (that would take decompressing the code of every libr
 load), except in a process whose links through the driver had kernels to refuse. A cubin loaded without the layer keeps its kernels that trap: the warning that nvJitLink
 writes when it links them is then all there is.
 
+**A variable asked for by name can be refused too.** A kernel compiled on its own
+(`VF_LAZY`, the default) that reads a lookup table of its module (a variable with an initializer
+and no `.visible` or `.weak` name, which no function of the module can change, as the grids of
+the i-quants in llama.cpp and Strata) is given a copy of the table. Once it is, the program
+is not given that table by name (`cuLibraryGetGlobal`, `cudaMemcpyToSymbol` and the like, or
+`cuModuleGetGlobal` on a module of the library): the lookup returns `CUDA_ERROR_NOT_FOUND` (500)
+and a line on standard error says why, since a write through the address would not reach the
+copy. A table that the program asks for before any such kernel keeps one copy, the whole
+module's, for its kernels. `VF_LAZY=0` compiles every module whole, with one copy of each
+variable. Neither `tests/gpu/run.sh` nor Strata on two V100s (issue #3) asked for such a table
+(2026-11-23).
+
 ## Kernels launched from a second translation
 
 A kernel compiled for blocks of 1,024 threads may have 64 registers at most on a V100, and the

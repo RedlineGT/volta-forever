@@ -228,11 +228,27 @@ the extracted kernel's line information stay with it.
 The soundness rule: a kernel is **independent** (can be compiled alone) when it
 references no persistent variable (`.global`, `.const`) of the module, except the
 string constants of `vprintf` and `__assertfail`, whose content is identical in every
-copy. Everything else is **dependent** and served from the whole module. The analysis
-is in `crates/vf-ptx/src/deps.rs`.
+copy, and read-only data. Everything else is **dependent** and served from the whole
+module. The analysis is in `crates/vf-ptx/src/deps.rs`.
 
-Over llama.cpp's 149 modules, 96.5 % of entries are independent. A first run of the
-demonstrator takes seconds instead of minutes.
+Read-only data is a variable whose bytes the module gives (plain data with an
+initializer that names nothing, not managed memory), whose name the module keeps to
+itself (no `.visible`, `.weak`, `.extern` or `.common`: such a name is shared state that
+other translation units may use) and that no function can change: its address, or a
+value made from it, reaches nothing but the address of a load and arithmetic (no store
+of any kind, atomic, reduction, call or copy, and no other variable's initializer). Lookup tables are such data (the grids of llama.cpp's and
+Strata's i-quants). The sub-module of a kernel that reads it holds a copy, and every
+copy keeps the same bytes for as long as the program writes none; it can write one
+only through an address it asks for by name. So while a sub-module holds a copy of a
+variable, the program is not given that variable (`cuLibraryGetGlobal`, and
+`cuModuleGetGlobal` on a module of the library): it gets `CUDA_ERROR_NOT_FOUND`, and a
+line at the default log level says why. A variable that the program was given first is
+the whole module's, and the kernels that read it are then served from there.
+
+Over llama.cpp's 149 modules (b12418, its sm_75 PTX), all 7,628 entries are
+independent (7,365 before read-only data was copied); over the 52 modules of Strata's
+CUDA 13 engine 0.1.64, 2,782 of 2,800 (2,081 before), the other 18 sharing variables
+that they write. A first run of the demonstrator takes seconds instead of minutes.
 
 ### The cache
 
