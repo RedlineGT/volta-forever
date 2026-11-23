@@ -98,6 +98,17 @@ if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 1 ]; then
 else
     echo "FAIL  VF_SAFE=1: status $status, said $said times ($log)"; failed=1
 fi
+# Only the exact value 1 turns safe mode on: with any other value the tensor-core path serves (mode
+# notsafe), and the runtime says once that safe mode stays off.
+for value in true yes "" " 1"; do
+    run notsafe-"${value// /_}" "$out/test" "VF_SAFE=$value" VF_CUBLAS_BF16_TC=1 -- notsafe
+    said=$(grep -c "VF_SAFE=$value is not 1: safe mode stays off" "$log")
+    if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 1 ]; then
+        echo "PASS  VF_SAFE='$value': not safe mode, the tensor-core path serves, said once"
+    else
+        echo "FAIL  VF_SAFE='$value': status $status, said $said times ($log)"; failed=1
+    fi
+done
 run lazy "$out/test" VF_CUBLAS_BF16_TC=1 -- lazy
 pass lazy "lazy setup: nothing made with a handle; the module at the first served call, the tensor-core path's pool and cuBLASLt handle at its first call, in relaxed capture mode"
 for step in module alloc scale gemm16 epilogue fallback; do
@@ -133,6 +144,7 @@ control bias-alias skinny "cuBLASLt, a bias that overlaps D (its fourth column):
 control any-build otherbuild "skinny alone, another cuBLAS build: not one call" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901
 control eager-setup lazy "lazy: the runtime made something with the handle" VF_CUBLAS_BF16_TC=1
 control safe-ignored safe "safe: a tensor-core call: not one call" VF_SAFE=1 VF_CUBLAS_BF16_TC=1
+control safe-lenient notsafe "not safe: a tensor-core call was not served" VF_SAFE=yes VF_CUBLAS_BF16_TC=1
 control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1
 # The variant built with VF_BF16_CONTROL_ABORT aborts where it should say that the runtime is missing:
 # the process must end by SIGABRT (status 134) without "ok".

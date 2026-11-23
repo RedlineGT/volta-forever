@@ -247,7 +247,9 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   12.9 runs its sequential kernel are computed by one kernel of the layer, with 12.9's bits
   (`docs/emulations.md`, section 11, says where exactly, and how that was established).
 - `VF_SAFE=1` keeps the conservative paths: the tensor-core path serves nothing, whatever
-  `VF_CUBLAS_BF16_TC` says; the skinny path, whose results are 12.9's bits, is not affected.
+  `VF_CUBLAS_BF16_TC` says; the skinny path, whose results are 12.9's bits, is not affected. Only the
+  exact value `1` turns it on: any other value (`true`, `yes`, an empty one, ` 1`) leaves it off, and
+  the runtime says so.
 - `VF_CUBLAS_BF16_TC=1`: larger products run on the tensor cores, with exact scaling to fp16 and
   fixed slices of k, and differ from 12.9's in the last bits (within 25 units of 2^-24 sum |a b|
   measured; sums of products of one sign come out low, by about 13 units on average when the data

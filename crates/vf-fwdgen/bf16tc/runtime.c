@@ -350,10 +350,13 @@ static void init(void)
     cfg.tc = switch_value("VF_CUBLAS_BF16_TC", 0);
     cfg.skinny = switch_value("VF_CUBLAS_BF16_SKINNY", cfg.tc);
     /* VF_SAFE=1 keeps the conservative paths: the tensor-core path, whose results differ from 12.9's,
-     * serves nothing whatever VF_CUBLAS_BF16_TC says; the skinny path, which gives 12.9's bits, stays. */
+     * serves nothing whatever VF_CUBLAS_BF16_TC says; the skinny path, which gives 12.9's bits, stays. Only
+     * the exact value 1 turns safe mode on; any other value (empty, 0, true, yes, " 1", ...) leaves it off. */
     const char *safe = getenv("VF_SAFE");
-    cfg.safe = safe && *safe && strcmp(safe, "0") != 0 && !CONTROL("safe-ignored");
-    if (cfg.safe && strcmp(safe, "1") != 0) say("VF_SAFE=%s is neither 0 nor 1: taken as 1", safe);
+    cfg.safe = safe && (!strcmp(safe, "1") || (CONTROL("safe-lenient") && *safe && strcmp(safe, "0") != 0)) &&
+               !CONTROL("safe-ignored");
+    if (safe && strcmp(safe, "1") != 0 && strcmp(safe, "0") != 0 && !cfg.safe)
+        say("VF_SAFE=%s is not 1: safe mode stays off", safe);
     if (cfg.safe && cfg.tc) {
         say("VF_SAFE=1: the tensor-core path serves nothing, whatever VF_CUBLAS_BF16_TC says");
         cfg.tc = 0;
