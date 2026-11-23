@@ -324,15 +324,18 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
-  580.178.04 (`tests/gpu/forward/bf16-graphs.c`), a second instantiation of the graph is refused, it
-  cannot be embedded as a child graph or instantiated for device launch, `cudaGraphExecUpdate` from a
-  recapture is refused, and a graph captured into a conditional node's body cannot be instantiated
-  at all, while the same graph without the node works; the layer cannot tell any of these apart when
-  it is called. In a program that runs its decode steps from graphs (vLLM), the tensor-core path
-  therefore speeds up only what runs outside them (prefill above the captured sizes, eager programs);
-  the skinny path serves captured calls (one kernel node, nothing allocated). A replayed tensor-core
-  call therefore has 12.9's bits, which differ in their last bits from the same call made outside a
-  capture: a program that compares a graph's replay with an eager run of the same step sees it.
+  580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
+  `VF_BF16_CONTROL=capture-tc`, which serves captured calls), a second instantiation of the graph is
+  refused, it cannot be embedded as a child graph or instantiated for device launch,
+  `cudaGraphExecUpdate` from a recapture is refused, and a graph captured into a conditional node's
+  body cannot be instantiated at all, while the same graph without the node works; the layer cannot
+  tell any of these apart when it is called. A program that replays its steps from graphs gains from
+  the tensor-core path only in what runs outside them: vLLM replays its decode steps and its prefill
+  chunks up to the largest captured size (512 and 2048 tokens for the two models measured), and with
+  `VF_CUBLAS_BF16_TC=1` its prefill was 6 % faster on one model and unchanged on the other. The skinny
+  path serves captured calls (one kernel node, nothing allocated). A replayed tensor-core call has
+  12.9's bits, which differ in their last bits from the same call made outside a capture: a program
+  that compares a graph's replay with an eager run of the same step sees it.
 - **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
   explicit algorithms, pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with
   any attribute outside the supported set, and every call of a context that is not a V100's.

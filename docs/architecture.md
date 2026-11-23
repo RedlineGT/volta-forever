@@ -587,8 +587,10 @@ when one of the three files is missing; without the launcher the variables do no
   capture that allocation would become an allocation node of the program's graph, and a graph that
   holds one cannot be instantiated twice, embedded as a child graph, instantiated for device launch,
   updated from a recapture, or instantiated at all when it was captured into a conditional node's body
-  (`tests/gpu/forward/bf16-graphs.c`), none of which the runtime can see coming when it is called.
-  So a captured tensor-core call goes to cuBLAS 12.9. The skinny path serves captured calls: it adds
+  (`tests/gpu/forward/bf16-graphs.c` with `VF_BF16_CONTROL=capture-tc`, a test build's control that
+  serves captured calls), none of which the runtime can see coming when it is called. So a captured
+  tensor-core call goes to cuBLAS 12.9, and the same test checks that a graph captured through the
+  variant then behaves step for step as with 12.9 alone. The skinny path serves captured calls: it adds
   one kernel node and allocates nothing. An eager call's allocation is made in relaxed capture mode
   for the calling thread (`cuThreadExchangeStreamCaptureMode`), so that it cannot invalidate a capture
   of that thread or another's in global mode.

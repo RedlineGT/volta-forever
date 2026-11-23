@@ -799,20 +799,26 @@ the handle. The skinny path therefore serves only where 12.9 was seen to run its
 default workspace when it is made and at every `cublasSetStream`; with `CUBLAS_WORKSPACE_CONFIG`
 set, the default does not count.) Within these regions the rule served 123,964 configurations of the
 grid and 18,961 random ones not on it, all where 12.9 ran its sequential kernel; it forwards every
-configuration where 12.9 ran `gemmSN` and some where it did not. 1,578 of them, executed, gave 12.9's
-bits in every element. Where 12.9 runs `gemmSN`, that kernel is the more accurate one (at m = 777,
-TN, k = 1536: 0.35-0.45 units of 2^-24 sum |a b| against 1.45-2.38 for the chain), and the skinny
-path does not serve. The rule rests on samples of one GPU and one driver: it is not a property that
+configuration where 12.9 ran `gemmSN` and some where it did not. Executed on 1,578 configurations in
+these regions, the path served 1,206 (the others lie outside its bounds, below), each with 12.9's
+bits in every element; at the rule's edges (each bound just inside and just outside), with operands
+at unaligned addresses, padded leading dimensions and each class of workspace (160 configurations,
+both output types, n = 8 and 16), the 76 it served had 12.9's bits too, and neither it nor 12.9
+wrote outside the m rows of a column. Where 12.9 runs `gemmSN`, that kernel is the more accurate
+one (at m = 777, TN, k = 1536: 0.35-0.45 units of 2^-24 sum |a b| against 1.45-2.38 for the chain),
+and the skinny path does not serve. The rule rests on samples of one GPU and one driver: it is not a property that
 cuBLAS documents.
 
 The path also has bounds of its own, a rule of performance and not of correctness (inside them and
 outside, the bits are 12.9's where the rule above serves), from the time it takes against 12.9's (G1,
-the same tool, timing both on each shape the rule serves): k at most 16384; with op(B) transposed, where it reads op(B) by
-elements, either 256 <= k and m <= 4608, or 64 <= k and 128 <= m <= 1536 (outside, at large m or very
-short k, it was slower than 12.9, down to 0.16 times); with NN, m >= 128. In the region kept it was
-1.13 to 8.5 times as fast as 12.9 (median 1.8 for NT, 2.2 for TT, 4.8 for NN, 6.3 for TN, the layout
-of a framework's linear layers), including the small m and long k where 12.9's sequential kernel is
-slow too (m = 2 to 512, k = 256 to 2^20: 3 to 8.5 times).
+the same tool, timing both on each shape the rule serves): k at most 16384; with op(B) transposed,
+where it reads op(B) by elements, either 256 <= k and m <= 4608, or 64 <= k and 128 <= m <= 1536
+(outside, at large m or very short k, it was slower than 12.9, down to 0.16 times); with NN,
+m >= 128. On the 1,206 configurations above, executed with the rule and these bounds in place, it
+was 1.16 to 20 times as fast as 12.9 (median 3.2 for NT, 3.9 for TT, 4.8 for NN, 6.1 for TN, the
+layout of a framework's linear layers), and also where 12.9's sequential kernel is slow, at small m
+and long k (m = 2 to 1024, k = 256 to 16384: 2.8 to 8.3 times with op(B) transposed, 4.9 to 19
+times for TN).
 
 ### The tensor-core path (`VF_CUBLAS_BF16_TC=1`)
 
@@ -836,10 +842,9 @@ tiled kernel, one fp32 fused multiply-add chain per element), with the same epil
 where 12.9 runs its sequential kernel. Every element has one writer; an element's value depends on
 its row and column of op(A) and op(B) and on the call's shape (the gates, the chunks of at most
 32 MiB of workspace, and the kernel cuBLAS chooses for a chunk's slices), never on other rows, other
-calls or what ran before. With beta = 0, C is not read. Two runs give the same bits; a graph replays
-the eager call's bits.
+calls or what ran before. With beta = 0, C is not read. Two runs give the same bits.
 
 A tensor-core call captured in a graph goes to cuBLAS 12.9 (its workspace would be a node of the
-program's graph: `LIMITS.md`, "The bf16 cuBLAS variants"), and so does one whose workspace cannot be
-allocated. The variants do not change cuBLAS's workspace contract: a forwarded call uses the
+program's graph: `LIMITS.md`, "The bf16 cuBLAS variants"), so a replay has 12.9's bits, not those of
+the same call made outside a capture; so does a call whose workspace cannot be allocated. The variants do not change cuBLAS's workspace contract: a forwarded call uses the
 handle's workspace as 12.9 does, with the same rules for threads and streams.
