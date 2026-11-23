@@ -336,7 +336,7 @@ On one Tesla V100, with no switch set (`LIMITS.md` has the counts and what does 
 | llama.cpp (official CUDA 13 build) | A or C | flash attention on or off; quantized and NVFP4 weights |
 | Historical ZML source test | B, with the map above | the test opens bundled CUDA libraries by absolute path |
 | vLLM 0.34 (installed with pip) | B, as PyTorch | the engine and its HTTP server |
-| SGLang 0.5 (installed with pip) | B, as PyTorch | the engine and its HTTP server, with its default attention (FlashInfer) or with `--attention-backend triton`. Five of FlashInfer's eighteen prefill kernels are still refused: if a model or a batch asks for one of them, the error names it, and `--attention-backend triton` goes without them |
+| SGLang 0.5 (installed with pip) | B, as PyTorch | the engine and its HTTP server, with its default attention (FlashInfer) or with `--attention-backend triton`. Five of FlashInfer's eighteen prefill kernels were refused when they were last counted (`LIMITS.md`): if a model or a batch asks for one of them, the error names it, and `--attention-backend triton` goes without them |
 
 A kernel that the layer cannot run is refused when the program asks for it (the program gets
 error 218 and a NULL handle, and on standard error a line names the kernel and says why:

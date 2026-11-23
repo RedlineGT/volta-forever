@@ -62,7 +62,9 @@ as that of 2.14.0 was: the figures above and the timings below are those of 2.14
 **FlashInfer** (SGLang's default attention). Of its eighteen prefill kernels
 (`BatchPrefillWithPagedKVCache` and `BatchPrefillWithRaggedKVCache`, nine each), thirteen are
 translated and five are refused: three that name 255 registers, two for an instruction that
-the translator does not have (`LEA.HI` with a uniform register).
+the translator did not have (`LEA.HI` with a uniform register). These are the counts of
+2026-11-20; the rule for `LEA.HI` with a uniform register came on 2026-11-21 (in 0.1.2), and
+these kernels were not counted again.
 
 **Other libraries.** The machine code of 42 libraries of CUDA 13.5, cuDNN, NCCL and others was
 translated and checked instruction by instruction, not run (`docs/validation.md`, "The corpora"):
