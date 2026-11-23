@@ -381,7 +381,7 @@ ok
 | `VF_ADAPT` | `1` | `0`: give the driver every image as it is (to see what a program does without the layer's rewriting) |
 | `VF_REAL_LIBCUDA` | auto | Path to NVIDIA's real `libcuda.so.1` when it cannot be found by itself |
 | `VF_STATS` | `0` | `1`: print call counts and the most launched kernels at exit |
-| `VF_PROFILE` | off | Write a per-kernel profile to `FILE.PID` at exit |
+| `VF_PROFILE` | off | Write a per-kernel profile to `FILE.PID` at exit. Only the process that loaded the layer writes it, and the `VF_STATS` report: a child made by `fork()` (a daemon, a pre-fork worker) writes neither, even when it does all the CUDA work |
 
 **Audit library (`libvf_audit.so`):**
 
