@@ -4,6 +4,15 @@
 The kernels and their cases are those of tests/gpu/triton_corpus.py (the generator; vendor
 kernels are added by --vendor, see tests/gpu/triton_vendor.py). For each case:
 
+  - the inputs: made once, from the case's seed, in one thread, by the command that makes the
+    references, and saved beside them (DIR/inputs/CASE.pt, with their digest); the interpreter and
+    both routes on the GPU take them from there. (Made again in each process, they could differ in
+    the last bits: PyTorch's tanh on the CPU is MKL's, called by each thread of its pool on a block
+    of 2,048 values, and in two processes of the Triton campaign one thread computed its block
+    with MKL's AVX2 code of low accuracy instead of its AVX-512 code (ld-erfinv-f64: 890 to 902
+    of the block's values one unit of the last place away, which erfinv near 1 magnifies); it
+    also differs from one machine to another. Every record says the digest of the inputs it ran
+    on, and the report says it with a difference.);
   - the reference: Triton's interpreter on the CPU (TRITON_INTERPRET=1, in a process without a
     GPU), or the case's own computation with PyTorch on the CPU where it names one;
   - the GPU, through the layer as the program is given it: Triton, told 7.5, makes sm_75 machine
@@ -17,11 +26,13 @@ kernels are added by --vendor, see tests/gpu/triton_vendor.py). For each case:
 
 Commands:
   triton-diff.py interp --out DIR [--level L] [--filter RE] [--jobs N]
-        the reference of every case of the level, saved in DIR (one file per case)
+        the inputs and the reference of every case of the level, saved in DIR (one file per case)
+  triton-diff.py inputs --out DIR [--level L] [--filter RE] [--jobs N]
+        the inputs only; prints the digest of all of them (the same in every process)
   triton-diff.py gpu --route sass|ptx --ref DIR --out FILE [--runs N] [--level L] [--filter RE]
         [--shard I/N] [--case-wait S]
-        run the cases on the GPU, compare each with DIR, write one JSON line per case to FILE
-        (the full outputs of a case that fails are saved beside FILE)
+        run the cases on the GPU on the inputs of DIR, compare each with DIR, write one JSON line
+        per case to FILE (the full outputs of a case that fails are saved beside FILE)
   triton-diff.py report FILE... [--json OUT]
         put the lines of both routes together: per case, the verdict
   triton-diff.py all --work DIR [--level quick] [--runs 5]
@@ -58,9 +69,85 @@ def seed_of(name):
 
 
 def make_inputs(case):
+    """The case's inputs, from its seed, computed in one thread (in several, a thread of PyTorch's
+    pool can take other code of MKL than the others: the head of this file)."""
     import torch
-    g = torch.Generator().manual_seed(seed_of(case.name))
-    return case.make(g)
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        g = torch.Generator().manual_seed(seed_of(case.name))
+        return case.make(g)
+    finally:
+        torch.set_num_threads(threads)
+
+
+def raw(t):
+    """The bytes of a CPU tensor, as a numpy array of uint8."""
+    import torch
+    t = t.contiguous().reshape(-1)
+    if t.dtype == torch.bool:
+        t = t.to(torch.uint8)
+    return t.view(torch.uint8).numpy()
+
+
+def input_digest(t):
+    """The digest of a case's inputs: each entry in the order of the names, with its type, shape
+    and bytes."""
+    import torch
+    h = hashlib.sha256()
+    for k in sorted(t):
+        v = t[k]
+        if isinstance(v, torch.Tensor):
+            h.update(f'{k} {v.dtype} {tuple(v.shape)}\n'.encode())
+            if v.numel():
+                h.update(raw(v))
+        else:
+            h.update(f'{k} {v!r}\n'.encode())
+    return h.hexdigest()[:24]
+
+
+# A tensor this large is saved compressed (one case of the full corpus has 2 GB, nearly all zeros).
+PACKED = 64 << 20
+
+
+def inputs_path(ref, case):
+    return os.path.join(ref, 'inputs', case.name + '.pt')
+
+
+def save_inputs(ref, case, t):
+    """Save the inputs `t` of `case` in the directory `ref`; their digest."""
+    import torch
+    plain, packed = {}, {}
+    for k, v in t.items():
+        if isinstance(v, torch.Tensor) and v.numel() * v.element_size() >= PACKED:
+            data = bytearray(zlib.compress(raw(v), 1))
+            packed[k] = {'dtype': str(v.dtype).split('.')[-1], 'shape': list(v.shape),
+                         'data': torch.frombuffer(data, dtype=torch.uint8)}
+        else:
+            plain[k] = v
+    d = input_digest(t)
+    path = inputs_path(ref, case)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({'digest': d, 'plain': plain, 'packed': packed}, path + '.tmp')
+    os.replace(path + '.tmp', path)
+    return d
+
+
+def load_inputs(ref, case):
+    """(inputs, digest): the inputs of `case` saved in `ref`, checked against their digest."""
+    import torch
+    path = inputs_path(ref, case)
+    if not os.path.exists(path):
+        raise RuntimeError(f'no inputs in {path}: make them with `triton-diff.py interp` (or `inputs`)')
+    d = torch.load(path, weights_only=True)
+    t = dict(d['plain'])
+    for k, p in d['packed'].items():
+        data = bytearray(zlib.decompress(p['data'].numpy()))
+        t[k] = torch.frombuffer(data, dtype=getattr(torch, p['dtype'])).reshape(p['shape'])
+    got = input_digest(t)
+    if got != d['digest']:
+        raise RuntimeError(f'the inputs in {path} do not match their digest ({got}, saved {d["digest"]})')
+    return t, got
 
 
 def digest(t):
@@ -79,12 +166,11 @@ def apply_post(case, outs):
 # The reference
 
 
-def reference_of(case, interp_ok=True, inputs=None):
+def reference_of(case, inputs, interp_ok=True):
     """{name: CPU tensor} or None. Under the interpreter when the case's reference is it. `inputs`:
-    the case's tensors when they are made already (they are not changed)."""
+    the case's tensors (they are not changed)."""
     import torch
-    t = make_inputs(case) if inputs is None else {k: (v.clone() if isinstance(v, torch.Tensor) else v)
-                                                  for k, v in inputs.items()}
+    t = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
     if case.ref is None:
         return None
     if callable(case.ref):
@@ -101,10 +187,40 @@ def reference_of(case, interp_ok=True, inputs=None):
     return {k: t[k] for k in case.outs}
 
 
+def inputs_of(a, c):
+    """(inputs, digest, made): the inputs of case `c` in the directory a.out, made and saved
+    first when they are not there (or with --again)."""
+    import torch
+    if a.again or not os.path.exists(inputs_path(a.out, c)):
+        t = make_inputs(c)
+        return t, save_inputs(a.out, c, t), True
+    d = torch.load(inputs_path(a.out, c), weights_only=True, mmap=True)
+    return None, d['digest'], False
+
+
+def cmd_inputs(a):
+    """The inputs of every case, saved in a.out; prints the digest of all of them."""
+    import torch
+    torch.set_num_threads(1)
+    cs = load_cases(a.level, a.filter, a.vendor)
+    if a.shard:
+        i, n = map(int, a.shard.split('/'))
+        cs = [c for k, c in enumerate(cs) if k % n == i]
+    whole = hashlib.sha256()
+    made = 0
+    for c in cs:
+        _, d, new = inputs_of(a, c)
+        whole.update(f'{c.name} {d}\n'.encode())
+        made += new
+    print(f'inputs: {made} made, {len(cs)} cases, digest of all {whole.hexdigest()[:24]}')
+    return 0
+
+
 def cmd_interp(a):
     """In a process of its own, with TRITON_INTERPRET=1 and no GPU."""
     assert os.environ.get('TRITON_INTERPRET') == '1', 'run with TRITON_INTERPRET=1'
     import torch
+    torch.set_num_threads(1)
     os.makedirs(a.out, exist_ok=True)
     cs = load_cases(a.level, a.filter, a.vendor)
     if a.shard:
@@ -113,16 +229,20 @@ def cmd_interp(a):
     done = 0
     for c in cs:
         path = os.path.join(a.out, c.name + '.pt')
-        if os.path.exists(path) and not a.again:
-            continue
+        t, d, made = inputs_of(a, c)
         if c.ref is None or callable(c.ref):
             continue
+        if os.path.exists(path) and not made:
+            continue
+        if t is None:
+            t, d = load_inputs(a.out, c)
         start = time.time()
         try:
-            r = reference_of(c)
-            torch.save({'outs': r, 'time': time.time() - start}, path + '.tmp')
+            r = reference_of(c, t)
+            torch.save({'outs': r, 'time': time.time() - start, 'inputs': d}, path + '.tmp')
         except Exception as e:
-            torch.save({'error': f'{type(e).__name__}: {e}'[:2000], 'time': time.time() - start}, path + '.tmp')
+            torch.save({'error': f'{type(e).__name__}: {e}'[:2000], 'time': time.time() - start, 'inputs': d},
+                       path + '.tmp')
         os.replace(path + '.tmp', path)
         done += 1
     print(f'interp: {done} references made, {len(cs)} cases')
@@ -130,11 +250,11 @@ def cmd_interp(a):
 
 
 def cmd_interp_parallel(a):
-    """Run `interp` in --jobs processes (each with a shard of the cases)."""
+    """Run `interp` (or `inputs`) in --jobs processes (each with a shard of the cases)."""
     env = dict(os.environ, TRITON_INTERPRET='1', CUDA_VISIBLE_DEVICES='')
     for name in ('LD_AUDIT', 'LD_PRELOAD'):
         env.pop(name, None)
-    base = [sys.executable, '-s', os.path.abspath(__file__), 'interp', '--out', a.out, '--level', a.level]
+    base = [sys.executable, '-s', os.path.abspath(__file__), a.cmd, '--out', a.out, '--level', a.level]
     if a.filter:
         base += ['--filter', a.filter]
     if a.vendor:
@@ -143,7 +263,11 @@ def cmd_interp_parallel(a):
         base += ['--again']
     env.update(OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
     procs = [subprocess.Popen(base + ['--shard', f'{i}/{a.jobs}'], env=env) for i in range(a.jobs)]
-    return max(p.wait() for p in procs)
+    status = max(p.wait() for p in procs)
+    if a.cmd == 'inputs' and status == 0:
+        # the digest of all of them, from the files the shards made
+        return cmd_inputs(argparse.Namespace(**dict(vars(a), shard='', again=False)))
+    return status
 
 # ------------------------------------------------------------------------------------------------
 # The GPU
@@ -263,15 +387,19 @@ def cmd_worker(a):
         rec = {'case': c.name, 'route': a.route, 'idx': idx}
         t0 = time.time()
         try:
-            inputs = make_inputs(c)
+            # The inputs that the reference was made from, the same for both routes (made again here,
+            # they could differ in the last bits: the head of this file says why).
+            inputs, rec['inputs'] = load_inputs(a.ref, c)
             ref = None
             if c.ref is not None:
                 if callable(c.ref):
-                    ref = reference_of(c, interp_ok=False, inputs=inputs)
+                    ref = reference_of(c, inputs, interp_ok=False)
                 else:
                     p = os.path.join(a.ref, c.name + '.pt')
                     if os.path.exists(p):
                         d = torch.load(p)
+                        if d.get('inputs') != rec['inputs']:
+                            raise RuntimeError(f'the reference {p} was made from other inputs ({d.get("inputs")})')
                         ref = d.get('outs')
                         if ref is None:
                             rec['ref_error'] = d.get('error')
@@ -279,9 +407,7 @@ def cmd_worker(a):
                         rec['ref_error'] = 'no reference file'
             hashes, first, det_detail = [], None, ''
             for run in range(a.runs):
-                # (The inputs are made once and copied for every run: made again, they can differ in
-                # the last bit where PyTorch's CPU functions make them, tanh for one, and a function
-                # that magnifies that, erfinv near 1, then seemed to give other results in one run.)
+                # (A fresh copy of the same inputs for every run.)
                 td = {k: (v.cuda() if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
                 c.run(td)
                 torch.cuda.synchronize()
@@ -444,21 +570,28 @@ def verdicts(files, cases_by_name=None):
                 continue
             if not r.get('det', True):
                 v = 'FAIL-DET'
-                why.append(f'{route}: {r.get("ndistinct")} different results in the runs; {r.get("det_detail", "")[:300]}')
+                why.append(f'{route}: {r.get("ndistinct")} different results in the runs on inputs {r.get("inputs")}; '
+                           f'{r.get("det_detail", "")[:300]}')
             if r.get('ref_ok') is False:
                 if v in ('PASS', 'SKIP-REF', 'ERROR'):
                     v = 'FAIL-REF'
-                why.append(f'{route}: {r.get("ref_detail", "")[:400]}')
+                why.append(f'{route}: on inputs {r.get("inputs")}: {r.get("ref_detail", "")[:400]}')
             if r.get('ref_ok') is None and v == 'PASS':
                 v = 'SKIP-REF'
                 if r.get('ref_error'):
                     why.append(f'{route}: no reference: {r["ref_error"][:200]}')
         s, p = by.get('sass'), by.get('ptx')
-        if s and p and s.get('status') == p.get('status') == 'ok' and s.get('hash') != p.get('hash'):
+        if s and p and s.get('status') == p.get('status') == 'ok' and s.get('inputs') != p.get('inputs'):
+            # (Not the layer's: the inputs were made again between the two routes.)
+            if v in ('PASS', 'SKIP-REF'):
+                v = 'FAIL-ROUTE'
+            why.append(f'the routes ran on different inputs (sass {s.get("inputs")}, ptx {p.get("inputs")})')
+        elif s and p and s.get('status') == p.get('status') == 'ok' and s.get('hash') != p.get('hash'):
             exact = c.route_exact if c is not None else True
             if exact and v in ('PASS', 'SKIP-REF'):
                 v = 'FAIL-ROUTE'
-            why.append('the routes give different bits' + ('' if exact else ' (allowed by the case)'))
+            why.append(f'the routes give different bits on the same inputs ({s.get("inputs")})'
+                       + ('' if exact else ' (allowed by the case)'))
         # The route each module took, by the layer's lines (when the case loaded a module: one of an
         # earlier case's is not loaded again)
         if s and s.get('status') == 'ok' and 'ptx' in s.get('vf', []):
@@ -472,7 +605,7 @@ def verdicts(files, cases_by_name=None):
                 v = 'FAIL-ROUTE'
             why.append(f'ptx route: the layer said {p.get("vf")}: a module was not retargeted PTX')
         out[name] = {'verdict': v, 'why': why, 'vf': {k: by[k].get('vf') for k in by},
-                     'time': {k: by[k].get('time') for k in by}}
+                     'time': {k: by[k].get('time') for k in by}, 'inputs': {k: by[k].get('inputs') for k in by}}
     return out
 
 
@@ -535,12 +668,13 @@ def main():
         p.add_argument('--level', default='full', choices=['quick', 'full'])
         p.add_argument('--filter', default='')
         p.add_argument('--vendor', action='store_true', help='also the kernels of vLLM and SGLang (triton_vendor.py)')
-    p = sub.add_parser('interp')
-    common(p)
-    p.add_argument('--out', required=True)
-    p.add_argument('--shard', default='')
-    p.add_argument('--jobs', type=int, default=0, help='run in N processes')
-    p.add_argument('--again', action='store_true')
+    for name in ('interp', 'inputs'):
+        p = sub.add_parser(name)
+        common(p)
+        p.add_argument('--out', required=True)
+        p.add_argument('--shard', default='')
+        p.add_argument('--jobs', type=int, default=0, help='run in N processes')
+        p.add_argument('--again', action='store_true')
     p = sub.add_parser('worker')
     common(p)
     p.add_argument('--route', required=True, choices=['sass', 'ptx'])
@@ -569,8 +703,8 @@ def main():
     p.add_argument('--jobs', type=int, default=8)
     p.add_argument('--case-wait', type=int, default=600)
     a = ap.parse_args()
-    if a.cmd == 'interp':
-        return cmd_interp_parallel(a) if a.jobs else cmd_interp(a)
+    if a.cmd in ('interp', 'inputs'):
+        return cmd_interp_parallel(a) if a.jobs else {'interp': cmd_interp, 'inputs': cmd_inputs}[a.cmd](a)
     return {'worker': cmd_worker, 'gpu': cmd_gpu, 'report': cmd_report, 'all': cmd_all}[a.cmd](a)
 
 

@@ -1,7 +1,8 @@
 """Triton kernels and their cases, for tests/gpu/triton-diff.py.
 
-Every case is a kernel, a grid, its arguments (tensors made on the CPU from a seed) and how its
-result is checked against a reference: Triton's interpreter on the CPU (TRITON_INTERPRET=1) by
+Every case is a kernel, a grid, its arguments (tensors made on the CPU from a seed, once:
+tests/gpu/triton-diff.py saves them with the reference, for both routes) and how its result is
+checked against a reference: Triton's interpreter on the CPU (TRITON_INTERPRET=1) by
 default, a computation with PyTorch on the CPU where the interpreter cannot run the kernel or
 computes something else than the kernel says (named in the case), or nothing but the other runs
 on the GPU (determinism, the other route) where neither can.

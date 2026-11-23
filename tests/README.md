@@ -95,9 +95,11 @@ scripts of `tests/sass/`).
   what the same kernel gives on the CPU under Triton's interpreter (or the case's PyTorch
   computation), bit for bit or within the tolerance the case states; its five runs give the same
   bits; and the layer's two routes, the translated sm_75 machine code and the retargeted PTX of
-  the same kernel, give the same bits. A case without a reference (the interpreter cannot run it)
-  is compared between its runs and the routes only (`SKIP-REF`); one whose machine code the layer
-  refuses and runs as the PTX kept in the cubin is `PASS-PTX`.
+  the same kernel, give the same bits. All of them on the same inputs: made once by the step that
+  makes the references and saved with them, and named by their digest in the report. A case
+  without a reference (the interpreter cannot run it) is compared between its runs and the routes
+  only (`SKIP-REF`); one whose machine code the layer refuses and runs as the PTX kept in the
+  cubin is `PASS-PTX`.
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
   cubins included (at 0.1.3: 489 of 489, the 14 test cubins and PyTorch's 475).
@@ -159,7 +161,13 @@ python3 tests/gpu/triton-diff.py report --level full sass.jsonl ptx.jsonl
 ```
 
 (the `gpu` commands through the layer, with `VF_LOG_LEVEL=2` and `VF_LOG` set, so that each case
-says which route its modules took; `--vendor` adds the kernels of vLLM and SGLang of
+says which route its modules took; `interp` saves each case's inputs in `REF/inputs`, made in one
+thread, and the `gpu` commands take them from there, so that a reference made on another machine
+was computed on the inputs the GPU is given (made again, PyTorch's tanh, which is MKL's, does not
+give the same last bits on every machine, nor in every process: `ld-erfinv-f64` once had other
+inputs in one of the two processes of the routes, a block of 2,048 values that one thread computed
+with MKL's AVX2 code of low accuracy); `triton-diff.py inputs --out DIR` makes the inputs alone and
+prints the digest of all of them; `--vendor` adds the kernels of vLLM and SGLang of
 `triton_vendor.py`, run with the Python of each engine's environment: 151 cases with vLLM, 90 with
 SGLang; Triton builds its C launcher on the node, so `CPATH` must name Python 3.12 headers there).
 

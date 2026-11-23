@@ -4,10 +4,13 @@
 # wise operations in every type, conversions, reductions, scans, sorts, tl.dot in several types,
 # precisions, tiles, warps and stages, flash attention, masked and gathered memory, block pointers,
 # atomics, loops, grids, random numbers), run by tests/gpu/triton-diff.py (read its head):
+#   - the inputs of each case, made once from its seed and saved with the reference (run/ref/inputs),
+#     which the interpreter and both routes take: the report gives their digest with a difference;
 #   - the reference: each case under TRITON_INTERPRET=1 on the CPU, in processes without a GPU (or a
 #     computation with PyTorch on the CPU where the case names one);
 #   - route `sass`: as a program runs it: Triton is told 7.5 and makes sm_75 machine code, which the
-#     layer translates; 5 runs of each case on fresh inputs, which must give the same bits;
+#     layer translates; 5 runs of each case on fresh copies of its inputs, which must give the same
+#     bits;
 #   - route `ptx`: the same compiled kernels loaded from the PTX that Triton made them from (the
 #     layer retargets it, the driver's compiler makes sm_70 code of it), 2 runs;
 #   - every case must agree with its reference (bit for bit, or within the tolerance the case says)
