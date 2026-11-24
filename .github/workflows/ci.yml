@@ -21,8 +21,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Unit tests
-        run: cargo test --workspace
+      - name: Unit tests, in an empty home of their own that they must leave empty
+        run: tests/scripts/untouched-home.sh cargo test --workspace
       - name: The layer built as scripts/build.sh installs it
         run: scripts/build.sh
       - name: The proxy against a stand-in for the driver

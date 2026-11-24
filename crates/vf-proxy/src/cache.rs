@@ -24,7 +24,8 @@
 //! # Location
 //!
 //! `VF_PROXY_CACHE` names the directory (`0` or empty: off). Without it, `$XDG_CACHE_HOME/volta-forever/proxy`
-//! or `$HOME/.cache/volta-forever/proxy` is used. The cache is off when no directory can be formed.
+//! or `$HOME/.cache/volta-forever/proxy` is used. The cache is off when no directory can be formed,
+//! and in the unit tests.
 //!
 //! # Trust
 //!
@@ -103,8 +104,13 @@ fn disabled(reason: &str) -> String {
     )
 }
 
-/// Determine the cache directory from the environment.
+/// Determine the cache directory from the environment. None in the unit tests, whatever the
+/// environment names: a test that adapts an image neither takes it from the cache of whoever runs
+/// the tests nor keeps its translation there.
 fn cache_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     if let Ok(val) = std::env::var("VF_PROXY_CACHE") {
         if val == "0" || val.is_empty() {
             return None;
@@ -1226,6 +1232,15 @@ mod tests {
             .sum();
         assert!(total <= 200, "total {total} > 200");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_unit_tests_have_no_cache() {
+        // (Until 2026-11-24 a test that translates machine code through `images::adapt` kept its
+        // translation in ~/.cache/volta-forever/proxy at each run.) The functions of the cache are
+        // tested here on directories of the tests' own.
+        assert_eq!(cache_dir(), None);
+        assert!(!enabled());
     }
 
     #[test]
