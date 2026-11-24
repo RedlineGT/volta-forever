@@ -22,7 +22,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
 use std::sync::{LazyLock, Mutex};
 
-use vf_adapt::emulation::{Announcer, Load};
+use vf_adapt::emulation::{Announcer, KEPT_KERNELS, Load};
 use vf_adapt::{Emulated, EmulatedCounts, Refused};
 
 use crate::{REALS, config, idx, images, log, profile};
@@ -111,6 +111,8 @@ struct Explained {
     names: HashSet<String>,
     /// How many refused kernels had a name explained before.
     again: usize,
+    /// Refused kernels came beyond the `KEPT_KERNELS` that `said` keeps.
+    beyond: bool,
 }
 
 /// What to say of a refused kernel that the program asks for.
@@ -124,6 +126,8 @@ enum Explain {
     Again,
     /// That further kernels of names explained before are not listed.
     Further,
+    /// That further refused kernels are not said: more than `KEPT_KERNELS` were.
+    Beyond,
 }
 
 impl Explained {
@@ -131,12 +135,17 @@ impl Explained {
     /// kernel of each name is explained; another of the same name, refused otherwise, while no more
     /// than `limit` have been (all of them with `all`; none with a limit of zero).
     fn refused(&mut self, name: &str, function: &str, reason: &str, limit: usize, all: bool) -> Explain {
-        if !self
-            .said
-            .insert((name.to_string(), function.to_string(), reason.to_string()))
-        {
+        let kernel = (name.to_string(), function.to_string(), reason.to_string());
+        if self.said.contains(&kernel) {
             return Explain::Nothing;
         }
+        if self.said.len() + self.names.len() >= KEPT_KERNELS {
+            return match std::mem::replace(&mut self.beyond, true) {
+                false => Explain::Beyond,
+                true => Explain::Nothing,
+            };
+        }
+        self.said.insert(kernel);
         if self.names.insert(name.to_string()) {
             return Explain::First;
         }
@@ -409,6 +418,9 @@ pub fn refused(handle: usize, name: &str) -> bool {
                  kernel of this name{which})"
             ));
         }
+        Explain::Beyond => log::warn(format_args!(
+            "further refused kernels are not said: more than {KEPT_KERNELS} were (each is still refused)"
+        )),
         Explain::Further => log::warn(format_args!(
             "kernels refused under a name already said are not said any more (VF_LOG_LEVEL=2 says them all, \
              VF_EMULATION_WARNINGS=N says N)"
@@ -718,6 +730,23 @@ mod tests {
         let mut silent = Explained::default();
         assert_eq!(silent.refused("k", "k", &why(1), 0, true), Explain::First);
         assert_eq!(silent.refused("k", "k", &why(2), 0, true), Explain::Nothing);
+    }
+
+    #[test]
+    fn what_is_kept_of_the_refusals_said_is_bounded() {
+        let mut explained = Explained::default();
+        let mut said = Vec::new();
+        for n in 0..KEPT_KERNELS as u32 * 2 {
+            said.push(explained.refused(&format!("k{}", n % 3000), "f", &format!("reason {n}"), 20, true));
+        }
+        assert!(explained.said.len() + explained.names.len() <= KEPT_KERNELS);
+        assert_eq!(said.iter().filter(|e| **e == Explain::Beyond).count(), 1);
+        assert_eq!(
+            said.iter().filter(|e| **e == Explain::First).count(),
+            explained.names.len()
+        );
+        // One kept is still known.
+        assert_eq!(explained.refused("k0", "f", "reason 0", 20, true), Explain::Nothing);
     }
 
     #[test]

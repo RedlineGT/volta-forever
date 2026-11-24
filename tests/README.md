@@ -333,7 +333,8 @@ that the default level prints none of them; and that the lines of a kernel with 
 instructions and of a refused kernel are said once for each kernel, its name and its code, or for
 a refused kernel its name and why (a second kernel of a name, of other code or refused otherwise,
 said, from level 2 with its image's digest; the same image loaded again not said again), within
-`VF_EMULATION_WARNINGS`; it needs a C compiler. The
+`VF_EMULATION_WARNINGS`, and that past 4,096 kernels of one name from as many images the next are
+neither listed nor counted (what is kept of them is bounded); it needs a C compiler. The
 thirteenth checks, with the same stand-in, that with `VF_SUMMARY` the report at exit is in its file
 while the process runs, rewritten when it changes, and still there, as it last was, once the
 process is killed with SIGKILL; that it is written at exit (with `VF_STATS`'s counts); that no

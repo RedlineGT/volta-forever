@@ -12,8 +12,9 @@ and why it is refused. A second kernel of a name, of other code or refused other
 (from level 2 with its image's digest, which the line of its load printed); the same image loaded
 again is not said again. Past
 VF_EMULATION_WARNINGS kernels with emulated instructions, and as many refusals of a name said
-before, a line says that the next are not listed. A stand-in driver (link_mock_driver.c) loads
-the modules.
+before, a line says that the next are not listed. What is kept of the kernels said is bounded:
+past 4096 kernels of one name from as many images, the next are neither listed nor counted, and a
+line says so. A stand-in driver (link_mock_driver.c) loads the modules.
 
 Run with python3 tests/proxy/log_lines.py path/to/libcuda.so.1.
 """
@@ -98,6 +99,19 @@ def kernels(proxy):
         assert api.cuModuleGetFunction(c.byref(function), module, b"r") == 218
 
 
+# More kernels of one name, each of its own code, than the layer keeps of the kernels it said.
+MANY = 4096 + 50
+
+
+def many(proxy):
+    api = c.CDLL(proxy)
+    module, function = c.c_void_p(), c.c_void_p()
+    for i in range(MANY):
+        image = entry(b"k", b" tanh.approx.f32 %%f1, %%f2;\n add.f32 %%f1, %%f1, 0f%08X;\n" % (0x3F800000 + i))
+        assert api.cuModuleLoadData(c.byref(module), image) == 0
+        assert api.cuModuleGetFunction(c.byref(function), module, b"k") == 0
+
+
 def loads(proxy, path):
     api = c.CDLL(proxy)
     module, library = c.c_void_p(), c.c_void_p()
@@ -110,7 +124,7 @@ def loads(proxy, path):
 
 if __name__ == "__main__":
     if len(sys.argv) == 4:
-        loads(sys.argv[1], sys.argv[3]) if sys.argv[3] != "kernels" else kernels(sys.argv[1])
+        {"kernels": kernels, "many": many}.get(sys.argv[3], lambda proxy: loads(proxy, sys.argv[3]))(sys.argv[1])
         sys.exit(0)
     assert xxh64(b"") == 0xEF46DB3751D8E999 and xxh64(b"abc") == 0x44BC2CF5AD770999
     assert xxh64(b"Nobody inspects the spammish repetition") == 0xFBCEA83C8A378BF1
@@ -170,3 +184,13 @@ if __name__ == "__main__":
             "\n".join(lines)
         assert lines[4].startswith("kernels refused under a name already said are not said any more"), lines[4]
         print("PASS within VF_EMULATION_WARNINGS")
+
+        run = subprocess.run([sys.executable, __file__, sys.argv[1], mock, "many"], env=dict(env, VF_LOG_LEVEL="1"),
+                             check=True, stderr=subprocess.PIPE, text=True)
+        lines = [line.split("] ", 1)[1] for line in run.stderr.splitlines() if "forwarding to" not in line]
+        listed = [line for line in lines if "emulated in k" in line]
+        beyond = [line for line in lines if "neither listed nor counted" in line]
+        assert len(listed) == 20 and len(beyond) == 1 and "more than 4096 were given" in beyond[0], "\n".join(lines)
+        assert lines[-1] == ("4096 kernels with emulated instructions were given to the program, and more that were "
+                             "not counted: 4096 tanh"), lines[-1]
+        print(f"PASS {MANY} kernels of one name from as many images: 4096 kept, the next neither listed nor counted")

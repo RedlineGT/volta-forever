@@ -14,6 +14,11 @@ use vf_ptx::EmulatedCounts;
 /// Kernel names are shortened to this many characters in the list (C++ names run to hundreds).
 const NAME_SHOWN: usize = 100;
 
+/// How many kernels a record of what was said keeps (`Said`, the refusals of the proxy): beyond them
+/// (thousands of specializations that a program's autotuning makes, for one), what was not said is
+/// not said, and one line says so; the memory they take stays bounded.
+pub const KEPT_KERNELS: usize = 4096;
+
 /// One load of an image: the handle the driver gave it and the number of that load (a handle that
 /// the driver gives again, after an unload, is another load). `Load::default()`: one load for all.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +36,8 @@ pub enum Seen {
     Another,
     /// A kernel seen before: from the same load, or from an image of the same digest.
     Again,
+    /// A kernel not seen before, beyond the `KEPT_KERNELS` kept: not kept.
+    Full,
 }
 
 /// The kernels of each name seen: the first by its load, the others by the digest of their image. A
@@ -47,6 +54,9 @@ impl Said {
     /// load, or 0 when it is not known (images of unknown digests are taken as one).
     pub fn see(&mut self, name: &str, load: Load, digest: &dyn Fn(Load) -> u64) -> Seen {
         let Some(&first) = self.first.get(name) else {
+            if self.len() >= KEPT_KERNELS {
+                return Seen::Full;
+            }
             self.first.insert(name.to_string(), load);
             return Seen::First;
         };
@@ -57,11 +67,15 @@ impl Said {
         if image != 0 && image == digest(first) {
             return Seen::Again;
         }
-        if self.images.insert((name.to_string(), image)) {
-            Seen::Another
-        } else {
-            Seen::Again
+        let kernel = (name.to_string(), image);
+        if self.images.contains(&kernel) {
+            return Seen::Again;
         }
+        if self.len() >= KEPT_KERNELS {
+            return Seen::Full;
+        }
+        self.images.insert(kernel);
+        Seen::Another
     }
 
     /// How many kernels are kept.
@@ -80,6 +94,8 @@ struct State {
     /// How many kernels were announced.
     count: usize,
     totals: EmulatedCounts,
+    /// Kernels were given beyond those that `said` keeps: not counted.
+    beyond: bool,
 }
 
 /// The kernels announced so far in a process.
@@ -126,6 +142,15 @@ impl Announcer {
             Seen::Again => return lines,
             Seen::First => false,
             Seen::Another => true,
+            Seen::Full => {
+                if !std::mem::replace(&mut state.beyond, true) && limit > 0 {
+                    lines.push(format!(
+                        "  further kernels with emulated instructions are neither listed nor counted: more than \
+                         {KEPT_KERNELS} were given"
+                    ));
+                }
+                return lines;
+            }
         };
         state.count += 1;
         state.totals.add(counts);
@@ -171,9 +196,14 @@ impl Announcer {
         }
         let count = state.count;
         Some(format!(
-            "{count} {} with emulated instructions {} given to the program: {}",
+            "{count} {} with emulated instructions {} given to the program{}: {}",
             if count == 1 { "kernel" } else { "kernels" },
             if count == 1 { "was" } else { "were" },
+            if state.beyond {
+                ", and more that were not counted"
+            } else {
+                ""
+            },
             state.totals.summary()
         ))
     }
@@ -299,5 +329,45 @@ mod tests {
         assert_eq!(said.see("k", load(31), &digest), Seen::Again);
         assert_eq!(asked.get(), 6);
         assert_eq!(said.len(), 3);
+    }
+
+    #[test]
+    fn what_is_kept_of_the_kernels_said_is_bounded() {
+        // Kernels of one name from many images, one load each (the digest of load n is n).
+        let announcer = Announcer::new();
+        let mut lines = Vec::new();
+        for n in 1..=KEPT_KERNELS as u64 + 100 {
+            let load = Load {
+                handle: n as usize,
+                number: n,
+            };
+            lines.extend(announcer.given("k", load, &|load| load.number, None, &counts(1), 20, false));
+        }
+        let state = announcer.state.lock().unwrap();
+        assert_eq!(state.as_ref().unwrap().said.len(), KEPT_KERNELS);
+        drop(state);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("neither listed nor counted"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        assert_eq!(lines.len(), 1 + 20 + 1 + 1);
+        assert_eq!(
+            announcer.summary(20).unwrap(),
+            format!(
+                "{KEPT_KERNELS} kernels with emulated instructions were given to the program, and more that were not \
+                 counted: {KEPT_KERNELS} tanh"
+            )
+        );
+        // A kernel kept is still known for one beyond.
+        let first = Load { handle: 1, number: 1 };
+        assert!(
+            announcer
+                .given("k", first, &|load| load.number, None, &counts(1), 20, false)
+                .is_empty()
+        );
     }
 }
