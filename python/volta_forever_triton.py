@@ -54,6 +54,23 @@ import _thread
 
 # The version of the rules that decide which kernels are compiled for sm_80 (in the cache key).
 RULES = "3"
+# The kinds of products that are left to 7.5 although they may be compiled for sm_80: measured
+# slower that way on a V100, through the layer, than Triton's fma code for 7.5 (below 0.97 of its
+# speed at 1, 16 or 256 rows, in one sweep; a line within the noise of such measures:
+# docs/performance.md, "With VF_TRITON_TC"). A kernel all of whose
+# products are of one kind is compiled for 7.5. Each kind: the operand types, the accumulator types,
+# how B is stored ("n": by rows of N, its elements of one k next to each other in memory, as the
+# shared memory of the sm_80 kernel shows it), and the cells measured slower: a tile (M, N, K) and
+# the stages asked (None: any). A tile or a number of stages that was not measured is not left so.
+SLOWER = (
+    {"why": "bfloat16 products of a skinny tile measured slower, B stored by rows",
+     "types": ("bf16",), "acc": ("f32",), "b": "n",
+     "cells": {(16, 128, 32): None, (16, 128, 64): (1, 3), (16, 64, 32): (1,), (16, 64, 64): None,
+               (32, 128, 32): (1, 3), (32, 64, 32): None, (32, 64, 64): None}},
+    {"why": "float16 products with float16 sums of a skinny tile measured slower, B stored by rows",
+     "types": ("f16",), "acc": ("f16",), "b": "n",
+     "cells": {(16, 128, 32): None, (16, 128, 64): (3,), (32, 64, 32): (1,), (16, 256, 32): (2,)}},
+)
 # The types of the operands of a product that may be compiled for sm_80, by their name in Triton's
 # IR, and what VF_TRITON_TC=1 takes.
 KNOWN_TYPES = ("f16", "bf16", "i8")
@@ -374,6 +391,96 @@ def eligible(ttir, allowed):
         if a != b or a not in allowed:
             return "a tl.dot of %s by %s" % (a, b)
     return None
+
+
+def _products(ttir):
+    """Each tl.dot of a TTIR: (operand type, accumulator type, M, N, K of its tile)."""
+    import re
+    out = []
+    for line in ttir.splitlines():
+        m = re.search(_DOT, line)
+        if m is None:
+            continue
+        a, b, c = m.groups()
+        dims_a = [int(x) for x in a.split("x")[:-1] if x.strip().isdigit()]
+        dims_c = [int(x) for x in c.split("x")[:-1] if x.strip().isdigit()]
+        if len(dims_a) < 2 or len(dims_c) < 2:
+            continue
+        out.append((_element(a), _element(c), dims_c[-2], dims_c[-1], dims_a[-1]))
+    return out
+
+
+def b_storage(ttgir):
+    """How the B operands of the products of an sm_80 TTGIR are stored in shared memory: "n" when
+    every one is by rows of N (its last dimension the fastest), "k" when every one is by columns,
+    else None (mixed, or not loaded from shared memory)."""
+    import re
+    orders = {}
+    for line in ttgir.splitlines():
+        m = re.match(r"\s*(#\w+)\s*=\s*#[\w.]*shared<\{(.*)\}>", line)
+        if m:
+            o = re.search(r"order\s*=\s*\[([\d,\s]+)\]", m.group(2))
+            if o:
+                orders[m.group(1)] = [int(x) for x in o.group(1).split(",")]
+    seen = set()
+    for line in ttgir.splitlines():
+        if "local_load" not in line or not re.search(r"dot_op<\{opIdx\s*=\s*1\b", line):
+            continue
+        m = re.search(r"memdesc<([^,>]*),\s*(#\w+)", line)
+        order = orders.get(m.group(2)) if m else None
+        if not order:
+            return None
+        rank = len(m.group(1).split("x")) - 1
+        seen.add("n" if order[0] == rank - 1 else "k")
+    return seen.pop() if len(seen) == 1 else None
+
+
+def slower(ttir, ttgir, stages=None):
+    """Why a kernel that may be compiled for sm_80 is left to 7.5 all the same, or None: every one of
+    its products is of a kind that SLOWER names (TTIR: the types and the tile; the sm_80 TTGIR: how
+    B is stored; the stages asked)."""
+    if not SLOWER or _triton_version() < (3, 4):
+        return None   # (Triton 3.3 cannot compile a product of halves for 7.5: sm_80 is the only way)
+    products = _products(ttir)
+    if not products:
+        return None
+    storage = None
+    for rule in SLOWER:
+        if not all(_matches(rule, p, stages) for p in products):
+            continue
+        if "b" in rule:
+            if storage is None:
+                storage = b_storage(ttgir) or "?"
+            if storage != rule["b"]:
+                continue
+        return "%s (measured slower for sm_80 on a V100)" % rule["why"]
+    return None
+
+
+def _triton_version():
+    """Triton's version as (major, minor), or (99, 0) when it is not known."""
+    import re
+    try:
+        import triton
+        m = re.match(r"(\d+)\.(\d+)", triton.__version__)
+        return (int(m.group(1)), int(m.group(2))) if m else (99, 0)
+    except Exception:  # noqa: BLE001
+        return (99, 0)
+
+
+def _matches(rule, product, stages=None):
+    a, acc, m, n, k = product
+    big = (0, 1 << 62)
+    if "cells" in rule:
+        if (m, n, k) not in rule["cells"]:
+            return False
+        asked = rule["cells"][(m, n, k)]
+        if asked is not None and stages not in asked:
+            return False
+    return (a in rule.get("types", (a,)) and acc in rule.get("acc", (acc,))
+            and rule.get("m", big)[0] <= m <= rule.get("m", big)[1]
+            and rule.get("n", big)[0] <= n <= rule.get("n", big)[1]
+            and rule.get("elements", big)[0] <= m * n * k <= rule.get("elements", big)[1])
 
 
 def _kernel_name(ttir):

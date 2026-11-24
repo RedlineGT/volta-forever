@@ -32,7 +32,7 @@ def _load(name, filename):
 
 _core = _load("volta_forever_triton", "volta_forever_triton.py")
 _client = _load("volta_forever_triton_client", "volta_forever_triton_client.py")
-VOLTA_SHARED, keeps_ptx = _core.VOLTA_SHARED, _client.keeps_ptx
+slower, VOLTA_SHARED, keeps_ptx = _core.slower, _core.VOLTA_SHARED, _client.keeps_ptx
 
 # A helper that has had nothing to do for GRACE seconds gives its slot up to a process that waits
 # for one (the lock "waiting" is held), which it looks at every POLL seconds.
@@ -104,6 +104,9 @@ def compile80(backend, ttir, context, metadata, options):
         opt = dataclasses.replace(options, arch="sm80", num_stages=stages)
         ttgir = backend.make_ttgir(_parse(ttir, context, "ttir"), md, opt, 80)
         ttgir_text = str(ttgir)
+        rule = slower(ttir, ttgir_text, max(1, options.num_stages))
+        if rule:
+            return None, rule, False
         llir = backend.make_llir(ttgir, md, opt, 80)
         shared = md.get("shared")
         if not isinstance(shared, int):
