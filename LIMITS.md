@@ -547,7 +547,10 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   context on the later card and refused on the V100. A library whose PTX is compiled kernel by
   kernel (deferred) gives the later card the V100's PTX.
 - MPS (the Multi-Process Service)
-- Driver 580.196.07 and later drivers of the 580 branch (everything was run with 580.178.04)
+- Drivers of the 580 branch other than 580.178.04, with which everything was run: 580.173.02, and
+  the drivers after 580.196.07. 580.196.07 was reported by users, not run by the project: one report
+  has `tests/gpu/run.sh` passing its 165 cases at 0.1.4, another an engine that ran there until a bug
+  of its own, on long prompts.
 - Windows; ARM
 - CUDA 14 and later
 - Nsight Compute and Nsight Systems (CUPTI's sampling of the program counter was used through
