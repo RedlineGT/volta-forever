@@ -34,7 +34,8 @@
 //!   loaded as it is, and the driver refuses it); `VF_TRANSLATE=first`: translate it also where
 //!   the image has PTX that would otherwise be rewritten;
 //! - `VF_EMULATION_WARNINGS=N`: list the first N kernels given to the program with emulated
-//!   instructions (default 20; 0: none);
+//!   instructions, and say again N refused kernels of names said before (default 20; 0: none; a
+//!   kernel is its name and its image, `kernels`);
 //! - `VF_CAPABILITY=8.0`: compute capability reported to the callers that have no code for this GPU
 //!   (default: the architecture their code starts at when it can be adapted, else the real one; see
 //!   `callers`). The PTX taken from a program is then the PTX it has for that capability; a caller
@@ -48,7 +49,9 @@
 //!   refuses (kernel name, grid, block, shared memory, launch attributes);
 //! - `VF_SAFE=1` (exactly): safe mode, the switches of the rewriting whose results are not
 //!   bit-identical to the default's are not used (`vf_adapt::Policy::make_safe`), said once at
-//!   level 1.
+//!   level 1;
+//! - `VF_SUMMARY=FILE`: the report at exit also written to `FILE.PID`, and rewritten while the
+//!   process runs (`summary`).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -71,6 +74,7 @@ mod lazy;
 mod log;
 pub mod marker;
 mod profile;
+mod summary;
 
 pub use generated::{HOOKED, NAMES, NSYM, idx};
 
@@ -105,7 +109,8 @@ pub struct Config {
     /// Retry oversized dynamic shared-memory opt-ins at the physical V100 limit.
     pub fit_shared: bool,
     /// How many kernels with emulated instructions are listed on the console before the following
-    /// are only counted (0: none, and no summary).
+    /// are only counted (0: none, and no summary), and how many refused kernels of names said before
+    /// are said (`kernels`).
     pub emulation_warnings: usize,
     /// Print per-module and per-kernel timing breakdown (`VF_TIMING=1`).
     pub timing: bool,
@@ -225,6 +230,7 @@ extern "C" fn init() {
     LOADED_IN.store(std::process::id(), Relaxed);
     let config = config();
     log::open();
+    summary::start();
     if let Err(problem) = vf_adapt::requested_capability() {
         log::warn(format_args!("{problem}"));
     }
@@ -306,10 +312,31 @@ extern "C" fn fini() {
         return;
     }
     profile::write();
-    kernels::summary();
-    fit::summary();
+    let lines = report_lines();
+    for (level, line) in &lines {
+        log::line(*level, format_args!("{line}"));
+    }
+    summary::finish(&lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>());
+}
+
+/// The lines of the report at exit (`summary`).
+fn report() -> Vec<String> {
+    report_lines().into_iter().map(|(_, line)| line).collect()
+}
+
+/// The report at exit, line by line, with the level at which each is logged: the kernels with
+/// emulated instructions given to the program, the second translations, and with `VF_STATS` the
+/// calls and launches counted (asked for: logged at every level).
+fn report_lines() -> Vec<(u8, String)> {
+    let mut lines = Vec::new();
+    if let Some(line) = kernels::summary_line() {
+        lines.push((1, line));
+    }
+    if let Some(line) = fit::summary_line() {
+        lines.push((2, line));
+    }
     if !config().stats {
-        return;
+        return lines;
     }
     let mut calls: Vec<(usize, &CStr)> = COUNTS
         .iter()
@@ -322,8 +349,8 @@ extern "C" fn fini() {
         .iter()
         .map(|(n, name)| format!("{}={n}", name.to_string_lossy()))
         .collect();
-    log::error(format_args!("calls: {}", line.join(" "))); // asked for: printed at every level
-    log::error(format_args!("{}", guard::summary()));
+    lines.push((0, format!("calls: {}", line.join(" "))));
+    lines.push((0, guard::summary()));
     if let Some(launches) = hooks::launches() {
         let total: u64 = launches.iter().map(|(_, n)| n).sum();
         let line: Vec<String> = launches
@@ -331,12 +358,16 @@ extern "C" fn fini() {
             .take(20)
             .map(|(name, n)| format!("{name}={n}"))
             .collect();
-        log::error(format_args!(
-            "launches: {total} of {} kernels, the most launched: {}",
-            launches.len(),
-            line.join(" ")
+        lines.push((
+            0,
+            format!(
+                "launches: {total} of {} kernels, the most launched: {}",
+                launches.len(),
+                line.join(" ")
+            ),
         ));
     }
+    lines
 }
 
 #[used]

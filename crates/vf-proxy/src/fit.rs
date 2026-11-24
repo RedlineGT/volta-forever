@@ -608,17 +608,17 @@ fn unload_second(second: usize, library: bool) {
     }
 }
 
-/// When the process ends, at the level of the log's information: what was held and done.
-pub fn summary() {
+/// For the report at exit (logged at the level of information): what was held and done.
+pub fn summary_line() -> Option<String> {
     let (made, launches) = (MADE.load(Relaxed), LAUNCHES.load(Relaxed));
     if !enabled() || (made == 0 && MOST_BYTES.load(Relaxed) == 0) {
-        return;
+        return None;
     }
-    log::info(format_args!(
+    Some(format!(
         "fit: {made} second translations made, {launches} launches from them; original images held for it: {} now, {} bytes at most",
         HELD.load(Relaxed),
         MOST_BYTES.load(Relaxed)
-    ));
+    ))
 }
 
 // ---- the refused launch -----------------------------------------------------------------------------

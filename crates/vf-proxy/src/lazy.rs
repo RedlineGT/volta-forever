@@ -424,6 +424,16 @@ pub unsafe fn setup_from_cache(
         .iter()
         .map(|e| (e.name.clone(), e.independent, e.tables.clone()))
         .collect();
+    // The digest of the image, by which what is said of its kernels is said once (`kernels`).
+    let image = if manifest
+        .entries
+        .iter()
+        .any(|e| e.refused.is_some() || e.emulated.is_some())
+    {
+        crate::images::xxh64(&original_bytes)
+    } else {
+        0
+    };
 
     // SAFETY: options pointers are the originals from the caller, still valid.
     let result = unsafe {
@@ -477,7 +487,7 @@ pub unsafe fn setup_from_cache(
         // Keep an empty Replacement so that images::release works at unload time, and register
         // refused/emulated info as the adaptation path does.
         crate::images::keep(lib_handle, crate::images::Replacement::from_vec(Vec::new()));
-        crate::kernels::describe(lib_handle, refused, emulated, true);
+        crate::kernels::describe(lib_handle, image, refused, emulated, true);
     }
     true
 }
@@ -1155,7 +1165,7 @@ unsafe fn materialize_load(mut libs: Libs, library: usize, id: u64) -> Result<us
                 crate::images::keep(handle, crate::images::Replacement::from_vec(image));
             }
             // By the handle the program holds: its lookups are answered from there.
-            crate::kernels::describe(library, refused, Vec::new(), true);
+            crate::kernels::describe(library, 0, refused, Vec::new(), true);
             Ok(handle)
         }
         // The library was unloaded meanwhile: what was loaded for it is nobody's.

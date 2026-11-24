@@ -97,9 +97,11 @@ scripts of `tests/sass/`).
   what the same kernel gives on the CPU under Triton's interpreter (or the case's PyTorch
   computation), bit for bit or within the tolerance the case states; its five runs give the same
   bits; and the layer's two routes, the translated sm_75 machine code and the retargeted PTX of
-  the same kernel, give the same bits. A case without a reference (the interpreter cannot run it)
-  is compared between its runs and the routes only (`SKIP-REF`); one whose machine code the layer
-  refuses and runs as the PTX kept in the cubin is `PASS-PTX`.
+  the same kernel, give the same bits. All of them on the same inputs: made once by the step that
+  makes the references and saved with them, and named by their digest in the report. A case
+  without a reference (the interpreter cannot run it) is compared between its runs and the routes
+  only (`SKIP-REF`); one whose machine code the layer refuses and runs as the PTX kept in the
+  cubin is `PASS-PTX`.
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
   cubins included (at 0.1.4: 491 of 491, the 16 test cubins and PyTorch's 475).
@@ -165,7 +167,13 @@ python3 tests/gpu/triton-diff.py report --level full sass.jsonl ptx.jsonl
 ```
 
 (the `gpu` commands through the layer, with `VF_LOG_LEVEL=2` and `VF_LOG` set, so that each case
-says which route its modules took; `--vendor` adds the kernels of vLLM and SGLang of
+says which route its modules took; `interp` saves each case's inputs in `REF/inputs`, made in one
+thread, and the `gpu` commands take them from there, so that a reference made on another machine
+was computed on the inputs the GPU is given (made again, PyTorch's tanh, which is MKL's, does not
+give the same last bits on every machine, nor in every process: `ld-erfinv-f64` once had other
+inputs in one of the two processes of the routes, a block of 2,048 values that one thread computed
+with MKL's AVX2 code of low accuracy); `triton-diff.py inputs --out DIR` makes the inputs alone and
+prints the digest of all of them; `--vendor` adds the kernels of vLLM and SGLang of
 `triton_vendor.py`, run with the Python of each engine's environment: 151 cases with vLLM, 90 with
 SGLang; Triton builds its C launcher on the node, so `CPATH` must name Python 3.12 headers there).
 
@@ -232,7 +240,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Eleven more host regressions exercise the built libraries directly:
+Thirteen more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -246,6 +254,8 @@ python3 tests/proxy/readonly_tables.py dist/lib/libcuda.so.1
 python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1
 tests/proxy/guard_stress.sh
 python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
+python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
+python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -309,7 +319,19 @@ is given the default's image, with one line at level 1 that names the switch; `0
 `VF_PAIRS=0` and `VF_ALIGNED_ROWS=0` are left as they are; and the proxy's cache keeps what a run
 with safe mode and one without make under keys of their own, in either order, for a translation
 of machine code and for a library compiled kernel by kernel. Each case in a process of its own; it
-needs a C compiler.
+needs a C compiler. The twelfth checks,
+with the stand-in of the fourth, that from `VF_LOG_LEVEL=2` the lines about an image name it (by
+the file of `cuModuleLoad`, by the size and XXH64 digest of an image that `cuModuleLoadData` or
+`cuLibraryLoadData` is given), so that two kernels of one name in two images are told apart, and
+that the default level prints none of them; and that the lines of a kernel with emulated
+instructions and of a refused kernel are said once for each kernel, a kernel being its name and
+its image (a second kernel of a name, from another image, said with that image's digest; the same
+image loaded again not said again), within `VF_EMULATION_WARNINGS`; it needs a C compiler. The
+thirteenth checks, with the same stand-in, that with `VF_SUMMARY` the report at exit is in its file
+while the process runs, rewritten when it changes, and still there, as it last was, once the
+process is killed with SIGKILL; that it is written at exit (with `VF_STATS`'s counts); that no
+thread is started without the variable; and that children made by `fork()` while the thread
+writes end and write no report of their own; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -326,9 +348,9 @@ libraries against a mock library.
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`, 451 at 0.1.4); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
-`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py` and
-`nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and `tests/forward/bf16.sh`; `launcher.sh` under `dash` and
-under `bash --posix`;
+`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
+`log_lines.py`, `summary_file.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
+`tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
 kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py`, which
@@ -336,6 +358,37 @@ needs the CUDA 12.9.2 toolkit, nor
 `tests/forward/package-refusals.sh`, which needs the forwarding libraries built from NVIDIA's
 toolkits (`scripts/fetch-all.sh redist`, `scripts/build-forwarders.sh`): it fetches neither.
 The tests on a GPU and the SASS tests over whole corpora are run by hand.
+
+### Checking a release
+
+`tests/release-check.sh` runs, one after the other, what needs no GPU, and ends with a table (each
+step, PASS, FAIL or SKIP, its time, and the log of a step that failed) and the exit status 1 when a
+step failed, 2 when none failed but one could not run here (what it needs is missing: the CUDA
+12.9.2 toolkit, the forwarding libraries, the instruction descriptions), 0 otherwise:
+
+- the CI's host steps (formatting, lints with warnings as errors, the unit tests, `scripts/build.sh`
+  and every host suite of the list above); the host suites that the CI does not run, when what
+  they need is here (`jitlink_objects.py`, `package-refusals.sh`, `scripts/build-bf16-kernels.sh
+  --check`); and `compare.sh`, on the test kernels and on PyTorch's cubins when `TORCH` names them
+  (about ten minutes in all with `JOBS=6`, eight of them for `compare.sh`);
+- with `--full`, then the validator over the corpora: `validate-corpus.sh` on `TORCH`,
+  `heldout-validate.sh` on `HELDOUT` and `controls.sh` (hours; a step whose corpus is missing is
+  skipped).
+
+The GPU part is printed, not run: the commands of `tests/gpu/`, from the tree, with the settings a
+release is checked with (`run.sh` at the default capability and at `VF_CAPABILITY=8.0`;
+`forward.sh`, `forward-bf16.sh`; `torch.sh` and `torch-models.sh` at the default, at
+`VF_CAPABILITY=8.0` and at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`; `triton.sh`,
+`vllm-topk-topp-run.sh`, `llamacpp.sh`, `launcher.sh`; `vllm.sh` and `sglang.sh` with
+`VF_VLLM_VENV` and `VF_SGLANG_VENV` when they are set; `zml.sh`), then how to run them on an
+installed archive instead of the tree: the GPU scripts take the tree's `dist/` (the forwarding
+libraries of `dist/forward`, the launcher that `launcher.sh` runs), so the archive's directories
+and launcher have to stand in a copy of the tree, with a new `VF_OUT`. With
+`VF_RELEASE_GPU_RUN='PREFIX'`, each command of the tree is also run, as `PREFIX 'COMMAND'` (a
+runner of jobs that takes a shell command line and holds a GPU for it), one after the other, and
+put in the table; `VF_RELEASE_GPU_TREE` is the path of the tree where the command runs, and
+`VF_GPU` the GPU's index there (by default the first of `CUDA_VISIBLE_DEVICES`, else 0). Every step
+writes its output to `$VF_OUT/release-check/`.
 
 ## Preparing the dependencies
 

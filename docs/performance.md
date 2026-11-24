@@ -57,6 +57,25 @@ a PyTorch built for another CUDA.)
   the clock has settled (the GPU kept busy until NVML reports 1530 MHz), or record the clock with
   each.
 
+### Measuring on a V100
+
+For a measurement of one's own, beside the warm-up of "The clock" above (12 s of work was enough
+for the figures below):
+
+- **Alternate the settings inside one job**: A, B, A, B on one GPU in one job, each after the
+  warm-up, rather than one job for each setting. From one pass to the next of one session, a kernel
+  of the same bytes ran at 26.0 to 27.9 TFLOPS (Triton's float16 GEMM, 2026-11-23): more than many
+  of the differences that this file reports.
+- **Time small kernels through a CUDA graph**, not one eager launch at a time from Python: there a
+  launch costs the launcher's microseconds (Triton's more than PyTorch's), and a launch waited for
+  costs the wait too. Through the layer at 1530 MHz (2026-11-23, PyTorch 2.14.0 and Triton 3.8.0,
+  two rounds): an addition of 4,194,304 floats took 64 us a launch replayed from a graph of 200
+  launches, and 65 us launched 200 times back to back, but 82 to 87 us (PyTorch) and 97 to 104 us
+  (Triton) with a wait after each launch; one of 4,096 floats took 1.4 us from the graph, 7 to 10
+  us (PyTorch) and 18 to 20 us (Triton) back to back, and 18 to 86 us with a wait after each. A
+  kernel of tens of microseconds timed one eager launch at a time measures the launcher as much
+  as the kernel.
+
 ## 2. PyTorch operations
 
 89 operations, the layer's time divided by the native wheel's (`tests/gpu/torch-bench.sh`),
