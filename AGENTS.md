@@ -68,7 +68,9 @@ Steps, in this order:
    eager mode for diagnosis. Benchmark the verified configuration with the engine's fast paths.
    To tell whether a difference comes from an opt-in of the layer, run again with `VF_SAFE=1`
    (exactly `1`): the switches whose results are not bit-identical to the default's are then not
-   used, and the layer says which it turned off. It does not change the capability told.
+   used, nor the pairs of products of translated machine code (whose last bits depend on a
+   kernel's registers), and the layer says what it turned off. It does not change the capability
+   told.
    [Safe mode](INSTALL.md#environment-variables)
 
 When it does not work, say which of these it is: a setting (fix it and tell the user), a

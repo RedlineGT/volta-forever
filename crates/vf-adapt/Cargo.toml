@@ -4,6 +4,7 @@ description = "What to hand the driver of a Volta GPU in place of an image built
 version.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]

@@ -1202,8 +1202,10 @@ mod tests {
         let h1b = cache_hash(img, &p1);
         assert_eq!(h1, h1b);
         // Safe mode (VF_SAFE=1): what a run without it kept is not given to a run with it, nor the
-        // reverse, though safe mode turns nothing off of the default. A switch that safe mode turns
-        // off does not change its key.
+        // reverse, also where it makes the same bytes (an image without products of machine code).
+        // A switch that safe mode turns off does not change its key; the pairs of machine code that
+        // it turns off are in the key: VF_PAIRS=0 without safe mode has a key of its own, and so
+        // would safe mode with them.
         let mut safe = vf_adapt::Policy::default();
         safe.make_safe();
         assert_ne!(cache_hash(img, &safe), h1, "safe mode changes the cache key");
@@ -1211,5 +1213,15 @@ mod tests {
         grouped_safe.make_safe();
         assert_ne!(cache_hash(img, &grouped_safe), cache_hash(img, &grouped));
         assert_eq!(cache_hash(img, &grouped_safe), cache_hash(img, &safe));
+        let unpaired = vf_adapt::Policy {
+            pairs: false,
+            ..vf_adapt::Policy::default()
+        };
+        assert_ne!(cache_hash(img, &unpaired), h1);
+        assert_ne!(cache_hash(img, &unpaired), cache_hash(img, &safe));
+        assert_ne!(
+            cache_hash(img, &vf_adapt::Policy { pairs: true, ..safe }),
+            cache_hash(img, &safe)
+        );
     }
 }

@@ -86,7 +86,7 @@ On V100 with driver 580.178.04, PyTorch matched the CPU on all 924 operations wi
 
 ## Build and test
 
-To build from source, install Rust (edition 2024) and GCC, then run these commands from the checkout.
+To build from source, install Rust 1.88 or later (edition 2024) and GCC, then run these commands from the checkout.
 
 ```sh
 scripts/build.sh

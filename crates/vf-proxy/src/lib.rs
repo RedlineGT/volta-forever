@@ -48,8 +48,8 @@
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
 //!   refuses (kernel name, grid, block, shared memory, launch attributes);
 //! - `VF_SAFE=1` (exactly): safe mode, the switches of the rewriting whose results are not
-//!   bit-identical to the default's are not used (`vf_adapt::Policy::make_safe`), said once at
-//!   level 1;
+//!   bit-identical to the default's are not used, nor the pairs of products of machine code
+//!   (`vf_adapt::Policy::make_safe`), said once at level 1;
 //! - `VF_SUMMARY=FILE`: the report at exit also written to `FILE.PID`, and rewritten while the
 //!   process runs (`summary`).
 

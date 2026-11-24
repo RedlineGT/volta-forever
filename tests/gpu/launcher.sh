@@ -209,7 +209,7 @@ else
 fi
 
 echo "=== (d) VF_SAFE=1 with VF_CUBLAS_BF16_TC=1 through the launcher ==="
-# What vf doctor says ("not used: VF_CUBLAS_BF16_TC=1") must be what happens: tests/gpu/forward/bf16-safe.c,
+# What vf doctor says (VF_CUBLAS_BF16_TC=1 among what is not used) must be what happens: tests/gpu/forward/bf16-safe.c,
 # products that the variants' tensor-core path takes (legacy TN, NN, NT and cuBLASLt with a bias) and one
 # that the skinny path takes, run through the launcher with the release runtime of forward/bf16tc, must
 # give cuBLAS 12.9's bits, and the runtime's report must count no call on the tensor-core path. The
@@ -242,7 +242,7 @@ else
     control=$out/launcher-caches/safe-bf16-tc-control.log
     echo "$doctor" | grep -i "VF_SAFE" | sed 's/^/  doctor: /'
     grep -E "VF_SAFE=1:|tensor-core path [0-9]|differ from 12.9's|^ok " "$log" | sed 's/^/  /'
-    if ! echo "$doctor" | grep -q "not used: VF_CUBLAS_BF16_TC=1"; then
+    if ! echo "$doctor" | grep -q "not used: .*VF_CUBLAS_BF16_TC=1"; then
         echo "FAIL  safe-bf16-tc (vf doctor does not say that VF_CUBLAS_BF16_TC=1 is not used)"
         failed=1
     elif [ $safe_status -eq 0 ] && grep -qx "ok bf16-safe" "$log" && grep -q "tensor-core path 0" "$log" &&

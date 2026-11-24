@@ -102,8 +102,8 @@ pub struct Policy {
     /// When supported machine code is translated for the device.
     pub translate: Translate,
     /// Whether pairs of products on whole rows are translated as such in machine code
-    /// (`VF_PAIRS=0`: they are not). The same variable sets `lowering.pairs`, the pairs of the
-    /// program-text lowering.
+    /// (`VF_PAIRS=0`: they are not, nor in safe mode). The same variable sets `lowering.pairs`, the
+    /// pairs of the program-text lowering.
     pub pairs: bool,
     /// Where the translation of machine code takes its registers (`VF_BORROW`; the values are
     /// those of `vf_sass::translate::Options::borrow`). The default, 7: above the program's
@@ -118,16 +118,17 @@ pub struct Policy {
     /// it, or PTX it reaches); the later card, its entries as they were.
     pub keep_sources: bool,
     /// Safe mode (`VF_SAFE=1`, `Safe`): the switches whose results are not bit-identical to the
-    /// default's are at their default (`make_safe`). In the policy, so that what is made in safe
-    /// mode and what is made without it are kept apart where the policy is a key (the proxy's
-    /// cache hashes it), even where they would be the same bytes.
+    /// default's are at their default, and each product of machine code is translated by itself
+    /// (`make_safe`). In the policy, so that what is made in safe mode and what is made without it
+    /// are kept apart where the policy is a key (the proxy's cache hashes it), even where they would
+    /// be the same bytes.
     pub safe: bool,
 }
 
 /// Safe mode, asked for with `VF_SAFE`: the layer keeps its conservative paths, those whose results
-/// are bit-identical to its default's. Only the exact value `1` turns it on; unset, `0` and any other
-/// value (empty, `true`, `yes`, ` 1`, `01`) leave it off, as the bf16 cuBLAS variants read the same
-/// variable.
+/// are bit-identical to its conservative reference's (`Policy::make_safe`). Only the exact value `1`
+/// turns it on; unset, `0` and any other value (empty, `true`, `yes`, ` 1`, `01`) leave it off, as the
+/// bf16 cuBLAS variants read the same variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Safe {
     /// Unset, or `0`.
@@ -167,11 +168,12 @@ pub fn safe_line(safe: &Safe, turned_off: &[&str]) -> Option<String> {
         Safe::Off => None,
         Safe::NotOne(value) => Some(format!("VF_SAFE='{value}' is not 1: safe mode stays off")),
         Safe::On if turned_off.is_empty() => Some(
-            "VF_SAFE=1: the layer keeps its conservative paths (no switch that safe mode turns off is set)".to_string(),
+            "VF_SAFE=1: the layer keeps its conservative paths (nothing that safe mode turns off is in use)"
+                .to_string(),
         ),
         Safe::On => Some(format!(
             "VF_SAFE=1: the layer keeps its conservative paths: {} not used (results not bit-identical to the \
-             default's)",
+             reference's)",
             turned_off.join(", ")
         )),
     }
@@ -451,7 +453,8 @@ impl Policy {
     /// `VF_TRANSLATE=0`: do not translate machine code; `VF_TRANSLATE=first`: translate it also
     /// where an image has PTX (`Translate`). `VF_PAIRS=0`: compute every tensor-core product by
     /// itself, in machine code (`pairs`) and in program text (`lowering.pairs`). `VF_SAFE=1`: what
-    /// these ask for whose results are not bit-identical to the default's is not used (`make_safe`).
+    /// these ask for whose results are not bit-identical to the default's is not used, nor the pairs
+    /// of machine code (`make_safe`).
     pub fn with_environment(self) -> Policy {
         self.with_environment_said().0
     }
@@ -466,9 +469,10 @@ impl Policy {
     }
 
     /// Safe mode (`Safe`): the settings of this policy whose results are not bit-identical to the
-    /// default's are put back to the default's, and `safe` is set. Returns what was turned off, as
-    /// the variables and values that ask for it. The reference of lowered and translated code is the
-    /// program's own instructions as the default computes them:
+    /// reference's are put back to it, and `safe` is set. Returns what was turned off, as the
+    /// variables and values that ask for it. The reference of lowered and translated code is the
+    /// program's own instructions as the default computes them, with each product of machine code
+    /// by itself:
     ///
     /// - `VF_BF16_TC_GROUPS=1`, `VF_BF16_TC_TILES=1`: bf16 products on Volta's fp16 tensor cores, whose
     ///   sums are truncated, and the path chosen by a vote over every operand (`docs/emulations.md`,
@@ -477,10 +481,16 @@ impl Policy {
     ///   chosen by a vote (their `ordered` modes give the default's bits and stay);
     /// - `VF_TRANSLATE=first`, `VF_TRANSLATE=force`: another form of the program, its machine code
     ///   translated where the default takes its PTX, its sm_75 code translated where its sm_70 code
-    ///   runs (`VF_TRANSLATE=0` refuses what it does not translate, and stays).
+    ///   runs (`VF_TRANSLATE=0` refuses what it does not translate, and stays);
+    /// - `pairs`, on by default (said as `VF_PAIRS in machine code`): two products of sm_75 machine
+    ///   code computed together add the halves of k, where a product by itself adds the even k, then
+    ///   the odd (`docs/pairs.md`, section 9), and whether they are made depends on the registers of
+    ///   the kernel and on the block that it requires (none at level 3 of `borrow`). Each product is
+    ///   then translated by itself at every level, as with `VF_PAIRS=0` in machine code.
     ///
     /// Not changed: what the programs are told (`told_sm`): the code a program then chooses is its
-    /// own choice; nor `pairs`, `borrow` and `lowering.aligned_rows`.
+    /// own choice; nor `lowering.pairs` (the pairs of program text give the bits of each product by
+    /// itself: `docs/pairs.md`, section 13), `borrow` and `lowering.aligned_rows`.
     pub fn make_safe(&mut self) -> Vec<&'static str> {
         use vf_ptx::lower::{Bf16Column, Bf16Row};
         let mut turned_off = Vec::new();
@@ -507,6 +517,10 @@ impl Policy {
         }
         if matches!(self.translate, Translate::First | Translate::Force) {
             self.translate = Translate::WithoutPtx;
+        }
+        if self.pairs {
+            self.pairs = false;
+            turned_off.push("VF_PAIRS in machine code");
         }
         self.safe = true;
         turned_off
@@ -2743,7 +2757,7 @@ mod tests {
         );
         assert_eq!(
             safe_line(&Safe::On, &[]).as_deref(),
-            Some("VF_SAFE=1: the layer keeps its conservative paths (no switch that safe mode turns off is set)")
+            Some("VF_SAFE=1: the layer keeps its conservative paths (nothing that safe mode turns off is in use)")
         );
         let line = safe_line(&Safe::On, &["VF_BF16_TC_GROUPS=1", "VF_BF16_ROW=tree"]).unwrap();
         assert!(
@@ -2757,10 +2771,17 @@ mod tests {
     #[test]
     fn safe_mode_turns_off_what_changes_results() {
         use vf_ptx::lower::{Bf16Column, Bf16Row};
+        const PAIRS: &str = "VF_PAIRS in machine code";
+        // The default in safe mode: the pairs of machine code off, those of program text on.
         let safe_default = Policy {
             safe: true,
+            pairs: false,
             ..Policy::default()
         };
+        assert!(safe_default.lowering.pairs);
+        let mut default = Policy::default();
+        assert_eq!(default.make_safe(), vec![PAIRS]);
+        assert_eq!(format!("{default:?}"), format!("{safe_default:?}"));
         type Change<'a> = &'a dyn Fn(&mut Policy);
         let with = |change: Change| {
             let mut policy = Policy::default();
@@ -2779,7 +2800,7 @@ mod tests {
         for (name, change) in changing {
             let mut policy = with(change);
             assert_ne!(format!("{policy:?}"), format!("{:?}", Policy::default()), "{name}");
-            assert_eq!(policy.make_safe(), vec![name]);
+            assert_eq!(policy.make_safe(), vec![name, PAIRS]);
             assert_eq!(format!("{policy:?}"), format!("{safe_default:?}"), "{name}");
         }
         // All of them at once, in one list.
@@ -2790,30 +2811,87 @@ mod tests {
             p.lowering.bf16_row = Bf16Row::Tree;
             p.translate = Translate::Force;
         });
-        assert_eq!(all.make_safe().len(), 5);
+        assert_eq!(all.make_safe().len(), 6);
         assert_eq!(format!("{all:?}"), format!("{safe_default:?}"));
+        // With VF_PAIRS=0 there is nothing to turn off, and it stays as it is.
+        let mut unpaired = with(&|p| {
+            p.pairs = false;
+            p.lowering.pairs = false;
+        });
+        let before = unpaired;
+        assert!(unpaired.make_safe().is_empty(), "{before:?}");
+        assert_eq!(
+            format!("{unpaired:?}"),
+            format!("{:?}", Policy { safe: true, ..before })
+        );
         // What gives the default's bits, what refuses instead of computing otherwise, and what the
-        // programs are told: left as they are.
-        let kept: [Change; 7] = [
+        // programs are told: left as they are (the pairs of machine code apart).
+        let kept: [Change; 6] = [
             &|p| p.lowering.bf16_column = Bf16Column::Ordered,
             &|p| p.lowering.bf16_row = Bf16Row::Ordered,
             &|p| p.translate = Translate::Never,
             &|p| p.told_sm = Some(80),
-            &|p| {
-                p.pairs = false;
-                p.lowering.pairs = false;
-            },
             &|p| p.borrow = 9,
             &|p| p.lowering.aligned_rows = false,
         ];
         for change in kept {
             let mut policy = with(change);
             let before = policy;
-            assert!(policy.make_safe().is_empty(), "{before:?}");
-            assert_eq!(format!("{policy:?}"), format!("{:?}", Policy { safe: true, ..before }));
+            assert_eq!(policy.make_safe(), vec![PAIRS], "{before:?}");
+            assert_eq!(
+                format!("{policy:?}"),
+                format!(
+                    "{:?}",
+                    Policy {
+                        safe: true,
+                        pairs: false,
+                        ..before
+                    }
+                )
+            );
         }
         // Made in safe mode or not, two policies are told apart, even when nothing was turned off.
-        assert_ne!(format!("{safe_default:?}"), format!("{:?}", Policy::default()));
+        assert_ne!(format!("{:?}", Policy { safe: true, ..before }), format!("{before:?}"));
+    }
+
+    #[test]
+    fn safe_mode_translates_each_product_of_machine_code_by_itself() {
+        // Eight products a turn on two A, from whole-row loads (tests/kernels/k_pair_bits.cu): the
+        // translator makes pairs of them by default, and none with VF_PAIRS=0 in machine code.
+        let cubin = include_bytes!("../../../tests/kernels/k_pair_bits.135.sm75.cubin");
+        let ptx = include_bytes!("../../../tests/kernels/k_pair_bits.135.sm75.ptx");
+        let image = |policy: &Policy| policy.adapt_cubin(cubin).image.unwrap();
+        let mut safe = Policy::default();
+        safe.make_safe();
+        // As the layer translates by itself, and within the budget (the second translation at
+        // launch): pairs by default (the control), each product by itself in safe mode.
+        for borrow in [vf_sass::translate::BORROW_DEFAULT, 5] {
+            let default = Policy {
+                borrow,
+                ..Policy::default()
+            };
+            let unpaired = Policy {
+                pairs: false,
+                ..default
+            };
+            assert_ne!(image(&default), image(&unpaired), "VF_BORROW={borrow}");
+            assert_eq!(
+                image(&Policy { borrow, ..safe }),
+                image(&unpaired),
+                "VF_BORROW={borrow}"
+            );
+        }
+        // The pairs of program text give the bits of each product by itself: they stay (in the PTX
+        // of the same source, the readers after the loop are not where the 32 lanes are known to
+        // run together, and it has none: tests/kernels/ptx-cases/pairs-adversarial.ptx has some).
+        let text = |policy: &Policy, ptx: &[u8]| policy.adapt_ptx(ptx).image.unwrap();
+        assert_eq!(text(&safe, ptx), text(&Policy::default(), ptx));
+        let ptx = include_bytes!("../../../tests/kernels/ptx-cases/pairs-adversarial.ptx");
+        let text = |policy: &Policy| text(policy, ptx);
+        let mut unpaired = Policy::default();
+        unpaired.lowering.pairs = false;
+        assert_ne!(text(&Policy::default()), text(&unpaired));
+        assert_eq!(text(&safe), text(&Policy::default()));
     }
 
     #[test]
