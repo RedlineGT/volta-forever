@@ -1426,6 +1426,7 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     }
     // A path is bytes, in whatever encoding: it is read as the driver would read it.
     let mut contents = std::fs::read(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
+    let file_len = contents.len();
     guarded(who, || {
         let named = Who {
             call: who,
@@ -1451,6 +1452,11 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
         // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
         let mut replacement = unsafe { adapt_unguarded(&named, contents.as_ptr().cast(), None) }?;
         replacement.shown = named.shown();
+        if !replacement.trap_only.is_empty() {
+            // The file as it is (without the zero added to text): what `xxhsum -H1` gives for it.
+            let file = &contents[..file_len];
+            replacement.program_image = Some((file.len(), xxh64(file)));
+        }
         Some(replacement)
     })
 }
@@ -1560,5 +1566,19 @@ mod tests {
             "keeping an image without kernels without code took a digest"
         );
         assert_eq!(with, 1);
+    }
+
+    #[test]
+    fn an_image_with_kernels_without_code_loaded_from_a_file_is_named_by_the_file() {
+        let path = std::env::temp_dir().join(format!("vf-no-code-test-{}.ptx", std::process::id()));
+        let text = &NO_CODE[..NO_CODE.len() - 1];
+        std::fs::write(&path, text).unwrap();
+        let named = std::ffi::CString::new(path.as_os_str().as_bytes().to_vec()).unwrap();
+        let replacement = adapt_file("cuModuleLoad", &named);
+        let _ = std::fs::remove_file(&path);
+        let replacement = replacement.unwrap();
+        assert_eq!(replacement.trap_only, ["k"]);
+        // The size and digest of the file, as `xxhsum -H1` gives them, not those of the adapted image.
+        assert_eq!(replacement.program_image, Some((text.len(), xxh64(text))));
     }
 }
