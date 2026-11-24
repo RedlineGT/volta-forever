@@ -59,8 +59,10 @@ Steps, in this order:
    are still told what their code allows. Use
    the override only in a
    configuration verified by the engine guide and compare its outputs. Triton takes PyTorch's
-   value: told 7.5, its `tl.dot` uses no tensor cores (right, but many times slower), and only
-   `VF_CAPABILITY_ALL=1` changes that in a program with PyTorch. [Capability rules](LIMITS.md#the-capability-told-with-vf_capability)
+   value: told 7.5, its `tl.dot` uses no tensor cores (right, but many times slower).
+   `VF_TRITON_TC=1` (off by default) makes Triton compile its float16, bfloat16 and int8
+   products for sm_80 while everyone is still told 7.5; read what it changes in `LIMITS.md`
+   ("Triton's matrix products") before you set it. [Capability rules](LIMITS.md#the-capability-told-with-vf_capability)
 7. **Prefer PTX.** If you build the program or its extensions yourself, build them with PTX
    retained. Use `TORCH_CUDA_ARCH_LIST="7.5+PTX"` for a PyTorch extension or add
    `-gencode arch=compute_75,code=compute_75` to the `nvcc` command. VF can then retarget the
