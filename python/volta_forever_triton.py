@@ -932,4 +932,3 @@ def install():
         module = sys.modules.get(name)
         if module is not None:
             patch(module)
-
