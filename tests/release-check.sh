@@ -9,7 +9,8 @@
 # with the CUDA 12.9.2 compiler), and tests/sass/compare.sh on the test kernels and on PyTorch's
 # cubins when `TORCH` names them. With --full, then the independent validator over the corpora:
 # validate-corpus.sh on `TORCH`, heldout-validate.sh on `HELDOUT` and controls.sh (hours, and the
-# corpora of tests/README.md: a step whose corpus is missing is skipped).
+# corpora of tests/README.md: a step whose corpus is missing is skipped). Last, `executable`: every
+# script that a step or a GPU command runs directly has the mode 100755 in git's index.
 #
 # GPU part: printed, not run: the commands of tests/gpu/ with the settings a release is checked
 # with, then how to check an installed archive instead of this tree. VF_RELEASE_GPU_RUN='PREFIX'
@@ -41,10 +42,24 @@ HELDOUT=${HELDOUT:-}
 
 rows=()
 failed=0 skipped=0
+# The scripts of the tree that the steps and the GPU commands run directly (not through an interpreter).
+invoked=()
+# script_of WORD...: the first word of a command that is neither `env` nor an assignment, when it is a
+# file of the tree.
+script_of() {
+    local word
+    for word in "$@"; do
+        case $word in env | *=*) continue ;; esac
+        if [ -f "$W/$word" ]; then echo "$word"; fi
+        return 0
+    done
+}
 # step NAME COMMAND...: run COMMAND in the tree, its output to NAME.log; PASS when it ends with 0.
 step() {
-    local name=$1 start=$SECONDS status result
+    local name=$1 start=$SECONDS status result script
     shift
+    script=$(script_of "$@")
+    [ -z "$script" ] || invoked+=("$script")
     printf '%-24s ' "$name"
     (cd "$W" && "$@") > "$out/$name.log" 2>&1
     status=$?
@@ -159,6 +174,28 @@ command_of() {
     local settings=$1 script=$2
     printf "cd %q && %s && %s%s" "$tree" "$pick" "${settings:+$settings }" "$script"
 }
+
+# Every script that a step or a GPU command runs directly is executable as git has it: a checkout
+# takes the mode of the index, whatever the mode of the file here (outside a git checkout, the file's
+# own is looked at). tests/gpu/triton.sh was not, and its command failed wherever it ran as printed.
+for suite in "${gpu_suites[@]}"; do
+    IFS='|' read -r name settings script <<< "$suite"
+    read -r -a words <<< "$script"
+    script=$(script_of "${words[@]}")
+    [ -z "$script" ] || invoked+=("$script")
+done
+executable() {  # executable SCRIPT...: each one has the mode 100755 in the index
+    local s mode bad=0 checkout=0
+    [ "$(git -C "$W" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$W" && pwd -P)" ] && checkout=1
+    for s in $(printf '%s\n' "$@" | sort -u); do
+        if [ $checkout = 1 ]; then mode=$(git -C "$W" ls-files -s -- "$s" | cut -d' ' -f1)
+        elif [ -x "$W/$s" ]; then mode=100755
+        else mode="not executable"; fi
+        if [ "$mode" = 100755 ]; then echo "ok    $s"; else echo "FAIL  $s: ${mode:-not in the index}"; bad=1; fi
+    done
+    return $bad
+}
+step executable executable "${invoked[@]}"
 
 cat <<EOF
 

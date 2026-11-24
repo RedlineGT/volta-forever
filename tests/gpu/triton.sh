@@ -26,6 +26,7 @@
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
+vf_clear_settings
 out=${VF_OUT:-$VF_TEST_ROOT}
 
 proxy=${VF_PROXY:-$W/dist/lib}

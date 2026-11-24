@@ -4,10 +4,13 @@
 # GPU is the PCI-order index of the GPU to use (default 0). Builds the test programs once into
 # $VF_OUT (default $VF_TEST_ROOT), then runs each case and prints PASS or FAIL; exit status 1
 # on any FAIL. The tree tested is the one this script is in; the build tested is its dist/lib, or
-# the directory $VF_PROXY (a build staged beside the installed one).
+# the directory $VF_PROXY (a build staged beside the installed one). Each case sets the layer's
+# settings it needs; of the others it takes VF_CAPABILITY only (a release is checked at 8.0 too,
+# tests/release-check.sh), except in the cases of what a program is told by default.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
+vf_clear_settings VF_CAPABILITY
 G=$W/tests/kernels
 T=$W/toolkits
 out=${VF_OUT:-$VF_TEST_ROOT}
@@ -62,6 +65,12 @@ rt() {  # rt NAME PROGRAM LIBRARY-PATH EXPECTED... : run a CUDA-runtime program 
     log=$out/logs/$name.log
     LD_LIBRARY_PATH=$proxy:$libs VF_LOG_LEVEL=2 "$out/bin/$program" >"$log" 2>&1
     check "$name" "$@"
+}
+by_default() {  # by_default CASE... : run the case without the caller's VF_CAPABILITY, then give it back
+    local told=${VF_CAPABILITY-} was=${VF_CAPABILITY+set}
+    unset VF_CAPABILITY
+    "$@"
+    [ -z "$was" ] || export VF_CAPABILITY="$told"
 }
 all7=("saxpy +ok" "mathk +ok" "block_sum +ok" "warp_sum +ok" "histo +ok" "half_dot +ok" "dbl +ok")
 
@@ -378,7 +387,7 @@ check stored-machine-code "machine code for sm_75 translated \(2 functions\)" "^
 translated=("machine code for sm_75 translated \(7 functions\)" "${all7[@]}"
     "emulated in warp_sum: 1 instructions added in translated machine code"
     "emulated in block_sum: 3 instructions added in translated machine code")
-drv cubin-sm75 "$G/k_basic.135.sm75.cubin" "cubin without sm_70 code: machine code" "${translated[@]}" "machine code of saxpy: for 7.0"
+by_default drv cubin-sm75 "$G/k_basic.135.sm75.cubin" "cubin without sm_70 code: machine code" "${translated[@]}" "machine code of saxpy: for 7.0"
 # A program that is told a capability and asks which architecture the machine code of its kernel
 # is for is answered that capability, not the 7.0 of the translation (PyTorch's backward attention
 # asks, and stops when the answer is below the variant it chose).
@@ -510,7 +519,7 @@ check tables-copied "^all results match$" "lazy: compiling sub-module for kernel
     "the variable table is not given to the program \(error 801\)" "the variable $mangled is not given to the program \(error 801\)"
 
 rt runtime-12.9 rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "own kernel: 0/65536 wrong" "sgemm check: 0 wrong" "half gemm check: 0 wrong"
-rt runtime-13.5-ptx rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "runtime 13050, driver API 13000" "rt_probe.135.sm75ptx is told compute capability 7.5: its code starts there" "device 0: .*sm_75" "PTX for sm_75 retargeted" "own kernel: 0/65536 wrong" "machine code for sm_75 translated" "kernel volta_sgemm_.* is not given to the program: its machine code for sm_75 is not translated" "cublasCreate -> 0 " "cublasSgemm -> 13 "
+by_default rt runtime-13.5-ptx rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "runtime 13050, driver API 13000" "rt_probe.135.sm75ptx is told compute capability 7.5: its code starts there" "device 0: .*sm_75" "PTX for sm_75 retargeted" "own kernel: 0/65536 wrong" "machine code for sm_75 translated" "kernel volta_sgemm_.* is not given to the program: its machine code for sm_75 is not translated" "cublasCreate -> 0 " "cublasSgemm -> 13 "
 rt runtime-13.5-cublas-forwarded rt_probe.135.sm75ptx "$W/dist/forward:$T/cuda-12.9.2/lib" "device 0: .*sm_75" "own kernel: 0/65536 wrong" "libcublas.so.12[0-9.]* is told the real compute capability" "cuBLAS version 120902" "sgemm check: 0 wrong" "half gemm check: 0 wrong"
 VF_CAPABILITY=12.0 rt rdc-cross-object rdc.135.sm120a "$T/cuda-13.5.0/lib" "compiling sub-module for kernel set_five" "kernel using another CUDA object: 42" "cross-object cluster kernel refused" "unresolved indirect kernel refused"
 VF_CAPABILITY=12.0 VF_LAZY=0 rt rdc-cross-object-eager rdc.135.sm120a "$T/cuda-13.5.0/lib" "kernel using another CUDA object: 42" "cross-object cluster kernel refused" "unresolved indirect kernel refused"

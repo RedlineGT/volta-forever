@@ -44,6 +44,14 @@ A setting of one script alone is described in the header of that script (for exa
 `VF_ZML_CUDNN` of `zml.sh`, `VF_BENCH` of `llamacpp-bench.sh`, `VF_TOOL` and `JOBS` of the
 scripts of `tests/sass/`).
 
+`run.sh`, `forward.sh`, `forward-bf16.sh` and `triton.sh`, whose cases set the layer's settings that
+they need, unset those left in the environment (the settings of `INSTALL.md`, "Environment
+variables", that change what the layer does, not those that say where something is, such as
+`VF_PROXY_CACHE`) and print one line that names them, except `VF_CAPABILITY` for `run.sh` (a release
+is checked with it at 8.0; its cases of what a program is told by default run without it); the other
+scripts take the layer's settings from the environment (as `torch.sh` is run at `VF_CAPABILITY=8.0`
+or with `VF_SAFE=1`).
+
 ## What PASS means
 
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
@@ -383,7 +391,9 @@ step failed, 2 when none failed but one could not run here (what it needs is mis
   (about ten minutes in all with `JOBS=6`, eight of them for `compare.sh`);
 - with `--full`, then the validator over the corpora: `validate-corpus.sh` on `TORCH`,
   `heldout-validate.sh` on `HELDOUT` and `controls.sh` (hours; a step whose corpus is missing is
-  skipped).
+  skipped);
+- last, `executable`: every script that a step or a command of the GPU part runs directly has the
+  mode 100755 in git's index, which is what a checkout gives it.
 
 The GPU part is printed, not run: the commands of `tests/gpu/`, from the tree, with the settings a
 release is checked with (`run.sh` at the default capability and at `VF_CAPABILITY=8.0`;
