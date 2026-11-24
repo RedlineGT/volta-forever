@@ -10,6 +10,7 @@ pub mod deps;
 pub mod division;
 pub mod emulated;
 pub mod lower;
+mod parallel;
 pub mod refused;
 pub mod scan;
 pub mod stubs;
@@ -608,10 +609,22 @@ fn lower_single_target(
     LoweredTarget { lowered, emulated }
 }
 
+const PARALLEL_LOWER_MIN_BYTES: usize = 131_072;
+
 /// `lower_to_volta` with what the rewriting may take for granted about the program.
 pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lowering) {
+    lower_to_volta_inner(text, options, None)
+}
+
+#[cfg(test)]
+fn lower_to_volta_with_threads(text: &[u8], options: lower::Options, max_threads: usize) -> (Vec<u8>, Lowering) {
+    lower_to_volta_inner(text, options, Some(max_threads))
+}
+
+fn lower_to_volta_inner(text: &[u8], options: lower::Options, max_threads: Option<usize>) -> (Vec<u8>, Lowering) {
     let functions = functions(text);
     let mut targets = Vec::new();
+    let mut active_bytes = 0usize;
     let mut need_outside = false;
     for function in &functions {
         let body = &text[function.body.clone()];
@@ -620,6 +633,7 @@ pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lo
             continue;
         }
         need_outside |= cluster.is_empty();
+        active_bytes += body.len();
         targets.push(LowerTarget {
             function,
             cluster,
@@ -636,13 +650,23 @@ pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lo
         Vec::new()
     };
     let address_bits = address_bits(text);
+    let threads = if targets.len() >= 2 && active_bytes >= PARALLEL_LOWER_MIN_BYTES {
+        max_threads
+            .unwrap_or_else(parallel::configured_threads)
+            .min(targets.len())
+            .max(1)
+    } else {
+        1
+    };
+    let results = parallel::par_map(&targets, threads, &|target| {
+        lower_single_target(target, &outside, address_bits, options)
+    });
 
     let mut out = Vec::with_capacity(text.len() + text.len() / 2);
     let mut lowering = Lowering::default();
     let mut copied = 0;
     let mut changed = Vec::new();
-    for target in &targets {
-        let LoweredTarget { lowered, emulated } = lower_single_target(target, &outside, address_bits, options);
+    for (target, LoweredTarget { lowered, emulated }) in targets.iter().zip(results) {
         for line in &target.cluster {
             out.extend_from_slice(&text[copied..line.start]);
             copied = line.end;
@@ -1160,5 +1184,49 @@ mod tests {
                 "all sample {sample}"
             );
         }
+    }
+
+    #[test]
+    fn parallel_lowering_is_bit_exact_with_sequential() {
+        use std::fmt::Write as _;
+        let mut module = String::from(".version 8.0\n.target sm_80\n.address_size 64\n");
+        let pad = "\tadd.s32 %r1, %r1, 1;\n".repeat(1600);
+        for i in 0..8 {
+            match i % 4 {
+                0 => {
+                    let _ = write!(
+                        module,
+                        ".visible .entry k_{i}() {{\n\t.reg .b32 %r<4>;\n\t.reg .f32 %f<4>;\n                         \ttanh.approx.f32 %f0, %f1;\n{pad}\tmax.f16 %h0, %h1, %h2;\n\tret;\n}}\n"
+                    );
+                }
+                1 => {
+                    let _ = write!(
+                        module,
+                        ".func bad_{i}() {{\n\t.reg .b32 %r<4>;\n{pad}\tbarrier.cluster.arrive;\n\tret;\n}}\n"
+                    );
+                }
+                2 => {
+                    let _ = write!(
+                        module,
+                        ".visible .entry plain_{i}() {{\n\t.reg .b32 %r<4>;\n{pad}\tret;\n}}\n"
+                    );
+                }
+                _ => {
+                    let _ = write!(
+                        module,
+                        ".visible .entry clust_{i}() .explicitcluster {{\n\t.reg .b32 %r<4>;\n{pad}\tret;\n}}\n"
+                    );
+                }
+            }
+        }
+        assert!(module.len() > PARALLEL_LOWER_MIN_BYTES * 2);
+        let (seq_out, seq_low) = lower_to_volta_with_threads(module.as_bytes(), lower::Options::default(), 1);
+        let (par_out, par_low) = lower_to_volta_with_threads(module.as_bytes(), lower::Options::default(), 4);
+        assert_eq!(par_out, seq_out);
+        assert_eq!(par_low, seq_low);
+        assert_eq!(par_low.tanh_expanded, 2);
+        assert_eq!(par_low.trapped.len(), 4);
+        assert_eq!(par_low.refused.len(), 2);
+        assert_eq!(par_low.emulated.len(), 2);
     }
 }
