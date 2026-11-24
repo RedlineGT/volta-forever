@@ -519,8 +519,12 @@ A kernel whose translation exceeds the launch limit (error 701) is not refused.
 Instead, the layer translates the module again at the moment the launch is
 refused, within each kernel's own declared register count (`VF_FIT=1`, the
 default; `crates/vf-proxy/src/fit.rs`). This second translation uses the
-budget chain (levels up to 3 with room), where every kernel stays at or below
-its declared count. It is slower code (uniform registers in memory) and is made
+budget chain (`VF_BORROW=5`: levels up to 3 with room), where every kernel stays
+at or below its declared count. A kernel with tensor-core products goes up to
+level 2 only: level 3 refuses it there ("a matrix product in a function at
+level 3"), and when no lower level keeps within its count, it is not launched
+from the second translation, and the program gets the driver's answer to the
+first. It is slower code (uniform registers in memory) and is made
 once, at the first refused launch. The independent validator finds nothing in
 PyTorch's 475 cubins translated this way, as in their usual translation
 (`docs/validation.md`, "The corpora", says what it objected to until 2026-11-20
