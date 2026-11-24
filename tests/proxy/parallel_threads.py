@@ -1,8 +1,10 @@
 """CPU test for VF_THREADS and RLIMIT_NPROC thread-creation refusal fallback.
 
-Under RLIMIT_NPROC=1 against a stand-in driver (link_mock_driver.c), large modules that trigger
-parallel PTX lowering and module analysis must still succeed bit-exact without panicking, falling
-back to the calling thread across vf-translate adapt, cuModuleLoadData, and cuLibraryLoadData.
+Under RLIMIT_NPROC=1, a large module that triggers parallel PTX lowering and module analysis must
+still be adapted without panicking, falling back to the calling thread: vf-translate adapt must
+write the same bytes with VF_THREADS=1, with VF_THREADS=4 and under the limit; against a stand-in
+driver (link_mock_driver.c), cuModuleLoadData and cuLibraryLoadData must adapt it and give its
+kernel, with no internal error and nothing loaded as is (what the driver is given is not compared).
 
 Run with python3 tests/proxy/parallel_threads.py path/to/libcuda.so.1.
 """

@@ -562,10 +562,15 @@ the launcher and not; on a later card, the driver's answers for the program's ow
 PTX's architecture for the layer's code there (of a deferred library, or of one loaded from PTX
 text). Until 2026-11-24 the PTX was said to be for sm_70, which made CUB's algorithms answer
 "invalid device function". Each setting in a process of its own; it needs gcc and objcopy.
-The nineteenth checks, with `vf-translate` and the stand-in under `RLIMIT_NPROC=1`, that `vf-translate adapt`,
-`cuModuleLoadData` and `cuLibraryLoadData` produce identical lowered output across `VF_THREADS`
-settings and fall back cleanly to the calling thread when worker creation is refused on a large
-module; it needs a C compiler.
+The nineteenth checks the fallback of the parallel lowering and analysis of PTX (`VF_THREADS`) to
+the calling thread when no worker thread can be started, on a module of 20 kernels and more than
+128 KiB: that `vf-translate adapt` writes the same bytes with `VF_THREADS=1`, with `VF_THREADS=4` and
+with `VF_THREADS=4` under `RLIMIT_NPROC=1` (this part is skipped, without a line, when
+`dist/bin/vf-translate` is not there); and that, with the stand-in of the fourth under
+`RLIMIT_NPROC=1` and `VF_THREADS=4`, `cuModuleLoadData` and `cuLibraryLoadData` of that module
+retarget it and give its kernel, with no internal error and nothing loaded as is (what the driver is
+given is not compared). It needs a C compiler; run as root, `RLIMIT_NPROC` refuses no thread, and
+the fallback is not reached.
 
 ### Forwarding stack test (`tests/forward/`)
 
