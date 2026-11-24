@@ -34,11 +34,13 @@ import ctypes as c
 import errno
 import os
 from pathlib import Path
+import queue
 import resource
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import warnings
@@ -294,10 +296,86 @@ def of(text, name):
     return [line[len(name) + 3:] for line in text.splitlines() if line.startswith(f"[{name}] ")]
 
 
+LIMIT = 60  # seconds: the longest that any wait of a case takes; then the case's processes are killed and it fails
+
+
+class Child:
+    """A case's process, in a session of its own (its children with it), its output read by threads: no wait of
+    the test is unbounded, and a case that hangs is killed, all its processes, and fails."""
+
+    def __init__(self, args, env, preexec=None):
+        self.p = subprocess.Popen(args, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, preexec_fn=preexec, start_new_session=True)
+        self.pid = self.p.pid
+        self.out = queue.Queue()
+        self.err = []
+        self.readers = [threading.Thread(target=self._read, args=(self.p.stdout, self.out.put), daemon=True),
+                        threading.Thread(target=self._read, args=(self.p.stderr, self.err.append), daemon=True)]
+        for r in self.readers:
+            r.start()
+
+    @staticmethod
+    def _read(f, put):
+        for text in f:
+            put(text)
+        put(None)
+
+    def errors(self):
+        return "".join(e for e in self.err if e)[-3000:]
+
+    def kill(self):
+        try:
+            os.killpg(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return self.p.wait()
+
+    def line(self, seconds=LIMIT):
+        """The next line of the process's output, as words."""
+        try:
+            text = self.out.get(timeout=seconds)
+        except queue.Empty:
+            self.kill()
+            raise AssertionError(f"no line from process {self.pid} within {seconds} s: killed; "
+                                 f"its standard error: {self.errors()}")
+        if text is None:
+            raise AssertionError(f"process {self.pid} ended (status {self.p.wait()}) before its line; "
+                                 f"its standard error: {self.errors()}")
+        return text.split()
+
+    def send(self, text="go"):
+        self.p.stdin.write(text + "\n")
+        self.p.stdin.flush()
+
+    def end(self, seconds=LIMIT):
+        """Wait for the process's end: its status, the rest of its output and its standard error."""
+        try:
+            self.p.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            self.kill()
+            raise AssertionError(f"process {self.pid} did not end within {seconds} s: killed; "
+                                 f"its standard error: {self.errors()}")
+        for r in self.readers:
+            r.join(seconds)
+        out = []
+        while not self.out.empty():
+            text = self.out.get()
+            if text is not None:
+                out.append(text)
+        return self.p.returncode, "".join(out), "".join(e for e in self.err if e)
+
+    def finish(self, seconds=LIMIT):
+        """The end of a process that must exit with 0: its output and its standard error."""
+        status, out, err = self.end(seconds)
+        assert status == 0, (status, out, err)
+        return out, err
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 4:
         child(*sys.argv[1:])
         sys.exit(0)
+    sys.stdout.reconfigure(line_buffering=True)  # each PASS line out at once, whatever ends the test
     proxy = os.path.abspath(sys.argv[1])
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -311,22 +389,14 @@ if __name__ == "__main__":
             base.pop(name, None)
         summary = tmp / "summary"
         on = dict(VF_SUMMARY=str(summary), VF_SUMMARY_INTERVAL="1")
-        start = lambda mode, preexec=None, **env: subprocess.Popen(
-            [sys.executable, __file__, proxy, library, mode], env=dict(base, **env), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, preexec_fn=preexec)
-        line = lambda p: p.stdout.readline().split()
-        send = lambda p, text="go": (p.stdin.write(text + "\n"), p.stdin.flush())
-
-        def finish(p, timeout=60):
-            out, err = p.communicate(timeout=timeout)
-            assert p.returncode == 0, (p.returncode, out, err)
-            return out, err
+        start = lambda mode, preexec=None, **env: Child([sys.executable, __file__, proxy, library, mode],
+                                                        dict(base, **env), preexec)
 
         # Return codes; the functions are the layer's.
         for mode, env in (("codes", {}), ("codes-kept", on)):
             p = start(mode, **env)
-            line(p)
-            out, err = finish(p)
+            p.line()
+            out, err = p.finish()
             # Without VF_SUMMARY, no fill is called; with it, the removals called theirs.
             assert out.split()[0] == "codes" and (mode != "codes" or out.split() == ["codes", "0"]), (out, err)
         print("PASS the return codes, the 4 slots and a name that takes its slot back; the functions are the layer's")
@@ -334,8 +404,8 @@ if __name__ == "__main__":
         # Lines while the process runs, written again when they change, kept after SIGKILL; fills that misbehave.
         names = ["counter", "bad", "bad2", "empty"]
         p = start("lines", **on)
-        line(p)
-        assert line(p) == ["ready"]
+        p.line()
+        assert p.line() == ["ready"]
         path = Path(f"{summary}.{p.pid}")
         wait_for(path, "[counter] count 0\n")
         text = well_formed(path, names)
@@ -344,7 +414,7 @@ if __name__ == "__main__":
         for bad in ("bad", "bad2"):
             mine = of(text, bad)
             assert mine and mine[-1] == "END", mine[-3:]
-            assert any("caf\u00e9" in m and "\u6f22" in m and "[volta-forever] forged" in m and "esrever" in m
+            assert any("café" in m and "漢" in m and "[volta-forever] forged" in m and "esrever" in m
                        for m in mine), mine[:3]
             assert sum(len(m.encode()) + 1 for m in mine) <= 4096, sum(len(m.encode()) for m in mine)
         assert of(text, "empty") == [] and of(text, "counter") == ["count 0"], text
@@ -352,11 +422,10 @@ if __name__ == "__main__":
         order = [next(i for i, l in enumerate(lines) if l.startswith(f"[{n}] ")) for n in ("counter", "bad", "bad2")]
         assert order == sorted(order) and all(not l.startswith("[") or l.startswith("[volta-forever] ")
                                               for l in lines[:order[0]]), text
-        send(p)
-        assert line(p) == ["ready"]
+        p.send()
+        assert p.line() == ["ready"]
         wait_for(path, "[counter] count 1\n")
-        p.send_signal(signal.SIGKILL)
-        assert p.wait() == -signal.SIGKILL
+        assert p.kill() == -signal.SIGKILL
         text = well_formed(path, names)
         assert "running for" in text and of(text, "counter") == ["count 1"] and "at its exit" not in text, text
         print("PASS a fill's lines after the layer's, written again when they change, kept after SIGKILL; fills that"
@@ -365,63 +434,60 @@ if __name__ == "__main__":
 
         # A removal: the fill called once more, its lines kept and marked, nothing called after; the slot back.
         p = start("remove", **on)
-        line(p)
-        assert line(p) == ["ready"]
+        p.line()
+        assert p.line() == ["ready"]
         path = Path(f"{summary}.{p.pid}")
         wait_for(path, "[counter] count 3\n")
-        send(p)
-        removed = line(p)
+        p.send()
+        removed = p.line()
         assert removed[:2] == ["removed", "0"], removed
         wait_for(path, "[counter, last report] count 3\n")
-        send(p)
-        calls = line(p)
+        p.send()
+        calls = p.line()
         assert calls == ["calls", removed[2]], (calls, removed)
         text = well_formed(path, ["counter"])
         assert "count 4" not in text and "[counter] " not in text, text
-        send(p)
-        assert line(p) == ["again", "0"]
+        p.send()
+        assert p.line() == ["again", "0"]
         wait_for(path, "[counter] count 4\n")
         assert "last report" not in path.read_text()
-        p.send_signal(signal.SIGKILL)
-        p.wait()
+        p.kill()
         print("PASS a removal calls the fill once more and keeps its lines, marked as its last report; nothing is"
               " called after it; the name registered again takes its slot back")
 
         # The removal waits for a call under way.
         p = start("slow", **on)
-        line(p)
-        slow = line(p)
-        assert slow[0] == "slow", (slow, p.stderr.read() if p.poll() is not None else "")
-        assert line(p) == ["ready"]
+        p.line()
+        slow = p.line()
+        assert slow[0] == "slow", slow
+        assert p.line() == ["ready"]
         path = Path(f"{summary}.{p.pid}")
         wait_for(path, "[slow, last report] slow\n")
-        p.send_signal(signal.SIGKILL)
-        p.wait()
+        p.kill()
         print(f"PASS a removal waits for the call under way ({slow[1]} ms of it left) and returns after its own"
               f" last call ({slow[2]} ms in all); nothing is called after it")
 
         # A fill that calls the layer back.
         p = start("reenter", **on)
-        line(p)
-        assert line(p) == ["ready"]
+        p.line()
+        assert p.line() == ["ready"]
         path = Path(f"{summary}.{p.pid}")
         wait_for(path, "[counter] count 5\n")
         text = well_formed(path, ["re", "counter"])
         assert of(text, "re") == [f"reenter add {errno.EDEADLK} remove {errno.EDEADLK}"], text
-        p.send_signal(signal.SIGKILL)
-        p.wait()
+        p.kill()
         print("PASS a fill that calls vf_summary_add or vf_summary_remove is refused (EDEADLK), not left waiting")
 
         # Children made by fork() while the thread writes (and holds the lock for 300 ms).
         p = start("fork", **on)
-        line(p)
-        children = line(p)
-        assert children[0] == "children", (children, p.stderr.read() if p.poll() is not None else "")
-        assert line(p) == ["ready"]
+        p.line()
+        children = p.line()
+        assert children[0] == "children", children
+        assert p.line() == ["ready"]
         path = Path(f"{summary}.{p.pid}")
         wait_for(path, "[slow] slow\n")
-        p.send_signal(signal.SIGKILL)
-        _, err = p.communicate()
+        p.kill()
+        _, _, err = p.end()
         written = sorted(f.name for f in tmp.glob("summary.*"))
         for pid in children[1:]:
             assert not any(name.startswith(f"summary.{pid}") for name in written), written
@@ -434,17 +500,17 @@ if __name__ == "__main__":
 
         # A child made without fork()'s handlers while the thread holds the lock.
         p = start("rawfork", **on)
-        line(p)
-        out, err = finish(p)
+        p.line()
+        out, err = p.finish()
         assert out.split() == ["rawfork", str(errno.ECHILD), str(errno.ECHILD)], (out, err)
         print("PASS a child made without fork()'s handlers while the thread held the lock (held for ever in it): add"
               " and remove return ECHILD at once")
 
         # Without VF_SUMMARY: no thread, no call.
         p = start("unset")
-        before, after = map(int, line(p)[1:])
+        before, after = map(int, p.line()[1:])
         assert after == before, (before, after)
-        out, err = finish(p)
+        out, err = p.finish()
         assert out.split() == ["calls", "0"], out
         assert "calls before 0, after 0, vf_summary_remove returned 0" in err, err
         assert list(tmp.glob(f"summary.{p.pid}*")) == []
@@ -456,8 +522,8 @@ if __name__ == "__main__":
         else:
             no_threads = lambda: resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
             p = start("nothread", no_threads, **on)
-            line(p)
-            out, err = finish(p)
+            p.line()
+            out, err = p.finish()
             assert "cannot start the thread that writes the report" in err, err
             assert out.split() == ["calls", "0"], out
             text = well_formed(Path(f"{summary}.{p.pid}"), ["counter"])
@@ -470,8 +536,8 @@ if __name__ == "__main__":
         for mode in ("order-layer", "order-library"):
             p = start(mode, **on)
             if mode == "order-layer":
-                line(p)
-            out, err = finish(p)
+                p.line()
+            out, err = p.finish()
             text = well_formed(Path(f"{summary}.{p.pid}"), ["counter"])
             end = [l for l in err.splitlines() if l.startswith("fill library: removed at its end")]
             assert len(end) == 1 and end[0].endswith("vf_summary_remove returned 0"), err
@@ -489,23 +555,20 @@ if __name__ == "__main__":
         # A library unloaded while the thread runs, and one pinned.
         def unloaded(mode, want=None, **env):
             p = start(mode, **on, **env)
-            line(p)
-            assert line(p) == ["ready"]
+            p.line()
+            assert p.line() == ["ready"]
             path = Path(f"{summary}.{p.pid}")
             wait_for(path, "[counter] count 2\n")
-            send(p)
+            p.send()
             if want is None:  # the control: the process must end by itself
-                try:
-                    _, err = p.communicate("\n", timeout=30)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    raise AssertionError("the process did not end")
-                return p.returncode, err
-            state = line(p)
-            assert state[0] == want, (state, p.stderr.read() if p.poll() is not None else "")
-            assert line(p) == ["alive"]
-            send(p)
-            out, err = finish(p)
+                p.send()
+                status, _, err = p.end(30)
+                return status, err
+            state = p.line()
+            assert state[0] == want, state
+            assert p.line() == ["alive"]
+            p.send()
+            out, err = p.finish()
             return well_formed(path, ["counter"]), err
         text, err = unloaded("dlclose", "unloaded")
         assert "removed at its end: calls before" in err and of(text, "counter, last report") == ["count 2"], text
