@@ -68,6 +68,27 @@ STRATA_WATCHDOG_S=900 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch .
 
 VF and the driver keep what they made in their caches (here 7 MB and 15 MB; with VF 0.1.3 the driver's took 140 MB, which `CUDA_CACHE_MAXSIZE` must allow), and the next starts need no setting: the first window then took 1.7 s and 2.9 s in two runs (31 s with VF 0.1.3). Another build of VF does not use the layer's cache of the one before: give the watchdog the same time at the first start after an upgrade.
 
+### Engine 0.1.66 and long prompts
+
+Strata 0.2.20 installs the CUDA 13 engine 0.1.66. When it detects VF, that engine maps the 7.5 that VF reports back to 7.0 (its log says `compute capability 7.0 (volta-forever 0.1.4: remapped from reported 7.5)`), and then runs the prompt chunks that go to the GPU on its int8 expert kernels for Volta (`i8h_kernel`). Its CUDA 13 build has no code for those kernels: their body is a trap, for every architecture of that build (its CUDA 12 build has sm_70 code for them). With VF 0.1.4 the first prompt of a few thousand tokens (4,021 here) stops the GPU: the engine ends with `native_expert_i8/down: unspecified launch failure`, the system log (`dmesg`) gets an Xid 43 line, and the server answers 503 (issue #3). With VF from main the layer refuses that launch, with a line that names the kernel (`kernel ...i8h_kernel... has no code in its image ...: its body is a trap and nothing else; cuLaunchKernel with it is refused (error 218)`), and the engine ends with `native_expert_i8/gu: a PTX JIT compilation failed`, without a GPU fault; the server answers 503 as well. Set `STRATA_I8_SM70=0` in the environment of the launch:
+
+```sh
+STRATA_I8_SM70=0 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch ...
+```
+
+The engine then still says `every chunk runs 48 of 48 layers on the int8 kernels`, and asks for its other int8 kernels (`i8_kernel`) instead. `STRATA_EXPERT_I8=0`, which the report found, takes the FP16 path, and reads prompts more slowly. Measured on two V100-SXM2-32GB (driver 580.178.04, two Xeon Gold 6133) with the IQ3_S checkpoint and the flags of issue #3 (`--gpu 0,1 --context 64k --parallel 1 --vision off --drafting off --mtp off --tune skip --set prompt-cache=0 --set conversation-cache-mib=0`), VF from main on 2026-11-24: each prompt was read twice in one server, with nothing reused, and 48 tokens generated at temperature zero. The figures are the engine's, for the second read (the first includes the compilation of the kernels that a prompt size uses first).
+
+| Prompt (tokens) | CUDA 12 engine, no VF: read / decode (tokens/s) | CUDA 13 engine with VF, `STRATA_I8_SM70=0` | with VF, `STRATA_EXPERT_I8=0` |
+| ---: | ---: | ---: | ---: |
+| 4,021 | 1,510 / 70.1 | 1,385 / 64.5 | 1,076 / 64.5 |
+| 8,102 | 1,637 / 68.7 | 1,504 / 58.8 | 1,427 / 58.6 |
+| 16,270 | 2,225 / 68.3 | 2,039 / 58.3 | 1,945 / 57.5 |
+| 35,124 | 2,729 / 66.6 | 2,498 / 57.0 | 2,272 / 57.4 |
+
+With either setting, the replies to all nine requests (a short question, then the four prompts twice) were the native engine's text. With empty caches the first window took 32.0 s at the default settings and 32.1 s with each setting.
+
+That build also has kernels whose body is empty for every architecture, where its CUDA 12 build has sm_70 code: `q8_v70_kernel` (21 instances) and `gr_up_ts_kernel` and `gr_down_ts_kernel` (16). Launched, such a kernel does nothing and returns no error, so VF does not refuse it, and the engine's results would be wrong without a message. In these runs the engine never asked for any of them: VF compiles each kernel of these libraries when the engine first asks for it, and names it then at `VF_LOG_LEVEL=2` (or with `VF_TIMING=1`), and none of these was named, at the default settings up to the refused launch, and with either setting up to the prompt of 35,124 tokens. `VF_LOG_LEVEL=2` also says, for each image that it adapts, how many of its kernels have a body that is a trap and how many an empty one.
+
 ## 5. Benchmarks
 
 With that server running, download the client and prompts to the same directory. The client runs a warm-up and three different chats at temperature zero with thinking disabled.

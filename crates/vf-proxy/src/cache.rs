@@ -54,7 +54,7 @@ use crate::{generated, log};
 /// Magic at the start of every cached file.
 const FILE_MAGIC: [u8; 4] = *b"S70C";
 /// Format version; bump to invalidate all entries when the on-disk layout changes.
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 /// File header: magic(4) + format_version(4) + key(16) + content_len(4) + checksum(8) = 36.
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
@@ -392,6 +392,9 @@ pub struct ManifestEntry {
     pub refused: Option<(String, String)>,
     /// When the entry has emulated instructions.
     pub emulated: Option<vf_ptx::EmulatedCounts>,
+    /// Its code is a trap and nothing else (`vf_adapt::Stubs::trap_only`): given at a lookup, not
+    /// launched.
+    pub trap_only: bool,
 }
 
 /// Encode the manifest to bytes.
@@ -415,6 +418,9 @@ fn encode_manifest(m: &CachedManifest) -> Vec<u8> {
         }
         if !e.tables.is_empty() {
             flags |= 8;
+        }
+        if e.trap_only {
+            flags |= 16;
         }
         buf.push(flags);
         // tables
@@ -487,6 +493,7 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
         let flags = data[pos];
         pos += 1;
         let independent = flags & 1 != 0;
+        let trap_only = flags & 16 != 0;
         let mut tables = Vec::new();
         if flags & 8 != 0 {
             let count = read_u32(&mut pos)? as usize;
@@ -536,6 +543,7 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
             tables,
             refused,
             emulated,
+            trap_only,
         });
     }
     Some(CachedManifest { entries })
@@ -648,6 +656,7 @@ fn encode_translation(adapted: &vf_adapt::Adapted) -> Option<Vec<u8>> {
         refused,
         emulated,
         over_budget,
+        stubs,
     } = &adapted.outcome
     else {
         return None;
@@ -674,6 +683,12 @@ fn encode_translation(adapted: &vf_adapt::Adapted) -> Option<Vec<u8>> {
         put_str(&mut buf, &e.kernel);
         for v in counts_of(&e.counts) {
             put(&mut buf, v);
+        }
+    }
+    for list in [&stubs.trap_only, &stubs.empty] {
+        put(&mut buf, list.len());
+        for kernel in list {
+            put_str(&mut buf, kernel);
         }
     }
     buf.extend_from_slice(image);
@@ -734,6 +749,12 @@ fn decode_translation(data: &[u8]) -> Option<vf_adapt::Adapted> {
             },
         });
     }
+    let mut stubs = vf_adapt::Stubs::default();
+    for list in [&mut stubs.trap_only, &mut stubs.empty] {
+        for _ in 0..read(&mut pos)? {
+            list.push(read_str(&mut pos)?);
+        }
+    }
     Some(vf_adapt::Adapted {
         outcome: vf_adapt::Outcome::Translated {
             entries,
@@ -742,6 +763,7 @@ fn decode_translation(data: &[u8]) -> Option<vf_adapt::Adapted> {
             refused,
             emulated,
             over_budget,
+            stubs,
         },
         image: Some(data.get(pos..)?.to_vec()),
     })
@@ -809,6 +831,7 @@ mod tests {
                         c.fp16_tensor = 10;
                         c
                     }),
+                    trap_only: false,
                 },
                 ManifestEntry {
                     name: "kernel_b".to_string(),
@@ -816,6 +839,7 @@ mod tests {
                     tables: Vec::new(),
                     refused: Some(("bad_func".to_string(), "unknown instruction".to_string())),
                     emulated: None,
+                    trap_only: false,
                 },
                 ManifestEntry {
                     name: "kernel_c".to_string(),
@@ -823,6 +847,7 @@ mod tests {
                     tables: Vec::new(),
                     refused: None,
                     emulated: None,
+                    trap_only: true,
                 },
             ],
         }
@@ -851,6 +876,8 @@ mod tests {
         assert!(decoded.entries[1].emulated.is_none());
         assert_eq!(decoded.entries[2].name, "kernel_c");
         assert!(decoded.entries[2].independent);
+        // A kernel whose code is a trap is kept as such, and only it.
+        assert!(decoded.entries[2].trap_only && !decoded.entries[0].trap_only && !decoded.entries[1].trap_only);
     }
 
     #[test]
@@ -873,6 +900,10 @@ mod tests {
                     counts,
                 }],
                 over_budget: true,
+                stubs: vf_adapt::Stubs {
+                    trap_only: vec!["no_code".to_string()],
+                    empty: vec!["noop".to_string(), "probe".to_string()],
+                },
             },
             image: Some(vec![0x7f, b'E', b'L', b'F', 1, 2, 3]),
         };

@@ -382,6 +382,11 @@ static CUresult ask(void *handle) {
     return 0;
 }
 CUresult cuFuncGetAttribute(int *value, int attribute, void *f) { (void)attribute; *value = 1; return ask(f); }
+// What a synchronisation of a stream returns (`sync_result`, set by a test: 719 is what a kernel
+// that faulted leaves), and that no stream is capturing.
+int sync_result;
+CUresult cuStreamSynchronize(void *stream) { (void)stream; return sync_result; }
+CUresult cuStreamIsCapturing(void *stream, int *status) { (void)stream; if (status) *status = 0; return 0; }
 CUresult cuFuncSetAttribute(void *f, int attribute, int value) { (void)attribute; (void)value; return ask(f); }
 CUresult cuFuncSetCacheConfig(void *f, int config) { (void)config; return ask(f); }
 CUresult cuFuncSetSharedMemConfig(void *f, int config) { (void)config; return ask(f); }

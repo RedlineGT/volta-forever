@@ -21,6 +21,65 @@ pub mod emulation;
 use vf_fatbin::{self as fatbin, Entry, FatBinary, KIND_ELF, KIND_PTX, NewEntry};
 pub use vf_ptx::{Emulated, EmulatedCounts, Refused, RefusedFunction, Trapped};
 
+/// Kernels that an image holds without code: their code in the image is a trap and nothing else
+/// (`vf_ptx::stubs`, `vf_sass::effects::entry_stubs`), which is how a kernel built for other
+/// architectures only is emitted for the others, or it does nothing. Neither is refused at a lookup:
+/// fat binaries are full of them, and programs look them up without launching them. The layer
+/// refuses a launch of the first (launched, it would end the context on any GPU) and names the
+/// second at log level 2. A kernel the layer refuses is in neither list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stubs {
+    /// Kernels whose code is a trap and nothing else.
+    pub trap_only: Vec<String>,
+    /// Kernels whose code does nothing.
+    pub empty: Vec<String>,
+}
+
+impl Stubs {
+    /// `self` with what `more` found.
+    pub fn extend(&mut self, more: Stubs) {
+        self.trap_only.extend(more.trap_only);
+        self.empty.extend(more.empty);
+    }
+
+    /// Whether neither list has a kernel.
+    pub fn is_empty(&self) -> bool {
+        self.trap_only.is_empty() && self.empty.is_empty()
+    }
+
+    /// `self` without the kernels that the layer refuses: their code is the layer's own trap, or
+    /// their refusal says more than this.
+    fn without(mut self, refused: &[Refused]) -> Stubs {
+        let kept = |name: &String| !refused.iter().any(|r| r.kernel == *name);
+        self.trap_only.retain(kept);
+        self.empty.retain(kept);
+        self
+    }
+
+    /// The kernels of PTX `text` (as the program gave it, before it is lowered) without code.
+    fn of_ptx(text: &[u8]) -> Stubs {
+        let found = vf_ptx::stubs::stubs(text);
+        Stubs {
+            trap_only: found.trap_only,
+            empty: found.empty,
+        }
+    }
+
+    /// The kernels of `cubin`, machine code for `sm`, without code. Only the encodings of sm_70 and
+    /// sm_75 are read; others give nothing.
+    fn of_cubin(cubin: &[u8], sm: u32) -> Stubs {
+        if !matches!(sm, 70 | 72 | 75) {
+            return Stubs::default();
+        }
+        vf_sass::effects::entry_stubs(cubin)
+            .map(|found| Stubs {
+                trap_only: found.trap_only,
+                empty: found.empty,
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// The lowest CUDA 13 machine-code target and the default capability reported on Volta.
 pub const TRANSLATED_FROM: u32 = 75;
 
@@ -228,6 +287,8 @@ pub enum Outcome {
         refused: Vec<Refused>,
         /// The kernels that run emulated instructions, with the counts by kind.
         emulated: Vec<Emulated>,
+        /// The kernels without code (`Stubs`).
+        stubs: Stubs,
     },
     /// Machine code for architecture `from_sm` was translated to machine code for the device
     /// (`entries` fat-binary entries, or 1 for a cubin), `functions` functions in all.
@@ -244,6 +305,8 @@ pub enum Outcome {
         /// rounded up to eight, 32 at least): the driver may refuse large blocks of it, which a
         /// second translation within the budget would have (`Policy::kept_for_second`).
         over_budget: bool,
+        /// The kernels without code in the machine code that was translated (`Stubs`).
+        stubs: Stubs,
     },
     /// Machine code for `from_sm` that the translator could not read: left as is.
     NotTranslated { from_sm: u32, reason: String },
@@ -298,6 +361,7 @@ struct Translation {
     refused: Vec<Refused>,
     emulated: Vec<Emulated>,
     over_budget: bool,
+    stubs: Stubs,
 }
 
 impl Translation {
@@ -545,8 +609,9 @@ impl Policy {
         lowest.map_or(Embedded::Nothing, |lowest_sm| Embedded::Other { lowest_sm })
     }
 
-    /// `text` for the device: Turing-only instructions lowered, then the header.
-    fn lower_ptx(&self, text: &[u8]) -> (Vec<u8>, vf_ptx::Lowering) {
+    /// `text` for the device: Turing-only instructions lowered, then the header; and its kernels
+    /// without code (`Stubs`), but those the lowering refuses.
+    fn lower_ptx(&self, text: &[u8]) -> (Vec<u8>, vf_ptx::Lowering, Stubs) {
         let (mut lowered, lowering) = if !vf_ptx::needs_lowering(text) {
             (text.to_vec(), vf_ptx::Lowering::default())
         } else {
@@ -556,7 +621,8 @@ impl Policy {
             vf_ptx::division::specialize(&mut lowered);
         }
         vf_ptx::retarget(&mut lowered, self.ptx_max, self.device_sm);
-        (lowered, lowering)
+        let stubs = Stubs::of_ptx(text).without(&lowering.refused);
+        (lowered, lowering, stubs)
     }
 
     /// Adapt PTX text (no terminating zero needed, none added).
@@ -572,7 +638,7 @@ impl Policy {
                 lowest_sm: header.target,
             });
         }
-        let (image, lowering) = self.lower_ptx(text);
+        let (image, lowering, stubs) = self.lower_ptx(text);
         let outcome = Outcome::Retargeted {
             entries: 1,
             from_sm: header.target,
@@ -581,6 +647,7 @@ impl Policy {
             trapped: lowering.trapped,
             refused: lowering.refused,
             emulated: lowering.emulated,
+            stubs,
         };
         Adapted {
             outcome,
@@ -623,12 +690,14 @@ impl Policy {
                 None => {}
             }
         }
+        let stubs = Stubs::of_cubin(cubin, sm).without(&refused);
         Ok(Translation {
             over_budget: translation_exceeds_budget(cubin, &translated.bytes),
             cubin: translated.bytes,
             functions: translated.report.len(),
             refused,
             emulated,
+            stubs,
         })
     }
 
@@ -664,6 +733,7 @@ impl Policy {
                         refused: translation.refused,
                         emulated: translation.emulated,
                         over_budget: translation.over_budget,
+                        stubs: translation.stubs,
                     },
                     image: Some(translation.cubin),
                 },
@@ -758,6 +828,7 @@ impl Policy {
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut translated, mut functions, mut refused, mut emulated) = (0, 0, Vec::new(), Vec::new());
         let mut over_budget = false;
+        let mut found = Stubs::default();
         let mut all_refused = source == 75 && self.translate == Translate::WithoutPtx;
         for entry in &fat.entries {
             if entry.kind() != KIND_ELF || entry.sm() != source {
@@ -792,6 +863,7 @@ impl Policy {
                         .collect();
                     refused.extend(stubs);
                     emulated.extend(translation.emulated);
+                    found.extend(translation.stubs);
                 }
                 Err(reason) => {
                     return Ok(Some(Adapted::unchanged(Outcome::NotTranslated {
@@ -807,6 +879,8 @@ impl Policy {
                 return Ok(Some(recovered));
             }
         }
+        // (A kernel refused for its told architecture is not one without code.)
+        let stubs = found.without(&refused);
         Ok(Some(Adapted {
             outcome: Outcome::Translated {
                 entries: translated,
@@ -815,6 +889,7 @@ impl Policy {
                 refused,
                 emulated,
                 over_budget,
+                stubs,
             },
             image: Some(fatbin::build(&entries)),
         }))
@@ -1023,7 +1098,7 @@ impl Policy {
     fn retarget_fatbin(&self, fat: &FatBinary<'_>, kind: u16, source: u32) -> Result<Adapted, fatbin::Error> {
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut rewritten, mut tensor_rewritten, mut tanh_expanded, mut trapped) = (0, 0, 0, Vec::new());
-        let (mut refused, mut emulated) = (Vec::new(), Vec::new());
+        let (mut refused, mut emulated, mut stubs) = (Vec::new(), Vec::new(), Stubs::default());
         for entry in &fat.entries {
             if entry.kind() != kind || entry.sm() != source {
                 entries.push(NewEntry::copy_of(entry));
@@ -1048,7 +1123,8 @@ impl Policy {
                 let (major, minor) = entry.content_version();
                 (payload, (u32::from(major), u32::from(minor)))
             };
-            let (text, lowering) = self.lower_ptx(&text);
+            let (text, lowering, found) = self.lower_ptx(&text);
+            stubs.extend(found);
             if self.keep_sources {
                 entries.push(NewEntry::copy_of(entry));
             }
@@ -1076,6 +1152,7 @@ impl Policy {
                 trapped,
                 refused,
                 emulated,
+                stubs,
             },
             image: Some(fatbin::build(&entries)),
         })
@@ -1356,6 +1433,7 @@ mod tests {
                 trapped: vec![],
                 refused: vec![],
                 emulated: vec![],
+                stubs: Stubs::default(),
             }
         );
         let image = adapted.image.unwrap();
@@ -1397,6 +1475,7 @@ mod tests {
             refused: vec![],
             emulated: vec![added("warp_sum", 1), added("block_sum", 3)],
             over_budget: false,
+            stubs: Stubs::default(),
         }
     }
 
@@ -1486,6 +1565,7 @@ mod tests {
                 trapped: vec![],
                 refused: vec![],
                 emulated: vec![],
+                stubs: Stubs::default(),
             }
         );
         assert_eq!(adapted.image.unwrap(), b".version 9.0\n.target sm_70\n");
@@ -1536,6 +1616,7 @@ mod tests {
                 trapped: vec![],
                 refused: vec![],
                 emulated: vec![],
+                stubs: Stubs::default(),
             }
         );
         assert_eq!(
@@ -1566,10 +1647,13 @@ mod tests {
             trapped,
             refused,
             emulated,
+            stubs,
         } = &adapted.outcome
         else {
             panic!("{:?}", adapted.outcome);
         };
+        // The trap that the layer put in c is not a kernel without code: c is refused, and said so.
+        assert!(stubs.is_empty(), "{stubs:?}");
         // a has a tanh and b a movmatrix, both emulated; c is trapped, and refused as a kernel.
         let names: Vec<&str> = emulated.iter().map(|kernel| kernel.kernel.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
@@ -1769,6 +1853,47 @@ mod tests {
 
     /// `tests/kernels/k_stub.cu`: machine code for sm_75 and sm_80, no PTX.
     const STUBS: &[u8] = include_bytes!("../../../tests/kernels/k_stub.135.sm75-sm80.fatbin");
+
+    /// `tests/kernels/k_nocode.cu`: PTX for sm_75, machine code for sm_75 and for sm_70, and a fat
+    /// binary with PTX and machine code for sm_75.
+    const NOCODE_PTX: &[u8] = include_bytes!("../../../tests/kernels/k_nocode.135.sm75.ptx");
+    const NOCODE_75: &[u8] = include_bytes!("../../../tests/kernels/k_nocode.135.sm75.cubin");
+    const NOCODE_70: &[u8] = include_bytes!("../../../tests/kernels/k_nocode.129.sm70.cubin");
+    const NOCODE_FAT: &[u8] = include_bytes!("../../../tests/kernels/k_nocode.135.sm75.fatbin");
+
+    fn stubs_of(outcome: &Outcome) -> &Stubs {
+        match outcome {
+            Outcome::Retargeted { stubs, .. } | Outcome::Translated { stubs, .. } => stubs,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn kernels_without_code_are_listed_whichever_code_is_taken() {
+        let expected = Stubs {
+            trap_only: vec!["no_code".to_string()],
+            empty: vec!["empty".to_string()],
+        };
+        let fat = fatbin::parse(NOCODE_FAT).unwrap();
+        // PTX text, and the PTX of a fat binary (taken by default).
+        let policy = Policy::default();
+        assert_eq!(stubs_of(&policy.adapt_ptx(NOCODE_PTX).outcome), &expected);
+        let adapted = policy.adapt_fatbin(&fat).unwrap();
+        assert!(matches!(adapted.outcome, Outcome::Retargeted { .. }));
+        assert_eq!(stubs_of(&adapted.outcome), &expected);
+        // Machine code for sm_75, translated: a cubin, and the cubin of the fat binary
+        // (VF_TRANSLATE=first).
+        assert_eq!(stubs_of(&policy.adapt_cubin(NOCODE_75).outcome), &expected);
+        let first = Policy {
+            translate: Translate::First,
+            ..Policy::default()
+        };
+        let adapted = first.adapt_fatbin(&fat).unwrap();
+        assert!(matches!(adapted.outcome, Outcome::Translated { .. }));
+        assert_eq!(stubs_of(&adapted.outcome), &expected);
+        // Code for sm_70 is loaded as it is: the layer says nothing of it.
+        assert_eq!(policy.adapt_cubin(NOCODE_70).outcome, Outcome::Native);
+    }
 
     #[test]
     fn a_stub_for_the_architecture_told_is_refused() {
@@ -2349,11 +2474,11 @@ mod tests {
 
     /// The text of the image that `policy` makes of the sm_80 `cubin`, or what it found when it
     /// retargets nothing.
-    fn retargeted_text(policy: &Policy, cubin: &[u8]) -> Result<String, Outcome> {
+    fn retargeted_text(policy: &Policy, cubin: &[u8]) -> Result<String, Box<Outcome>> {
         let adapted = policy.adapt_cubin(cubin);
         match (&adapted.outcome, adapted.image) {
             (Outcome::Retargeted { from_sm: 80, .. }, Some(image)) => Ok(String::from_utf8(image).unwrap()),
-            _ => Err(adapted.outcome),
+            _ => Err(Box::new(adapted.outcome)),
         }
     }
 

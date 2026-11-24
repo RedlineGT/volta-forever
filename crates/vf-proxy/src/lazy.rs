@@ -279,6 +279,7 @@ pub unsafe fn setup(
     adapted_data: Vec<u8>,
     refused: &[vf_adapt::Refused],
     emulated: &[vf_adapt::Emulated],
+    trap_only: &[String],
     jit_options: *mut c_int,
     jit_values: *mut *mut c_void,
     jit_count: c_uint,
@@ -337,7 +338,7 @@ pub unsafe fn setup(
 
     // Save the manifest to the proxy cache so that a subsequent run skips adaptation and analysis.
     if let Some(ref ck) = cache_key {
-        save_manifest_from_info(&info, refused, emulated, ck);
+        save_manifest_from_info(&info, refused, emulated, trap_only, ck);
     }
 
     // SAFETY: options pointers are the originals from the caller, still valid.
@@ -366,6 +367,7 @@ fn save_manifest_from_info(
     info: &ModuleInfo,
     refused: &[vf_adapt::Refused],
     emulated: &[vf_adapt::Emulated],
+    trap_only: &[String],
     ck: &crate::cache::CacheKey,
 ) {
     use crate::cache::{CachedManifest, ManifestEntry};
@@ -381,6 +383,7 @@ fn save_manifest_from_info(
                 tables: info.copied_tables(name),
                 refused: ref_info.map(|r| (r.function.clone(), r.reason.clone())),
                 emulated: emu_info.map(|e| e.counts.clone()),
+                trap_only: trap_only.contains(name),
             }
         })
         .collect();
@@ -426,6 +429,13 @@ pub unsafe fn setup_from_cache(
         .collect();
     // What identifies the image (`kernels`), as the cache knows it: the key of its entry.
     let identity = (cache_key.key as u64) ^ ((cache_key.key >> 64) as u64);
+    // The image the program gave, by its size and digest, when it has kernels without code: what the
+    // line that refuses a launch of one names.
+    let program_image = manifest
+        .entries
+        .iter()
+        .any(|e| e.trap_only)
+        .then(|| (original_bytes.len(), crate::images::xxh64(&original_bytes)));
 
     // SAFETY: options pointers are the originals from the caller, still valid.
     let result = unsafe {
@@ -478,10 +488,19 @@ pub unsafe fn setup_from_cache(
             .collect();
         // Keep an empty Replacement so that images::release works at unload time, and register
         // refused/emulated info as the adaptation path does.
+        let trap_only: Vec<String> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.trap_only)
+            .map(|e| e.name.clone())
+            .collect();
         let kept = crate::images::Replacement::from_vec(Vec::new());
         kept.set_identity(identity);
         crate::images::keep(lib_handle, kept);
         crate::kernels::describe(lib_handle, None, refused, emulated, true);
+        if let Some(image) = program_image {
+            crate::kernels::without_code(lib_handle, trap_only, image, true);
+        }
     }
     true
 }

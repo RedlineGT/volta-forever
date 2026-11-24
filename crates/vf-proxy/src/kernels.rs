@@ -8,6 +8,10 @@
 //!   private interface of the driver, an enumeration made before a refusal was known): what the
 //!   driver says of a handle leads back to these records (`verdict`), for `guard`.
 //! - Kernels that run emulated instructions: announced on the console when the program takes them.
+//! - Kernels without code: their code in the image is a trap and nothing else (`vf_adapt::Stubs`).
+//!   They are given at a lookup, as NVIDIA's driver gives them (programs look them up without
+//!   launching them), and a use that would run one is refused (`guard`): launched, it would end
+//!   the context, as it does on any GPU.
 //!
 //! Each is said once, within `VF_EMULATION_WARNINGS`, the second kernel of a name with what names its
 //! image when that is known (`Kernels::shown`). A kernel with emulated instructions is its name and
@@ -54,11 +58,16 @@ struct Kernels {
     origin: Option<Origin>,
     /// What names the image in the lines of its kernels, when it is known (`Replacement::shown`).
     shown: Option<String>,
+    /// Kernels without code (their code is a trap and nothing else), and the image they are in, by
+    /// its size and digest, for the line that says why one is not launched.
+    trap_only: HashSet<String>,
+    image: Option<(usize, u64)>,
 }
 
 static KNOWN: LazyLock<Mutex<HashMap<usize, Kernels>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-/// The number of modules and libraries known here with a refused kernel: while there is none, no
-/// handle that the program holds can be one of a refused kernel, and `guard` asks nothing.
+/// The number of modules and libraries known here with a refused kernel or a kernel without code:
+/// while there is none, no handle that the program holds can be one of those, and `guard` asks
+/// nothing.
 static REFUSING: AtomicUsize = AtomicUsize::new(0);
 /// Changed whenever what is known here changes, and whenever a module, a library or a context
 /// goes (after which the driver may give its handles to others): what `guard` concluded of a
@@ -166,7 +175,13 @@ fn known() -> std::sync::MutexGuard<'static, HashMap<usize, Kernels>> {
 /// What is known here changed (`known` is the map, under its lock): `REFUSING` is counted again, and
 /// a new generation begins.
 fn changed(known: &HashMap<usize, Kernels>) {
-    REFUSING.store(known.values().filter(|k| !k.refused.is_empty()).count(), SeqCst);
+    REFUSING.store(
+        known
+            .values()
+            .filter(|k| !k.refused.is_empty() || !k.trap_only.is_empty())
+            .count(),
+        SeqCst,
+    );
     new_generation();
 }
 
@@ -260,6 +275,20 @@ pub fn describe(handle: usize, shown: Option<String>, refused: Vec<Refused>, emu
     for kernel in emulated {
         kernels.emulated.insert(kernel.kernel, kernel.counts);
     }
+    changed(&known);
+}
+
+/// Record the kernels without code of the image loaded as `handle` (a library's when `library`):
+/// `names`, whose code is a trap and nothing else, in the image of `image` (its size and digest).
+pub fn without_code(handle: usize, names: Vec<String>, image: (usize, u64), library: bool) {
+    if names.is_empty() {
+        return;
+    }
+    let mut known = known();
+    let kernels = known.entry(handle).or_default();
+    kernels.is_library |= library;
+    kernels.image.get_or_insert(image);
+    kernels.trap_only.extend(names);
     changed(&known);
 }
 
@@ -583,10 +612,49 @@ unsafe fn of_library(handle: usize, library: usize, name: &str) -> bool {
     found == 0 && function as usize == handle
 }
 
+/// A kernel without code of which the program holds a handle: its name, and the image it is in.
+pub struct NoCode {
+    name: String,
+    image: Option<(usize, u64)>,
+}
+
+/// Kernels without code whose use was refused: the refusal is said once for each name.
+static NO_CODE_SAID: LazyLock<Mutex<Guarded>> = LazyLock::new(|| Mutex::new(Guarded::default()));
+
+impl NoCode {
+    /// Say, the first time for this kernel, that `call`, which would run it, is refused.
+    pub fn explain(&self, call: &str) {
+        match NO_CODE_SAID.lock().unwrap_or_else(|e| e.into_inner()).note(&self.name) {
+            Note::Nothing => return,
+            Note::Beyond => {
+                log::warn(format_args!(
+                    "further kernels without code whose launch is refused are not said: more than {KEPT_KERNELS} \
+                     were (each launch is still refused, error {})",
+                    crate::guard::REFUSED
+                ));
+                return;
+            }
+            Note::First => {}
+        }
+        let image = match self.image {
+            Some((size, digest)) => format!("its image ({size} bytes, XXH64 {digest:016x})"),
+            None => "its image".to_string(),
+        };
+        log::warn(format_args!(
+            "kernel {} has no code in {image}: its body is a trap and nothing else; {call} with it is refused \
+             (error {})",
+            self.name,
+            crate::guard::REFUSED
+        ));
+    }
+}
+
 /// What `verdict` says of a handle.
 pub enum Verdict {
     /// The handle is that of a refused kernel.
     Refused(Refusal),
+    /// The handle is that of a kernel without code: it may be asked about, not run.
+    NoCode(NoCode),
     /// It is not, wherever it is used.
     Allowed,
     /// It is not, where it is used now, which another use may not be: so this is not kept.
@@ -621,32 +689,47 @@ pub unsafe fn verdict(handle: usize, device: Option<c_int>) -> Verdict {
             reason: reason.clone(),
         })
     };
+    let no_code = |kernels: &Kernels| {
+        kernels.trap_only.contains(&name).then(|| NoCode {
+            name: name.clone(),
+            image: kernels.image,
+        })
+    };
+    // A refusal, else a kernel without code, of a module or library.
+    let finding = |kernels: &Kernels| {
+        refusal(kernels)
+            .map(Verdict::Refused)
+            .or_else(|| no_code(kernels).map(Verdict::NoCode))
+    };
     let on_this_gpu = || match device {
         Some(device) => crate::hooks::device_needs_adapting(device),
         None => crate::hooks::context_needs_adapting(),
     };
-    // A refusal of `library`: for the GPU where the handle is used. (The module that the driver
-    // gives for a library in a context is known here only for a context on this GPU.)
-    let of_a_library = |library: usize, refusal: Option<Refusal>| match refusal {
+    // A refusal of `library` (or a kernel of it without code): for the GPU where the handle is used,
+    // where the driver runs the library's own code for another GPU. (The module that the driver gives
+    // for a library in a context is known here only for a context on this GPU.)
+    let of_a_library = |library: usize, found: Option<Verdict>| match found {
         Some(_) if !crate::lazy::is_lazy(library) && !on_this_gpu() => Verdict::AllowedHere,
-        Some(refusal) => Verdict::Refused(refusal),
+        Some(found) => found,
         None => Verdict::Allowed,
     };
     let libraries: Vec<usize> = {
         let known = known();
         if let Some(kernels) = metadata(&known, owner) {
-            let found = refusal(kernels);
+            let found = finding(kernels);
             let library_kernel = known.get(&owner).is_some_and(|entry| entry.is_library);
             drop(known);
             return match found {
                 Some(found) if library_kernel => of_a_library(owner, Some(found)),
-                Some(found) => Verdict::Refused(found),
+                Some(found) => found,
                 None => Verdict::Allowed,
             };
         }
         known
             .iter()
-            .filter(|(_, kernels)| kernels.is_library && kernels.refused.contains_key(&name))
+            .filter(|(_, kernels)| {
+                kernels.is_library && (kernels.refused.contains_key(&name) || kernels.trap_only.contains(&name))
+            })
             .map(|(&library, _)| library)
             .collect()
     };
@@ -655,7 +738,7 @@ pub unsafe fn verdict(handle: usize, device: Option<c_int>) -> Verdict {
     }
     for &library in &libraries {
         if unsafe { of_library(handle, library, &name) } {
-            let found = known().get(&library).and_then(refusal);
+            let found = known().get(&library).and_then(finding);
             return of_a_library(library, found);
         }
     }

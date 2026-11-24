@@ -270,6 +270,8 @@ tests/proxy/guard_stress.sh
 python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
 python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
 python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
+python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
+python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -349,7 +351,17 @@ process is killed with SIGKILL; that it is written at exit (with `VF_STATS`'s co
 thread is started without the variable; and that children made by `fork()` while the thread
 writes end and write no report of their own; and that no link put where that file or the profile
 (`VF_PROFILE`) goes, or where the file was written first, leads either into the file it names,
-both being their owner's only; it needs a C compiler.
+both being their owner's only; it needs a C compiler. The fourteenth checks, with the stand-in of
+the ninth and its calls, that a kernel without code (its body in the image is a trap and nothing
+else) of a module or of a library, and its function in a context, is given at the lookup with
+nothing said and answered about, while no launch function runs it and no kernel node of a graph is
+made or given with it (218, and the driver is not called), with one line at the default level that
+names it and its image; that the kernels beside it that trap behind a test or after a store, and
+the empty one, run; and that its handle, given again by the driver to a kernel that is code, is
+launched. Each case in a process of its own, with deferred libraries and without; it needs a C
+compiler. The fifteenth checks, with the same stand-in, whose synchronisation returns what the test
+sets, that with `VF_PROFILE` the first synchronisation after a launch that returns an error is said
+at once, with the kernel it followed and its sizes, and only that one; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -367,7 +379,8 @@ On every push and pull request, `.github/workflows/ci.yml` runs the formatting a
 checks and the unit tests (`cargo test`, 451 at 0.1.4); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
-`log_lines.py`, `summary_file.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
+`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py` and `nvml_capability.py` of
+`tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test

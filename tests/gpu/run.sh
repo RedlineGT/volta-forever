@@ -614,6 +614,37 @@ VF_LAZY=0 guard guard-library-lazy-off library
 # about while no context, or another, was current (only questions: nothing that traps is launched).
 VF_LAZY=0 guard guard-contexts contexts
 
+# A kernel without code (its body in the image is a trap and nothing else: what a kernel built for
+# other architectures only is, in the code for the others) is given at the lookup and answered
+# about, as NVIDIA's driver does, but a launch of it is refused with 218 (said once, with its
+# image), a kernel node of it is not made, a capture in progress goes on, the context survives and
+# the kernels that are code run, one that traps behind a test and an empty one among them; no Xid
+# line more. From PTX (retargeted) and from machine code for sm_75 (translated). Until 2026-11-24
+# the launch trapped and the GPU stopped the context (Xid 43): Strata's CUDA 13 engine 0.1.66
+# launched such a kernel (issue #3).
+[ -x "$out/bin/test_nocode" ] && [ "$out/bin/test_nocode" -nt "$G/test_nocode.c" ] || gcc -O2 -Wall -o "$out/bin/test_nocode" "$G/test_nocode.c" -ldl || exit 2
+nocode() {  # nocode NAME IMAGE INTERFACE
+    local name=$1 image=$2 interface=$3 before after
+    log=$out/logs/$name.log
+    before=$(xids)
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_nocode" "$image" "$interface" >"$log" 2>&1
+    after=$(xids)
+    if dmesg >/dev/null 2>&1; then
+        echo "lines with Xid in the kernel's log: $before before, $after after" >>"$log"
+        [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
+    else
+        echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
+    fi
+    echo "lines that say no_code is not launched: $(grep -c 'kernel no_code has no code in its image' "$log")" >>"$log"
+    check "$name" "ALL CHECKS PASSED" "no Xid line more" "lines that say no_code is not launched: 1$" \
+        "kernel no_code has no code in its image \([0-9]+ bytes, XXH64 [0-9a-f]{16}\): its body is a trap and nothing else; cuLaunchKernel with it is refused \(error 218\)"
+}
+nocode nocode-ptx-module "$G/k_nocode.135.sm75.ptx" module
+nocode nocode-ptx-library "$G/k_nocode.135.sm75.ptx" library
+VF_LAZY=0 nocode nocode-ptx-library-lazy-off "$G/k_nocode.135.sm75.ptx" library
+nocode nocode-cubin-module "$G/k_nocode.135.sm75.cubin" module
+nocode nocode-cubin-library "$G/k_nocode.135.sm75.cubin" library
+
 # A kernel whose usual translation takes more registers than a block of 1,024 threads can have is
 # launched from a second translation that keeps to the kernel's own count (`docs/architecture.md`, "Launch"): taken
 # from a module and from a library, with an attribute that the program set on its kernel, in a
