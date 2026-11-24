@@ -4,7 +4,9 @@
 # - two checkouts (copies of scripts/ in two directories) are built in two directories of their
 #   own, and each script of a checkout builds it in the same one: scripts/build.sh and
 #   scripts/build-forwarders.sh, run with a stand-in for cargo that says where it was told to
-#   build; CARGO_TARGET_DIR, when it is set, is where they build;
+#   build; CARGO_TARGET_DIR, when it is set, is where they build; each directory of a checkout has
+#   the file CHECKOUT with the checkout's path, and scripts/target-dir.sh --list says each directory
+#   with its checkout, and ORPHAN when that checkout is gone;
 # - with --build, two copies of this tree, the second's crates/vf-fwdgen/bf16tc/runtime.c changed
 #   and all its files older than what the first's build made, each built by
 #   scripts/build-forwarders.sh (with cargo, as a user's checkouts are): each checkout's generator
@@ -45,6 +47,15 @@ check "the same for each script of a checkout" test -n "$a" -a "$a" = "$a_forwar
 case $a in "$tmp/cache/volta-forever/target-"*) inside=1 ;; *) inside=0 ;; esac
 check "under XDG_CACHE_HOME, outside the tree" test "$inside" = 1
 check "CARGO_TARGET_DIR when it is set" test "$given" = "$tmp/given"
+check "each directory names its checkout" test "$(cat "$a/CHECKOUT" 2>/dev/null)" = "$(cd "$tmp/a" && pwd -P)" \
+    -a "$(cat "$b/CHECKOUT" 2>/dev/null)" = "$(cd "$tmp/b" && pwd -P)"
+check "none written where CARGO_TARGET_DIR names" test ! -e "$tmp/given/CHECKOUT"
+rm -rf "$tmp/b"
+listed=$(XDG_CACHE_HOME="$tmp/cache" "$tmp/a/scripts/target-dir.sh" --list 2>&1)
+echo "$listed" | sed 's/^/  /'
+of_a=$(printf '%s\n' "$listed" | grep -c "$a	of $(cd "$tmp/a" && pwd -P)$")
+of_b=$(printf '%s\n' "$listed" | grep -c "$b	ORPHAN: its checkout .*/b is not there any more")
+check "--list: each directory with its checkout, ORPHAN when it is gone" test "$of_a" = 1 -a "$of_b" = 1
 
 if [ "${1:-}" = --build ]; then
     cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}

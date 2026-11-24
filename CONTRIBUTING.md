@@ -18,6 +18,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+The build scripts (`scripts/build.sh`, `scripts/build-forwarders.sh`, `scripts/package.sh`, and the
+tests that look for what they built) have cargo build each checkout in a directory of its own,
+outside the tree: `~/.cache/volta-forever/target-HASH` (`$XDG_CACHE_HOME` when it is set; HASH of
+the checkout's path; `scripts/target-dir.sh` says why one for each). It takes about 180 MB after
+`scripts/build.sh`, about 800 MB once `cargo test` and clippy have built in it too (with
+`CARGO_TARGET_DIR` naming it; without, they build in the checkout's `target/`, as cargo does), and
+more with the forwarding libraries. `CARGO_TARGET_DIR`, when it is set, is the one directory for
+every checkout, on purpose: cargo may then give one checkout what it built for another whose files
+are newer. Each directory has a file `CHECKOUT` with the path of its checkout:
+`scripts/target-dir.sh --list` lists the directories with their size and their checkout, and says
+ORPHAN of one whose checkout is not there any more, which can be removed.
+
 The GPU suites also need `scripts/fetch-all.sh redist` (CUDA 12.9.2 and 13.5.0 from NVIDIA's
 servers, about 20 GB) and `scripts/build-forwarders.sh`.
 
