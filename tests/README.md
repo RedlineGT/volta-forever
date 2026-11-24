@@ -52,6 +52,34 @@ is checked with it at 8.0; its cases of what a program is told by default run wi
 scripts take the layer's settings from the environment (as `torch.sh` is run at `VF_CAPABILITY=8.0`
 or with `VF_SAFE=1`).
 
+Where the GPU scripts write:
+
+- Under `$VF_OUT`: their builds and logs (`bin/`, `logs/`; `translate/` of `run.sh`, `bf16-test/`
+  of `forward-bf16.sh`, `tbo/` of `llamacpp-ops.sh`, `zml/` of `zml.sh`), the maps of the forwarding
+  libraries (`torch-audit.map`, `forward-audit.map`), and for the scripts that run whole programs a
+  directory of their own, which is those programs' `HOME` and `TMPDIR` and holds their caches
+  (Triton's, Hugging Face's, FlashInfer's, SGLang's): `vllm-cache/` of `vllm.sh`, `sglang-cache/` of
+  `sglang.sh`, `triton-test/` of `triton.sh`, `vllm-topk-cache/` of `vllm-topk-topp-run.sh`, and
+  `launcher-caches/` of `launcher.sh` (the `HOME` of its programs and their caches: the layer's, the
+  driver's and PyTorch's). `profile-torch.sh` writes under its `$VF_OUT` (default
+  `$VF_TEST_ROOT/profile`) only: `logs/`, `tmp/` (its `TMPDIR`) and `cache/` (the layer's, the
+  driver's and PyTorch's caches).
+- The kernels that the driver compiles from PTX, and those that PyTorch compiles: in
+  `$VF_OUT/nv-cache` and `$VF_OUT/torch-kernels` when `$VF_OUT` exists at the start and
+  `CUDA_CACHE_PATH` and `PYTORCH_KERNEL_CACHE_PATH` are not set (`tests/gpu/cache.sh`); llama.cpp's
+  and ZML's in `$VF_JIT_CACHE`, `vllm.sh`'s and `sglang.sh`'s in their directory.
+- Under `$TMPDIR` (`/tmp` when it is not set), each in a directory of its own made by the run and
+  removed at its end: the layer's cache (`tests/gpu/cache.sh`, unless `VF_PROXY_CACHE` is given, `0`
+  to turn it off), which must be a local directory of whoever runs (the layer refuses a cache whose
+  files belong to another user, as they can on a shared file system); the caches of the cases of
+  `run.sh` that test the layer's cache; and the sockets of vLLM's processes in `vllm.sh` (unless
+  `VLLM_RPC_BASE_PATH` is given). `vllm.sh`, `sglang.sh`, `triton.sh` and `vllm-topk-topp-run.sh` set
+  `TMPDIR` to their directory under `$VF_OUT` before they make the layer's cache, which is then there
+  (one for each pass of `vllm-topk-topp-run.sh`); the sockets of `vllm.sh` stay under the `TMPDIR`
+  that it was given.
+- What the programs of the other scripts write by themselves under `HOME` (PyTorch's and Triton's
+  caches, for one) is where those programs put it.
+
 ## What PASS means
 
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,

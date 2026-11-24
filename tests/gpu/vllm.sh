@@ -37,6 +37,8 @@
 #                        reads gigabytes of files and compiles kernels)
 #   $VF_ENGINE_WAIT    seconds an engine stage may take (default 1800, for the same reason; a
 #                        stage that runs out of it FAILS, and says it ran out of time)
+#   $TMPDIR            where the directory of vLLM's sockets is made (default /tmp; a local
+#                        directory, with a short path), unless $VLLM_RPC_BASE_PATH is given
 #   $VF_PROXY          proxy lib directory      (default: dist/lib of this tree)
 #   $VF_AUDIT_MAP_FILE audit map (optional; cuBLAS 12.9.2 forwarding)
 set -uo pipefail
@@ -72,6 +74,8 @@ fi
 [ -f "$proxy/libcuda.so.1" ] || { echo "missing: $proxy/libcuda.so.1 (build with scripts/build.sh)"; exit 2; }
 
 # --- Caches and temporary files under the output directory, not under /root ---
+# (The caller's TMPDIR is kept for the directory of vLLM's sockets, below.)
+caller_tmp=${TMPDIR:-/tmp}
 cache=$out/vllm-cache
 export HOME=$cache
 export TMPDIR=$cache/tmp
@@ -101,7 +105,7 @@ cleanup() {
 }
 trap 'cleanup "$?"' EXIT
 if [ -z "${VLLM_RPC_BASE_PATH:-}" ]; then
-    rpc_dir=$(mktemp -d /tmp/vf-vllm-rpc.XXXXXXXX) || exit 1
+    rpc_dir=$(mktemp -d "$caller_tmp/vf-vllm-rpc.XXXXXXXX") || exit 1
     export VLLM_RPC_BASE_PATH=$rpc_dir
 fi
 export PYTHONDONTWRITEBYTECODE=1 TORCH_COMPILE_DISABLE=1
