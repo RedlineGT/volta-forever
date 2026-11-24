@@ -58,7 +58,8 @@ where it is not from the build of this release. `docs/` says how each figure was
   training slower, and it takes products with k from 1024 to 16384 only: a model whose layers
   have fewer than 1024 in-features gets it only on its wider layers, and the gains measured on
   real programs were measured before that gate. `VF_SAFE=1` turns it off ([The bf16 cuBLAS
-  variants](#the-bf16-cublas-variants)).
+  variants](#the-bf16-cublas-variants)). (Since 0.1.5, on main: the tensor-core path takes TN
+  products only, and a bf16 fine-tuning step ran at 1.02 to 1.07 times its speed without it.)
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
   cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
   NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:
@@ -449,11 +450,11 @@ A Tesla V100 can capture and replay translated kernels. The official SGLang AWQ 
 What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.md` and
 `docs/emulations.md` (section 11). Both are off by default. Their limits:
 
-- **The tensor-core path is for inference, not for training.** Its results are not cuBLAS 12.9's
-  bits: they differ in the last bits (`docs/emulations.md`, section 11). It makes bf16 training
-  slower: the products of the backward pass fall into its fallback (below, "Speed that depends on
-  the data"), and a LoRA training step ran at 0.56 to 0.81 times its speed without the switch,
-  full fine-tuning at 0.37 to 0.66 times. Eager PyTorch inference programs ran 1.3 to 1.7 times as
+- **The tensor-core path's results are not cuBLAS 12.9's bits**: they differ in the last bits
+  (`docs/emulations.md`, section 11), in inference and in training. A bf16 fine-tuning step (LoRA and
+  full fine-tuning of a 0.5B model) ran at 1.02 to 1.07 times its speed without the switch: its
+  forward products are served, those of its backward pass go to 12.9 (below, the TN layout). Eager
+  PyTorch inference programs ran 1.3 to 1.7 times as
   fast with it (prompts, generation at batch 8 and 32, an embedding encoder; Whisper 1.24 to 1.30,
   generation at batch 1 unchanged), and up to 1.9 times under `torch.compile`
   (`docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs":
@@ -493,11 +494,49 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   Qwen2.5's 0.5B) gets it only on its wider layers, such as the MLP's down-projection (k = 4864); its
   other products go to the skinny path (n <= 16, within its rule) or to cuBLAS 12.9. The skinny path is
   unaffected.
+- **The tensor-core path serves the TN layout only** (op(A) = A^T, op(B) = B: a framework's linear layer,
+  y = x W^T, as cuBLAS gets it), a rule of speed. Inference keeps the path on the linear layers it gates in,
+  and training on its forward products; the products of a backward pass, input gradients (NN) and weight
+  gradients (NT, whose k is the batch's tokens), go to cuBLAS 12.9, and so do TT products. In the other
+  layouts the path reads strided vectors, 64 to a block of its scale kernel and again for every chunk of
+  columns, and a gradient's rows and columns often fail the exact check and go to its generic fallback. Every
+  product of four fine-tuning steps (adapters of rank 16 and full fine-tuning, 2,048 and 4,096 tokens, a
+  model of hidden size 896), timed in place, each call of a real step waited for: with the rule removed (a
+  test build's control), 19 of the 22 NN and NT products the path would serve ran at 0.24 to 0.90 times
+  12.9's speed (the other three, of 16 rows, at 1.02 to 1.34), and the steps' products together at 0.62 to
+  0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.44 to 3.84 times
+  (`docs/performance.md`, section 7).
+- **Narrow products of tall matrices go to cuBLAS 12.9**: TN with m >= 8192 is served only with n > 128, and TN with
+  m >= 6144 only with k <= 8192 (an output layer over a vocabulary, or a wide MLP's up projection, at a batch of up to
+  128 tokens; and long products of many rows). With so many rows 12.9 fills the GPU. Up to 64 columns, its tile's
+  width, it computed such products about as fast as the path or faster from m = 8256 on (1.014 to 1.03 times as fast
+  at m = 8256 to 8320, as fast or faster from 8384 on, down to 0.65 times its speed on output layers); from 65 to 128
+  columns the path was up to 1.7 times as fast, but within 3 % or slower (down to 0.95 times) at 112 to 128 columns
+  on output layers and at m = 10240; from 129 columns on it was at least 1.21 times as fast (1.37 to 1.59 at
+  129). With k beyond 8192,
+  12.9 was also as fast or faster at up to 256 columns from m = 6656 on (0.93 to 0.98 times at k = 13824 to 16384,
+  n = 128 to 192; at m = 6144, at least 1.03 times), and at more columns from m = 8192 on (0.95 to 0.97 times at
+  k = 16384, n = 192 to 384). The bounds take the measured points within 3 % of 12.9 or below on their side
+  (`docs/performance.md`, section 7, gives the sweeps and the points on both sides of each bound).
+- **Wide down projections at many columns go to cuBLAS 12.9**: TN with k > 8192 is served only with n <= 256. Such
+  products are the down projections of SiLU-gated MLPs, k their intermediate size: their input, the gated
+  activation, holds values far below each column's largest, and on real text up to 75 % of a layer's columns fail
+  the exact check; the fallback computes them, one fused multiply-add chain over the whole k each, which costs more
+  than the path saves from a few hundred columns on. Whether a layer loses depends on its data, which the rule
+  cannot see: of the down projections of four models measured on real text (k = 4864 to 12288, n = 32 to 2048),
+  the layer that lost (k = 8960, 53 to 70 % of its columns failing) ran at 1.16 to 1.17 times 12.9's speed at 256
+  columns and below 1.0 at every n from 384 on (down to 0.62 times; at 320, 0.85 or 1.08 by the choice of
+  columns), while the other down projections of k > 8192 ran at 1.05 to 2.16 times 12.9's speed from 320
+  columns on; the class goes to 12.9, and with it those gains. No model
+  measured has a k between 4864 and 8960; the down projections of k = 4864 kept at least 1.08 times 12.9's speed
+  at every n. On four ReLU and GELU models no token vector failed the check.
 - **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
   explicit algorithms of `cublasGemmEx` and `cublasGemmStridedBatchedEx`, a `cublasLtMatmul`
   algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
   configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
-  pedantic modes, k above 16384 or below 1024 on the tensor cores, cuBLASLt descriptors with any attribute outside
+  pedantic modes, k above 16384 or below 1024 on the tensor cores, products in another layout than TN on the
+  tensor cores, and TN with m >= 8192 and n <= 128, with m >= 6144 and k > 8192, or with k > 8192 and n > 256
+  there, cuBLASLt descriptors with any attribute outside
   the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no
   workspace, or with a workspace that is not 256-byte aligned (12.9 refuses that), a bias epilogue
   whose bias overlaps D, and every call of a context that is not a V100's. A legacy workspace set at
@@ -513,6 +552,22 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   how many tensor-core calls had rows or columns failing the check, how many of them more than a quarter
   of their rows or of their columns, and the share of the calls' elements that the fallback computed;
   `VF_PROFILE` gives the fallback kernel's own time (`vf_bf16_fallback_tn`).
+- **A product whose input has many failing columns can run below cuBLAS 12.9's speed**, whatever the rules
+  of speed above. 12.9 computes a bf16 product in tiles of 64 x 64, four per SM, 320 at a time on a V100:
+  its time is flat over ranges of n and jumps where one more of its tiles lands on the busiest SM (at m =
+  4096: at n = 129, 193, and 321, where its second wave begins). The tensor-core path's own time grows
+  evenly with n, and the fallback adds one fused multiply-add chain over the whole k for every element of
+  a failing column, less efficient per column than 12.9's tiles. With a quarter or more of the columns
+  failing, the sum can pass 12.9's time on its flat stretches, most before its second wave. Measured on a
+  layer of TN 4096 x n x 4096 whose input had 26 to 38 % of its columns failing, 12.9 and the path
+  alternated in one process per n (2 passes): at worst 0.86 times 12.9's speed (n = 320), 0.86 to 0.97 at
+  n = 128, 192 and 256 to 320, 1.00 to 1.03 at n = 96, 160 and 640, 1.05 to 1.44 at the other n from 32 to 1024; an attention
+  layer of the same model and shape, whose columns all converted, at 1.33 to 2.46 (`docs/performance.md`,
+  section 7, gives the table per n with 12.9's waves). No rule of shape tells such a layer from the others
+  of its shape, and a choice made from the data would need a synchronization with the host for every call
+  (measured: 11 % of the speed of eager decoding at batch 32) and would make an element's bits depend on
+  other columns: the path serves it. The report at exit counts the calls with more than a quarter of their
+  rows or columns failing (above).
 - **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
   layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
   the pool of the context keeps up to 64 MiB between eager calls.

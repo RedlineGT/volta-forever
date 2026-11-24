@@ -121,16 +121,23 @@ Where the GPU scripts write:
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the
   tensor-core path's special values against 12.9 (`bf16-s1.c`) and its acceptance test
   (`bf16-accept.c`: 12.9's classes, determinism, an error bound and a bias bound against the exact
-  product for every call it serves at k >= 1024, nothing served below and every call from there on
+  product for every call it serves at k >= 1024, nothing served below and every TN call from there on
   served, failing when the gate is moved to 512 or 256, with `VF_ACCEPT_STRICT=1` (its two documented
-  exceptions removed) and with the path off; with `VF_SAFE=1`, every result 12.9's); with
+  exceptions removed) and with the path off; with `VF_SAFE=1`, every result 12.9's); the path's layout
+  rule, tall rule and wide rule (`bf16-rules.c`: a fine-tuning step's input and weight gradients, NN and
+  NT, an output layer up to the tall rule's n and a wide down projection past the wide rule's n
+  forwarded with 12.9's bits, the step's TN products, the output layer one column more and the wide
+  down projection at the wide rule's n served; with each rule removed by a control, it fails); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
-  column, writes outside them, error and time per shape), and `bf16-cost.c` the one behind the
-  documented host times, fallback cost and same-sign error; both run by hand.
+  column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the
+  documented host times, fallback cost and same-sign error, and `bf16-layout-cost.c` the one behind the
+  layout rule, the tall rule and the wide rule (the time of single products per layout, shape and share
+  of failing columns, through the variants and through 12.9); all run by hand.
 - `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
-  the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k,
+  the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k, with
+  the products of a fine-tuning step and the tall rule's edges (rows that hold whatever the gate is),
   each control making its test fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).

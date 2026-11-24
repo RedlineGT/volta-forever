@@ -11,7 +11,8 @@
 // paths; any other call is forwarded to CUDA 12.9 with its arguments unchanged.
 // - The skinny path (VF_CUBLAS_BF16_SKINNY=1, or with VF_CUBLAS_BF16_TC=1 unless SKINNY=0): one
 //   kernel, one fp32 fused multiply-add chain per element in increasing k from +0, no workspace.
-// - The tensor-core path (VF_CUBLAS_BF16_TC=1), for calls that are not captured in a graph: rows of
+// - The tensor-core path (VF_CUBLAS_BF16_TC=1), for TN products (op(A) = A^T, op(B) = B: the layout of
+//   linear layers) that are not captured in a graph and that cuBLAS 12.9 does not compute as fast: rows of
 //   op(A) and columns of op(B) scaled by exact powers of two and converted to fp16 when every element
 //   converts exactly; CUDA 12.9's fp16 GEMM over fixed k-slices of 256, on a cuBLASLt handle of this
 //   runtime's own; an exact rescale; the rows and columns that do not convert by a fused multiply-add
@@ -62,6 +63,35 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
  * gate, and the test judges their bias from k = 2048 and 4096 (docs/emulations.md, "The tensor-core path's gate").
  * A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
 #define VF_TC_MIN_K 1024
+/* The tensor-core path's layout: op(A) = A^T and op(B) = B (TN, how cuBLAS sees a framework's linear layer
+ * y = x W^T, in inference and in the forward pass of training). A performance rule: in the other layouts the
+ * path reads strided vectors, 64 to a block of its scale kernel and again for every chunk of columns, and its
+ * fallback is the generic tiled kernel, so it was slow at long k even when every row and column converted; and
+ * the products of a backward pass are in those layouts (input gradients NN, weight gradients NT with k the
+ * batch's tokens), whose gradients' rows and columns fail the exact check. On fine-tuning steps' own operands
+ * most of the NN and NT products the path would serve ran below 12.9's speed, several at under half of it, where
+ * its TN products ran faster (docs/performance.md, section 7, gives each). Every other layout goes to cuBLAS
+ * 12.9. */
+#define VF_TC_TRANS_A 1
+#define VF_TC_TRANS_B 0
+/* The tall rule, a rule of speed: TN with m >= VF_TC_TALL_M is served only with n > VF_TC_TALL_MAX_N, and TN with
+ * m >= VF_TC_TALL_LONG_M only with k <= VF_TC_TALL_MAX_K. With so many rows cuBLAS 12.9 fills the GPU: up to 64
+ * columns (its tile's width) it computed such products about as fast as the path from m = 8256 on, and from 112 to
+ * 128 columns (two of its tiles) as fast or faster at some m from 10240 on; with k beyond 8192, also at up to 256
+ * columns from m = 6656 on (the wide rule takes more columns) (docs/performance.md, section 7, gives the sweeps and
+ * the points on both sides of each bound). */
+#define VF_TC_TALL_M 8192
+#define VF_TC_TALL_MAX_N 128
+#define VF_TC_TALL_LONG_M 6144
+#define VF_TC_TALL_MAX_K 8192
+/* The wide rule, a rule of speed: TN with k > VF_TC_WIDE_K is served only with n <= VF_TC_WIDE_MAX_N. Such products
+ * are the down projections of SiLU-gated MLPs, whose inputs (the gated activations) hold values far below their
+ * columns' largest: on real text, up to 75 % of a layer's columns fail the exact check, and the fallback computes
+ * them, one fused multiply-add chain over the whole k each, which costs more than the path saves over 12.9 from
+ * a few hundred columns on. Whether a layer loses depends on its data, which a static rule cannot see: the whole
+ * class goes to 12.9 (docs/performance.md, section 7, gives every layer measured). */
+#define VF_TC_WIDE_K 8192
+#define VF_TC_WIDE_MAX_N 256
 #define VF_STR_(x) #x
 #define VF_STR(x) VF_STR_(x)
 #define VF_MIN_K 16                  /* shorter products are forwarded */
@@ -316,6 +346,10 @@ enum {
     R_K,       /* k beyond the tensor-core path's limit */
     R_SHORT_K, /* in the tensor-core path's gate but for k, shorter than VF_TC_MIN_K */
     R_SAFE,    /* a call the tensor-core path would serve, with VF_SAFE=1 */
+    R_LAYOUT,  /* in the tensor-core path's gate, in another layout than TN */
+    R_TALL,    /* TN in the tensor-core path's gate with m >= VF_TC_TALL_M and n <= VF_TC_TALL_MAX_N, or with
+                * m >= VF_TC_TALL_LONG_M and k > VF_TC_TALL_MAX_K */
+    R_WIDE,    /* TN in the tensor-core path's gate with k > VF_TC_WIDE_K and n > VF_TC_WIDE_MAX_N */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
     R_MATH,    /* pedantic or unknown math mode */
@@ -333,7 +367,12 @@ static const char *const reason_name[R_N] = {
     "not bf16 with fp32 accumulation", "explicit algorithm", "batch", "64-bit size", "shape",
     "arguments left to cuBLAS", "outside the paths' domains", "12.9 would not run its sequential kernel",
     "another cuBLAS build",
-    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1", "unknown handle",
+    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1",
+    "not TN (the tensor-core path's layout)",
+    "m >= " VF_STR(VF_TC_TALL_M) " with n <= " VF_STR(VF_TC_TALL_MAX_N) ", or m >= " VF_STR(VF_TC_TALL_LONG_M)
+    " with k > " VF_STR(VF_TC_TALL_MAX_K) " (12.9 as fast)",
+    "k > " VF_STR(VF_TC_WIDE_K) " with n > " VF_STR(VF_TC_WIDE_MAX_N) " (the fallback's cost on real activations)",
+    "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
     "no chunking", "tensor-core call in a graph capture", "allocation failed", "launch failed"};
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
@@ -551,7 +590,7 @@ static void setup_kernels(Ctx *x)
     atomic_store_explicit(&x->kernels, 1, memory_order_release);
     static atomic_int said;
     if (!atomic_exchange(&said, 1))
-        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (outside graph captures)",
+        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (TN, outside graph captures)",
             cfg.skinny ? "on" : "off", cfg.tc ? "on" : "off");
     return;
 fail:
@@ -916,8 +955,10 @@ static int choose_path(const Shape *s, int *reason)
         if (cfg.measured_build && sequential_kernel_129(s)) return PATH_SKINNY;
         not_sequential = cfg.measured_build ? 1 : 2;
     }
-    /* The tensor-core path (n >= 2, checked before): a large product, or a wide one, with k from
-     * VF_TC_MIN_K to VF_TC_MAX_K. Its gate depends on n, so one element's bits can depend on the batch:
+    /* The tensor-core path (n >= 2, checked before): a large product, or a wide one, in the TN layout, not tall
+     * and narrow, with k from VF_TC_MIN_K to VF_TC_MAX_K. The layout and the tall shape are decided before the
+     * shortest k, so that such calls are 12.9's whatever VF_TC_MIN_K is. Its gate depends on n, so one element's
+     * bits can depend on the batch:
      * 12.9's (forwarded, or the skinny path) for a narrow product, the tensor-core path's for a wide one
      * (LIMITS.md). n = 1 is never served: 12.9 computes it faster. Were the tensor-core path to take it,
      * its internal fp16 GEMM would give column 0 other bits than at n >= 2 (measured on 15 shapes, where
@@ -927,6 +968,19 @@ static int choose_path(const Shape *s, int *reason)
     if ((cfg.tc || cfg.tc_safe) && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
         if (k > VF_TC_MAX_K && !CONTROL("tc-k")) {
             *reason = R_K;
+            return PATH_NONE;
+        }
+        if ((s->ta != VF_TC_TRANS_A || s->tb != VF_TC_TRANS_B) && !CONTROL("tc-layouts")) {
+            *reason = R_LAYOUT;
+            return PATH_NONE;
+        }
+        if (((m >= VF_TC_TALL_M && n <= VF_TC_TALL_MAX_N) || (m >= VF_TC_TALL_LONG_M && k > VF_TC_TALL_MAX_K)) &&
+            !CONTROL("tc-tall")) {
+            *reason = R_TALL;
+            return PATH_NONE;
+        }
+        if (k > VF_TC_WIDE_K && n > VF_TC_WIDE_MAX_N && !CONTROL("tc-wide")) {
+            *reason = R_WIDE;
             return PATH_NONE;
         }
         if (k >= cfg.tc_min_k) {
@@ -1963,6 +2017,14 @@ EXPORT int vf_bf16_test_tc_min_k(void)
 {
     pthread_once(&g_init_once, init);
     return cfg.tc_min_k;
+}
+
+/* Test builds: the bounds of the tall and wide rules (0: VF_TC_TALL_M, 1: VF_TC_TALL_MAX_N, 2: VF_TC_TALL_MAX_K,
+ * 3: VF_TC_WIDE_K, 4: VF_TC_WIDE_MAX_N, 5: VF_TC_TALL_LONG_M), so that the tests write their rows from them. */
+EXPORT int vf_bf16_test_rule_bound(int i)
+{
+    static const int b[] = {VF_TC_TALL_M, VF_TC_TALL_MAX_N, VF_TC_TALL_MAX_K, VF_TC_WIDE_K, VF_TC_WIDE_MAX_N, VF_TC_TALL_LONG_M};
+    return i >= 0 && i < (int)(sizeof b / sizeof *b) ? b[i] : -1;
 }
 
 /* Test builds: what the runtime has made. out[0] and out[1]: the current context's kernels and its

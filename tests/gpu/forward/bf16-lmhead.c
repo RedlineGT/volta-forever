@@ -5,16 +5,19 @@
  *   VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1   the skinny path alone forwards every such call (its rule:
  *                                                 TN up to m = 16384, NN 9728, NT and TT 4608), and each has
  *                                                 12.9's bits: TN at n = 2, 8, 16, NN, NT and TT at n = 8
- *   VF_CUBLAS_BF16_TC=1                           the tensor-core path serves TN at n = 8 and 64 outside a
+ *   VF_CUBLAS_BF16_TC=1                           TN at n = 8, 64 and the tall rule's bound (128) goes to 12.9,
+ *                                                 with its bits, for the tall rule (12.9 is as fast there); the
+ *                                                 tensor-core path serves TN at one and 64 columns more outside a
  *                                                 capture, in chunks of at most 32 MiB of workspace: error
  *                                                 against fp64 within 32 units of 2^-24 sum |a b| on 512
  *                                                 sampled rows, the same bits twice; captured, the call is
  *                                                 forwarded and the replay has 12.9's bits
- * Prints "ok bf16-lmhead". */
+ * With a test build of the runtime, k is its gate when that is above 2048, so that the tensor-core path still takes
+ * these calls. Prints "ok bf16-lmhead". */
 #include "bf16-common.h"
 
 static const int M = 151936;
-static int K = 896; /* 2048 with the tensor-core path */
+static int K = 896; /* 2048 with the tensor-core path (or the runtime's gate, when above) */
 static cublasHandle_t hv, h12;
 static cudaStream_t st;
 
@@ -51,16 +54,28 @@ int main(void)
 {
     const char *tcv = getenv("VF_CUBLAS_BF16_TC");
     const int tc = tcv && !strcmp(tcv, "1");
-    if (tc) K = 2048;
     CU(cudaSetDevice(0));
     CU(cudaFree(0));
     open_129();
     CU(cudaStreamCreate(&st)); /* blocking: ordered after the uploads */
     if (cublasCreate(&hv) || c129.Create(&h12)) return 1;
     open_runtime();
+    if (tc) {
+        int (*min_k)(void) = NULL;
+        void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+        if (rt) *(void **)&min_k = dlsym(rt, "vf_bf16_test_tc_min_k");
+        K = min_k && min_k() > 2048 ? min_k() : 2048;
+    }
     cublasSetStream(hv, st);
     c129.SetStream(h12, st);
-    const int NMAX = 64;
+    int tall_n = 128; /* the tall rule's n (a test build reports it) */
+    {
+        int (*bound)(int) = NULL;
+        void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+        if (rt) *(void **)&bound = dlsym(rt, "vf_bf16_test_rule_bound");
+        if (bound) tall_n = bound(1);
+    }
+    const int NMAX = tall_n + 64;
     uint16_t *hA = bf16_random((size_t)M * K, 0.05), *hB = bf16_random((size_t)NMAX * K, 1.0);
     void *A = to_device(hA, (size_t)M * K * 2), *B = to_device(hB, (size_t)NMAX * K * 2), *C, *C2;
     CU(cudaMalloc(&C, (size_t)M * NMAX * 4));
@@ -91,7 +106,28 @@ int main(void)
             free(r2);
         }
     } else {
-        static const int ns[] = {8, 64};
+        /* tall and narrow: 12.9's, with its bits */
+        const int nt[] = {8, 64, tall_n};
+        for (int c = 0; c < 3; ++c) {
+            const int n = nt[c];
+            const size_t cb = (size_t)M * n * 4;
+            const Counts k0 = counts(API_GEMMEX);
+            const cublasStatus_t s1 = gemm(hv, 0, 1, 0, n, A, B, C);
+            CU(cudaStreamSynchronize(st));
+            const Counts k1 = counts(API_GEMMEX);
+            const cublasStatus_t s2 = gemm(h12, 1, 1, 0, n, A, B, C2);
+            CU(cudaStreamSynchronize(st));
+            float *r1 = from_device(C, cb), *r2 = from_device(C2, cb);
+            const size_t d = ndiff(r1, r2, cb, 4);
+            printf("TN n = %2d: status %d / 12.9 %d, %s, %zu elements differ from 12.9's\n", n, (int)s1, (int)s2,
+                   !rt_counters ? "(not counted)" : delta(&k0, &k1, FWD(R_TALL)) == 1 ? "forwarded (tall)" : "NOT forwarded "
+                   "for the tall rule", d);
+            CHECK(s1 == 0 && s2 == 0 && d == 0 && (!rt_counters || delta(&k0, &k1, FWD(R_TALL)) == 1),
+                  "TN n = %d: not forwarded for the tall rule with 12.9's bits", n);
+            free(r1);
+            free(r2);
+        }
+        const int ns[] = {tall_n + 1, tall_n + 64};
         for (int c = 0; c < 2; ++c) {
             const int n = ns[c];
             const size_t cb = (size_t)M * n * 4;
@@ -112,7 +148,7 @@ int main(void)
             free(r1b);
         }
         /* captured: forwarded, and the replay has 12.9's bits */
-        const int n = 64;
+        const int n = tall_n + 64;
         const size_t cb = (size_t)M * n * 4;
         cudaStream_t cs;
         CU(cudaStreamCreateWithFlags(&cs, cudaStreamNonBlocking));

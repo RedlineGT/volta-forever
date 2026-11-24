@@ -142,6 +142,22 @@ if want bf16-lmhead; then
         done
     fi
 fi
+# The tensor-core path's layout rule, tall rule and wide rule: a fine-tuning step's input and weight gradients (NN,
+# NT), an output layer up to the tall rule's n (TN, m = 151936) and a wide down projection past the wide rule's n go to
+# 12.9 with its bits; the TN products of the step, the output layer one column more and the wide down projection at
+# the wide rule's n to the tensor-core path. Each control that removes a rule (test builds) must make it fail there.
+if want bf16-rules; then
+    if build bf16-rules; then
+        run bf16-rules "$test_dir"; verdict bf16-rules
+        for c in tc-layouts:layout tc-tall:"tall rule" tc-wide:"wide rule"; do
+            run bf16-rules "$test_dir" VF_BF16_CONTROL=${c%%:*} >/dev/null
+            cp "$log" "$out/logs/forward-bf16-rules-${c%%:*}.log"
+            if [ "$status" != 0 ] && grep -q "^FAIL .*: not forwarded for the ${c#*:}$" "$log"; then
+                echo "PASS  bf16-rules control: without the ${c#*:} (${c%%:*}) it fails there"
+            else echo "FAIL  bf16-rules control ${c%%:*}: did not fail at the ${c#*:} ($out/logs/forward-bf16-rules-${c%%:*}.log)"; failed=1; fi
+        done
+    fi
+fi
 # G3 with the skinny path: its captured calls are kernel nodes of the runtime's module.
 if want bf16-graphs-skinny; then
     build bf16-graphs && { run bf16-graphs "$test_dir" VF_BF16_GRAPHS_N=8; verdict bf16-graphs; }

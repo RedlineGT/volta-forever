@@ -253,18 +253,23 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   shapes, up to n = 16: `LIMITS.md`). The variants read it at their first intercepted call (a
   handle's creation or a product): set before a program's first cuBLAS call, it is honoured; set
   after, it is not.
-- `VF_CUBLAS_BF16_TC=1`: larger products with k from 1024 to 16384 run on the tensor cores, with
+- `VF_CUBLAS_BF16_TC=1`: larger products in the TN layout (a linear layer's, in inference and in a training
+  step's forward pass; the backward pass's products go to 12.9) with k from 1024 to 16384 run on the tensor
+  cores, but for the shapes where 12.9 was as fast or faster on real operands or in sweeps (`LIMITS.md`: TN with
+  m >= 8192 and n <= 128, with m >= 6144 and k > 8192, and with k > 8192 and n > 256), with
   exact scaling to fp16 and fixed slices of k, and differ from 12.9's in the last bits (within 25
   units of 2^-24 sum |a b| measured; sums of products of one sign come out low, by about 13 units on
   average when the data spans many binades), except when they are captured in a CUDA graph; the
   skinny path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. One element's bits then
   depend on the batch size and on capture (`LIMITS.md`), and a model whose layers have fewer than
-  1024 in-features gets the tensor cores only on its wider layers. It is for inference: it makes
-  bf16 training slower (`LIMITS.md`, "The bf16 cuBLAS variants"; `docs/performance.md`, "bf16
-  products through cuBLAS: the opt-in variants on real programs").
+  1024 in-features gets the tensor cores only on its wider layers. A training step's forward products
+  are served too, its backward pass's go to 12.9; a product whose input has many columns failing the
+  exact conversion can still run below 12.9's speed (`LIMITS.md`, "The bf16 cuBLAS variants";
+  `docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs").
 
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
 explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 or below 1024 for the tensor cores,
+products in another layout than TN and the TN shapes of the rules above,
 tensor-core calls captured in a CUDA graph (`LIMITS.md`, "The bf16 cuBLAS variants", says why), and
 calls whose workspace cannot be allocated. An eager tensor-core call (TN 1536 x 480 x 1536) cost
 16.5 microseconds of host time against

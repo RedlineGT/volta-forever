@@ -10,8 +10,9 @@
  * columns, where a fat binary of separate multiplies and adds (VF_BF16_FATBIN=control-MULADD.fatbin)
  * gives other bits and makes the test fail.
  * Then failing rows and columns spread over the chunks of a call (the fallback runs once, after the last
- * chunk, over all of them): TN 1536 x n x 8960, whose workspace takes 2 chunks of rows at n = 64, 6 at
- * n = 512 and 6 x 4 at n = 2048, with 1 failing column, 2 % of them, every column, and failing rows too;
+ * chunk, over all of them): TN 1536 x n x 8192, whose workspace takes 2 chunks of rows at n = 64, 6 at
+ * n = 512 and 3 x 7 at n = 2048 (k = 8192, the wide rule's bound: with k > 8192 the path leaves n > 256 to
+ * 12.9), with 1 failing column, 2 % of them, every column, and failing rows too;
  * fp32 output with alpha 0.7, beta 0.3 and C in place, and bf16 output. Every fallback element must have
  * the host model's bits (a sample of 4096 of them when there are more) and cuBLAS 12.9's bits from the
  * same call (all of them).
@@ -187,11 +188,11 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
     free(tinycol);
 }
 
-/* Failing rows and columns over several chunks: TN 1536 x n x 8960. cols: the number of failing columns
+/* Failing rows and columns over several chunks: TN 1536 x n x 8192. cols: the number of failing columns
  * (spread evenly), -1 for every column. */
 static void chunk_case(int n, int cols, int nrows, int bf16_out)
 {
-    const int m = 1536, k = 8960, lda = k, ldb = k;
+    const int m = 1536, k = 8192, lda = k, ldb = k;
     uint16_t *hA = bf16_random((size_t)m * k, 0.05), *hB = bf16_random((size_t)n * k, 1.0);
     const int ncols = cols < 0 ? n : cols;
     char *colbad = calloc((size_t)n, 1), *rowbad = calloc((size_t)m, 1);

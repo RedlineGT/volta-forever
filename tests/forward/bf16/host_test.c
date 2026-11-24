@@ -161,8 +161,9 @@ static void launch_args(const char *l, void *out, size_t size)
 }
 
 /* ---- counters ---- */
-enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_SAFE, R_HANDLE,
-       R_CONTEXT, R_MATH, R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
+enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_SAFE, R_LAYOUT,
+       R_TALL, R_WIDE, R_HANDLE, R_CONTEXT, R_MATH, R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC,
+       R_LAUNCH, R_N };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 typedef struct {
     unsigned long long v[4 + R_N];
@@ -418,15 +419,49 @@ static void stats_mode(void)
 
 /* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
  * path on. n = 1 goes to 12.9; the skinny path first (n <= 16, or n < 32 with m k < 2^20, where 12.9 runs its
- * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384; the rest
- * to 12.9, with its reason. Checked through the runtime's counters. The rows at the gate are written from RULE_GATE
- * (VF_TC_MIN_K, which the runtime must report): moving the gate means changing both, and a gate moved in the
- * runtime alone (VF_BF16_TC_MIN_K=512, a test build's way) makes the table fail. ---- */
+ * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384, in the TN
+ * layout only, for m >= RULE_TALL_M only with n > RULE_TALL_MAX_N, for m >= RULE_TALL_LONG_M only with
+ * k <= RULE_TALL_MAX_K, and for k > RULE_WIDE_K
+ * only with n <= RULE_WIDE_MAX_N; the rest to 12.9, with its reason. Checked through the runtime's counters. The rows
+ * at the gate and at the bounds of the tall and wide rules are written from these constants, which the runtime must
+ * report (VF_TC_MIN_K and the others): moving a bound means changing both, and a gate moved in the runtime alone
+ * (VF_BF16_TC_MIN_K=512, a test build's way) makes the first table fail; the second holds whatever the gate is. ---- */
 #define RULE_GATE 1024
+#define RULE_TALL_M 8192
+#define RULE_TALL_MAX_N 128
+#define RULE_TALL_LONG_M 6144
+#define RULE_TALL_MAX_K 8192
+#define RULE_WIDE_K 8192
+#define RULE_WIDE_MAX_N 256
+
+/* TC_K: the tensor-core path when k >= the runtime's gate, else 12.9 for the gate's reason */
+enum { SK = -1, TC = -2, TC_K = -3 };
+
+static void rule_row(int ta, int tb, int m, int n, int k, int want, const char *why, int gate)
+{
+    if (want == TC_K) want = k >= gate ? TC : R_SHORT_K;
+    G g = gemm(ta, tb, m, n, k);
+    g.A = DEV(1), g.B = DEV(17), g.C = DEV(33); /* 4 GiB apart: the largest operand here takes 1.3 GB */
+    const Counts c0 = counts(API_GEMMEX);
+    take();
+    const cublasStatus_t st = call(&g);
+    take();
+    const Counts c1 = counts(API_GEMMEX);
+    const int sk = c1.v[1] - c0.v[1] == 1, tc = c1.v[2] - c0.v[2] == 1;
+    int seen_why = -1;
+    for (int q = 0; q < R_N; ++q)
+        if (c1.v[4 + q] - c0.v[4 + q] == 1) seen_why = q;
+    const int got = sk ? SK : tc ? TC : seen_why;
+    char wants[32], seen[32];
+    snprintf(wants, sizeof wants, want == SK ? "skinny" : want == TC ? "tc" : "forwarded (reason %d)", want);
+    snprintf(seen, sizeof seen, got == SK ? "skinny" : got == TC ? "tc" : "forwarded (reason %d)", got);
+    CHECK(st == 0 && got == want && (got != SK && got != TC ? count("gemmex ") == 1 : count("gemmex ") == 0),
+          "rule: %s %d x %d x %d (%s): %s, not %s", ta ? (tb ? "TT" : "TN") : (tb ? "NT" : "NN"), m, n, k, why, seen,
+          wants);
+}
 
 static void tc_rule(void)
 {
-    enum { SK = -1, TC = -2 };
     const int G1 = RULE_GATE - 8; /* one step of k under the gate (k a multiple of 8) */
     const struct {
         int ta, tb, m, n, k, want; /* SK, TC, or the reason it is forwarded for */
@@ -452,38 +487,83 @@ static void tc_rule(void)
         {1, 0, 1545, 8, G1, R_SHORT_K, "TN n = 8, m = 1545 (not in the skinny path's TN rule), m k >= 2^20, k under the gate"},
         {1, 0, 384, 8, 1536, R_SEQ, "TN n = 8, m = 384, m k < 2^20"},
         {0, 1, 1536, 8, 1920, SK, "NT n = 8"},
-        {0, 1, 1536, 64, G1, R_SHORT_K, "NT n = 64, k one step under the gate"},
-        {0, 1, 1536, 64, 2048, TC, "NT n = 64, k = 2048"},
-        {0, 0, 2048, 128, 2048, TC, "NN n = 128"},
+        {0, 1, 1536, 64, G1, R_LAYOUT, "NT n = 64, k one step under the gate: not TN"},
+        {0, 1, 1536, 64, 2048, R_LAYOUT, "NT n = 64, k = 2048: not TN"},
+        {0, 0, 2048, 128, 2048, R_LAYOUT, "NN n = 128: not TN"},
         {0, 0, 2048, 8, 2048, SK, "NN n = 8"},
         {0, 0, 64, 8, 1920, R_DOMAIN, "NN m = 64 n = 8 (outside the skinny path's NN bounds), m k < 2^20"},
-        {1, 1, 1536, 48, 4096, TC, "TT n = 48"},
+        {1, 1, 1536, 48, 4096, R_LAYOUT, "TT n = 48: not TN"},
+    };
+    /* The products of a fine-tuning step in the layouts cuBLAS gets them (a model of hidden size 896, MLP size 4864,
+     * vocabulary 151936, rank-16 adapters; 2048 or 4096 tokens), and the tall rule. The layout and the tall shape are
+     * decided before the shortest k, so these rows hold whatever the gate is: a k of 0 or below stands for the
+     * runtime's gate plus that k, and TC_K rows are served from the gate on. */
+    static const struct {
+        int ta, tb, m, n, k, want;
+        const char *why;
+    } train[] = {
+        {0, 0, 896, 2048, 4864, R_LAYOUT, "the gradient of an MLP's input through its gate and up projections"},
+        {0, 0, 896, 4096, 4864, R_LAYOUT, "the gradient of an MLP's input, 4096 tokens"},
+        {0, 0, 16, 4096, 4864, R_LAYOUT, "the gradient of a rank-16 adapter's activations"},
+        {0, 1, 896, 4864, 2048, R_LAYOUT, "the weight gradient of a gate or up projection, k = 2048 tokens"},
+        {0, 1, 896, 4864, 4096, R_LAYOUT, "the weight gradient of a gate or up projection, k = 4096 tokens"},
+        {0, 1, 896, 151936, 4096, R_LAYOUT, "the weight gradient of the output layer"},
+        {0, 1, 4864, 896, 4096, R_LAYOUT, "the weight gradient of the down projection"},
+        {0, 1, 896, 128, 2048, R_LAYOUT, "the weight gradient of a k or v projection"},
+        {0, 1, 16, 4864, 4096, R_LAYOUT, "a rank-16 adapter's B gradient, gate or up projection"},
+        {0, 1, 4864, 16, 4096, R_LAYOUT, "a rank-16 adapter's A gradient, down projection (beyond the skinny bounds)"},
+        {0, 1, 896, 16, 4096, SK, "a rank-16 adapter's A gradient, q to up projections: the skinny path"},
+        {0, 0, 896, 2048, -8, R_LAYOUT, "NN one step under the gate: the layout's reason"},
+        {0, 1, 896, 4864, 0, R_LAYOUT, "NT at the gate"},
+        {1, 1, 1536, 48, 0, R_LAYOUT, "TT at the gate"},
+        {1, 0, 896, 2048, 4864, TC_K, "the down projection (TN)"},
+        {1, 0, 16, 4096, 4864, TC_K, "a rank-16 adapter's A product, down projection (TN)"},
+        {1, 0, 896, 2048, 0, TC_K, "TN at the gate"},
+        {1, 0, 896, 2048, -8, TC_K, "TN one step under the gate"},
+        {1, 0, 151936, 2, 2048, R_TALL, "an output layer over a vocabulary of 151936, n = 2"},
+        {1, 0, 151936, RULE_TALL_MAX_N, 4096, R_TALL, "an output layer over a vocabulary of 151936, n at the tall bound"},
+        {1, 0, 151936, RULE_TALL_MAX_N + 1, 4096, TC_K, "an output layer over a vocabulary of 151936, n past the tall bound"},
+        {1, 0, 151936, RULE_TALL_MAX_N, 896, R_TALL, "an output layer, n at the tall bound, k = 896: the tall reason, not the gate's"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N, 4096, R_TALL, "m at the tall bound, n at its bound"},
+        {1, 0, RULE_TALL_M - 8, RULE_TALL_MAX_N, 4096, TC_K, "m one step under the tall bound, n at its bound"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K, TC_K, "m at the tall bound, n past it, k at its bound"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "m at the tall bound, n past it, k one step past"},
+        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, R_TALL, "m at the long-k bound, k one step past the tall k"},
+        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, TC_K, "m one step under the long-k bound, k past the tall k"},
+        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K, TC_K, "m at the long-k bound, k at the tall k"},
+        {1, 0, RULE_TALL_LONG_M, RULE_TALL_MAX_N, 4096, TC_K, "m at the long-k bound, n at the tall bound (below the tall m)"},
+        {1, 0, 8960, RULE_TALL_MAX_N, 1536, 8960 >= RULE_TALL_M ? R_TALL : TC_K, "a gate or up projection of an MLP of 8960, n at the tall bound"},
+        {1, 0, 8960, RULE_TALL_MAX_N + 1, 1536, TC_K, "a gate or up projection of an MLP of 8960, n past the tall bound"},
+        {1, 0, 1536, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, R_WIDE, "k one step past the wide bound, n past it"},
+        {1, 0, 1536, RULE_WIDE_MAX_N, RULE_WIDE_K + 8, TC_K, "k one step past the wide bound, n at its bound"},
+        {1, 0, 1536, RULE_WIDE_MAX_N + 1, RULE_WIDE_K, TC_K, "k at the wide bound, n past it"},
+        {1, 0, 1536, 2048, 8960, 8960 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 8960, 2048 tokens"},
+        {1, 0, 1536, 64, 8960, 8960 > RULE_WIDE_K && 64 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 8960, 64 tokens"},
+        {1, 0, 4096, 2048, 12288, 12288 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 12288, 2048 tokens"},
+        {1, 0, 896, 2048, 4864, 4864 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 4864, 2048 tokens"},
+        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, RULE_WIDE_K + 8 > RULE_TALL_MAX_K ? R_TALL : R_WIDE, "tall and wide: the tall reason first"},
+        {0, 1, 151936, 64, 4096, R_LAYOUT, "NT, m = 151936, n = 64: the layout first"},
     };
     int (*min_k)(void) = NULL;
     void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
     if (rt) *(void **)&min_k = dlsym(rt, "vf_bf16_test_tc_min_k");
-    CHECK(min_k && min_k() == RULE_GATE, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's %d",
-          min_k ? min_k() : -1, RULE_GATE);
-    for (size_t r = 0; r < sizeof rows / sizeof *rows; ++r) {
-        G g = gemm(rows[r].ta, rows[r].tb, rows[r].m, rows[r].n, rows[r].k);
-        const Counts c0 = counts(API_GEMMEX);
-        take();
-        const cublasStatus_t st = call(&g);
-        take();
-        const Counts c1 = counts(API_GEMMEX);
-        const int sk = c1.v[1] - c0.v[1] == 1, tc = c1.v[2] - c0.v[2] == 1;
-        int why = -1;
-        for (int q = 0; q < R_N; ++q)
-            if (c1.v[4 + q] - c0.v[4 + q] == 1) why = q;
-        const int got = sk ? SK : tc ? TC : why;
-        char want[32], seen[32];
-        snprintf(want, sizeof want, rows[r].want == SK ? "skinny" : rows[r].want == TC ? "tc" : "forwarded (reason %d)",
-                 rows[r].want);
-        snprintf(seen, sizeof seen, got == SK ? "skinny" : got == TC ? "tc" : "forwarded (reason %d)", got);
-        CHECK(st == 0 && got == rows[r].want && (got != SK && got != TC ? count("gemmex ") == 1 : count("gemmex ") == 0),
-              "rule: %s %d x %d x %d (%s): %s, not %s", rows[r].ta ? (rows[r].tb ? "TT" : "TN") : (rows[r].tb ? "NT" : "NN"),
-              rows[r].m, rows[r].n, rows[r].k, rows[r].why, seen, want);
-    }
+    const int gate = min_k ? min_k() : -1;
+    CHECK(gate == RULE_GATE, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's %d", gate,
+          RULE_GATE);
+    int (*bound)(int) = NULL;
+    if (rt) *(void **)&bound = dlsym(rt, "vf_bf16_test_rule_bound");
+    static const int want_bounds[] = {RULE_TALL_M, RULE_TALL_MAX_N, RULE_TALL_MAX_K, RULE_WIDE_K, RULE_WIDE_MAX_N,
+                                      RULE_TALL_LONG_M};
+    static const char *const bound_names[] = {"VF_TC_TALL_M", "VF_TC_TALL_MAX_N", "VF_TC_TALL_MAX_K",
+                                              "VF_TC_WIDE_K", "VF_TC_WIDE_MAX_N", "VF_TC_TALL_LONG_M"};
+    for (int b = 0; b < 6; ++b)
+        CHECK(bound && bound(b) == want_bounds[b], "rule: the runtime's %s is %d, not this table's %d", bound_names[b],
+              bound ? bound(b) : -1, want_bounds[b]);
+    for (size_t r = 0; r < sizeof rows / sizeof *rows; ++r)
+        rule_row(rows[r].ta, rows[r].tb, rows[r].m, rows[r].n, rows[r].k, rows[r].want, rows[r].why, gate);
+    for (size_t r = 0; r < sizeof train / sizeof *train; ++r)
+        rule_row(train[r].ta, train[r].tb, train[r].m, train[r].n, train[r].k > 0 ? train[r].k : gate + train[r].k,
+                 train[r].want, train[r].why, gate);
 }
 
 /* ---- H4: one runtime for both APIs ---- */
