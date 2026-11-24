@@ -204,6 +204,31 @@ at a time (runs of 2026-11-20 and 21): greedy generation at 84 to 99 tokens per 
 97 with sampling. The same build gives 85 or 96 from one run to the next. The engine's text is
 the CPU's token for token (`docs/validation.md`, "On the hardware").
 
+**A bf16 model at the default capability and told 8.0.** Qwen2.5-0.5B-Instruct as it is stored
+(bfloat16), vLLM 0.34.0 with PyTorch 2.14.0+cu130, the layer of 0.1.5 through the launcher's
+environment (`vf env`), vLLM's engine in one process with its default settings (torch.compile
+and CUDA graphs on, no `--dtype`), greedy, 200 tokens a request after one warm-up request, one
+request and then 32 at once, two rounds a run, caches warm; one V100, 2026-11-24. Each row is
+its own start of the engine; the rows marked "again" were run a second time:
+
+| Setting | Attention | 1 request (tokens/s) | 32 requests (tokens/s, all) |
+|---|---|---:|---:|
+| default (told 7.5; vLLM makes the model float16) | TRITON_ATTN | 358.7, 359.0; again 356.0, 354.4 | 7,434, 7,456; again 7,433, 7,386 |
+| default, `VF_TRITON_TC=1` | TRITON_ATTN | 355.9, 365.4; again 357.0, 357.2 | 7,901, 7,901; again 7,848, 7,815 |
+| `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` (bfloat16) | FLASH_ATTN (FlashAttention-2) | 81.5, 81.5; again 81.4, 81.4 | 741.9, 742.0; again 740.9, 741.1 |
+| the same, `VF_CUBLAS_BF16_TC=1` | FLASH_ATTN | 81.6, 81.6 | 745.0, 746.2 |
+
+The first 120 characters of the first request's text were the same in every run. Told 8.0 the
+model ran 4.4 times slower at one request (81.5 against 359) and 10 times slower at 32 (742
+against 7,445): its linear layers then go to cuBLAS 12.9's bfloat16 kernels and its attention to
+FlashAttention-2's bfloat16 tensor-core products, which the layer computes with float32 `fma`
+(`docs/emulations.md`, "bf16"); a V100 has tensor cores for float16 only. At the default
+capability the linear layers are float16 products, which cuBLAS 12.9 computes on the tensor
+cores, and Triton's attention, told 7.5, multiplies with float32 `fma` unless `VF_TRITON_TC=1`
+("With `VF_TRITON_TC`", below). One small model was measured (hidden size 896), not a larger one.
+Told 8.0, vLLM's compilation must stay on for a bfloat16 model (`LIMITS.md`, "The capability
+told with `VF_CAPABILITY`").
+
 ### SGLang
 
 SGLang 0.5.23 installed with pip, Qwen2.5-0.5B-Instruct in f16, the same three prompts, one
@@ -367,6 +392,12 @@ Told 8.0, Triton's cubins keep their PTX, which the layer lowers to Volta's prod
 products" in `docs/emulations.md`).
 
 #### With `VF_TRITON_TC`
+
+On vLLM's engine with a bf16 model at the default capability (section 3, "vLLM": vLLM makes the
+model float16 and takes Triton's attention), `VF_TRITON_TC=1` gave 355.9 to 365.4 tokens/s at one
+request against 354.4 to 359.0, and 7,815 to 7,901 at 32 against 7,386 to 7,456, 6 % more. It
+acts at the default capability only: told 8.0 (`VF_CAPABILITY` set to another value than 7.5) it
+says so in one line and changes nothing, so it does not help a bf16 model that has to be told 8.0.
 
 `VF_TRITON_TC=1` (off by default; `LIMITS.md`, "Triton's matrix products") makes Triton compile a
 kernel whose products are all float16, bfloat16 or int8 for sm_80 while it is told 7.5, as are
@@ -745,6 +776,11 @@ word where the path gave the sentence; at batch 1 the transcript was that of the
 losses of training differed from those with the switches off by 0.0034 at most; the first three of LoRA were within
 0.0019 of the CPU's in fp32 with the switches off and within 0.0040 with the path. Each setting gave the same bits in
 all three rounds, in every workload.
+
+Stock vLLM 0.34.0 with the same model in bf16, told 8.0, its CUDA graphs on (section 3, "vLLM"): 81.6 tokens/s at one
+request and 745.0 to 746.2 at 32 with `VF_CUBLAS_BF16_TC=1`, against 81.4 to 81.5 and 740.9 to 742.0 without, no
+gain. vLLM replays its forward from CUDA graphs, and a call captured in a graph is computed by cuBLAS 12.9
+(`LIMITS.md`, "The bf16 cuBLAS variants").
 
 ### Training
 

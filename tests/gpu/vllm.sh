@@ -12,9 +12,18 @@
 #   d   vLLM's HTTP server (the OpenAI API): a completion for each prompt, greedy with the
 #       repetition penalty that the model's own configuration asks for (the server applies it by
 #       default, and then its kernel for penalties runs): the CPU's text, made with that penalty
+#   e   vLLM's engine, greedy, with the model's own bfloat16, told 8.0 (VF_CAPABILITY=8.0
+#       VF_CAPABILITY_ALL=1, which this stage sets: below 8.0 vLLM makes the model float16), its
+#       compilation off as in every stage, through the launcher of this tree (`vf env`; not
+#       VF_PROXY): every token the CPU's. Or LIMIT (below).
 # REFUSED: the layer did not give a kernel to the program, and says which and why. (Until
 # 2026-11-19, c, c2 and d were refused: a kernel of vLLM's sampling names every register of the
 # machine; `docs/translator.md`, "Registers", says how it is translated.)
+# LIMIT (stage e only; the exit status is not changed): the engine stopped after asking for a
+# kernel that only its library's code for sm_80 has, which the layer does not give (it gives that
+# library's sm_75 code), and the layer said which. vLLM 0.34 stops so at its first forward without
+# compilation, at its bf16 norm (LIMITS.md, "The capability told with VF_CAPABILITY"); until
+# 2026-11-24 the layer said nothing, and the stage would be a FAIL.
 #
 # Requires, either
 #   $VF_VLLM_VENV     a virtual environment in which vLLM was installed the usual way
@@ -48,7 +57,7 @@ host=$(hostname)
 out=${VF_OUT:-$VF_TEST_ROOT}
 gpu=${1:-0}
 [ $# -gt 0 ] && shift
-stages=" ${*:-a b c c2 d} "
+stages=" ${*:-a b c c2 d e} "
 want() { [[ "$stages" == *" $1 "* ]]; }
 
 venv=${VF_VLLM_VENV:-}
@@ -141,7 +150,7 @@ source "$W/tests/gpu/verdict.sh"
 # model's configuration for d: what vLLM's server does by default.)
 ref=$run/ref-f32.json
 refp=$run/ref-f32-penalty.json
-if want a || want c; then
+if want a || want c || want e; then
     echo "=== the CPU's reference (transformers, float32, 50 tokens, plain greedy) ==="
     CUDA_VISIBLE_DEVICES="" MODEL="$model" DTYPE=float32 MAX_TOKENS=50 OUTFILE="$ref" \
         "${py[@]}" "$W/tests/gpu/vllm-ref.py" || { echo "FAIL: the CPU's reference"; exit 1; }
@@ -230,6 +239,23 @@ $(grep 'cannot run on this GPU' "$run/server.log")" ALL_MATCH "$status"
         verdict d "$(tail -30 "$run/server.log")" ALL_MATCH 1
     fi
     stop_server $server
+fi
+
+# ---------- stage e: vLLM's engine, greedy, bfloat16, told 8.0 ----------
+# Through the launcher of this tree (`vf env`: its dist/, whatever VF_PROXY says), as the guide runs
+# vLLM: vLLM asks NVML for the capability before it starts CUDA, and NVML is told the capability
+# asked only through the launcher (INSTALL.md, "What the launcher sets"); told the GPU's 7.0 there,
+# vLLM refuses bfloat16.
+if want e; then
+    echo ""
+    echo "=== stage e: vLLM's engine, greedy, bfloat16, told 8.0 with VF_CAPABILITY_ALL=1 (through the launcher), against the CPU ==="
+    vllm_bf16=$(unset LD_AUDIT VF_AUDIT_MAP_FILE LD_LIBRARY_PATH; VF_LAUNCHER=1 vf_layer "$proxy" "$map"
+        VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1 MODEL="$model" DTYPE=bfloat16 MAX_TOKENS=50 TEMPERATURE=0 \
+            REF_FILE="$ref" timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1)
+    status=$?
+    # (With the errors that stopped the engine: the first of them is where it stopped.)
+    echo "$vllm_bf16" | grep -E "prompt [0-9]|MATCH|NEAR TIE|DIFFER|tok/s|^FAIL|Error: " | cut -c1-200
+    verdict_or_limit e "$vllm_bf16" ALL_MATCH "$status"
 fi
 
 # ---------- what the run left outside its own directories ----------

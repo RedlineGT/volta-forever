@@ -19,6 +19,8 @@ const CUDA_SUCCESS: CUresult = 0;
 /// What the layer answers for a variable that it does not give to the program (`may_name_global`):
 /// not `CUDA_ERROR_NOT_FOUND`, which says that the module has no such name.
 const CUDA_ERROR_NOT_SUPPORTED: CUresult = 801;
+/// What NVIDIA's driver answers for a kernel name that the code it has does not have.
+const CUDA_ERROR_NOT_FOUND: CUresult = 500;
 /// What NVIDIA's driver answers for the module of an image that has no code for the GPU
 /// (`no_whole_module`).
 const CUDA_ERROR_NO_BINARY_FOR_GPU: CUresult = 209;
@@ -660,7 +662,9 @@ unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
 }
 
 /// A lookup of kernel `name` in the module or library `handle`: refused when the kernel cannot run on
-/// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced.
+/// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced,
+/// and one that is not found, but is in the code of its image that a GPU of the capability told
+/// loads, is said (`kernels::not_given`).
 /// A refusal, and any lookup that fails, leaves NULL in `kernel_out`, as NVIDIA's driver does for a
 /// name it does not have: a program that ignores the error then launches nothing, not what its
 /// variable held before. (A lookup in a deferred library can fail where the driver is not asked: a
@@ -691,6 +695,9 @@ unsafe fn lookup(
     let result = find();
     if result != CUDA_SUCCESS && !kernel_out.is_null() {
         unsafe { *kernel_out = std::ptr::null_mut() };
+    }
+    if result == CUDA_ERROR_NOT_FOUND {
+        kernels::not_given(handle, &name);
     }
     if result == CUDA_SUCCESS {
         kernels::given(handle, &name);

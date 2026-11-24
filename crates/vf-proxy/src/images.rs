@@ -81,6 +81,9 @@ pub struct Replacement {
     pub paired: Vec<String>,
     /// The digest of the image given to the driver (`identity`), once it was asked for.
     identity: OnceLock<u64>,
+    /// The image's machine code that a GPU of the capability told loads, when the layer gave the
+    /// program other code (`kernels::Elsewhere`): for a lookup that fails.
+    pub elsewhere: Option<kernels::Elsewhere>,
 }
 
 // SAFETY: the wrapper points at owned, immutable data. Its fourth word is either the program
@@ -117,6 +120,7 @@ impl Replacement {
             program: None,
             paired: Vec::new(),
             identity: OnceLock::new(),
+            elsewhere: None,
         }
     }
 
@@ -160,6 +164,7 @@ impl Replacement {
         next.how = self.how.clone();
         next.program = self.program.clone();
         next.paired = self.paired.clone();
+        next.elsewhere = self.elsewhere.clone();
         Some((next, retry.functions))
     }
 
@@ -262,6 +267,7 @@ impl Replacement {
         loaded.how = self.how;
         loaded.program = self.program;
         loaded.paired = self.paired;
+        loaded.elsewhere = self.elsewhere;
         loaded
     }
 
@@ -335,6 +341,9 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
             .program_image
             .unwrap_or_else(|| (replacement.data.len(), replacement.identity()));
         kernels::without_code(handle, trap_only, image, FOR_LIBRARY.get());
+    }
+    if let Some(elsewhere) = replacement.elsewhere.take() {
+        kernels::elsewhere(handle, elsewhere, FOR_LIBRARY.get());
     }
     // For a second translation at launch (`fit`): the original of a translation that has a kernel
     // over its budget. Otherwise nothing: and nothing may be left there under a handle that the
@@ -1073,6 +1082,49 @@ fn adapt_container(who: &dyn Display, bytes: &[u8], fat: &fatbin::FatBinary<'_>)
     failed.map_or(Ok(result), Err)
 }
 
+/// The machine code of `fat` that a GPU of the capability told loads, when the program was told a
+/// later generation than the machine code that `outcome` translated for it: what a lookup that fails
+/// is said of (`kernels::not_given`). The image is named by its caller (`adapt`, `adapt_file`).
+fn elsewhere_of(fat: &fatbin::FatBinary<'_>, outcome: &Outcome) -> Option<kernels::Elsewhere> {
+    let Outcome::Translated { from_sm, .. } = outcome else {
+        return None;
+    };
+    let policy = policy();
+    let loads_sm = policy.told_machine_code(fat, *from_sm)?;
+    Some(kernels::Elsewhere {
+        given_sm: *from_sm,
+        told_sm: policy.told_sm?,
+        loads_sm,
+        why: policy.why_given(*from_sm, loads_sm),
+        image: String::new(),
+    })
+}
+
+/// What names an image in a line: the file it is in, when that is known, then its size and digest
+/// (`xxh64`) when they are.
+fn image_named(file: Option<String>, sized: Option<(usize, u64)>) -> String {
+    let sized = sized.map(|(size, digest)| format!("{size} bytes, XXH64 {digest:016x}"));
+    match (file, sized) {
+        (Some(file), Some(sized)) => format!("{file}: {sized}"),
+        (Some(file), None) => file,
+        (None, Some(sized)) => sized,
+        (None, None) => "its size not known".to_string(),
+    }
+}
+
+/// The file that the process loaded and that the bytes at `at` are in (a fat binary that a CUDA
+/// runtime registered is in the file of the library or program it was compiled into), as the
+/// loader names it; `None` for memory of no such file.
+fn loaded_file(at: *const c_void) -> Option<String> {
+    let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+    // SAFETY: `dladdr` only compares the address with the loaded objects; nothing is read there.
+    if unsafe { libc::dladdr(at, &mut info) } == 0 || info.dli_fname.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// `at`: where the fat binary is, for the bytes of the whole of it.
 fn adapt_fatbin(
     who: &dyn Display,
@@ -1087,17 +1139,22 @@ fn adapt_fatbin(
         let linked = matches!(adapted.outcome, Outcome::Native)
             .then(|| linked_in(&fat))
             .flatten();
-        Ok((original, adapted, linked))
+        let elsewhere = elsewhere_of(&fat, &adapted.outcome);
+        Ok((original, adapted, linked, elsewhere))
     });
     match result {
-        Ok((original, _, Some(found))) => {
+        Ok((original, _, Some(found), _)) => {
             say_known(who, "fat binary with a cubin made by a linker", &found);
             let mut replacement = Replacement::new(original.to_vec(), wrapper);
             replacement.refused = found.refused;
             replacement.emulated = found.emulated;
             Some(replacement)
         }
-        Ok((original, adapted, None)) => finish(who, "fat binary", adapted, wrapper, false, Some(original)),
+        Ok((original, adapted, None, elsewhere)) => {
+            let mut replacement = finish(who, "fat binary", adapted, wrapper, false, Some(original))?;
+            replacement.elsewhere = elsewhere;
+            Some(replacement)
+        }
         Err(e) => {
             log::warn(format_args!("{who}: {e}; loaded as is"));
             None
@@ -1501,9 +1558,12 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
         };
         let mut replacement = unsafe { adapt_unguarded(&named, ptr, len) }?;
         replacement.shown = named.shown();
-        if !replacement.trap_only.is_empty() {
+        if !replacement.trap_only.is_empty() || replacement.elsewhere.is_some() {
             // SAFETY: what `adapt` was given.
             replacement.program_image = unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
+        }
+        if let Some(elsewhere) = replacement.elsewhere.as_mut() {
+            elsewhere.image = image_named(loaded_file(ptr), replacement.program_image);
         }
         replacement.program = named.program();
         Some(replacement)
@@ -1625,10 +1685,13 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
         // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
         let mut replacement = unsafe { adapt_unguarded(&named, contents.as_ptr().cast(), None) }?;
         replacement.shown = named.shown();
-        if !replacement.trap_only.is_empty() {
+        if !replacement.trap_only.is_empty() || replacement.elsewhere.is_some() {
             // The file as it is (without the zero added to text): what `xxhsum -H1` gives for it.
             let file = &contents[..file_len];
             replacement.program_image = Some((file.len(), xxh64(file)));
+        }
+        if let Some(elsewhere) = replacement.elsewhere.as_mut() {
+            elsewhere.image = image_named(Some(path.to_string_lossy().into_owned()), replacement.program_image);
         }
         replacement.program = named.program();
         Some(replacement)

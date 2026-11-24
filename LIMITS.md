@@ -456,6 +456,17 @@ is (224) and 1.95 times slower than the native build with its quantized kernels 
 **vLLM, SGLang, ZML**: no native build exists to compare with. vLLM 83 to 99 tokens a second
 and SGLang 45 to 59 (Qwen2.5-0.5B); ZML 27 to 29 (Qwen3.5-9B). Runs of 2026-11-20 and 21.
 
+**vLLM told 8.0 to keep a bfloat16 model.** `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` is for a
+model that refuses float16 (below 8.0 vLLM makes a bfloat16 model float16). For an ordinary dense
+model it is the slow setting: Qwen2.5-0.5B-Instruct (stored in bfloat16) on stock vLLM 0.34.0,
+compilation and CUDA graphs on, 200 tokens a request, one V100, ran at 359 tokens a second at one
+request and 7,445 at 32 in total at the default capability, and at 81.5 and 742 told 8.0, 4.4 and
+10 times slower; the text began the same in every run (2026-11-24; one small model). Told 8.0, its
+bfloat16 products run in FlashAttention-2 and in cuBLAS's bfloat16 kernels without tensor cores,
+which a V100 has for float16 only. `VF_TRITON_TC=1` acts at the default capability only (there: 356
+to 365 and 7,901, 6 % more at 32), and the bfloat16 cuBLAS variants gave nothing told 8.0 (81.6
+and 745: vLLM replays its forward from CUDA graphs). `docs/performance.md`, "vLLM", has every run.
+
 **Triton's matrix products** (`tl.dot`). Told 7.5, which is what Triton is told by default in a
 program with PyTorch, Triton 3.8 uses no tensor-core instruction: it multiplies with float32
 `fma` (its own choice below 8.0; it says so with `MLIR_ENABLE_DIAGNOSTICS=remarks`). Its results
@@ -510,7 +521,11 @@ launcher; `INSTALL.md`) makes it compile a kernel whose products all multiply fl
 or int8 operands for sm_80, as on an Ampere GPU, while PyTorch, NVML and every other reader of the
 capability are still told 7.5; the layer then runs the PTX that each such cubin keeps. It is off
 by default (one line of the launcher, `triton_tc_default`, decides that), and `VF_SAFE=1` turns it
-off whatever it is set to. What changes for a program, by type:
+off whatever it is set to. It acts at the default capability only: with `VF_CAPABILITY` set to
+another value than 7.5 it says so in one line and changes nothing, so a bfloat16 model that a
+program must be told 8.0 for (vLLM's) gains nothing from it. On vLLM's engine at the default
+capability, a bfloat16 model made float16, it gave 6 % more at 32 requests ([Speed](#speed)).
+What changes for a program, by type:
 
 - **float16**: the products run on Volta's tensor cores (`docs/emulations.md`, section 2).
   Their sums are truncated, four terms at a time, where Triton's `fma` rounds each: on random
@@ -795,7 +810,30 @@ What that does not cover:
   capability, and whose sm_75 code is a stub (it writes no memory, where its code for the
   capability told does: PyTorch's attention kernels for sm_80), is refused, and the operation
   fails. It is only for a program that does not launch those kernels, as SGLang with the
-  settings of its guide.
+  settings of its guide, or vLLM for a model that refuses float16: for an ordinary dense model
+  vLLM was 4.4 to 10 times faster at the default capability ([Speed](#speed)).
+- **A kernel that only the code for the capability told has.** The layer gives an image that has
+  machine code for sm_75 and for sm_80, and no PTX, its sm_75 code, translated, whatever the
+  capability told: its translation of sm_80 machine code covers fewer instructions and is not
+  independently validated (`docs/architecture.md`, "Fat binaries and what is chosen"). A library
+  compiled for several architectures can have a kernel in its code for sm_80 only, or under
+  another name in its code for sm_75 (a template whose `enable_if` takes another overload there).
+  Told 8.0 (with `VF_CAPABILITY_ALL=1` for a library that uses a CUDA runtime), its host code asks
+  for the kernel by its name in the sm_80 code, and the lookup fails as the driver answers for a
+  name that it does not have (500; the CUDA runtime says `named symbol not found`). The layer says
+  so at that lookup, once for each kernel: `kernel NAME is not in the code that the layer gives for
+  its image (FILE: SIZE bytes, XXH64 DIGEST), its machine code for sm_75 translated: it is only in
+  the image's machine code for sm_80, ...`. Told 7.5 it says nothing: a GPU of 7.5 has no such
+  kernel either. vLLM 0.34.0 stops so at its first forward with a bfloat16 model, told 8.0 with
+  `VF_CAPABILITY_ALL=1` and its compilation off (`--enforce-eager`, or `TORCH_COMPILE_DISABLE=1`):
+  its vectorized bf16 `fused_add_rms_norm` is only in the sm_80 code of its
+  `_C_stable_libtorch.abi3.so`. With its compilation on (its default), vLLM computes that norm
+  with PyTorch's operations and runs; at the default capability it makes the model float16 and
+  does not ask for that kernel ([the vLLM guide](docs/guides/vllm.md), 2026-11-24). The sm_80 code
+  of that image would not run here either: the layer's translator refuses 102 of its 103
+  functions, that kernel among them, and the image keeps no PTX. `VF_TRANSLATE=first` gives the
+  machine code for the capability told precedence in every image, PyTorch's too, whose sm_80 code
+  the layer translates less of. Not said: a kernel of an image linked from relocatable code.
 - NVML, answered by the audit library, reports the value asked for to every caller: told 8.0, a
   program that reads NVML (vLLM does) and a CUDA runtime that is told 7.5 give it two answers.
 - Triton compiles for the capability that PyTorch reports (`torch.cuda.get_device_capability`)
@@ -881,7 +919,9 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   the tensor-core path only in what runs outside them: vLLM replays its decode steps and its prefill
   chunks up to the largest captured size (512 and 2048 tokens for the two models measured), and with
   `VF_CUBLAS_BF16_TC=1` its prefill was 6 % faster on one model and unchanged on the other (measured
-  before the gate on k). The skinny
+  before the gate on k). A bfloat16 model on stock vLLM 0.34.0 told 8.0, CUDA graphs on, ran at 81.6
+  tokens a second at one request and 745 at 32 with it, against 81.5 and 742 without (2026-11-24,
+  Qwen2.5-0.5B-Instruct, `docs/performance.md`, "vLLM"). The skinny
   path serves captured calls (one kernel node, nothing allocated). A replayed tensor-core call has
   12.9's bits, which differ in their last bits from the same call made outside a capture: a program
   that compares a graph's replay with an eager run of the same step sees it.

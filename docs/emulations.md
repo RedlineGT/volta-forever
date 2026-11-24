@@ -296,6 +296,26 @@ over the other rows or columns (which must be zero) and over the bounds of every
 chooses their path. The `ordered` modes give the same bits on both paths (the same order, the
 same `fma.rn`), and the default path has no vote: both are reproducible.
 
+**A scaled form on the FP16 tensor cores, tried and not kept.** A lowering of bf16 `m16n8k16`
+that scales each row of A and each column of B by a power of two into the range of a half, checks
+that every value is then a normal half or zero, computes the product with four `m8n8k4` and
+applies the scales in one `fma` a result, with the scalar product as the fallback of a result
+whose row or column does not fit, was made by hand for Triton's bf16 GEMM (both operands by
+`ldmatrix`, tiles 64x64x32 and 128x128x32, one stage, 2048 x 2048 x 2048) and run on a V100
+(2026-11-24). Its results were right against a float64 product on the host (on terms of one
+sign, a mean error of -0.17 units in the last place, K = 512), and it was slower: 5.35 and 5.63
+TFLOPS against 9.79 and 9.92 for the scalar products, 0.54 to 0.57 times. The conversion and the
+check cost more instructions than the `fma` they replace (one turn of the loop of the 64x64
+kernel, per warp: 2,804 instructions, 256 of them `HMMA`, against 1,725 for the scalar products,
+1,024 of them `FFMA`), and the converted rows stay in registers (the 64x64 kernel's 125 registers
+become 216 without the check and the fallback, 255 with them). The layer keeps the scalar
+products.
+`VF_BF16_TC_GROUPS=1` stays the opt-in for programs whose bf16 operands are known to be halves:
+on the same GEMMs, with one and with three stages, 1.33 to 1.51 times the scalar products when
+every operand converts, 0.84 to 0.98 times when some do not, and on terms of one sign a mean error
+of -28.6 to -29.7 units in the last place (K = 512; the scalar products: -0.0015), the truncation
+of Volta's sums (section 1).
+
 **Instruction counts.** One `m16n8k16` on bf16: 199 instructions (64 `fma`, 32 shuffles).
 One `m16n8k8` on bf16: 116. One `m16n8k8` on tf32: 103 (plus operand truncation, below).
 One `m16n8k4` on tf32: 68. One `m8n8k4` on f64: 63. These are whole-kernel counts;

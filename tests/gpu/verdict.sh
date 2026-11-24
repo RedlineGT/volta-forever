@@ -6,6 +6,28 @@ refused() {
     echo "$1" | grep -m1 'cannot run on this GPU' | cut -c1-300
 }
 
+not_given() {
+    # What the layer says when the program asks an image for a kernel that the code the layer gave
+    # for it has not, and the image's code for the capability told has (LIMITS.md, "The capability
+    # told with VF_CAPABILITY").
+    echo "$1" | grep -m1 'is not in the code that the layer gives for its image' | cut -c1-300
+}
+
+verdict_or_limit() {
+    # verdict_or_limit STAGE OUTPUT WORD STATUS: as `verdict`, except for a program that ended by
+    # itself with an error after the layer said that it asked for a kernel which only the code for
+    # the capability told has, which the layer did not give (`not_given`), and refused nothing:
+    # LIMIT, a limit that LIMITS.md documents, said with the layer's line; `failed` is not changed.
+    # The same end without that line is a FAIL.
+    local status=$4
+    if [ "$status" != 0 ] && [ "$status" != 124 ] && [ "$status" != 137 ] && [ -n "$(not_given "$2")" ] &&
+        [ -z "$(refused "$2")" ]; then
+        echo "LIMIT stage-$1: $(not_given "$2")"
+    else
+        verdict "$@"
+    fi
+}
+
 verdict() {
     # verdict STAGE OUTPUT WORD STATUS: PASS when the program's verdict is WORD and the program
     # then ended by itself with status 0 (STATUS, its exit status; 124 when it ran out of time,

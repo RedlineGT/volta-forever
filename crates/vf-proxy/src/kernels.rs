@@ -66,6 +66,30 @@ struct Kernels {
     /// later one (`retargeted`): what the program's code was compiled for, where the driver, which
     /// compiled the layer's PTX, says this GPU's (`retargeted_from`).
     retargeted_from: Option<u32>,
+    /// The image's machine code that a GPU of the capability told loads, which the layer did not
+    /// give (`elsewhere`), and the names of the kernels that were looked for there and are not in it
+    /// (`not_given`; at most `KEPT_KERNELS`).
+    elsewhere: Option<Elsewhere>,
+    absent: HashSet<String>,
+}
+
+/// The machine code of an image that a GPU of the capability told loads, where the layer gave the
+/// program the translation of the image's code for an earlier generation
+/// (`vf_adapt::Policy::told_machine_code`): a program told that capability asks for its kernels by
+/// the names they have in that code, and the code given may have no kernel of such a name. Said
+/// when such a lookup fails (`not_given`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Elsewhere {
+    /// The architecture of the machine code that the layer translated and gave.
+    pub given_sm: u32,
+    /// The capability that the program was told, as an SM number: the image was adapted for it.
+    pub told_sm: u32,
+    /// The architecture of the image's machine code that a GPU of that capability loads.
+    pub loads_sm: u32,
+    /// Why the layer gave the code for `given_sm` (`vf_adapt::Policy::why_given`).
+    pub why: String,
+    /// What names the program's image: the file it is in, its size and its digest.
+    pub image: String,
 }
 
 static KNOWN: LazyLock<Mutex<HashMap<usize, Kernels>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -304,6 +328,98 @@ pub fn retargeted(handle: usize, sm: u32, library: bool) {
     let kernels = known.entry(handle).or_default();
     kernels.is_library |= library;
     kernels.retargeted_from = Some(sm);
+}
+
+/// The image loaded as `handle` (a library's when `library`) has machine code that a GPU of the
+/// capability told loads, which the layer did not give (`Elsewhere`). (Nothing that `guard`
+/// concludes changes: no new generation.)
+pub fn elsewhere(handle: usize, elsewhere: Elsewhere, library: bool) {
+    let mut known = known();
+    let kernels = known.entry(handle).or_default();
+    kernels.is_library |= library;
+    kernels.elsewhere = Some(elsewhere);
+    kernels.absent.clear();
+}
+
+/// Kernels named by the line of `not_given`: said once for each name.
+static NOT_GIVEN_SAID: LazyLock<Mutex<Guarded>> = LazyLock::new(|| Mutex::new(Guarded::default()));
+
+/// The line of `not_given`, for kernel `name` of an image of which `elsewhere` is known.
+fn not_given_line(name: &str, elsewhere: &Elsewhere) -> String {
+    let Elsewhere {
+        given_sm,
+        told_sm,
+        loads_sm,
+        why,
+        image,
+    } = elsewhere;
+    format!(
+        "kernel {name} is not in the code that the layer gives for its image ({image}), its machine code for \
+         sm_{given_sm} translated: it is only in the image's machine code for sm_{loads_sm}, which a GPU of the \
+         capability told ({}.{}) loads. The lookup fails as the driver answers for a name that it does not have \
+         (error 500): {why} (LIMITS.md, \"The capability told with VF_CAPABILITY\")",
+        told_sm / 10,
+        told_sm % 10
+    )
+}
+
+/// The lookup of kernel `name` in the module or library `handle` failed: the driver has no kernel of
+/// that name in the code the layer gave. When the image's machine code that a GPU of the capability
+/// told loads has one (`Elsewhere`), a line says so, once for each kernel: the program was told a
+/// capability for which its image has the kernel, and was given other code. Nothing is said when
+/// that code has no kernel of the name either: a GPU of that capability has none.
+pub fn not_given(handle: usize, name: &str) {
+    if let Some(line) = not_given_said(handle, name) {
+        log::warn(format_args!("{line}"));
+    }
+}
+
+/// `not_given`: the line to say, if there is one (once for each kernel; the line that further
+/// ones are not said, beyond `KEPT_KERNELS`).
+fn not_given_said(handle: usize, name: &str) -> Option<String> {
+    let (owner, elsewhere) = {
+        let known = known();
+        let owner = known.get(&handle).and_then(|k| k.library).unwrap_or(handle);
+        match known.get(&owner) {
+            Some(Kernels {
+                elsewhere: Some(elsewhere),
+                absent,
+                ..
+            }) if !absent.contains(name) => (owner, elsewhere.clone()),
+            _ => return None,
+        }
+    };
+    if NOT_GIVEN_SAID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .said
+        .contains(name)
+    {
+        return None;
+    }
+    // (Outside the lock of what is known: the cubins of that code are read, decompressed.)
+    let load = images::load_of(owner);
+    let found = images::retained(owner).is_some_and(|image| {
+        vf_fatbin::parse(image.data_bytes()).is_ok_and(|fat| vf_adapt::has_kernel(&fat, elsewhere.loads_sm, name))
+    });
+    if !found {
+        let mut known = known();
+        if images::load_of(owner) == load
+            && let Some(kernels) = known.get_mut(&owner)
+            && kernels.absent.len() < KEPT_KERNELS
+        {
+            kernels.absent.insert(name.to_string());
+        }
+        return None;
+    }
+    match NOT_GIVEN_SAID.lock().unwrap_or_else(|e| e.into_inner()).note(name) {
+        Note::Nothing => None,
+        Note::Beyond => Some(format!(
+            "further kernels that are only in code which the layer did not give are not said: more than \
+             {KEPT_KERNELS} were (each lookup still fails, error 500)"
+        )),
+        Note::First => Some(not_given_line(name, &elsewhere)),
+    }
 }
 
 /// The architecture of the program's PTX from which the layer made the code of `handle`, a function
@@ -872,6 +988,64 @@ mod tests {
         assert!(metadata(&known(), module).is_none());
         assert!(metadata(&known(), other).is_none());
         forget(module);
+    }
+
+    #[test]
+    fn a_kernel_that_only_the_code_not_given_has_is_said_once_at_a_lookup_that_fails() {
+        // `tests/kernels/k_sections.cu`: `k_from_80` only in the code for sm_80, `k_before_80` only
+        // in the code for sm_75. Told 8.0, the program is given the translation of the sm_75 code.
+        const SECTIONS: &[u8] = include_bytes!("../../../tests/kernels/k_sections.135.sm75-sm80.fatbin");
+        let (library, module, other) = (0x7e57_2000, 0x7e57_2010, 0x7e57_2020);
+        let policy = vf_adapt::Policy {
+            told_sm: Some(80),
+            keep_sources: true,
+            ..vf_adapt::Policy::default()
+        };
+        let fat = vf_fatbin::parse(SECTIONS).unwrap();
+        let loads_sm = policy.told_machine_code(&fat, 75).unwrap();
+        let given = policy.adapt_fatbin(&fat).unwrap().image.unwrap();
+        let elsewhere = Elsewhere {
+            given_sm: 75,
+            told_sm: 80,
+            loads_sm,
+            why: policy.why_given(75, loads_sm),
+            image: "lib.so: 9184 bytes, XXH64 0123456789abcdef".to_string(),
+        };
+        let mut replacement = images::Replacement::from_vec(given.clone());
+        replacement.elsewhere = Some(elsewhere.clone());
+        images::keep(library, replacement);
+        // Through the module that the driver gives for the library in a context, and the library.
+        share(module, library);
+        let line = not_given_said(module, "k_from_80").expect("a line for k_from_80");
+        assert!(
+            line.starts_with(
+                "kernel k_from_80 is not in the code that the layer gives for its image (lib.so: 9184 bytes, XXH64 \
+                 0123456789abcdef), its machine code for sm_75 translated: it is only in the image's machine code \
+                 for sm_80, which a GPU of the capability told (8.0) loads. The lookup fails as the driver answers \
+                 for a name that it does not have (error 500): the layer gives an image that has machine code for \
+                 sm_75 and sm_80 its code for sm_75"
+            ),
+            "{line}"
+        );
+        // Once for each kernel.
+        assert_eq!(not_given_said(library, "k_from_80"), None);
+        // A name that the code for sm_80 does not have either: nothing, and it is not read again.
+        for name in ["k_nowhere", "k_before_80"] {
+            assert_eq!(not_given_said(library, name), None, "{name}");
+            assert!(
+                metadata(&known(), library).is_some_and(|k| k.absent.contains(name)),
+                "{name}"
+            );
+        }
+        // An image of which nothing of the kind is known.
+        let mut plain = images::Replacement::from_vec(given);
+        plain.elsewhere = None;
+        images::keep(other, plain);
+        assert_eq!(not_given_said(other, "k_from_80"), None);
+        // Gone with the library.
+        drop(images::release(library));
+        assert!(metadata(&known(), module).is_none());
+        drop(images::release(other));
     }
 
     #[test]
