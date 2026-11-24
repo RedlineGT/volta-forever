@@ -53,7 +53,15 @@
 //! thread alone writes (a sequence lock that this thread alone takes, as the guard's slots are
 //! read), with the value of a counter that only the synchronisations move (`EPOCH`): a launch kept
 //! with a value that a synchronisation's beginning had not moved yet was accepted before that
-//! synchronisation began, which therefore waited for it. No instruction that locks memory runs
+//! synchronisation began, which therefore waited for it. In one thread that follows from the order
+//! of its own instructions. Between threads it relies on the driver: the launch loads `EPOCH`
+//! after the driver's call returned, with a plain load, and a synchronisation in another thread
+//! moves it with a locked instruction before it calls the driver (the pattern of two stores and two
+//! loads, which x86 orders only through a locked instruction or a fence on both sides). The
+//! driver's launch ends, after its last store of the submission, with locked instructions of its
+//! own (its locks), which order the load after it; a driver that did without would let a launch of
+//! one thread, made as a synchronisation began in another, be taken for covered by it. No fence is
+//! added for that: it would cost the launch more than the record. No instruction that locks memory runs
 //! after the driver's call, the driver is not asked which context is current, no clock is read,
 //! and the record is written in the launch entry itself (inlined: a call to a function elsewhere in
 //! the library cost more than the record). On a V100, in a loop of empty kernels launched from one
