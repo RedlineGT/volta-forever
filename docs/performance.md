@@ -478,50 +478,253 @@ go through any of this: it uses Volta's instructions, and the layer leaves its c
 
 ## 7. bf16 products through cuBLAS: the opt-in variants on real programs
 
-Measured on 2026-11-23 on one Tesla V100-SXM2-32GB, driver 580.178.04, with the layer built from
-the series of the bf16 cuBLAS variants before its last four fixes (the signed zero with a bias, the
-attributes of an explicit cuBLASLt algorithm, workspaces not at 256-byte addresses, the lazy setup;
-none changes the speed of a product that a path serves), and before the tensor-core path's gate on k
-(`VF_TC_MIN_K`, 1024): with the gate, every product of these three models with 768 or 896
-in-features, all but the second product of each MLP (3,072 or 4,864 in-features), goes to the
-skinny path or to cuBLAS 12.9, so the column of the tensor cores below was measured with the path
-serving products that it no longer takes. PyTorch 2.14.0+cu130 and transformers
-5.22.2, eager, in bf16: Qwen2.5-0.5B-Instruct (hidden size 896, MLP 4,864, vocabulary 151,936) for
-generation and training, BAAI/bge-base-en-v1.5 for embeddings, openai/whisper-small for speech.
-Each comparison is one GPU job in which the three settings (both switches off,
-`VF_CUBLAS_BF16_SKINNY=1`, `VF_CUBLAS_BF16_TC=1`, which turns the skinny path on too) take turns
-over two rounds, each process after 12 s of warm-up so that the card's clock has settled (1,500 to
-1,530 MHz recorded). The cases bound by the host (generation at batch 1 and 8, Whisper's
-transcription) ran pinned to the CPUs nearest the GPU and moved by up to about 30 % from one start
-of the process to the next. The rate with the switches off, then the ratios to it, and the share of the
-GPU's kernel time that bf16 cuBLAS products take with the switches off:
+Measured on 2026-11-24 on one Tesla V100-SXM2-32GB, driver 580.178.04, with the layer of the series of the bf16
+variants' rules of speed: the tensor-core path's gate on k (`VF_TC_MIN_K`, 1024), its three rules of speed (below),
+its fallback launched once per call with its tiles chosen from measured times. PyTorch 2.14.0+cu130 and
+transformers 5.22.2, eager, in bf16: Qwen2.5-0.5B-Instruct (hidden size 896, MLP 4,864, vocabulary 151,936) for
+generation and training, BAAI/bge-base-en-v1.5 for embeddings, openai/whisper-small for speech. Each comparison is
+one GPU job in which the three settings (both switches off, `VF_CUBLAS_BF16_SKINNY=1`, `VF_CUBLAS_BF16_TC=1`, which
+turns the skinny path on too) take turns over two rounds, each process after 12 s of warm-up so that the card's
+clock has settled (1,530 MHz recorded), every process pinned to the CPUs nearest the GPU (the cases bound by the
+host, generation at batch 1 and 8 and Whisper's transcription, moved by up to about 30 % from one start of the
+process to the next unpinned). The rate with the switches off, then the ratios to it (the range over the two
+rounds), and the share of the GPU's kernel time that bf16 cuBLAS products take with the switches off (from the
+profiles of the earlier measurements, 2026-11-23: what runs with the switches off is not changed by the series):
 
 | Workload | Switches off | Skinny | Tensor cores | bf16 products |
 |---|---:|---:|---:|---:|
-| `generate()`, batch 1 (one column: never served) | 35 tokens/s | 1.00 | 0.97-1.02 | 35 % |
-| `generate()`, batch 8 | 196 tokens/s | 1.27 | 1.35 | 82 % |
-| `generate()`, batch 32 | 635 tokens/s | 1.00 | 1.46-1.49 | 80 % |
-| Prompts of 512 to 2,048 tokens | 7.4k-10.4k tokens/s | 1.00 | 1.31-1.70 | |
-| Log-likelihood of 8 x 512 tokens | 8.8k tokens/s | 1.00 | 1.56 | |
-| The same model under `torch.compile`, at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` (one round) | 8.5k-12k tokens/s | | 1.44-1.91 | |
-| Embeddings, batches of 32 to 256 | 91-1,600 sequences/s | 1.00 | 1.51-1.74 | 82.5 % |
-| Whisper's encoder alone | 21 windows/s | 1.00 | 1.30 | 48 % (Whisper) |
-| Whisper's transcription, batch 16 | 103 audio-seconds/s | 1.04 | 1.24 | |
-| LoRA training step, 8 x 256 and 32 x 128 tokens | 1.40 and 0.81 steps/s | 1.02, 1.04 | 0.81, 0.56 | 83 % |
-| Full training step, two sizes | 1.23 and 0.70 steps/s | 1.00 | 0.66, 0.37 | 77.5 % |
+| `generate()`, batch 1 (one column: never served) | 36 tokens/s | 0.98 | 0.98-0.99 | 35 % |
+| `generate()`, batch 8 | 197 tokens/s | 1.27 | 1.39 | 82 % |
+| `generate()`, batch 32 | 637 tokens/s | 1.00 | 1.46 | 80 % |
+| Prompts of 512 to 2,048 tokens | 7.4k-10.4k tokens/s | 1.00 | 1.05-1.18 | |
+| Log-likelihood of 8 x 512 tokens | 8.8k tokens/s | 1.00 | 1.06 | |
+| The same model under `torch.compile`, at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` (one round) | 8.6k-12k tokens/s | | 1.07-1.22 | |
+| Embeddings, batches of 32 to 256 | 91-1,600 sequences/s | 1.00 | 1.11-1.16 | 82.5 % |
+| Whisper's encoder alone | 21 windows/s | 1.00 | 1.07 | 48 % (Whisper) |
+| Whisper's transcription, batch 16 | 104 audio-seconds/s | 1.04 | 1.20-1.21 | |
+| LoRA training step, 8 x 256 and 32 x 128 tokens | 1.40 and 0.81 steps/s | 1.03, 1.03 | 1.07, 1.07 | 83 % |
+| Full training step, 8 x 256 and 32 x 128 tokens | 1.24 and 0.70 steps/s | 1.00 | 1.02, 1.02 | 77.5 % |
 
-Training is slower with the tensor-core path because the products of its backward pass fall into
-the path's scalar fallback: the input gradients (NN, m = 896, n = the tokens, k = 4,864) ran at 0.20
-times the speed of cuBLAS 12.9, the weight gradients (NT) at 0.16 to 0.33 times and LoRA's rank-16
-products at 0.16 to 0.26 times; in the profile of full training, the fallback kernel took 31.7 % of
-the kernel time, the scaling kernel about 34 % and the fp16 products 12.5 %. With the skinny path
-alone, every output was bit for bit that with the switches off, in every workload and round, the
-losses and final weights of training included. With the tensor-core path, generation's logits
-differed from those with the switches off by 0.048 on average and 0.92 at most, with the same most
-likely token at 98.05 % of positions; from those of the same model in fp32 on the CPU, by 0.0602 on
-average with the switches off and 0.0600 with the path (same most likely token: 97.66 % and
-97.27 %); embeddings had a cosine of at least 0.999947 to those with the switches off, and their
-nearest neighbour was the CPU's in every case, with the path and without.
+With the gate on k, every product of these three models with 768 or 896 in-features, all but the second product of
+each MLP (3,072 or 4,864 in-features), goes to the skinny path or to cuBLAS 12.9: only one of the seven products of
+each layer of the generation model, and one of the six of each layer of the two encoders, can go to the tensor
+cores. The prompts, the scoring, the embeddings and Whisper's encoder therefore gain less than in the measurements
+made before the gate, when the path served their products with 768 or 896 in-features too: 1.31 to 1.70, 1.56,
+1.51 to 1.74 and 1.30 then. Generation at batch 8 and 32 kept its gain (1.35 and 1.46 to 1.49 then).
+
+With the skinny path alone, every output was bit for bit that with the switches off, in every workload and round:
+the generated tokens and logits, the embeddings, Whisper's transcripts, and the losses and trained weights of
+training. With the tensor-core path, the logits of a check batch (4 x 64 positions) differed from those with the
+switches off by 0.047 on average and 0.81 at most, with the same most likely token at 98.44 % of positions; from
+those of the same model in fp32 on the CPU, by 0.0602 on average with the switches off and 0.0584 with the path
+(the same most likely token at 97.66 % of positions with both). Greedy generation at batch 8 kept the tokens of the
+switches off for 77 of its 128 on average (one sequence of the 8 throughout), at batch 32 for 38; at batch 8 no
+sequence was the CPU's throughout with the switches off (42 tokens on average), 2 of 8 with the path (59).
+Embeddings had a cosine of at least 0.999952 to those with the switches off, and their nearest neighbour was the
+CPU's in every case, with the path and without. Of Whisper's 24 transcripts at batch 8 and 16, 18 were those of
+the switches off; of the others, two differ in a capital, two in "21," against "21st,", one in a comma and a word,
+and in one window the switches off stopped after the first word where the path gave the sentence. The losses of
+training differed from those with the switches off by 0.0042 at most; the first three of LoRA were within 0.0019
+of the CPU's in fp32 with the switches off and within 0.0017 with the path. Each setting gave the same bits in both
+rounds, in every workload.
+
+### Training
+
+bf16 fine-tuning of the 0.5B model: adapters of rank 16 on every linear layer (LoRA; the base frozen in bf16)
+and full fine-tuning (fp32 master weights), both under bf16 autocast with AdamW, 8 steps of 8 x 256 and of
+32 x 128 tokens after 2 of warm-up, on fixed windows of the model's own README and licence. Measured again in a
+job of its own, three runs of each setting alternated; beside them, two runs of the layer as it was before this
+series (the path then served every layout), from an earlier job of the same kind. Steps per second:
+
+| Workload | Switches off | Tensor cores | Ratio | Tensor cores, before this series | Ratio |
+|---|---:|---:|---:|---:|---:|
+| LoRA, 8 x 256 tokens | 1.405 | 1.508 | 1.07 | 1.088 | 0.77 |
+| LoRA, 32 x 128 tokens | 0.808 | 0.863 | 1.07 | 0.444 | 0.55 |
+| Full fine-tuning, 8 x 256 tokens | 1.246 | 1.271 | 1.02 | 0.777 | 0.62 |
+| Full fine-tuning, 32 x 128 tokens | 0.702 | 0.717 | 1.02 | 0.250 | 0.36 |
+
+Every bf16 product of a real step timed in place (each call waited for; two runs of each setting), summed per
+step; then with the layout rule removed, by the test builds' control `VF_BF16_CONTROL=tc-layouts`, which serves the
+NN and NT products again:
+
+| Workload | Switches off (ms per step) | Tensor cores | Speed | Layout rule removed | Speed |
+|---|---:|---:|---:|---:|---:|
+| LoRA, 8 x 256 tokens | 670.3 | 620.1 | 1.08 | 800.5 | 0.84 |
+| LoRA, 32 x 128 tokens | 1,119.6 | 1,041.2 | 1.08 | 1,422.9 | 0.79 |
+| Full fine-tuning, 8 x 256 tokens | 678.3 | 657.3 | 1.03 | 920.6 | 0.74 |
+| Full fine-tuning, 32 x 128 tokens | 1,229.6 | 1,205.6 | 1.02 | 1,997.3 | 0.62 |
+
+With the rule removed, 19 of the 22 NN and NT products within the path's gate (k from 1,024 to 16,384, n of 32
+or more) ran at 0.24 to 0.90 times 12.9's speed: the output layer's weight gradient (NT 896 x 151,936 x 4,096)
+at 0.29, the MLP's input gradients (NN 896 x n x 4,864) at 0.42 to 0.44; the other three, of 16 rows, at 1.02 to
+1.34. The TN products that the path serves ran at 1.44 to 3.84 times 12.9's speed: the down projections
+(896 x n x 4,864) at 1.44 to 1.53, the adapters' 16 x n x 4,864 at 2.12 and 3.84. In each setting every step's
+loss and the trained weights' checksum were the same bits from run to run; with the path they differ from those
+with the switches off (the losses by 0.0042 at most), since its products differ from 12.9's in their last bits.
+
+### The rules of speed
+
+The tensor-core path serves a product only where it was measured faster than cuBLAS 12.9. Three static rules
+of shape, decided before the gate on k, leave the rest to 12.9: each gives its reason in the exit report, and a
+control of the test builds removes it (`VF_BF16_CONTROL`), with which the rule's tests fail (`bf16-rules`,
+`tests/forward/bf16.sh`). Speeds are 12.9's time over the path's:
+
+| Rule | Products left to 12.9 | Reason in the exit report | Measured on the side it leaves to 12.9 | Measured on the side it serves | Control |
+|---|---|---|---|---|---|
+| Layout | every layout but TN (op(A) = A^T, op(B) = B): a backward pass's input gradients (NN) and weight gradients (NT), TT | `not TN (the tensor-core path's layout)` | the NN and NT products of four fine-tuning steps, timed in place with the rule removed: 19 of the 22 that the path would serve at 0.24 to 0.90 (the output layer's weight gradient, NT 896 x 151,936 x 4,096, at 0.29), three of 16 rows at 1.02 to 1.34; the steps' products together at 0.62 to 0.84 | the same steps' TN products: 1.44 to 3.84; the steps' products together at 1.02 to 1.08 | `tc-layouts` |
+| Tall | TN with m >= 8,192 and n <= 128, or with m >= 6,144 and k > 8,192 | `m >= 8192 with n <= 128, or m >= 6144 with k > 8192 (12.9 as fast)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96, at n = 65 to 128: 1.01 to 1.56; at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; m = 6,656 to 8,320 with k = 12,288 to 16,384 at n <= 256: down to 0.93 | output layers at n >= 129: 1.21 and more (1.37 to 1.59 at 129); m = 6,144 with k > 8,192 at n <= 256: 1.03 and more | `tc-tall` |
+| Wide | TN with k > 8,192 and n > 256 | `k > 8192 with n > 256 (the fallback's cost on real activations)` | a down projection (k = 8,960) with 53 to 70 % of its input's columns failing, in the runs before the rules: 0.85 and 1.08 at n = 320 (the two choices of columns), 0.62 to 0.98 at every n from 384 to 2,048 | the same layer at n = 256: 1.17, at n = 192: 1.18 | `tc-wide` |
+| None: the exception | nothing (no rule of shape tells these products from others of their shape) | none; from `VF_LOG_LEVEL=2` the exit report counts the calls with more than a quarter of their rows or columns failing | | served, and can run below 12.9's speed: a product whose input has a quarter or more of its columns failing the exact check, near the top of one of 12.9's waves; measured on one layer, TN 4,096 x n x 4,096 with 26 to 38 % failing: 0.86 to 0.97 at n = 128, 192 and 256 to 320 (below) | |
+
+The tall and wide bounds come from the sweeps below and from the real operands of four language models (a 0.5B
+model of hidden size 896, a 1.5B model of hidden size 1,536, and two hybrid models of linear-attention and
+attention layers, 9B of hidden size 4,096 and 4B of hidden size 2,560): every linear layer with k >= 1,024 of one
+prefill of 8 x 256 tokens of text, at n = 32 to 2,048 in 15 steps, two choices of n of those columns (the first n
+tokens; n spread over the batch), 3 rounds, the settings alternated in separate processes. With the rules:
+
+| Model | Layers | Products served | Median speed | The slowest served | Below 1.05 | Below 1.0 | Products left to 12.9 |
+|---|---:|---:|---:|---|---:|---:|---:|
+| 0.5B, hidden 896 | 24 | 696 | 3.27 | 1.08: the MLP's down projection, 896 x 4,864, n = 1,024 (12 % of its columns failing) | 0 | 0 | 0 |
+| 1.5B, hidden 1,536 | 197 | 4,723 | 2.62 | 1.17: the MLP's down projection, 1,536 x 8,960, n = 256 (50 %) | 0 | 0 | 990 |
+| 9B hybrid, hidden 4,096 | 249 | 5,771 | 2.01 | 0.88: a linear-attention output projection, 4,096 x 4,096, n = 320 (30 %; below) | 9 | 6 | 1,450 |
+| 4B hybrid, hidden 2,560 | 249 | 5,771 | 2.08 | 1.28: the output layer, 248,320 x 2,560, n = 192 (none) | 0 | 0 | 1,450 |
+
+and four models with ReLU and GELU activations (their MLPs' second products, k = 3,072, are their only layers of
+k >= 1,024; no column of their inputs failed the check):
+
+| Model | Layers | Products served | Median speed | The slowest served | Products left to 12.9 |
+|---|---:|---:|---:|---|---:|
+| T5-base (ReLU), encoder and decoder | 24 | 696 | 3.97 | 1.72: 768 x 3,072, n = 1,536 | 0 |
+| OPT-125m (ReLU) | 12 | 348 | 3.83 | 1.70: 768 x 3,072, n = 1,536 | 0 |
+| bge-base-en-v1.5 (GELU, BERT encoder) | 12 | 348 | 3.84 | 1.69: 768 x 3,072, n = 1,536 | 0 |
+| whisper-small's encoder (GELU, 1,500 frames of audio) | 12 | 312 | 4.66 | 2.14: 768 x 3,072, n = 1,024 | 0 |
+
+Every product the rules serve in these eight models ran at 1.03 times 12.9's speed or more, but in one layer: the
+exception below.
+
+**The exception: a product whose input has many failing columns.** 12.9 computes a bf16 product in tiles of 64 x 64,
+four per SM, 320 at a time on a V100: its time is flat over ranges of n and jumps where one more of its tiles lands
+on the busiest SM (at m = 4,096: at n = 129, 193, and 321, where its second wave begins). The path's own time grows
+evenly with n, and its fallback adds one fused multiply-add chain over the whole k for every element of a failing
+column, less efficient per column than 12.9's tiles. With a quarter or more of the columns failing, the sum can pass
+12.9's time on its flat stretches, most before its second wave. The one layer measured with such an input, the
+output projection of the first linear-attention layer of the 9B model (TN 4,096 x n x 4,096, 26 to 38 % of its
+input's columns failing; in the other 248 layers measured in that model, at most one column in 32 failed), on that
+layer's own operands, 12.9 and the path alternated in one process per n (8 event-timed calls per setting, 7 rounds,
+medians; 2 passes; the worse of the two choices of columns):
+
+| n | 12.9's tiles (at most per SM) | 12.9 (us) | The path (us) | Speed (two passes) | The attention layer's speed |
+|---:|---|---:|---:|---|---:|
+| 32 | 64 (1) | 632 | 440 | 1.435, 1.438 | 2.41 |
+| 64 | 64 (1) | 635 | 527 | 1.204, 1.206 | 2.15 |
+| 96 | 128 (2) | 667 | 648 | 1.028, 1.028 | 1.56 |
+| 128 | 128 (2) | 670 | 700 | 0.956, 0.955 | 1.73 |
+| 160 | 192 (3) | 741 | 739 | 1.003, 1.003 | 1.74 |
+| 192 | 192 (3) | 746 | 767 | 0.972, 0.973 | 1.65 |
+| 224 | 256 (4) | 931 | 797 | 1.168, 1.170 | 1.93 |
+| 256 | 256 (4) | 935 | 995 | 0.939, 0.940 | 1.73 |
+| 288 | 320 (4) | 918 | 1,052 | 0.873, 0.874 | 1.33 |
+| 320 | 320 (4) | 922 | 1,075 | 0.857, 0.856 | 1.47 |
+| 336 | 384 (2 waves) | 1,564 | 1,084 | 1.442, 1.440 | 2.46 |
+| 384 | 384 (2 waves) | 1,572 | 1,309 | 1.201, 1.200 | 2.23 |
+| 448 | 448 (2 waves) | 1,642 | 1,394 | 1.178, 1.178 | 2.08 |
+| 512 | 512 (2 waves) | 1,830 | 1,633 | 1.120, 1.120 | 2.15 |
+| 576 | 576 (2 waves) | 1,833 | 1,745 | 1.050, 1.050 | 1.75 |
+| 640 | 640 (2 waves) | 1,826 | 1,774 | 1.029, 1.030 | 1.68 |
+| 656 | 704 (3 waves) | 2,471 | 1,854 | 1.332, 1.333 | 2.11 |
+| 704 | 704 (3 waves) | 2,479 | 1,892 | 1.310, 1.311 | 2.21 |
+| 768 | 768 (3 waves) | 2,548 | 1,997 | 1.276, 1.278 | 2.05 |
+| 1,024 | 1,024 (4 waves) | 3,382 | 2,867 | 1.180, 1.180 | 1.98 |
+
+The runs of the models above, settings alternated in separate processes, give the same picture for that layer (0.88
+to 1.02 at n = 96 to 320, 1.15 and more from 384 on); an earlier run of that shape alone gave higher figures (0.92
+at n = 288 to 320): between separate processes the card's clock can differ, and 12.9's arithmetic-bound kernel
+follows it more than the path's memory-bound steps, which is why the table above was measured in one process. Before
+the fallback's tiles were chosen from measured times, the runs across processes gave the layer 0.88 to 1.02 at n =
+96 to 320 as well (0.90 at n = 128, 0.94 since). Its effect on the model is small: it takes 0.2 % of the 12.9 time
+of the model's layers measured, and their sum ran at 1.30 to 1.76 times 12.9's speed at n = 96 to 320; at n = 320,
+1.480 times, against 1.483 had that layer run at 12.9's speed. Three ways out were measured and not taken. A choice
+of the internal fp16 GEMM's algorithm gains at most 3 % of a call: cuBLASLt's heuristic gives seven, its first is
+the fastest up to n = 104 and within 1.3 to 6.7 % at n = 128 to 336, and the step at n = 321 is 12.9's, not the
+path's (the path's time is flat there: 1,075 against 1,084 us). Handing such a call to 12.9 whole needs its failing
+count on the host, a synchronization per tensor-core call, which cost 10.9 % of the speed of eager decoding at batch
+32 (1.1 % on prompts of 512 tokens, 0.2 % on 2,048), is impossible in a graph capture, and would make an element's
+bits depend on the other columns' data. A rule of shape would take the layer's attention-layer twins too (the same
+shape, no failing column: 1.33 to 2.46). From `VF_LOG_LEVEL=2` the exit report counts the calls with more than a
+quarter of their rows or columns failing.
+
+What the rules cost and keep, per model: the sum of the products' times over the layers measured (the first n
+tokens), as a speed against 12.9, with the path serving every product of its gate and then with the rules. It needs
+the path's time on the products the rules leave to 12.9, so it comes from the runs made before the rules (the same
+models and text, 3 rounds; the MLPs, the output layer, the attention and linear-attention output projections and
+the attention's query, key and value projections; the fallback's tiles then chosen by the earlier units):
+
+| Model | n | Layers | Left to 12.9 by the rules | 12.9, sum (ms) | Every product served | With the rules |
+|---|---:|---:|---:|---:|---:|---:|
+| 0.5B | 64 | 24 | 0 | 18.96 | 6.54 | 6.54 |
+| 0.5B | 128 | 24 | 0 | 18.58 | 5.64 | 5.64 |
+| 0.5B | 512 | 24 | 0 | 18.86 | 2.52 | 2.52 |
+| 0.5B | 2,048 | 24 | 0 | 45.56 | 1.50 | 1.50 |
+| 1.5B | 64 | 85 | 57 | 60.38 | 1.99 | 2.06 |
+| 1.5B | 128 | 85 | 57 | 66.91 | 1.86 | 1.71 |
+| 1.5B | 512 | 85 | 28 | 152.73 | 1.81 | 1.48 |
+| 1.5B | 2,048 | 85 | 28 | 533.06 | 1.73 | 1.50 |
+| 9B hybrid | 64 | 153 | 73 | 168.25 | 1.39 | 1.43 |
+| 9B hybrid | 128 | 153 | 73 | 240.01 | 1.56 | 1.21 |
+| 9B hybrid | 512 | 153 | 32 | 688.57 | 1.75 | 1.55 |
+| 9B hybrid | 2,048 | 153 | 32 | 2,543.40 | 1.68 | 1.56 |
+| 4B hybrid | 64 | 153 | 73 | 117.29 | 1.69 | 1.78 |
+| 4B hybrid | 128 | 153 | 73 | 136.25 | 1.63 | 1.50 |
+| 4B hybrid | 512 | 153 | 32 | 338.88 | 1.76 | 1.62 |
+| 4B hybrid | 2,048 | 153 | 32 | 1,278.48 | 1.78 | 1.64 |
+
+At n <= 128 the tall rule gives 12.9 the MLPs' up projections and the output layers of the three larger models,
+which the path computed at 1.14 to 1.76 times 12.9's speed at n = 96 to 128 (the attention's query projections of
+m >= 8,192 at 1.24 to 1.45, the output layers at 1.05 to 1.25): that is the cost at n = 128. A
+two-tier bound (12.9 up to 64 columns at m >= 8,192, the path from 65) would keep them; it needs first a dense sweep
+of m from 8,192 to 32,768 at n = 96 to 128, three passes, since the sweeps found points at 112 to 128 columns, at
+m = 10,240 and on output layers, where 12.9 was as fast or faster. Left for later.
+
+**The sweeps** (synthetic operands, every row and column converting, TN; the medians of 2 or 3 passes):
+
+- the tall rule's m bound, n = 32 to 128, k = 1,536 to 4,096 and 10,240 to 12,288, m = 8,192 to 9,208: at
+  k = 1,536 and 64 columns the path's lead fell from 1.05 at m = 8,192 to 1.02 at 8,384 and below 1.0 from 8,704
+  (0.95 at 9,208); at 65 to 128 columns it stayed at 1.07 to 1.46; at k = 10,240 to 12,288 it was within 2 % of
+  12.9 from m = 8,256 on.
+- the n bound, m = 8,192 to 151,936, k = 1,536 to 7,168, n = 96 to 192: 0.95 to 1.70 at n = 96 to 128 (within 3 %
+  of 12.9 or below at 112 to 128 columns for m = 10,240 and the output layers, down to 0.95), 1.18 and more at
+  n = 136 to 192.
+- output layers, m = 151,936 and 248,320, k = 1,024 to 4,096: 0.65 to 0.96 at n <= 64, 1.01 to 1.56 at n = 65 to
+  128, 1.21 and more from 129.
+- the long-k corner, k = 12,288 to 16,384, m = 6,144 to 8,320, n = 48 to 384: at n <= 256, 19 points below 1.03,
+  at m = 6,656 to 8,320 (0.93 at m = 7,680, k = 16,384, n = 128); at m = 6,144, 1.03 and more.
+- the wide rule's n bound on real operands: the down projection with the most failing columns (k = 8,960) at
+  1.17 to 1.19 at n = 192 to 256 with the rules; before them, at 0.85 at n = 320 (the first
+  tokens; 1.08 with the columns spread over the batch) and below 1.0 at every n from 384 on (down to 0.62); no
+  model measured has a down projection of k between 4,864 and 8,960; those of k = 4,864 kept at least 1.08 times
+  12.9's speed at every n.
+
+### Where the GPU time goes
+
+Profiles with `VF_PROFILE` (every launch waited for: a profile, not a benchmark), with the tensor-core path on: the
+share of the GPU's kernel time taken by cuBLAS 12.9's bf16 kernels, by the path's fp16 products, by the layer's
+other kernels (the skinny kernel, the scaling and check, the epilogue) and by the fallback; then, from the report at
+exit, the path's calls that had rows or columns failing the exact check, and the share of the path's elements that
+the fallback computed:
+
+| Program | 12.9's bf16 kernels | The path's fp16 products | The layer's other kernels | The fallback | Calls with failing rows or columns | Elements by the fallback |
+|---|---:|---:|---:|---:|---:|---:|
+| LoRA training, 2 steps of 8 x 256 tokens | 75.2 % | 2.4 % | 4.1 % | 0.3 % | 16 of 192 | 2.82 % |
+| Full fine-tuning, 2 steps of 8 x 256 tokens | 73.0 % | 1.8 % | 1.9 % | 0.2 % | 25 of 96 | 2.84 % |
+| A prompt of 2,048 tokens | 42.7 % | 5.3 % | 5.8 % | 0.6 % | 16 of 72 | 2.10 % |
+| Log-likelihood of 8 x 512 tokens | 66.8 % | 5.5 % | 5.6 % | 0.7 % | 16 of 72 | 3.14 % |
+| `generate()`, batch 8 | 35.4 % | 3.7 % | 15.4 % | 1.3 % | 142 of 3,288 | 2.24 % |
+| `generate()`, batch 32 | 62.3 % | 2.3 % | 4.0 % | 0.7 % | 160 of 3,288 | 2.36 % |
+
+With the switches off, 12.9's bf16 kernels took 57 to 83 % of the kernel time of the same programs. With the path
+on, they still take most of it: the products with 896 in-features and, in training, the backward pass's. Before
+this series, in full fine-tuning, the fallback took 31.7 % of the kernel time, the scaling kernel about 34 % and
+the fp16 products 12.5 %, for the backward pass's products that now go to 12.9.
 
 An engine that replays its steps from CUDA graphs gains little (`LIMITS.md`, "The bf16 cuBLAS
 variants"): SGLang at its default settings computes in fp16 on this card, with no bf16 product, and

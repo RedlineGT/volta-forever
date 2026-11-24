@@ -451,17 +451,17 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 `docs/emulations.md` (section 11). Both are off by default. Their limits:
 
 - **The tensor-core path's results are not cuBLAS 12.9's bits**: they differ in the last bits
-  (`docs/emulations.md`, section 11), in inference and in training. A bf16 fine-tuning step (LoRA and
-  full fine-tuning of a 0.5B model) ran at 1.02 to 1.07 times its speed without the switch: its
-  forward products are served, those of its backward pass go to 12.9 (below, the TN layout). Eager
-  PyTorch inference programs ran 1.3 to 1.7 times as
-  fast with it (prompts, generation at batch 8 and 32, an embedding encoder; Whisper 1.24 to 1.30,
-  generation at batch 1 unchanged), and up to 1.9 times under `torch.compile`
-  (`docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs":
-  one model of each kind, on one V100, measured before the gate on k: with it, these models'
-  products with 768 or 896 in-features, all but the second product of each MLP, go to the skinny
-  path or to 12.9). `VF_SAFE=1` keeps every call at 12.9's bits whatever `VF_CUBLAS_BF16_TC` says
-  ([Safe mode](#safe-mode-vf_safe1)).
+  (`docs/emulations.md`, section 11), in inference and in training. What it gains depends on the program's
+  shapes. Measured on one model of each kind on one V100 (`docs/performance.md`, "bf16 products through cuBLAS:
+  the opt-in variants on real programs"): eager generation at batch 8 and 32 ran 1.39 and 1.46 times as fast
+  with it, prompts and scoring 1.05 to 1.18 times, an embedding encoder 1.11 to 1.16 times, Whisper's encoder
+  1.07 times and its transcription at batch 16 1.20 times, the generation model under `torch.compile` 1.07 to
+  1.22 times, and generation at batch 1 (one column, never served) at 0.98 to 0.99 times its speed without the
+  switch. With the gate on k, these models' products with 768 or 896 in-features, all but the second product
+  of each MLP, go to the skinny path or to 12.9. A bf16 fine-tuning step (LoRA and full fine-tuning of the same
+  0.5B model) ran at 1.02 to 1.07 times its speed without the switch: its forward products are served, those of
+  its backward pass go to 12.9 (below, the TN layout). `VF_SAFE=1` keeps every call at 12.9's bits whatever
+  `VF_CUBLAS_BF16_TC` says ([Safe mode](#safe-mode-vf_safe1)).
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
   580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
