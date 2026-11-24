@@ -21,6 +21,7 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
   thread holds the lock, which the child then has held for ever: both functions return ECHILD there at once;
+- the layer's thread blocks every signal, and the thread that loaded the layer keeps its mask;
 - without VF_SUMMARY: no thread and no call; without the thread (it could not be started): the lines at exit;
 - at exit, in both orders of the destructors (the library loaded after the layer and before it; with glibc 2.39
   the destructors run in the order of loading, and the two cases must show both orders): when the layer's comes
@@ -67,9 +68,16 @@ def load(path, mode=os.RTLD_LOCAL):
     return lib
 
 
+def blocked(task):
+    """The signals that a thread of this process blocks (its SigBlk), as a number."""
+    with open(f"/proc/self/task/{task}/status") as status:
+        return int(next(l for l in status if l.startswith("SigBlk:")).split()[1], 16)
+
+
 def child(proxy, library, mode):
     warnings.simplefilter("ignore", DeprecationWarning)  # fork() with the layer's thread running
     say = lambda *words: print(*words, flush=True)
+    mask = blocked(os.getpid())  # before the layer is loaded
     if mode == "order-library":  # the library first, the layer after it
         lib = load(library)
         api = c.CDLL(proxy)
@@ -189,6 +197,13 @@ def child(proxy, library, mode):
         codes = list(c.cast(c.create_string_buffer(os.read(r, 8), 8), c.POINTER(c.c_int * 2)).contents)
         assert os.waitstatus_to_exitcode(status) == 0 and codes == [errno.ECHILD, errno.ECHILD], (status, codes)
         say("rawfork", *codes)
+        return
+
+    if mode == "signals":  # the masks of the threads, the layer's thread found by its name
+        tasks = os.listdir("/proc/self/task")
+        name = lambda t: open(f"/proc/self/task/{t}/comm").read().strip()
+        mine = [t for t in tasks if name(t) == "vf-summary"]
+        say("masks", hex(mask), hex(blocked(os.getpid())), *(hex(blocked(t)) for t in mine))
         return
 
     if mode in ("hang", "forks", "exits"):  # fills that break the contract
@@ -534,6 +549,20 @@ if __name__ == "__main__":
         assert out.split() == ["rawfork", str(errno.ECHILD), str(errno.ECHILD)], (out, err)
         print("PASS a child made without fork()'s handlers while the thread held the lock (held for ever in it): add"
               " and remove return ECHILD at once")
+
+        # The layer's thread blocks every signal; the thread that loaded the layer keeps its own mask.
+        p = start("signals", **on)
+        p.line()
+        masks = p.line()
+        p.finish()
+        assert masks[0] == "masks" and len(masks) == 4, masks
+        before, after, thread = (int(m, 16) for m in masks[1:])
+        wanted = sum(1 << (n - 1) for n in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
+                                            signal.SIGPIPE, signal.SIGALRM, signal.SIGTERM, signal.SIGCHLD,
+                                            signal.SIGRTMIN))
+        assert thread & wanted == wanted and after == before, masks
+        print(f"PASS the layer's thread blocks every signal (its SigBlk {masks[3]}), the thread that loaded the layer"
+              f" keeps its mask ({masks[2]})")
 
         # Without VF_SUMMARY: no thread, no call.
         p = start("unset")

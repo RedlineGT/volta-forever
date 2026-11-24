@@ -446,7 +446,21 @@ pub fn start() {
     }
     // SAFETY: the handlers only lock and unlock `LOCK`.
     unsafe { libc::pthread_atfork(Some(lock), Some(unlock), Some(unlock)) };
-    if let Err(e) = std::thread::Builder::new().name("vf-summary".into()).spawn(rewrite) {
+    // The thread blocks every signal (a thread starts with the mask of the one that makes it): no handler
+    // of the program's runs there, where the layer's locks are held and other libraries' code runs (one
+    // that called exit() there would wait for ever for a lock of its own thread), and a program that takes
+    // its signals with sigwait() gets them all.
+    // SAFETY: two signal sets to fill and to keep.
+    let (mut every, mut kept): (libc::sigset_t, libc::sigset_t) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+    // SAFETY: valid signal sets; this thread's mask, given back right after.
+    unsafe {
+        libc::sigfillset(&mut every);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &every, &mut kept);
+    }
+    let spawned = std::thread::Builder::new().name("vf-summary".into()).spawn(rewrite);
+    // SAFETY: as above.
+    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &kept, std::ptr::null_mut()) };
+    if let Err(e) = spawned {
         log::warn(format_args!(
             "VF_SUMMARY: cannot start the thread that writes the report while the process runs ({e}); it is written at exit"
         ));
