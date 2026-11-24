@@ -605,7 +605,10 @@ bytes, bytes that are not UTF-8 and valid UTF-8 between them, and return more th
 the file valid UTF-8 without control characters, each line with a known prefix, the text read up to
 the buffer's end and no further; a removal that waits for the call under way (of 300 ms), calls the
 function once more, keeps its lines marked as its last report, and calls nothing after; a function
-that calls the layer back, refused, not left waiting; children made by `fork()` while the thread
+that calls the layer back, refused, not left waiting; functions that break the contract: one that never
+returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then is made
+without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` (the
+process ends with that status, its last write made); children made by `fork()` while the thread
 writes and holds the lock, in which both functions do nothing, nothing is called, and which end and
 write nothing; without `VF_SUMMARY` no thread and no call, and without the thread (it cannot be
 started under `RLIMIT_NPROC`) the lines at exit; at exit, the library loaded after the layer called
@@ -613,8 +616,8 @@ by the layer's last write and its removal after it calling nothing, loaded befor
 with its last report written; a library unloaded by `dlclose` while the thread runs, which removes
 itself in its destructor (its last report stays, the process lives on), and one pinned, which stays,
 its lines written as they change; and, the control, one unloaded without removing itself, into which
-the thread calls (the process ends by SIGSEGV). Each case in a process of its own; it needs a C
-compiler.
+the thread calls (the process ends by SIGSEGV). Each case in a process of its own, killed with its
+children when a wait of the test passes 60 s; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -640,7 +643,7 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 518, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 519, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,

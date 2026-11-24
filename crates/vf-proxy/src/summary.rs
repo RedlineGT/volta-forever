@@ -16,21 +16,29 @@
 //! Another library can put lines of its own in the file, after the layer's (`docs/architecture.md`,
 //! "The summary's lines of other libraries"): `vf_summary_add` gives the layer a function of the
 //! library's, `fill`, that writes them into a buffer, and `vf_summary_remove` takes it back. These two
-//! are the layer's own functions, not NVIDIA's. Every write of the file calls each `fill` with the
-//! lock held; its text, cleaned (`text_lines`), counts in whether the report changed, and each of its
-//! lines is written with the library's name in front (`[NAME] `), which no line of the layer's
-//! (`[volta-forever] `) has. A
-//! removal takes the same lock, so it waits for a `fill` being called: a library that removes itself
-//! in its destructor is not called after it. While the file is still to be written, the removal calls
-//! `fill` once more, in the process that loaded the layer, and keeps what it gives for the writes that
-//! follow, marked as the library's last report (`[NAME, last report] `): at exit, the layer's last
-//! write (`fini`) and the destructor of a library that removes itself both run in `_dl_fini`, in the
-//! order of the libraries' loading, and the library's lines are in that write whichever comes first.
-//! Once the last write is made, a removal calls nothing. In a child made by `fork()`, both functions
-//! do nothing (the child writes no file), and no `fill` is called. A `fill` is called by the thread
-//! that writes the file, by a removal, and at exit by the thread that exits, as the rest of the report:
-//! the layer has no handler of a signal, and calls one from a handler only if the program calls
-//! `exit()` from it, which POSIX does not allow.
+//! are the layer's own functions, not NVIDIA's. Every write of the file calls each `fill`, one after the
+//! other, with a lock of theirs held (`FILLS`), not the file's (`LOCK`, which the handlers of
+//! `pthread_atfork` take): a fork waits for no library's code. A `fill`'s text, cleaned (`text_lines`),
+//! counts in whether the report changed, and each of its lines is written with the library's name in
+//! front (`[NAME] `), which no line of the layer's (`[volta-forever] `) has. A removal takes `FILLS`, so
+//! it waits for the `fill`s being called: a library that removes itself in its destructor is not called
+//! after it. While the file is still to be written, the removal calls `fill` once more, in the process
+//! that loaded the layer, and keeps what it gives for the writes that follow, marked as the library's
+//! last report (`[NAME, last report] `): at exit, the layer's last write (`fini`) and the destructor of
+//! a library that removes itself both run in `_dl_fini`, in the order of the libraries' loading, and
+//! the library's lines are in that write whichever comes first. The last write waits for `FILLS` 2 s
+//! at most (`LAST_WAIT`): a `fill` that does not return would hold the exit for ever. Once it is made,
+//! both functions return at once and do nothing. In a child made by `fork()`, both functions do
+//! nothing (the child writes no file), and no `fill` is called. A `fill` is called by the thread that
+//! writes the file, by a removal, and at exit by the thread that exits, as the rest of the report: the
+//! layer has no handler of a signal, and calls one from a handler only if the program calls `exit()`
+//! from it, which POSIX does not allow.
+//!
+//! What a `fill` may do is little (the contract, `docs/architecture.md`): read its library's counters,
+//! write text, and return at once. Every other library's `fill` and every removal waits for it; it must
+//! not block, wait for another thread (which may be waiting for `FILLS`: `EDEADLK` covers the calling
+//! thread only), fork, exit, call `pthread_exit` or `longjmp`, or throw (an unwinding through the
+//! layer's frames aborts the process). The two functions are not async-signal-safe.
 
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_int, c_uint, c_void};
@@ -57,12 +65,58 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 /// A failure to write the file was said.
 static FAILED: AtomicBool = AtomicBool::new(false);
 
-/// The lock of the file and of reading the report for it: a mutex of the C library, which the
-/// handlers of `pthread_atfork` take and give back around a fork.
+/// A mutex of the C library.
 struct Lock(UnsafeCell<libc::pthread_mutex_t>);
 // SAFETY: a pthread mutex is made to be shared between threads; it is only used through its address.
 unsafe impl Sync for Lock {}
-static LOCK: Lock = Lock(UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER));
+
+impl Lock {
+    const fn new() -> Self {
+        Lock(UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER))
+    }
+
+    /// The lock, held until what this gives is dropped (also when what holds it panics).
+    fn take(&'static self) -> Held {
+        // SAFETY: an initialized mutex that is never moved.
+        unsafe { libc::pthread_mutex_lock(self.0.get()) };
+        Held(self)
+    }
+
+    /// The lock if it can be taken within `wait`, else `None`.
+    fn take_within(&'static self, wait: Duration) -> Option<Held> {
+        let mut deadline = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a timespec to write.
+        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut deadline) };
+        let nanos = deadline.tv_nsec as u64 + u64::from(wait.subsec_nanos());
+        deadline.tv_sec += (wait.as_secs() + nanos / 1_000_000_000) as libc::time_t;
+        deadline.tv_nsec = (nanos % 1_000_000_000) as _;
+        // SAFETY: as for `take`.
+        (unsafe { libc::pthread_mutex_timedlock(self.0.get(), &deadline) } == 0).then_some(Held(self))
+    }
+}
+
+struct Held(&'static Lock);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // SAFETY: the mutex that this thread took.
+        unsafe { libc::pthread_mutex_unlock(self.0.0.get()) };
+    }
+}
+
+/// The lock of the file and of reading the report for it, which the handlers of `pthread_atfork` take
+/// and give back around a fork. Held around the layer's own code only: no library's `fill` runs with it.
+static LOCK: Lock = Lock::new();
+
+/// The lock of the registrations and of the calls of their `fill`s: a removal takes it, and so waits
+/// for the `fill`s under way. Not taken around a fork, so that a fork waits for no library's code (and
+/// a `fill` that forks does not wait for itself): a child made by `fork()` may have it held, by a thread
+/// it does not have, and never takes it (`refused_here`).
+static FILLS: Lock = Lock::new();
+
+/// How long the last write waits for `FILLS`: a `fill` that does not return would hold the exit for
+/// ever. Past it, the file is written without the other libraries' lines, and says so.
+const LAST_WAIT: Duration = Duration::from_secs(2);
 
 extern "C" fn lock() {
     // SAFETY: an initialized mutex that is never moved.
@@ -72,20 +126,6 @@ extern "C" fn lock() {
 extern "C" fn unlock() {
     // SAFETY: as for `lock`; called by the thread that locked it (in a child, the one that forked).
     unsafe { libc::pthread_mutex_unlock(LOCK.0.get()) };
-}
-
-/// `LOCK`, held until this is dropped (also when what holds it panics).
-struct Locked;
-
-impl Drop for Locked {
-    fn drop(&mut self) {
-        unlock();
-    }
-}
-
-fn locked() -> Locked {
-    lock();
-    Locked
 }
 
 // ---- the lines of other libraries (`vf_summary_add`, `vf_summary_remove`) --------------------------
@@ -115,15 +155,15 @@ struct Slot {
     kept: Vec<String>,
 }
 
-/// The registrations, read and changed with `LOCK` held only.
+/// The registrations, read and changed with `FILLS` held only.
 struct Registry(UnsafeCell<[Option<Slot>; SLOTS]>);
-// SAFETY: only used with `LOCK` held.
+// SAFETY: only used with `FILLS` held.
 unsafe impl Sync for Registry {}
 static REGISTRY: Registry = Registry(UnsafeCell::new([const { None }; SLOTS]));
 
-/// The thread (its `pthread_self`) that is in a library's `fill`, with `LOCK` held, else 0: a call of
+/// The thread (its `pthread_self`) that is in a library's `fill`, with `FILLS` held, else 0: a call of
 /// ours from that `fill` would wait for the lock that its thread holds. (Not a thread-local: the first
-/// use of one in a thread can take a lock of the loader's, with `LOCK` held.)
+/// use of one in a thread can take a lock of the loader's, with `FILLS` held.)
 static FILLING: AtomicUsize = AtomicUsize::new(0);
 
 fn this_thread() -> usize {
@@ -138,10 +178,11 @@ fn not_filling() {
 
 /// Adds the library `name` to those whose lines `VF_SUMMARY`'s file holds: each write of the file calls
 /// `fill(buf, 4096, ctx)` (in the thread that writes it while the process runs, in the one that exits
-/// for the last write), with the layer's lock held, and writes each line of what it gave with `[name] `
-/// in front, its bytes that are not UTF-8 dropped, and its control characters but the newline, the line
-/// and paragraph separators and the controls of bidirectional text (`text_lines`); without
-/// `VF_SUMMARY`, nothing is called. `name` is copied. Returns 0, or:
+/// for the last write), with the lock of the `fill`s held, and writes each line of what it gave with
+/// `[name] ` in front, its bytes that are not UTF-8 dropped, and its control characters but the
+/// newline, the line and paragraph separators and the controls of bidirectional text (`text_lines`);
+/// without `VF_SUMMARY`, nothing is called. `fill` must return at once (the module's contract). `name`
+/// is copied. After the last write (at exit), nothing is done and 0 returned. Returns 0, or:
 /// - `ENOTSUP`: `abi` is not 1, the number of this interface;
 /// - `EINVAL`: `name` or `fill` is null, or `name` is not 1 to 64 ASCII letters, digits, `.`, `_`,
 ///   `+` and `-`, or is `volta-forever` (the layer's own, in any case);
@@ -174,19 +215,26 @@ pub unsafe extern "C" fn vf_summary_add(
         let (Some(fill), Some(name)) = (fill, unsafe { name_of(name) }) else {
             return libc::EINVAL;
         };
-        let _locked = locked();
-        // SAFETY: with `LOCK` held.
+        if FINISHED.load(Relaxed) {
+            return 0; // after the last write: nothing more is written
+        }
+        let _held = FILLS.take();
+        if FINISHED.load(Relaxed) {
+            return 0;
+        }
+        // SAFETY: with `FILLS` held.
         register(unsafe { &mut *REGISTRY.0.get() }, &name, fill, ctx as usize)
     })
 }
 
 /// Takes back the `fill` registered with this `ctx`: the layer does not call it after this returns, and
-/// waits for a call of it under way. While `VF_SUMMARY`'s file is still to be written, in the process
-/// that loaded the layer, `fill` is called once more here, and what it gives is written in its place
-/// from then on, marked as the library's last report (`[name, last report] `); once the last write
-/// (at exit) is made, nothing is called. Returns 0, or `ENOENT` (not registered), `EINVAL` (`fill` is
-/// null), `ECHILD` (in a child made by `fork()`: nothing done), `EDEADLK` (called from a `fill`),
-/// `EIO` (an internal error of the layer).
+/// waits for the calls of `fill`s under way (every library's: the layer calls them one after the other,
+/// under one lock). While `VF_SUMMARY`'s file is still to be written, in the process that loaded the
+/// layer, `fill` is called once more here, and what it gives is written in its place from then on,
+/// marked as the library's last report (`[name, last report] `); once the last write (at exit) is made,
+/// nothing is called, nothing waited for, and 0 returned. Returns 0, or `ENOENT` (not registered),
+/// `EINVAL` (`fill` is null), `ECHILD` (in a child made by `fork()`: nothing done), `EDEADLK` (called
+/// from a `fill`), `EIO` (an internal error of the layer).
 ///
 /// # Safety
 /// As for `vf_summary_add`: `fill` and `ctx` still valid when this is called.
@@ -199,8 +247,11 @@ pub unsafe extern "C" fn vf_summary_remove(fill: Option<Fill>, ctx: *mut c_void)
         let Some(fill) = fill else {
             return libc::EINVAL;
         };
-        let _locked = locked();
-        // SAFETY: with `LOCK` held.
+        if FINISHED.load(Relaxed) {
+            return 0; // after the last write: nothing is called, nothing more is written
+        }
+        let _held = FILLS.take();
+        // SAFETY: with `FILLS` held.
         let slots = unsafe { &mut *REGISTRY.0.get() };
         let Some(slot) = slots.iter_mut().find(|slot| {
             slot.as_ref()
@@ -307,7 +358,7 @@ fn register(slots: &mut [Option<Slot>; SLOTS], name: &str, fill: Fill, ctx: usiz
 }
 
 /// What `fill` gives now, line by line, as the file holds it (`text_lines`): it is given `CAP` bytes,
-/// and no more of them are read, whatever it returns. With `LOCK` held, so that a removal waits.
+/// and no more of them are read, whatever it returns. With `FILLS` held, so that a removal waits.
 ///
 /// # Safety
 /// `fill` and `ctx` as registered, the library not removed.
@@ -344,15 +395,17 @@ fn text_lines(text: &[u8]) -> Vec<String> {
 }
 
 /// The lines of the registered libraries, in the order of their slots, for a write of the file: what
-/// each `fill` gives now, or a removed library's last report. With `LOCK` held. A panic leaves them
-/// out of this write.
-fn libraries_lines() -> Vec<String> {
+/// each `fill` gives now, or a removed library's last report. With `FILLS` held. For the thread's
+/// writes (`finished`), no `fill` is called once the last write is made (an exit under way). A panic
+/// leaves them out of this write.
+fn libraries_lines(finished: &AtomicBool) -> Vec<String> {
     catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: with `LOCK` held.
+        // SAFETY: with `FILLS` held.
         let slots = unsafe { &*REGISTRY.0.get() };
         let mut lines = Vec::new();
         for slot in slots.iter().flatten() {
             let (prefix, text) = match slot.fill {
+                _ if finished.load(Relaxed) => break,
                 // SAFETY: registered and not removed: the library is there (it removes itself before it
                 // goes, and the removal waits for the lock).
                 Some((fill, ctx)) => (format!("[{}] ", slot.name), unsafe { filled(fill, ctx) }),
@@ -401,6 +454,7 @@ pub fn start() {
 }
 
 /// The thread: the report, written again whenever it changed (the lines of other libraries included).
+/// The other libraries' lines are read first, with `FILLS` held, then the layer's report, with `LOCK`.
 fn rewrite() {
     let Some(settings) = SETTINGS.get() else {
         return;
@@ -408,11 +462,19 @@ fn rewrite() {
     let mut last = None;
     loop {
         std::thread::sleep(settings.interval);
-        let _locked = locked();
         if FINISHED.load(Relaxed) {
             return;
         }
-        let lines = lines(&crate::report());
+        let others = {
+            let _held = FILLS.take();
+            libraries_lines(&FINISHED)
+        };
+        let _locked = LOCK.take();
+        if FINISHED.load(Relaxed) {
+            return;
+        }
+        let mut lines = layer_lines(&crate::report());
+        lines.extend(others);
         if last.as_ref() != Some(&lines) {
             write(settings, &lines, false);
             last = Some(lines);
@@ -420,22 +482,36 @@ fn rewrite() {
     }
 }
 
-/// The process exits: its report, written for the last time.
+/// The process exits: its report, written for the last time, with the other libraries' lines when
+/// `FILLS` can be had within `LAST_WAIT`, and not when this thread is in a `fill` (it called `exit()`).
 pub fn finish(report: &[String]) {
     let Some(settings) = SETTINGS.get() else {
         return;
     };
-    let _locked = locked();
+    let others = if FILLING.load(Relaxed) == this_thread() {
+        Err("the process exited from one of their functions")
+    } else if let Some(_held) = FILLS.take_within(LAST_WAIT) {
+        let lines = libraries_lines(&AtomicBool::new(false));
+        FINISHED.store(true, Relaxed);
+        Ok(lines)
+    } else {
+        Err("one of their functions had not returned 2 s after the exit began")
+    };
     FINISHED.store(true, Relaxed);
-    write(settings, &lines(report), true);
+    let _locked = LOCK.take();
+    let mut lines = layer_lines(report);
+    match others {
+        Ok(others) => lines.extend(others),
+        Err(why) => lines.push(format!(
+            "[volta-forever] the lines of other libraries are not in this last write: {why}"
+        )),
+    }
+    write(settings, &lines, true);
 }
 
-/// The lines of the file after its first: the layer's report, then the other libraries'. With `LOCK`
-/// held.
-fn lines(report: &[String]) -> Vec<String> {
-    let mut lines: Vec<String> = report.iter().map(|line| format!("[volta-forever] {line}")).collect();
-    lines.extend(libraries_lines());
-    lines
+/// The layer's lines of the file, after its first.
+fn layer_lines(report: &[String]) -> Vec<String> {
+    report.iter().map(|line| format!("[volta-forever] {line}")).collect()
 }
 
 fn write(settings: &Settings, lines: &[String], exited: bool) {
@@ -650,6 +726,18 @@ mod tests {
             text_lines(forged.as_bytes()),
             ["x[volta-forever] 9 kernelsy desrever z"]
         );
+    }
+
+    #[test]
+    fn a_lock_held_elsewhere_is_given_up_after_the_wait() {
+        static HELD: Lock = Lock::new();
+        let held = HELD.take();
+        let t0 = Instant::now();
+        let wait = || HELD.take_within(Duration::from_millis(200)).is_some();
+        assert!(!std::thread::spawn(wait).join().unwrap());
+        assert!(t0.elapsed() >= Duration::from_millis(190), "{:?}", t0.elapsed());
+        drop(held);
+        assert!(std::thread::spawn(wait).join().unwrap());
     }
 
     static CALLED_BACK: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);

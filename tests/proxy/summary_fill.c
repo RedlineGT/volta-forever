@@ -7,6 +7,7 @@
 //   slow     sleeps 300 ms, then "slow"; the times of its calls kept
 //   reenter  calls vf_summary_add and vf_summary_remove from inside, says what they returned
 //   empty    nothing
+//   hang, forks, exits  once armed (fill_arm): never returns; forks (its child ends at once); calls exit(3)
 // Each counts its calls. Its destructor, when fill_at_exit asked for it, takes back what it registered
 // (as a library removes itself before it goes) and says on standard error how many times its fills
 // were called before and after, and what vf_summary_remove returned; with FILL_NO_REMOVE=1 it does not
@@ -19,6 +20,7 @@
 #include <string.h>
 #include <signal.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -89,6 +91,47 @@ static size_t fill_empty(char *buf, size_t cap, void *ctx)
     return 0;
 }
 
+/* Fills that break the contract, once armed (fill_arm): one that never returns, one that forks (its child ends at
+ * once, waited for), one that calls exit(3). in_fill says that the armed one was entered. */
+static atomic_int armed, in_fill, forks;
+static size_t fill_hang(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed)) {
+        atomic_store(&in_fill, 1);
+        for (;;) pause();
+    }
+    int n = snprintf(buf, cap, "hang not armed\n");
+    return n < 0 ? 0 : (size_t)n;
+}
+static size_t fill_forks(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed)) {
+        atomic_store(&in_fill, 1);
+        const pid_t pid = fork();
+        if (pid == 0) _exit(0);
+        if (pid > 0 && waitpid(pid, NULL, 0) == pid) atomic_fetch_add(&forks, 1);
+    }
+    int n = snprintf(buf, cap, "forked %d\n", atomic_load(&forks));
+    return n < 0 ? 0 : (size_t)n;
+}
+static size_t fill_exits(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed)) {
+        atomic_store(&in_fill, 1);
+        exit(3);
+    }
+    int n = snprintf(buf, cap, "exits not armed\n");
+    return n < 0 ? 0 : (size_t)n;
+}
+void fill_arm(int on) { atomic_store(&armed, on); }
+int fill_entered(void) { return atomic_load(&in_fill); }
+
 static fill_fn kind(const char *k)
 {
     if (!strcmp(k, "count")) return fill_count;
@@ -96,6 +139,9 @@ static fill_fn kind(const char *k)
     if (!strcmp(k, "slow")) return fill_slow;
     if (!strcmp(k, "reenter")) return fill_reenter;
     if (!strcmp(k, "empty")) return fill_empty;
+    if (!strcmp(k, "hang")) return fill_hang;
+    if (!strcmp(k, "forks")) return fill_forks;
+    if (!strcmp(k, "exits")) return fill_exits;
     return NULL;
 }
 

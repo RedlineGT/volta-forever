@@ -14,7 +14,10 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   splitlines would cut, no bidirectional control; the text read up to the buffer's end and no further);
 - a removal waits for the call under way (a fill of 300 ms), calls the fill once more and keeps its lines,
   marked; nothing is called after it; the same name registered again takes the slot back;
-- a fill that calls the layer back is refused (EDEADLK), not left waiting;
+- a fill that calls the layer back is refused (EDEADLK), not left waiting; fills that break the contract: one
+  that never returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then
+  is made without the libraries' lines and says so), one that forks at each write (no deadlock), one that calls
+  exit(3) (the process ends with that status and its last write is made, saying why it lacks those lines);
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
   thread holds the lock, which the child then has held for ever: both functions return ECHILD there at once;
@@ -187,6 +190,32 @@ def child(proxy, library, mode):
         assert os.waitstatus_to_exitcode(status) == 0 and codes == [errno.ECHILD, errno.ECHILD], (status, codes)
         say("rawfork", *codes)
         return
+
+    if mode in ("hang", "forks", "exits"):  # fills that break the contract
+        assert add(mode.encode(), mode.encode()) == 0
+        lib.fill_arm(1)
+        end = time.time() + 15
+        while not lib.fill_entered() and time.time() < end:
+            time.sleep(0.02)
+        assert lib.fill_entered(), "the armed fill was not called"
+        if mode == "exits":
+            time.sleep(20)  # its exit(3) ends the process first
+            say("still alive")
+            return
+        if mode == "hang":  # a fork from this thread, while the layer's thread is in the fill for ever
+            t0 = time.time()
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            os.waitpid(pid, 0)
+            say("fork", round(1000 * (time.time() - t0)))
+        else:  # the fill forks at each write
+            end = time.time() + 15
+            while lib.fill_calls() < 3 and time.time() < end:
+                time.sleep(0.05)
+            say("calls", lib.fill_calls())
+        say("exiting")
+        return  # exit()
 
     if mode == "reenter":
         assert add(b"re", b"reenter", 100) == 0
@@ -529,6 +558,47 @@ if __name__ == "__main__":
             text = well_formed(Path(f"{summary}.{p.pid}"), ["counter"])
             assert "at its exit" in text and of(text, "counter") == ["count 7"], text
             print("PASS a registration without the thread (it could not be started) is written at exit")
+
+        # Fills that break the contract. One that never returns: a fork from another thread does not wait for it
+        # (the fills have a lock of their own, which the handlers of pthread_atfork do not take), and the last write
+        # waits 2 s for it, then is made without the other libraries' lines, and says so.
+        p = start("hang", **on)
+        p.line()
+        fork = p.line()
+        assert fork[0] == "fork" and int(fork[1]) < 3000, fork
+        assert p.line() == ["exiting"]
+        t0 = time.time()
+        out, err = p.finish(30)
+        took = time.time() - t0
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["hang"])
+        assert text.startswith(f"[volta-forever] report of process {p.pid}, at its exit\n") and took < 10, (took, text)
+        assert ("\n[volta-forever] the lines of other libraries are not in this last write: one of their functions had "
+                "not returned 2 s after the exit began\n") in text and "\n[hang] " not in text, text
+        # One that forks at each write: no deadlock (the fork's handlers do not wait for the fill's own lock).
+        p = start("forks", **on)
+        p.line()
+        calls = p.line()
+        assert calls[0] == "calls" and int(calls[1]) >= 3, calls
+        assert p.line() == ["exiting"]
+        p.finish()
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["forks"])
+        forked = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("[forks] forked ")]
+        assert text.startswith(f"[volta-forever] report of process {p.pid}, at its exit\n") and forked and \
+            forked[0] >= 3, text
+        # One that calls exit(3): the process ends with that status, and the last write is made, without the other
+        # libraries' lines (this thread was in one of their functions), and says so.
+        p = start("exits", **on)
+        p.line()
+        status, out, err = p.end()
+        assert status == 3 and "still alive" not in out, (status, out, err)
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["exits"])
+        assert text.startswith(f"[volta-forever] report of process {p.pid}, at its exit\n"), text
+        assert ("\n[volta-forever] the lines of other libraries are not in this last write: the process exited from "
+                "one of their functions\n") in text, text
+        print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here), the"
+              f" last write made without the libraries' lines and saying so, and a fork from another thread does not wait"
+              f" for it ({fork[1]} ms); one that forks at each write is called {calls[1]} times; one that calls exit(3)"
+              f" ends the process with that status, its last write made and saying why it lacks the libraries' lines")
 
         # At exit, in both orders of the destructors: which one came first is read from the removal (whether it
         # called the fill once more), and the file must hold what that order gives; the two cases must show both.
