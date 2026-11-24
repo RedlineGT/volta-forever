@@ -35,10 +35,10 @@
 //! - when a call that the layer routes returns an error of a fault (`is_fault`) for the first time in
 //!   a context, the launches of that context that no synchronisation covers are the candidates: they
 //!   are named in one report at level 0, the last first, with the image of each and what the layer
-//!   made of it (`report`), and again in the report at exit (`summary_lines`). The calls looked at
-//!   are the launches, the synchronisations and queries of streams, events and contexts, and the
-//!   loads and unloads of modules. A fault that only calls that the layer does not route met (a
-//!   copy, a memset: they go to NVIDIA's driver without passing through the layer) is reported at
+//!   made of it (`gather`, `compose`), and again in the report at exit (`summary_lines`). The calls
+//!   looked at are the launches, the synchronisations and queries of streams, events and contexts,
+//!   and the loads and unloads of modules. A fault that only calls that the layer does not route met
+//!   (a copy, a memset: they go to NVIDIA's driver without passing through the layer) is reported at
 //!   the next call that the layer routes and that meets it, and not at all when there is none: the
 //!   layer asks the driver nothing at exit. (A query of each context there hung a program that
 //!   called `exit` from a signal handler during a call of the driver, which held a lock of the
