@@ -603,10 +603,12 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   layouts the path reads strided vectors, 64 to a block of its scale kernel and again for every chunk of
   columns, and a gradient's rows and columns often fail the exact check and go to its generic fallback. Every
   product of four fine-tuning steps (adapters of rank 16 and full fine-tuning, 2,048 and 4,096 tokens, a
-  model of hidden size 896), timed in place, each call of a real step waited for: with the rule removed (a
-  test build's control), 20 of the 22 NN and NT products the path would serve ran at 0.24 to 0.92 times
-  12.9's speed (the other two, of 16 rows, at 1.01 and 1.35), and the steps' products together at 0.61 to
-  0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.45 to 3.88 times
+  model of hidden size 896), timed in place with the gate at 1024, each call of a real step waited for: with
+  the rule removed (a test build's control), 20 of the 22 NN and NT products the path would serve ran at 0.24
+  to 0.92 times 12.9's speed (the other two, of 16 rows, at 1.01 and 1.35), and the steps' products together
+  at 0.61 to 0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.45 to 3.88
+  times. With the gate at 768, which also serves the steps' forward products of 896 in-features, the steps'
+  products together ran at 1.16 to 1.29 times 12.9's speed, those TN products at 1.45 to 2.21 times
   (`docs/performance.md`, section 7).
 - **Narrow products of tall matrices go to cuBLAS 12.9**: TN with m >= 8192 is served only with n > 64, and TN
   with m >= 6144 only with k <= 9216 (an output layer over a vocabulary, or a wide MLP's up projection, at a batch
