@@ -444,8 +444,10 @@ that the driver made of it (`kernels::retargeted`), the module of a library in a
 context and the kernels compiled alone included. For a function or kernel of such
 code, the proxy answers that architecture, at most what it answers for the machine
 code (the capability told: told 8.0, a program whose PTX is for sm_75 is answered 7.5
-and 8.0). A caller told the truth (code of its own for the V100, a direct client of
-the launcher) gets the driver's answers. On a later card, the code of a deferred
+and 8.0). A caller with code of its own for the V100, which is told the truth, and a
+direct client of the launcher without GPU code of its own, which is told 7.5 for the
+device, get the driver's answers (7.0 and 7.0 for the latter's PTX for sm_75, where a
+GPU of 7.5 says 7.5). On a later card, the code of a deferred
 library or of a library loaded from PTX text is the layer's there too, and is
 answered the same, at most the card's architecture. Translated machine code keeps the
 architecture of its PTX in its header (`docs/translator.md`), which the driver gives.

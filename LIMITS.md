@@ -826,6 +826,28 @@ What that does not cover:
   `dlopen` instead of naming it among the libraries it needs.
 - A value that is not `<major>.<minor>` (`8`, `80`, `sm_80`), or that is below 7.0, is not used,
   and the layer says so once.
+- **The architecture a kernel's PTX was written for** (`ptxVersion` of `cudaFuncGetAttributes`,
+  `CU_FUNC_ATTRIBUTE_PTX_VERSION`), by which CUB and Thrust choose their code among the
+  architectures a program was built for ("invalid device function" when it is none of them): for
+  code that the layer retargeted from PTX for a later architecture, the layer answers that
+  architecture, at most what the caller is answered for the machine code (the capability told),
+  as a GPU that compiled that PTX answers; native sm_70 code, PTX for sm_70 or earlier and
+  translated machine code (whose header keeps its PTX's architecture) are answered what the
+  driver answers. What that does not cover: the image that the driver's linker makes from PTX
+  inputs (`cuLinkAddData`, `cuLinkComplete`) and the cubins of the layer's nvJitLink are answered
+  7.0, the PTX that the driver compiled, so that CUB's algorithms in such code still answer
+  "invalid device function"; a kernel of a library loaded whole from PTX text, asked about as a
+  function in a context on a later card of the same machine, is answered what the driver answers
+  there; the functions of an image linked from relocatable objects (`-rdc`) are all answered the
+  lowest architecture of its objects; and a launcher client without GPU code of its own, told 7.5
+  for the device, is answered 7.0 for both its kernels' PTX and machine code, the driver's
+  answers, where a GPU of 7.5 says 7.5 for PTX for sm_75 (no device-wide CUB algorithm can be in
+  such a client: its host side is in the file with its GPU code). A program whose PTX is only for
+  an architecture above the one it is told (PTX for sm_80 alone with `VF_CAPABILITY=7.5`; by
+  default such a program is told 8.0) is answered the capability told, never more: CUB then finds
+  none of its architectures and answers "invalid device function" (`cub_sort.cu`, 2026-11-24),
+  where a GPU of that capability has no image of its code at all and fails at the first call with
+  "no kernel image is available"; the program's other kernels run through the layer.
 
 ## CUDA graphs
 
