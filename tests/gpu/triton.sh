@@ -31,7 +31,8 @@
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
-vf_clear_settings
+vf_clear_settings VF_TRITON_TC VF_TRITON_TC_TIMEOUT VF_TRITON_TC_START VF_TRITON_TC_JOBS VF_TRITON_TC_WAIT \
+    VF_TRITON_TC_IDLE
 out=${VF_OUT:-$VF_TEST_ROOT}
 
 proxy=${VF_PROXY:-$W/dist/lib}
