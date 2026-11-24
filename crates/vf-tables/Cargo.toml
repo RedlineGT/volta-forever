@@ -3,6 +3,7 @@ name = "vf-tables"
 description = "Volta, Turing and selected Ampere instruction forms generated from denvdis descriptions"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 # Not the workspace's licence: these tables derive from descriptions distributed under the LGPL 2.1.
 license = "LGPL-2.1-only"
