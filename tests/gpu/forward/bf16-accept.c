@@ -16,12 +16,12 @@
  *     B   per matrix (fp32 output), the bias towards zero, mean of (c - x) sign(x) / (u S'), is at most
  *         max(|bias of 12.9|, margin x slope x k) + 0.5 in magnitude: slope the native bias slope of the data
  *         (an RTX 5090 on the same data, measured once, constants below), margin VF_ACCEPT_BIAS_MARGIN (0.8);
- *         the bias of four synthetic constructions is judged from k = 4096 (craftsub), 2048 (configuration
+ *         the bias of four synthetic data sets is judged from k = 4096 (craftsub), 2048 (configuration
  *         1653006390) and 1024 (lognpos, advpos: positive data over many binades) on (VF_ACCEPT_STRICT=1: from the
  *         gate), see bias_from_fam and kept[];
  *     on deterministic data (bf16-accept-gen.h): 10 families and 3 configurations of the adversarial search,
- *     k = 256, 512, 768, 896, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a
- *     general C, the cuBLASLt bias
+ *     k = 256, 512, 768, 896, 1024, 1536, 2048, 4096, 16384 (TN; fp32 output at every k, bf16 output at 256, 768, 896,
+ *     1024 and 4096), NN, NT, TT at 2048, both output types, alpha and beta with a general C, the cuBLASLt bias
  *     epilogue. Calls below the gate are run but not judged, and so are the NN, NT and TT calls, which go to 12.9
  *     (the path's layout rule: TN only). With VF_ACCEPT_EXPECT_GATE=1, a call below the gate that the path serves
  *     is a failure, and so is a TN call from the gate on that it does not serve, or a call in another layout that
@@ -83,11 +83,15 @@ static double cur_slope; /* the slope of the data being judged */
  * at 1536 and 1.20 at 2048, the bound being 12.9's own bias there) up to k = 4096, and the search's configuration
  * 1653006390 (non-negative operands, a 2^21 activation at the start of every slice; 1.90 times its bound at 1024
  * and 1.27 at 1536, 0.95 at 2048) up to 2048.
- * Two natural families of positive data spread over many binades exceed it below k = 1024: lognpos (log-normal
- * magnitudes, one sign; 1.16 times its bound at k = 768, 0.91 at 896) and advpos (an adversarial positive
- * construction; 1.25 times its bound at 768, at its bound at 896): what a program whose operands are all positive
- * over a wide range should expect from the path at k = 768 to 1023. Real operands (1,728 pairs of four models, and
- * the layers of k = 768 and 896 of five models) have mixed-sign products and a bias of at most 0.05 times its bound.
+ * Two families of positive data spread over many binades exceed it below k = 1024: lognpos (log-normal magnitudes,
+ * one sign; 1.16 times its bound at k = 768, 0.91 at 896) and advpos (an adversarial positive construction; 1.25
+ * times its bound at 768, 1.003 at 896, within the half unit added): what a program whose operands are all positive
+ * over a wide range should expect from the path at k = 768 to 1023. Their bias does not grow with k (lognpos's is
+ * 36 to 40 units at every k from 768 to 16384), the bound does; advpos's element aligned with the slices is not what
+ * makes it exceed (moved or removed, its bias at 768 stays within 1.1 units of -52.83, measured in review). Real
+ * operands (1,728 pairs of four models, and the layers of k = 768 and 896 of five models) have mixed-sign products
+ * and a bias of at most 0.82 units (0.05 times the bound read with the slope of samesign, the smallest of the
+ * families of one sign).
  * Their bias is judged from 4096, 2048, 1024 and 1024 on, unless VF_ACCEPT_STRICT=1 (then from the gate). Every
  * other bound applies from the gate. */
 static int bias_from_fam[FAM_N] = {[FAM_CRAFTSUB] = 4096, [FAM_LOGNPOS] = 1024, [FAM_ADVPOS] = 1024};
@@ -588,7 +592,8 @@ static int test_mode(void)
     }
     printf("note  gate k >= %d; native bias bound %.2f x slope x k%s\n", gate, bias_margin,
            strict ? "; strict (every bias judged from the gate)"
-                  : "; the bias of craftsub judged from k = 4096, of configuration 1653006390 from 2048");
+                  : "; the bias of craftsub judged from k = 4096, of configuration 1653006390 from 2048, of lognpos and "
+                    "advpos from 1024");
     specials();
     static const int ks[] = {256, 512, 768, 896, 1024, 1536, 2048, 4096, 16384};
     static const int fams[] = {FAM_NORMAL, FAM_RELU2,   FAM_OUTLIER, FAM_CANCEL,   FAM_MIXED30,
@@ -602,7 +607,8 @@ static int test_mode(void)
         cur_bias_from = f < nf ? bias_from_fam[fams[f]] : kept[f - nf].bias_from;
         for (size_t ik = 0; ik < sizeof ks / sizeof *ks; ++ik)
             for (int ct = 0; ct < 2; ++ct) {
-                if (ct && ks[ik] != 256 && ks[ik] != 1024 && ks[ik] != 4096) continue;
+                /* bf16 output: under the gate (256), at the two k of real models it adds (768, 896), at 1024, 4096 */
+                if (ct && ks[ik] != 256 && ks[ik] != 768 && ks[ik] != 896 && ks[ik] != 1024 && ks[ik] != 4096) continue;
                 Prob p = {1, 0, 1024, 128, ks[ik], ct, 1.0f, 0.0f, 0, 0, 0, 0};
                 const Res r = run_prob(&g, &p, 64);
                 prob_name(name, sizeof name, &g, &p);

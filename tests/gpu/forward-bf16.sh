@@ -79,12 +79,13 @@ for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve b
         build $t && { run $t "$test_dir"; verdict $t; }
     fi
 done
-# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 1024
-# against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), and
-# no call below the gate served, every call from the gate on served. Controls, each of which must fail: the gate
-# moved to 512 and 256 (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the same), at a call of
-# that k; VF_ACCEPT_STRICT=1 (the bias of the two slice-aligned constructions judged from the gate too); the
-# tensor-core path off, as not serving. VF_SAFE=1: no call served by the tensor-core path, every result 12.9's.
+# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 768
+# against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), in fp32
+# and bf16 output, and no call below the gate served, every call from the gate on served. Controls, each of which
+# must fail: the gate moved to 512 and 256 (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the
+# same), at a call of that k of another family than lognpos and advpos; VF_ACCEPT_STRICT=1 (the bias of its four
+# documented exceptions judged from the gate too), at lognpos and advpos at k = 768; the tensor-core path off, as
+# not serving. VF_SAFE=1: no call served by the tensor-core path, every result 12.9's.
 # -fopenmp shortens its host side only.
 if want bf16-accept; then
     if build bf16-accept -fopenmp; then
