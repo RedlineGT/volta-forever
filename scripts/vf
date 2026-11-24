@@ -109,8 +109,8 @@ get_version() {
 
 # --- safe mode -------------------------------------------------------------------
 # VF_SAFE=1: the layer (libcuda.so.1, the nvJitLink adapter) and the bf16 cuBLAS variants keep
-# their conservative paths, those whose results are bit-identical to what they give by default
-# (INSTALL.md). Only the exact value 1 turns it on: unset, empty, 0, true, " 1" and every other
+# their conservative paths, those whose results are bit-identical to a reference: what they give by
+# default, with each tensor-core product of translated machine code computed by itself (INSTALL.md). Only the exact value 1 turns it on: unset, empty, 0, true, " 1" and every other
 # value leave it off, as the layer and the variants read it. The variable reaches the program as it
 # is; vf env prints it when it is on (a shell that reads those lines runs its programs in safe mode
 # too) and vf doctor says what it turns off. This function is the one place where the launcher
@@ -958,14 +958,17 @@ cmd_doctor() {
     fi
     venv_release
     [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
-    # Safe mode: on, with the switches set that it turns off (in the layer: the bf16 products on
-    # the tensor cores and in tree order, another form of the program; in the bf16 cuBLAS variants:
-    # their tensor-core path); or a value of VF_SAFE that leaves it off.
+    # Safe mode: on, with what it turns off that is in use (in the layer: the bf16 products on the
+    # tensor cores and in tree order, another form of the program, and the pairs of products of
+    # machine code, on unless VF_PAIRS is 0; in the bf16 cuBLAS variants: their tensor-core path),
+    # in the order in which the layer names them; or a value of VF_SAFE that leaves it off.
     if safe_mode; then
         _safe_off=
-        for _var in VF_BF16_TC_GROUPS VF_BF16_TC_TILES VF_BF16_COLUMN VF_BF16_ROW VF_TRANSLATE VF_CUBLAS_BF16_TC; do
+        for _var in VF_BF16_TC_GROUPS VF_BF16_TC_TILES VF_BF16_COLUMN VF_BF16_ROW VF_TRANSLATE VF_PAIRS VF_CUBLAS_BF16_TC; do
             eval "_val=\${$_var-}"
             case $_var=$_val in
+                VF_PAIRS=0) ;;
+                VF_PAIRS=*) _safe_off="${_safe_off:+$_safe_off, }VF_PAIRS in machine code" ;;
                 VF_BF16_TC_GROUPS=1 | VF_BF16_TC_TILES=1 | VF_BF16_COLUMN=tree | VF_BF16_ROW=tree | \
                     VF_TRANSLATE=first | VF_TRANSLATE=force | VF_CUBLAS_BF16_TC=1)
                     _safe_off="${_safe_off:+$_safe_off, }$_var=$_val" ;;
@@ -974,7 +977,7 @@ cmd_doctor() {
         if [ -n "$_safe_off" ]; then
             echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths; not used: $_safe_off"
         else
-            echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths (no switch that safe mode turns off is set)"
+            echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths (nothing that safe mode turns off is in use)"
         fi
     elif [ -n "${VF_SAFE+set}" ] && [ "$VF_SAFE" != 0 ]; then
         echo "NOTICE VF_SAFE is '$VF_SAFE', not 1: safe mode is off (only the exact value 1 turns it on)"
@@ -1158,7 +1161,8 @@ Environment:
                  forward/bf16tc; refused when they are not installed (0 or 1; unset: 0)
   VF_SAFE=1      safe mode (exactly 1): the layer and the bf16 cuBLAS variants keep their
                  conservative paths, whose results are bit-identical to their default's
-                 (see INSTALL.md); vf doctor says what it turns off
+                 with each product of translated machine code by itself (see INSTALL.md);
+                 vf doctor says what it turns off
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }

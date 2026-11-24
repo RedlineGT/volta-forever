@@ -357,11 +357,14 @@ gcc.
 The eleventh checks safe mode (`VF_SAFE=1`), with a stand-in that keeps every image it is given: each switch that safe
 mode turns off (`VF_BF16_TC_GROUPS`, `VF_BF16_TC_TILES`, `VF_BF16_COLUMN=tree`, `VF_BF16_ROW=tree`,
 `VF_TRANSLATE=first` and `force`) changes what the driver is given, and with `VF_SAFE=1` the driver
-is given the default's image, with one line at level 1 that names the switch; `0`, an empty value,
+is given the default's image, with one line at level 1 that names the switch; machine code with
+pairs of products (`k_pair_bits.135.sm75.cubin`) is given translated as with `VF_PAIRS=0`, and the
+line says `VF_PAIRS in machine code`, while the pairs of the PTX lowering stay; `0`, an empty value,
 `true`, ` 1` and the like leave the switch in use (each but `0` said once); the `ordered` modes,
 `VF_PAIRS=0` and `VF_ALIGNED_ROWS=0` are left as they are; and the proxy's cache keeps what a run
-with safe mode and one without make under keys of their own, in either order, for a translation
-of machine code and for a library compiled kernel by kernel. Each case in a process of its own; it
+with safe mode and one without make under keys of their own, in either order, for translations of
+machine code (one the same in both modes, one with pairs) and for a library compiled kernel by
+kernel. Each case in a process of its own; it
 needs a C compiler. The twelfth checks,
 with the stand-in of the fourth, that from `VF_LOG_LEVEL=2` the lines about an image name it (by
 the file of `cuModuleLoad`, by the size and XXH64 digest of an image that `cuModuleLoadData` or

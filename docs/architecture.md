@@ -777,11 +777,12 @@ rewriting, `VF_BF16_TC_GROUPS`, `VF_BF16_TC_TILES`, `VF_BF16_COLUMN`, `VF_BF16_R
 ### Safe mode
 
 `VF_SAFE=1` puts back to the default's setting, whatever their variables say, the switches above
-whose results are not bit-identical to the default's (`INSTALL.md` lists them):
-`vf_adapt::Policy::make_safe`, in every part that adapts code (the proxy, the nvJitLink adapter,
-`vf ptxas`, `vf adapt`), and the runtime of the bf16 cuBLAS variants for its tensor-core path. The
-policy keeps it (`Policy::safe`), so the cache of section 3 keeps what is made with it and without
-it apart. The launcher decides it in one function, `safe_mode`.
+whose results are not bit-identical to the default's (`INSTALL.md` lists them), and translates each
+tensor-core product of machine code by itself (the pairs of `VF_PAIRS` in machine code, not those
+of the PTX lowering): `vf_adapt::Policy::make_safe`, in every part that adapts code (the proxy,
+the nvJitLink adapter, `vf ptxas`, `vf adapt`), and the runtime of the bf16 cuBLAS variants for
+its tensor-core path. The policy keeps it (`Policy::safe`), so the cache of section 3 keeps what
+is made with it and without it apart. The launcher decides it in one function, `safe_mode`.
 
 ### Cache
 

@@ -138,11 +138,11 @@ safe_px() {  # safe_px NAME SAID MODULE WORD...: px, and a line of the log match
 }
 px bf16-group-rounding "$G/ptx-cases/bf16-group-rounding.ptx" 3f800004 3f800004 3f800004 3f800004
 VF_BF16_TC_GROUPS=1 px bf16-group-rounding-on "$G/ptx-cases/bf16-group-rounding.ptx" 3f800000 3f800000 3f800000 3f800000
-VF_SAFE=1 VF_BF16_TC_GROUPS=1 safe_px safe-bf16-group-rounding "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_TC_GROUPS=1 not used" \
+VF_SAFE=1 VF_BF16_TC_GROUPS=1 safe_px safe-bf16-group-rounding "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_TC_GROUPS=1, VF_PAIRS in machine code not used" \
     "$G/ptx-cases/bf16-group-rounding.ptx" 3f800004 3f800004 3f800004 3f800004
 VF_SAFE=true VF_BF16_TC_GROUPS=1 safe_px safe-not-one-bf16-group-rounding "VF_SAFE='true' is not 1: safe mode stays off" \
     "$G/ptx-cases/bf16-group-rounding.ptx" 3f800000 3f800000 3f800000 3f800000
-VF_SAFE=1 VF_BF16_ROW=tree safe_px safe-bf16-row-tree "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_ROW=tree not used" \
+VF_SAFE=1 VF_BF16_ROW=tree safe_px safe-bf16-row-tree "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_ROW=tree, VF_PAIRS in machine code not used" \
     "$G/ptx-cases/bf16-row.ptx" 4b800000 4b800000 41800000 1
 
 # Kernels that exist as PTX text only (tests/kernels/ptx-cases): four products
@@ -374,6 +374,37 @@ tc pairs "$G/k_pairs.135.sm75.ptx" "PTX for sm_75 retargeted" "37 kernels, 0 wro
 VF_PAIRS=0 tc pairs-machine-code-unpaired "$G/k_pairs.135.sm75.cubin" "machine code for sm_75 translated \(12 functions\)" "1 of these functions is not translated" \
     "emulated in p_basic: 234 instructions added in translated machine code" "34 kernels, 0 wrong"
 VF_PAIRS=0 tc groups-machine-code-unpaired "$G/k_groups.135.sm75.cubin" "machine code for sm_75 translated \(11 functions\)" "2 of these functions are not translated" "22 kernels, 0 wrong"
+# Safe mode and the pairs of machine code (tests/kernels/k_pair_bits.cu): eight FP16 products a turn
+# on two A, with B by plain and by transposed ldmatrix, on halves of many magnitudes, in a loop of 1
+# and 37 turns. A pair adds the halves of k, a product translated by itself the even k, then the odd:
+# the words differ (the control: the pairs by default, each product by itself with VF_PAIRS=0). The
+# same code requiring blocks of 1,024 threads (.reqntid) is translated at level 3, which makes no
+# pairs: by default, at that block, each product by itself. With VF_SAFE=1, the words of each product
+# by itself in every case, and one line says that the pairs are not used; with VF_SAFE=true (not 1),
+# the words of the pairs. (Before safe mode turned the pairs off, the cases with VF_SAFE=1 and no
+# required block gave the words of the pairs: 2026-11-24.)
+pb() {  # pb NAME THREADS TURNS CUBIN KERNEL SAID WORD...: ptxrun of KERNEL; a line of the log matches SAID when it is not empty
+    local name=$1 threads=$2 turns=$3 cubin=$4 kernel=$5 said=$6; shift 6
+    log=$out/logs/$name.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/ptxrun" -t "$threads" -i "$turns" "$G/$cubin" "$kernel" "$@" >"$log" 2>&1
+    check "$name" "^PASS $kernel of .*: $threads of $threads lanes as expected" "machine code for sm_75 translated \(2 functions\)" ${said:+"$said"}
+}
+said_safe="VF_SAFE=1: the layer keeps its conservative paths: VF_PAIRS in machine code not used"
+while read -r kernel turns p0 p1 p2 p3 u0 u1 u2 u3; do
+    pb pair-bits-$kernel-$turns 32 "$turns" k_pair_bits.135.sm75.cubin "$kernel" "" "$p0" "$p1" "$p2" "$p3"
+    VF_PAIRS=0 pb pair-bits-$kernel-$turns-unpaired 32 "$turns" k_pair_bits.135.sm75.cubin "$kernel" "" "$u0" "$u1" "$u2" "$u3"
+    VF_SAFE=1 pb safe-pair-bits-$kernel-$turns 32 "$turns" k_pair_bits.135.sm75.cubin "$kernel" "$said_safe" "$u0" "$u1" "$u2" "$u3"
+    pb pair-bits-required-$kernel-$turns 1024 "$turns" k_pair_bits.required.135.sm75.cubin "$kernel" "" "$u0" "$u1" "$u2" "$u3"
+    VF_SAFE=1 pb safe-pair-bits-required-$kernel-$turns 1024 "$turns" k_pair_bits.required.135.sm75.cubin "$kernel" "$said_safe" \
+        "$u0" "$u1" "$u2" "$u3"
+done <<'WORDS'
+plain 1 333c0907 3c09f41b 841b5a4b 00000000 3c70c519 e56cf81a 6bf993f0 00000000
+plain 37 a0a4f340 1a3b77a7 abcbaaea 00000000 828556d8 faaaff15 bc9006aa 00000000
+trans 1 cd2dd65b 6176d54a 2b0f0c1e 00000000 290a56f3 8f67fe00 5313ebd2 00000000
+trans 37 76284c2c ca585eaf 54451aa2 00000000 5f962557 db039578 2a22b8c8 00000000
+WORDS
+VF_SAFE=true pb safe-not-one-pair-bits-plain-37 32 37 k_pair_bits.135.sm75.cubin plain "VF_SAFE='true' is not 1: safe mode stays off" \
+    a0a4f340 1a3b77a7 abcbaaea 00000000
 # Matrix loads into registers that stores just before them still read (k_stored.cu, plain and
 # transposed), on 640 blocks that keep the memory pipeline full: what stands for a load writes a
 # destination with arithmetic only after waiting for its shuffles. Until 2026-11-23 it wrote the

@@ -574,15 +574,23 @@ same everywhere:
   `VF_CAPABILITY_ALL`) chooses its code for 8.0 and computes what that code computes: Triton's
   float32 `tl.dot` in tf32, for one ([The capability told with
   `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
-- **Pairs of products in machine code.** In the PTX lowering, a pair of products gives the bits of
-  each product by itself (`docs/pairs.md`, section 13). In sm_75 machine code the two can differ
-  in the last bits where the sums round: a pair adds the halves of k, (C + k 0..3) + k 4..7, where a
-  product translated by itself adds the even k, then the odd k (`docs/pairs.md`, section 9). The default
-  makes pairs where a function has the registers for them, and none at the third level of borrowing
-  (`docs/translator.md`, "Registers"), which a kernel that names nearly every register gets, and
-  the second translation at launch when it comes to that level: a kernel launched from its second
-  translation can give other last bits than from its first. Safe mode leaves `VF_PAIRS`,
-  `VF_BORROW` and `VF_FIT` as they are, and these differences with them.
+- **Pairs of products in machine code are not made.** In sm_75 machine code, two products on one A
+  computed together (a pair) add the halves of k, (C + k 0..3) + k 4..7, where a product translated
+  by itself adds the even k, then the odd k (`docs/pairs.md`, section 9), and their last bits
+  differ (every word of the `pair-bits` cases of `tests/gpu/run.sh`, with B loaded plain and
+  transposed). By default a kernel gets pairs where it has the registers for them, and none at the
+  third level of borrowing (`docs/translator.md`, "Registers"): a kernel that names nearly every
+  register, one that requires a block (`.reqntid`) that its translation with pairs cannot have, one
+  over its count with `VF_BORROW=9`. Safe mode translates each product by itself at every level,
+  which gives these one result (the same bits at levels 0 and 3, measured), whatever `VF_BORROW`
+  and `VF_FIT` say. (The second translation at launch takes no kernel with products to the third
+  level: such a kernel keeps the pairs of its first translation, or its large block is refused,
+  with safe mode or without.) In the PTX lowering a pair gives the bits of each product by itself
+  (`docs/pairs.md`, section 13): those pairs stay. Measured on 2026-11-24 on one V100, in three
+  rounds alternated after a warm-up: the fp16 GEMMs of Triton told 8.0 (PTX) and of cuBLAS ran at
+  the same speed with `VF_SAFE=1` as without, Triton's with the same bits, while PyTorch's fp16
+  attention (`scaled_dot_product_attention`, sm_75 machine code whose products pair) took 5.24 ms a
+  call instead of 2.80, 1.9 times as long.
 - **It is read once.** `libcuda.so.1` reads it when it is loaded, the nvJitLink adapter and the
   bf16 cuBLAS variants at their first use: a program that sets `VF_SAFE` while it runs does not get
   safe mode from `libcuda.so.1`, and may get it from the others.

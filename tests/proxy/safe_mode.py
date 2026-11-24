@@ -1,8 +1,9 @@
 """Safe mode (VF_SAFE=1) in the proxy, against a stand-in for the driver that keeps every image it is
 given: the switches whose results are not bit-identical to the default's are not used, whatever
-they say, and the proxy says so once; any value but 1 leaves them in use; the switches that give the
-default's bits, or refuse, are left as they are; and what the proxy's cache keeps from a run without
-safe mode is not given to a run with it, nor the reverse.
+they say, nor the pairs of products of machine code (each product is translated by itself, as with
+VF_PAIRS=0), and the proxy says so once; any value but 1 leaves them in use; the switches that give the
+default's bits, or refuse, and the pairs of the PTX lowering are left as they are; and what the
+proxy's cache keeps from a run without safe mode is not given to a run with it, nor the reverse.
 
 Run with python3 tests/proxy/safe_mode.py path/to/libcuda.so.1 (each case is a process of its own:
 the proxy reads VF_SAFE once, when it is loaded).
@@ -112,6 +113,8 @@ PAIRS = CASES / "pairs-adversarial.ptx"
 ELF75_PTX75 = W / "crates" / "vf-fatbin" / "tests" / "data" / "elf75-ptx75-zstd.fatbin"
 ELF70_ELF75_PTX70 = W / "crates" / "vf-fatbin" / "tests" / "data" / "elf70-elf75-ptx70-lz4.fatbin"
 CUBIN = W / "tests" / "kernels" / "k_fit_test.135.sm75.cubin"
+PAIRED = W / "tests" / "kernels" / "k_pair_bits.135.sm75.cubin"
+MACHINE_PAIRS = "VF_PAIRS in machine code"
 
 checks = wrong = 0
 
@@ -171,7 +174,7 @@ def images(proxy):
         safe, said = proxy.run(ptx, {name: "ordered", "VF_SAFE": "1"})
         check(f"{ptx.name}: {name}=ordered stays with VF_SAFE=1", safe == ordered)
         check(f"{ptx.name}: {name}=ordered is not said to be turned off",
-              len(said) == 1 and "no switch that safe mode turns off is set" in said[0], said)
+              len(said) == 1 and name not in said[0] and MACHINE_PAIRS in said[0], said)
 
     # Every switch at once: one line, which names each.
     switches = {"VF_BF16_TC_GROUPS": "1", "VF_BF16_TC_TILES": "1", "VF_BF16_COLUMN": "tree", "VF_BF16_ROW": "tree",
@@ -203,10 +206,15 @@ def images(proxy):
     # VF_SAFE=1 alone: the default's text, and a line that says so.
     safe, said = proxy.run(GROUP, {"VF_SAFE": "1"})
     check("VF_SAFE=1 alone: the default's text", safe == group_default)
-    check("VF_SAFE=1 alone: said once", len(said) == 1 and "no switch that safe mode turns off is set" in said[0], said)
+    check("VF_SAFE=1 alone: said once, with the pairs of machine code",
+          len(said) == 1 and said[0].startswith(f"[volta-forever] VF_SAFE=1: the layer keeps its conservative paths: "
+                                                f"{MACHINE_PAIRS} not used"), said)
 
-    # Left as they are: pairs, the test of the rows' alignment, what is not translated.
+    # Left as they are: the pairs of the PTX lowering (the same bits as each product by itself), the
+    # test of the rows' alignment, what is not translated.
     pairs_default, _ = proxy.run(PAIRS)
+    safe, said = proxy.run(PAIRS, {"VF_SAFE": "1"})
+    check(f"{PAIRS.name}: its pairs stay with VF_SAFE=1", safe == pairs_default)
     for name, value in (("VF_PAIRS", "0"), ("VF_ALIGNED_ROWS", "0")):
         alone, _ = proxy.run(PAIRS, {name: value})
         check(f"{PAIRS.name}: {name}={value} changes the lowering (control)", alone != pairs_default)
@@ -214,6 +222,24 @@ def images(proxy):
         check(f"{PAIRS.name}: {name}={value} stays with VF_SAFE=1", safe == alone)
         check(f"{PAIRS.name}: {name}={value} is not said to be turned off",
               len(said) == 1 and name not in said[0], said)
+
+    # The pairs of products of machine code (two products on one A from whole-row loads, which the
+    # translator computes together, adding the halves of k where a product by itself adds the even k,
+    # then the odd): with VF_SAFE=1, each product by itself, as with VF_PAIRS=0, and said.
+    paired, _ = proxy.run(PAIRED)
+    unpaired, _ = proxy.run(PAIRED, {"VF_PAIRS": "0"})
+    check(f"{PAIRED.name}: VF_PAIRS=0 gives another image (control)", unpaired != paired)
+    for env in ({"VF_SAFE": "1"}, {"VF_SAFE": "1", "VF_PAIRS": "1"}):
+        safe, said = proxy.run(PAIRED, env)
+        check(f"{PAIRED.name}: {env} gives the image of VF_PAIRS=0", safe == unpaired)
+        check(f"{PAIRED.name}: {env} says that the pairs of machine code are not used",
+              len(said) == 1 and f"{MACHINE_PAIRS} not used" in said[0], said)
+    safe, said = proxy.run(PAIRED, {"VF_SAFE": "1", "VF_PAIRS": "0"})
+    check(f"{PAIRED.name}: VF_PAIRS=0 with VF_SAFE=1 stays", safe == unpaired)
+    check(f"{PAIRED.name}: VF_PAIRS=0 with VF_SAFE=1: nothing turned off",
+          len(said) == 1 and "nothing that safe mode turns off is in use" in said[0], said)
+    notsafe, said = proxy.run(PAIRED, {"VF_SAFE": "true"})
+    check(f"{PAIRED.name}: VF_SAFE='true' keeps the pairs", notsafe == paired)
 
 
 def cache(proxy, out):
@@ -225,23 +251,27 @@ def cache(proxy, out):
         directory.mkdir(mode=0o700)
         return directory
 
-    # Machine code (its translation is kept, keyed by the image and the policy).
-    cubin_runs = {}
-    for order in (("default", "safe"), ("safe", "default")):
-        directory = fresh("cache-" + "-".join(order))
-        settings = {"VF_PROXY_CACHE": str(directory), "VF_LAZY": "1"}
-        seen = []
-        for _ in range(2):
-            for mode in order:
-                given, _ = proxy.run(CUBIN, dict(settings, **({"VF_SAFE": "1"} if mode == "safe" else {})))
-                cubin_runs.setdefault(mode, given)
-                check(f"{CUBIN.name} ({' then '.join(order)}): {mode} gives the same image from the cache or not",
-                      given == cubin_runs[mode])
-                seen.append(files(directory, ".t"))
-        check(f"{CUBIN.name} ({' then '.join(order)}): one translation kept for each, under keys of their own",
-              [len(s) for s in seen] == [1, 2, 2, 2], seen)
-        cubin_runs.setdefault("keys", seen[-1])
-        check(f"{CUBIN.name} ({' then '.join(order)}): the same keys whatever the order", seen[-1] == cubin_runs["keys"])
+    # Machine code (its translation is kept, keyed by the image and the policy): without products,
+    # the same bytes in both modes; with pairs of products, other bytes in safe mode.
+    for cubin in (CUBIN, PAIRED):
+        cubin_runs = {}
+        for order in (("default", "safe"), ("safe", "default")):
+            directory = fresh(f"cache-{cubin.stem}-" + "-".join(order))
+            settings = {"VF_PROXY_CACHE": str(directory), "VF_LAZY": "1"}
+            seen = []
+            for _ in range(2):
+                for mode in order:
+                    given, _ = proxy.run(cubin, dict(settings, **({"VF_SAFE": "1"} if mode == "safe" else {})))
+                    cubin_runs.setdefault(mode, given)
+                    check(f"{cubin.name} ({' then '.join(order)}): {mode} gives the same image from the cache or not",
+                          given == cubin_runs[mode])
+                    seen.append(files(directory, ".t"))
+            check(f"{cubin.name} ({' then '.join(order)}): one translation kept for each, under keys of their own",
+                  [len(s) for s in seen] == [1, 2, 2, 2], seen)
+            cubin_runs.setdefault("keys", seen[-1])
+            check(f"{cubin.name} ({' then '.join(order)}): the same keys whatever the order", seen[-1] == cubin_runs["keys"])
+        check(f"{cubin.name}: the same image in both modes" if cubin == CUBIN else f"{cubin.name}: another image in safe mode",
+              (cubin_runs["safe"] == cubin_runs["default"]) == (cubin == CUBIN))
 
     # PTX loaded as a library and compiled kernel by kernel (a module of two kernels: the bf16 one,
     # and the same under another name): what is worked out of it is kept, keyed the same way. A
