@@ -592,6 +592,7 @@ refuse refuse-link link "ALL CHECKS PASSED" \
 # the kernel's log, where it can be read). Until 2026-11-23 the first launch trapped (Xid 43).
 [ -x "$out/bin/test_guard" ] && [ "$out/bin/test_guard" -nt "$G/test_guard.c" ] || gcc -O2 -Wall -o "$out/bin/test_guard" "$G/test_guard.c" -ldl || exit 2
 xids() { dmesg 2>/dev/null | grep -c Xid; }
+xid_unchecked=  # a guard case whose check of the kernel's log could not be made: said at the end
 guard() {  # guard NAME INTERFACE
     local name=$1 interface=$2 before after
     log=$out/logs/$name.log
@@ -603,6 +604,7 @@ guard() {  # guard NAME INTERFACE
         [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
     else
         echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
+        xid_unchecked=1
     fi
     check "$name" "ALL CHECKS PASSED" "no Xid line more" \
         "kernel refused_by_layer cannot run on this GPU: barrier.cluster.arrive: no Volta sequence.*\. The program holds a handle to it, which a lookup by name refuses"
@@ -680,4 +682,7 @@ else
 fi
 rm -rf "$cache_dir"
 
+# The guard cases above pass their check of the kernel's log where it cannot be read (dmesg needs
+# privileges that the user may not have): said once, at the end, so that it is seen.
+[ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (dmesg not readable)"
 exit $failed

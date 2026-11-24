@@ -91,8 +91,9 @@ Where the GPU scripts write:
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
   (`CUDA_MODULE_LOADING`), a refused kernel launched with a handle taken from NVIDIA's driver
   itself (218 from every launch function and graph node, and no line more with "Xid" in the
-  kernel's log), and lookup tables asked for by name, answered as NVIDIA's driver answers them,
-  except where the layer refuses one (`tables.py`).
+  kernel's log, where it can be read: where it cannot, the last line of the output says "Xid lines
+  could not be checked (dmesg not readable)"), and lookup tables asked for by name, answered as
+  NVIDIA's driver answers them, except where the layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result, five of them again under
   `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
