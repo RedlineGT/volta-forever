@@ -418,8 +418,10 @@ their stream (another stream's, the legacy stream's, the thread's own default st
 of every thread, by thread; a CUDA graph's launch with the kernel nodes captured in it; a fault
 that only a copy met, found before the context is destroyed and at exit; under `VF_FAULT_TRACE=1`
 (only that value) the kernel or the graph named alone and its launch returning the error, and
-nothing waited for while a graph is being captured; and nothing said when nothing faults. Each case
-in a process of its own; it needs a C compiler.
+nothing waited for while a graph is being captured; that the report ends while another thread
+destroys contexts that have modules (120 threads' launches looked up meanwhile); that the waits of
+`VF_PROFILE` are the program's synchronisations for the report; and nothing said when nothing
+faults. Each case in a process of its own; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 

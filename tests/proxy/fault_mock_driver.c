@@ -1,61 +1,89 @@
 // A stand-in for NVIDIA's driver library, for fault.py: the layer loads it as the driver
-// (VF_REAL_LIBCUDA). It keeps modules with the names of the entries of the PTX they were given
-// (".entry NAME("), a function for each name asked for, contexts, streams, and graphs captured on a
-// stream.
+// (VF_REAL_LIBCUDA). Safe to call from several threads; any number of contexts and modules;
+// streams and events that belong to the context current when they were made; captures; a fault
+// that becomes visible after a delay.
 //
-// A fault, as NVIDIA's driver shows one (measured on a V100, tests/kernels/test_fault.c): the launch
-// of a function named write_null, or of a graph that holds one, returns 0, and so do the launches
-// made right after it (they are queued); the first call that waits for the GPU or asks it (a
-// synchronisation, a query, a copy) returns 700, and from then on every call that takes the context
-// (a launch, a module load, a lookup, cuFuncGetName) does; cuCtxGetCurrent, cuCtxPushCurrent,
-// cuCtxPopCurrent and cuCtxDestroy return 0. A context made later has no fault.
+// Every module has the functions add_one (index 0), write_null (index 1) and ecc_fail (index 2):
+// the handle of a function is (module << 4) | index. A fault, as NVIDIA's driver shows one
+// (measured on a V100, tests/kernels/test_fault.c): the launch of write_null (or of a graph that
+// holds it) returns 0, and so do the launches made right after it (they are queued); a call of its
+// context that waits for the GPU or asks it (a synchronisation, a query, a copy) returns 700 once
+// MOCK_DELAY (default 0) such calls of any context were made since the launch, and from then on
+// every call that takes the context does (a launch, a module load and unload, a lookup,
+// cuFuncGetName, cuStreamGetCtx); cuCtxGetCurrent, cuCtxPushCurrent, cuCtxPopCurrent and
+// cuCtxDestroy return 0. ecc_fail does the same with 214 (an uncorrectable ECC error). A context
+// made later has no fault.
+//
+// The legacy stream: a query or a synchronisation of the null stream while a blocking stream (one
+// made with flags 0) of the same context is being captured returns 906 and invalidates that
+// capture, as NVIDIA's driver does (the CUDA programming guide: "any use of the legacy stream
+// while a blocking stream of the context is capturing is invalid"); a launch into an invalidated
+// capture and its end return 901.
+//
+// The primary context of each device: made at its first retain, destroyed at its last release or
+// at a reset. With MOCK_EXEC_FIXED set, every instantiated graph gets the same handle (as a driver
+// may give the handle of one destroyed to the next one made).
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef int CUresult;
-enum { INVALID_HANDLE = 400, NOT_FOUND = 500, ILLEGAL_ADDRESS = 700 };
+enum {
+    INVALID_VALUE = 1,
+    INVALID_CONTEXT = 201,
+    INVALID_HANDLE = 400,
+    NOT_FOUND = 500,
+    ECC_UNCORRECTABLE = 214,
+    ILLEGAL_ADDRESS = 700,
+    CAPTURE_INVALIDATED = 901,
+    CAPTURE_IMPLICIT = 906,
+};
 
-unsigned launched, synchronized;
+// Counted for the tests: launches that ran, synchronisations of streams, every wait.
+_Atomic unsigned launched, synchronized, waits;
 
-#define MAX 64
-#define NAMES 8
-static struct {
-    uintptr_t handle;
-    int live;
-    char names[NAMES][32];
-    int count;
-} modules[MAX];
-static int module_count;
-static uintptr_t module_counter = 0x1000;
+#define SLOTS 4096
+static _Atomic uintptr_t next_context = 0x9000, next_module = 0x100, next_stream = 0x50000, next_event = 0x70000;
+static _Atomic uintptr_t next_graph = 0x600000;
+// By context handle modulo SLOTS: the fault met, and the fault under way with its delay.
+static _Atomic int sticky[SLOTS], pending[SLOTS], delay[SLOTS];
+// By stream (handle modulo SLOTS): its context, whether it is blocking, the graph it captures and
+// whether that capture was invalidated. By event: its context.
+static _Atomic uintptr_t stream_context[SLOTS], event_context[SLOTS], capturing[SLOTS];
+static _Atomic int stream_blocking[SLOTS], invalidated[SLOTS];
+// By graph: the error that its launch makes pending (0: none).
+static _Atomic int graph_faults[SLOTS];
 
-static struct {
-    uintptr_t handle;
-    int module, name;
-} functions[4 * MAX];
-static int function_count;
-static uintptr_t function_counter = 0x100000;
-
-// By context (its handle modulo MAX): a fault met (`sticky`) or under way (`pending`).
-static int sticky[MAX], pending[MAX];
-static uintptr_t context_counter = 0x9000;
-static _Thread_local uintptr_t stack[8];
+static _Thread_local uintptr_t stack[16];
 static _Thread_local int depth;
 
 static uintptr_t current(void) { return depth ? stack[depth - 1] : 0; }
+static int slot(uintptr_t h) { return (int)((h >> 4) % SLOTS); }
 
-// What a call that takes the current context returns, without waiting for the GPU: the fault, once a
-// call that waits met it.
-static CUresult queued_state(void) { return sticky[current() % MAX]; }
+static CUresult queued(uintptr_t context) { return context ? sticky[slot(context)] : INVALID_CONTEXT; }
 
-// What a call that waits for the GPU, or asks it, returns: the fault under way, if there is one.
-static CUresult context_state(void) {
-    uintptr_t c = current() % MAX;
+// A call that waits for the GPU or asks it, of `context`.
+static CUresult waited(uintptr_t context) {
+    if (!context) return INVALID_CONTEXT;
+    ++waits;
+    int c = slot(context);
     if (pending[c]) {
+        if (delay[c] > 0) {
+            --delay[c];
+            return 0;
+        }
         sticky[c] = pending[c];
         pending[c] = 0;
-        return sticky[c];
     }
     return sticky[c];
+}
+
+static void make_pending(uintptr_t context, int error) {
+    const char *d = getenv("MOCK_DELAY");
+    delay[slot(context)] = d ? atoi(d) : 0;
+    pending[slot(context)] = error;
 }
 
 CUresult cuInit(unsigned flags) { (void)flags; return 0; }
@@ -67,12 +95,16 @@ CUresult cuDeviceComputeCapability(int *major, int *minor, int device) {
     *minor = 0;
     return 0;
 }
+
+static void fresh(uintptr_t c) { sticky[slot(c)] = pending[slot(c)] = delay[slot(c)] = 0; }
+
 CUresult cuCtxCreate_v2(void **context, unsigned flags, int device) {
     (void)flags; (void)device;
-    *context = (void *)context_counter++;
-    sticky[(uintptr_t)*context % MAX] = pending[(uintptr_t)*context % MAX] = 0;
+    uintptr_t c = (next_context += 0x10);
+    fresh(c);
+    *context = (void *)c;
     if (!depth) depth = 1;
-    stack[depth - 1] = (uintptr_t)*context;
+    stack[depth - 1] = c;
     return 0;
 }
 CUresult cuCtxDestroy_v2(void *context) {
@@ -87,143 +119,171 @@ CUresult cuCtxSetCurrent(void *context) {
     return 0;
 }
 CUresult cuCtxPushCurrent_v2(void *context) {
-    if (depth == 8) return 1;
+    if (depth == 16) return 1;
     stack[depth++] = (uintptr_t)context;
     return 0;
 }
 CUresult cuCtxPopCurrent_v2(void **context) {
-    if (!depth) return 201;
+    if (!depth) return INVALID_CONTEXT;
     if (context) *context = (void *)stack[depth - 1];
     --depth;
     return 0;
 }
 CUresult cuCtxGetDevice(int *device) {
-    if (!current()) return 201;
+    if (!current()) return INVALID_CONTEXT;
     *device = 0;
     return 0;
 }
 
+// The primary context of devices 0 to 3.
+#define PRIMARY(device) ((uintptr_t)0x8000 + 0x10 * (uintptr_t)(device))
+static _Atomic int retains[4], active[4];
+CUresult cuDevicePrimaryCtxRetain(void **context, int device) {
+    if (device < 0 || device > 3) return INVALID_VALUE;
+    if (retains[device]++ == 0 && !active[device]) fresh(PRIMARY(device));
+    active[device] = 1;
+    *context = (void *)PRIMARY(device);
+    return 0;
+}
+CUresult cuDevicePrimaryCtxRelease_v2(int device) {
+    if (device < 0 || device > 3 || !retains[device]) return INVALID_CONTEXT;
+    if (!--retains[device]) active[device] = 0;
+    return 0;
+}
+CUresult cuDevicePrimaryCtxRelease(int device) { return cuDevicePrimaryCtxRelease_v2(device); }
+CUresult cuDevicePrimaryCtxReset_v2(int device) {
+    if (device < 0 || device > 3) return INVALID_VALUE;
+    active[device] = 0;
+    return 0;
+}
+CUresult cuDevicePrimaryCtxReset(int device) { return cuDevicePrimaryCtxReset_v2(device); }
+CUresult cuDevicePrimaryCtxGetState(int device, unsigned *flags, int *is_active) {
+    if (device < 0 || device > 3) return INVALID_VALUE;
+    *flags = 0;
+    *is_active = active[device];
+    return 0;
+}
+
+static const char *const names[] = {"add_one", "write_null", "ecc_fail"};
+#define NAMES 3
 CUresult cuModuleLoadData(void **module, const void *image) {
-    CUresult r = queued_state();
+    (void)image;
+    CUresult r = queued(current());
     if (r) return r;
-    int i = module_count++;
-    memset(&modules[i], 0, sizeof modules[i]);
-    modules[i].handle = module_counter++;
-    modules[i].live = 1;
-    for (const char *p = image; (p = strstr(p, ".entry ")) && modules[i].count < NAMES;) {
-        p += 7;
-        int n = 0;
-        while (p[n] && p[n] != '(' && p[n] != ' ' && p[n] != '\n' && n < 31) ++n;
-        memcpy(modules[i].names[modules[i].count], p, n);
-        modules[i].names[modules[i].count++][n] = 0;
-    }
-    *module = (void *)modules[i].handle;
+    *module = (void *)(next_module++);
     return 0;
 }
 CUresult cuModuleLoadDataEx(void **module, const void *image, unsigned n, int *options, void **values) {
     (void)n; (void)options; (void)values;
     return cuModuleLoadData(module, image);
 }
-CUresult cuModuleUnload(void *module) {
-    CUresult r = queued_state();
-    if (r) return r;
-    for (int i = 0; i < module_count; ++i)
-        if (modules[i].live && modules[i].handle == (uintptr_t)module) {
-            modules[i].live = 0;
-            return 0;
-        }
-    return INVALID_HANDLE;
-}
+CUresult cuModuleUnload(void *module) { (void)module; return queued(current()); }
 CUresult cuModuleGetFunction(void **function, void *module, const char *name) {
-    CUresult r = queued_state();
+    CUresult r = queued(current());
     if (r) return r;
-    for (int i = 0; i < module_count; ++i) {
-        if (!modules[i].live || modules[i].handle != (uintptr_t)module) continue;
-        for (int n = 0; n < modules[i].count; ++n) {
-            if (strcmp(modules[i].names[n], name)) continue;
-            for (int f = 0; f < function_count; ++f)
-                if (functions[f].module == i && functions[f].name == n) {
-                    *function = (void *)functions[f].handle;
-                    return 0;
-                }
-            int f = function_count++;
-            functions[f].handle = function_counter++ * 16;
-            functions[f].module = i;
-            functions[f].name = n;
-            *function = (void *)functions[f].handle;
+    for (int i = 0; i < NAMES; ++i)
+        if (!strcmp(name, names[i])) {
+            *function = (void *)(((uintptr_t)module << 4) | (uintptr_t)i);
             return 0;
         }
-        return NOT_FOUND;
-    }
-    return INVALID_HANDLE;
-}
-static const char *name_of(void *function) {
-    for (int f = 0; f < function_count; ++f)
-        if (functions[f].handle == (uintptr_t)function) return modules[functions[f].module].names[functions[f].name];
-    return 0;
+    return NOT_FOUND;
 }
 CUresult cuFuncGetName(const char **name, void *function) {
-    CUresult r = queued_state();
+    CUresult r = queued(current());
     if (r) return r;
-    *name = name_of(function);
-    return *name ? 0 : INVALID_HANDLE;
+    uintptr_t i = (uintptr_t)function & 0xf;
+    if (i >= NAMES) return INVALID_HANDLE;
+    *name = names[i];
+    return 0;
 }
 
-// Streams, and the graphs captured on them.
-#define STREAMS 16
-static uintptr_t stream_handles[STREAMS], capturing[STREAMS];
-static int stream_count;
-static uintptr_t graph_counter = 0x600000;
-static int graph_faults[MAX];
-
-static int stream_index(void *stream) {
-    for (int s = 0; s < stream_count; ++s)
-        if (stream_handles[s] == (uintptr_t)stream) return s;
-    return -1;
+static int is_null_stream(void *stream) { return (uintptr_t)stream <= 2; }
+static uintptr_t context_of(void *stream) {
+    return is_null_stream(stream) ? current() : stream_context[slot((uintptr_t)stream)];
 }
 CUresult cuStreamCreate(void **stream, unsigned flags) {
-    (void)flags;
-    stream_handles[stream_count] = 0x5000 + 0x10 * stream_count;
-    *stream = (void *)stream_handles[stream_count++];
+    uintptr_t s = (next_stream += 0x10);
+    stream_context[slot(s)] = current();
+    stream_blocking[slot(s)] = (flags & 1) == 0;
+    capturing[slot(s)] = 0;
+    invalidated[slot(s)] = 0;
+    *stream = (void *)s;
+    return 0;
+}
+CUresult cuStreamDestroy_v2(void *stream) { (void)stream; return 0; }
+CUresult cuStreamGetCtx(void *stream, void **context) {
+    uintptr_t c = context_of(stream);
+    if (sticky[slot(c)]) return sticky[slot(c)];
+    *context = (void *)c;
     return 0;
 }
 CUresult cuStreamBeginCapture_v2(void *stream, int mode) {
     (void)mode;
-    int s = stream_index(stream);
-    if (s < 0) return INVALID_HANDLE;
-    capturing[s] = graph_counter++;
-    graph_faults[capturing[s] % MAX] = 0;
+    if (is_null_stream(stream)) return INVALID_VALUE;
+    capturing[slot((uintptr_t)stream)] = next_graph++;
+    graph_faults[slot(capturing[slot((uintptr_t)stream)])] = 0;
+    invalidated[slot((uintptr_t)stream)] = 0;
     return 0;
 }
 CUresult cuStreamEndCapture(void *stream, void **graph) {
-    int s = stream_index(stream);
-    if (s < 0 || !capturing[s]) return 1;
-    *graph = (void *)capturing[s];
+    if (is_null_stream(stream)) return INVALID_VALUE;
+    int s = slot((uintptr_t)stream);
+    uintptr_t g = capturing[s];
+    if (!g) return INVALID_VALUE;
     capturing[s] = 0;
+    if (invalidated[s]) {
+        invalidated[s] = 0;
+        return CAPTURE_INVALIDATED;
+    }
+    *graph = (void *)g;
     return 0;
 }
 CUresult cuStreamGetCaptureInfo_v2(void *stream, int *status, uint64_t *id, void **graph, const void **deps,
                                    size_t *count) {
-    CUresult r = context_state();
+    CUresult r = queued(context_of(stream));
     if (r) return r;
-    int s = stream_index(stream);
-    *status = s >= 0 && capturing[s] ? 1 : 0;
+    int s = is_null_stream(stream) ? -1 : slot((uintptr_t)stream);
+    uintptr_t g = s >= 0 ? capturing[s] : 0;
+    *status = !g ? 0 : invalidated[s] ? 2 : 1;
     if (id) *id = 0;
-    if (graph) *graph = *status ? (void *)capturing[s] : 0;
+    if (graph) *graph = (void *)g;
     if (deps) *deps = 0;
     if (count) *count = 0;
     return 0;
 }
+
+// A use of the legacy stream of `context`: invalid while a blocking stream of it is capturing,
+// whose capture it invalidates.
+static CUresult legacy_use(uintptr_t context) {
+    int invalid = 0;
+    for (uintptr_t h = 0x50010; h < next_stream; h += 0x10) {
+        int s = slot(h);
+        if (capturing[s] && stream_blocking[s] && stream_context[s] == context) {
+            invalidated[s] = 1;
+            invalid = 1;
+        }
+    }
+    return invalid ? CAPTURE_IMPLICIT : 0;
+}
+
+static _Atomic uintptr_t exec_graph;
 CUresult cuGraphInstantiateWithFlags(void **exec, void *graph, unsigned long long flags) {
     (void)flags;
-    *exec = (void *)((uintptr_t)graph + 0x10000);
+    if (getenv("MOCK_EXEC_FIXED")) {
+        exec_graph = (uintptr_t)graph;
+        *exec = (void *)0x777000;
+    } else {
+        *exec = (void *)((uintptr_t)graph + 0x10000);
+    }
     return 0;
 }
+// (Launched with the graph it has at its launch.)
 CUresult cuGraphLaunch(void *exec, void *stream) {
-    (void)stream;
-    CUresult r = queued_state();
+    uintptr_t c = context_of(stream);
+    CUresult r = queued(c);
     if (r) return r;
-    if (graph_faults[((uintptr_t)exec - 0x10000) % MAX]) pending[current() % MAX] = ILLEGAL_ADDRESS;
+    uintptr_t g = getenv("MOCK_EXEC_FIXED") ? exec_graph : (uintptr_t)exec - 0x10000;
+    if (graph_faults[slot(g)]) make_pending(c, graph_faults[slot(g)]);
     return 0;
 }
 CUresult cuGraphDestroy(void *graph) { (void)graph; return 0; }
@@ -232,48 +292,65 @@ CUresult cuGraphExecDestroy(void *exec) { (void)exec; return 0; }
 CUresult cuLaunchKernel(void *f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz,
                         unsigned shared, void *stream, void **params, void **extra) {
     (void)gx; (void)gy; (void)gz; (void)bx; (void)by; (void)bz; (void)shared; (void)params; (void)extra;
-    CUresult r = queued_state();
+    uintptr_t c = context_of(stream);
+    CUresult r = queued(c);
     if (r) return r;
-    const char *name = name_of(f);
-    if (!name) return INVALID_HANDLE;
-    int s = stream_index(stream);
-    if (s >= 0 && capturing[s]) {
-        if (!strcmp(name, "write_null")) graph_faults[capturing[s] % MAX] = 1;
+    uintptr_t i = (uintptr_t)f & 0xf;
+    if (i >= NAMES) return INVALID_HANDLE;
+    int error = i == 1 ? ILLEGAL_ADDRESS : i == 2 ? ECC_UNCORRECTABLE : 0;
+    if (!is_null_stream(stream) && capturing[slot((uintptr_t)stream)]) {
+        if (invalidated[slot((uintptr_t)stream)]) return CAPTURE_INVALIDATED;
+        if (error) graph_faults[slot(capturing[slot((uintptr_t)stream)])] = error;
         return 0;
     }
     ++launched;
-    if (!strcmp(name, "write_null")) pending[current() % MAX] = ILLEGAL_ADDRESS;
+    if (error) make_pending(c, error);
     return 0;
 }
-
-// The thread's own default stream: the same launches.
 CUresult cuLaunchKernel_ptsz(void *f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz,
                              unsigned shared, void *stream, void **params, void **extra) {
     return cuLaunchKernel(f, gx, gy, gz, bx, by, bz, shared, stream, params, extra);
 }
 
-static CUresult wait(void) { return context_state(); }
-CUresult cuCtxSynchronize(void) { return wait(); }
+CUresult cuCtxSynchronize(void) { return waited(current()); }
 CUresult cuStreamSynchronize(void *stream) {
-    (void)stream;
     ++synchronized;
-    return wait();
+    if ((uintptr_t)stream == 0 || (uintptr_t)stream == 1) {
+        CUresult r = legacy_use(current());
+        if (r) return r;
+    }
+    return waited(context_of(stream));
 }
-CUresult cuStreamSynchronize_ptsz(void *stream) { (void)stream; return wait(); }
-CUresult cuStreamQuery(void *stream) { (void)stream; return wait(); }
-CUresult cuStreamDestroy_v2(void *stream) {
-    int s = stream_index(stream);
-    if (s < 0) return INVALID_HANDLE;
-    stream_handles[s] = 0;
+CUresult cuStreamSynchronize_ptsz(void *stream) { return waited(context_of(stream)); }
+CUresult cuStreamQuery(void *stream) {
+    if ((uintptr_t)stream == 0 || (uintptr_t)stream == 1) {
+        CUresult r = legacy_use(current());
+        if (r) return r;
+    }
+    return waited(context_of(stream));
+}
+
+CUresult cuEventCreate(void **event, unsigned flags) {
+    (void)flags;
+    uintptr_t e = (next_event += 0x10);
+    event_context[slot(e)] = current();
+    *event = (void *)e;
     return 0;
 }
+CUresult cuEventRecord(void *event, void *stream) {
+    event_context[slot((uintptr_t)event)] = context_of(stream);
+    return queued(context_of(stream));
+}
+CUresult cuEventSynchronize(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
+CUresult cuEventQuery(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
+
 CUresult cuMemAlloc_v2(uint64_t *pointer, size_t size) {
     (void)size;
     *pointer = 0x7f0000000000;
-    return context_state();
+    return queued(current());
 }
 CUresult cuMemcpyDtoH_v2(void *host, uint64_t device, size_t size) {
     (void)device;
     memset(host, 0, size);
-    return context_state();
+    return waited(current());
 }

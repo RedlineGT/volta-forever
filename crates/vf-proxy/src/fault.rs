@@ -68,6 +68,22 @@
 //! one sets) never end. A launch into a stream being captured is not synchronised (nothing runs),
 //! nor any launch while a capture is under way in the process (a synchronisation could end it).
 //!
+//! Locks. The locks of this file are taken in this order, and none of them is held while another
+//! part of the layer is asked anything:
+//!
+//! - `contexts`' lock of the modules (`MODULES`) comes before all of them: `contexts::destroyed`
+//!   holds it while it has the names of each module that goes forgotten (`forget_in`), which takes
+//!   `TAKEN`, then `FORGOTTEN`, and under that `RINGS_HELD` (`oldest_kept`). So nothing here asks
+//!   `contexts` (`context_of`, `known`) while it holds a lock of its own: the record is copied out
+//!   and the lock let go first (`identify`, `forget_in`).
+//! - `TAKEN` → `FORGOTTEN` → `RINGS_HELD`: never the other way.
+//! - `COVERS`, `GRAPHS`, `EXECS`, `REPORTED` and `SUMMARIES` are each taken alone: no other lock is
+//!   taken under them, and they are not taken under another (a value is copied out of one before
+//!   the next is taken).
+//! - No lock is held across a call of the driver, nor across a line written to the log; the report
+//!   (`seen`) runs with none held, and the images, deferred libraries and kernels it asks of
+//!   (`images::origin_text`, `lazy`, `kernels`) take their own locks alone.
+//!
 //! CUDA graphs: a graph's kernels run without passing through the layer. A launch made while its
 //! stream is captured is recorded as a node of the graph being captured, not as a launch, and so is
 //! a kernel node added by hand (`cuGraphAddKernelNode`, `cuGraphAddNode`); an instantiated graph
@@ -1007,7 +1023,9 @@ fn identify(handle: usize, epoch: Option<u64>) -> Identity {
             gone: true,
         };
     }
-    if let Some(known) = taken_map().get(&handle).cloned() {
+    // (The record copied out and the lock let go before `contexts` is asked: see "Locks" above.)
+    let known = taken_map().get(&handle).cloned();
+    if let Some(known) = known {
         let context = known
             .module
             .and_then(crate::contexts::context_of)

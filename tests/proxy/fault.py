@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 PTX = (b".version 7.0\n.target sm_75\n.address_size 64\n"
        b".visible .entry add_one(.param .u64 p)\n{\n ret;\n}\n"
@@ -141,6 +142,42 @@ def case(name, proxy):
         out.append(run.api.cuStreamEndCapture(captured, c.byref(graph)))
         out.append(run.launch("add_one", other, grid=2))
         out.append(waits.value - before)
+    elif name == "deadlock":
+        # A report, which looks up the context of every launch kept (here 120 threads' 256 each), while
+        # another thread destroys contexts that have modules: contexts::destroyed holds its lock while
+        # it has fault forget the names of each module, so no lock of fault.rs may be held while
+        # contexts is asked. (Each launching thread holds its record until all have launched.)
+        barrier = threading.Barrier(120)
+
+        def launcher():
+            run.api.cuCtxSetCurrent(run.context)
+            for i in range(256):
+                run.launch("add_one", grid=1 + i)
+            barrier.wait()
+        threads = [threading.Thread(target=launcher) for _ in range(120)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        out.append(run.launch("write_null", grid=7))
+        stop, destroyed = threading.Event(), [0]
+
+        def destroyer():
+            while not stop.is_set():
+                context = c.c_void_p()
+                run.api.cuCtxCreate_v2(c.byref(context), 0, 0)
+                for _ in range(16):
+                    module = c.c_void_p()
+                    run.api.cuModuleLoadData(c.byref(module), PTX)
+                run.api.cuCtxDestroy_v2(context)
+                destroyed[0] += 1
+        other = threading.Thread(target=destroyer)
+        other.start()
+        while destroyed[0] < 3:
+            time.sleep(0.001)
+        out.append(run.api.cuCtxSynchronize())
+        stop.set()
+        other.join()
     elif name == "profile":
         # VF_PROFILE waits for each launch: its wait that met the fault is the one reported, and its
         # waits that succeeded cover what they waited for.
@@ -232,6 +269,10 @@ def checks(name, log, summary, results):
         expect("the graph named", head.startswith("a kernel of a CUDA graph faulted on the GPU") and
                "    write_null (grid 3x1x1" in log)
         expect("the graph's launch returned the fault", results[7] == "700")
+    elif name == "deadlock":
+        count = re.search(r"one of the (\d+) launched", head)
+        expect("the report ended while contexts were destroyed, and named the launches of the 120 threads",
+               results == ["0", "700"] and count is not None and int(count.group(1)) >= 120 * 255)
     elif name == "profile":
         expect("the profile's wait after write_null met it",
                "the synchronisation of the stream after a launch (VF_PROFILE) returned 700" in head)
@@ -258,7 +299,7 @@ def main():
         mock = str(Path(tmp) / "libcuda_mock.so")
         subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-Bsymbolic", "-o", mock, str(here / "fault_mock_driver.c")],
                        check=True)
-        cases = [("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
+        cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
                  ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("copy", {}), ("exit", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
@@ -270,7 +311,13 @@ def main():
             env = dict(os.environ, VF_REAL_LIBCUDA=mock, VF_PROXY_CACHE="0", VF_LOG=str(log),
                        VF_SUMMARY=str(summary), **settings)
             env.pop("VF_LOG_LEVEL", None)
-            done = subprocess.run([sys.executable, __file__, proxy, name], env=env, capture_output=True, text=True)
+            try:
+                done = subprocess.run([sys.executable, __file__, proxy, name], env=env, capture_output=True,
+                                      text=True, timeout=120)
+            except subprocess.TimeoutExpired as hung:
+                text_of = lambda s: s.decode(errors="replace") if isinstance(s, bytes) else (s or "")
+                done = subprocess.CompletedProcess(hung.cmd, -9, text_of(hung.stdout), text_of(hung.stderr))
+                print(f"  {name}: still running after 120 s, stopped")
             results = next((line.split()[1:] for line in done.stdout.splitlines() if line.startswith("results")), [])
             text = log.read_text() if log.exists() else ""
             summaries = list(Path(tmp).glob(f"{name}.summary.*"))
