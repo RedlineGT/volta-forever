@@ -21,6 +21,7 @@ int stub_module_loads(void);
 void stub_set_stream(CUstream s, int ctx_index, unsigned long long capture, CUgraph graph);
 void stub_set_dtoh(const unsigned long long *v, int n); /* what the next copies to the host return */
 void stub_set_dtoh_repeat(const unsigned long long *v, int n); /* the same, repeated over the whole copy */
+void stub_pause_launch(const char *name, int us); /* a pause of us microseconds after each launch of that function */
 /* libcublas.so.12 stand-in: right after the next pointer-mode query of handle h, another "thread" sets
  * its stream to s and its pointer mode to device. */
 void stub_chaos(cublasHandle_t h, cudaStream_t s);

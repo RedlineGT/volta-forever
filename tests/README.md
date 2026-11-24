@@ -119,7 +119,10 @@ Where the GPU scripts write:
   skinny call of each kind (entry points, layouts, output types, C read, scalars on the device, an
   unaligned C) and a tensor-core call's fallback elements against 12.9, eager and replayed from a graph,
   silent when nothing differs, failing with a fat binary that changes one element of the skinny kernel's
-  (`bf16-verify.c`), and bf16-graphs' cases with the skinny path's calls captured under it; the runtime told
+  (`bf16-verify.c`), and bf16-graphs' cases with the skinny path's calls captured under it; verify mode
+  with two threads on one stream, on the legacy stream, on the per-thread default stream and on a stream
+  each, none of their calls reported as differing, and failing without the stream's lock (the control
+  `verify-unlocked`; `bf16-verify-threads.c`); the runtime told
   the real capability under the layer's settings, under both module loading modes
   (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the

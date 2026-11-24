@@ -130,6 +130,22 @@ if want bf16-verify; then
             echo "PASS  bf16-verify (the report at exit: nothing differed, said once)"
         else echo "FAIL  bf16-verify (exit status $status; report's totals $tot times, $dif signatures that differed; $log)"; failed=1; fi
     fi
+    # Two threads' calls on one stream (a program's stream, the legacy stream, the per-thread default stream) and on a
+    # stream each: every call verified, none reported as differing; with the control verify-unlocked (no lock across
+    # a call's launches) the shared streams' calls are reported as differing, and the test fails.
+    if build bf16-verify-threads; then
+        run bf16-verify-threads "$test_dir" VF_CUBLAS_BF16_VERIFY=1
+        tot=$(grep -c "verify: the skinny path's calls against cuBLAS 12.9's, bit for bit: [1-9][0-9]* calls verified (eager calls and graph replays), in [0-9]* call signatures; 0 differed, in 0 elements" "$log")
+        dif=$(grep -c "verify: DIFFERED" "$log")
+        if [ "$status" = 0 ] && grep -qx "ok bf16-verify-threads" "$log" && [ "$tot" = 1 ] && [ "$dif" = 0 ]; then
+            echo "PASS  bf16-verify-threads (the report at exit: nothing differed, said once)"
+        else echo "FAIL  bf16-verify-threads (exit status $status; report's totals $tot times, $dif signatures that differed; $log)"; failed=1; fi
+        run bf16-verify-threads "$test_dir" VF_CUBLAS_BF16_VERIFY=1 VF_BF16_CONTROL=verify-unlocked >/dev/null
+        cp "$log" "$out/logs/forward-bf16-verify-threads-unlocked.log"
+        if [ "$status" != 0 ] && grep -q "^FAIL .*: verify mode reports [1-9][0-9]* calls differing" "$log" && grep -q "verify: DIFFERED" "$log"; then
+            echo "PASS  bf16-verify-threads control: without the stream's lock (verify-unlocked) it fails there"
+        else echo "FAIL  bf16-verify-threads control verify-unlocked: did not fail ($out/logs/forward-bf16-verify-threads-unlocked.log)"; failed=1; fi
+    fi
     if build bf16-graphs; then
         run bf16-graphs "$test_dir" VF_BF16_GRAPHS_N=8 VF_CUBLAS_BF16_VERIFY=1
         cp "$log" "$out/logs/forward-bf16-graphs-verify.log"

@@ -257,9 +257,10 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   says each call signature that differed once, with what it takes to make the call again (entry point,
   operations, sizes, leading dimensions, types, addresses modulo 256, scalars and their pointer mode,
   algorithm, epilogue, workspace) and its first differing element. It costs a 12.9 call and a
-  comparison per verified call; per CUDA context, 40 KiB of counters and a non-blocking stream of the
-  runtime's own; per stream, a scratch buffer of 1 MiB or more, kept to the end of the process
-  (`LIMITS.md`, "Verify mode").
+  comparison per verified call, whose signature's text is made once, at its first call; per CUDA context,
+  40 KiB of counters and a non-blocking stream of the runtime's own; per stream (per thread on the
+  per-thread default stream), a scratch buffer of 1 MiB or more, kept to the end of the process. Calls of
+  several threads on one stream are verified one after the other (`LIMITS.md`, "Verify mode").
 - `VF_SAFE=1` (safe mode: the proxy's table of "Environment variables", below, says what it is and
   how it is read): the variants' tensor-core path serves nothing, whatever `VF_CUBLAS_BF16_TC` says;
   the skinny path, whose results are 12.9's bits, is not affected. Every result is then cuBLAS 12.9's

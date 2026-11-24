@@ -512,7 +512,7 @@ typedef struct Ctx {
     atomic_int vmade;         /* verify mode: its stream and signature counters, 0 not made yet, 1 there, -1 not */
     CUstream vstream;         /* the runtime's own non-blocking stream, to zero what it allocates */
     CUdeviceptr vslots;       /* VF_VERIFY_SLOTS signatures' counters (abi.h, VfCmpArgs.slot) */
-    struct VScratch *vscr;    /* each stream's scratch buffer, under g_setup_mu */
+    struct VScratch *vscr;    /* each stream's scratch buffer: added under g_setup_mu, read without it (vstream) */
 } Ctx;
 
 static Ctx g_no_ctx = {.kernels = -1, .tc = -1}; /* a handle whose context has no state: every call forwarded */
@@ -1059,9 +1059,16 @@ typedef struct VRef {
 #define VF_VERIFY_SLOTS 1024 /* call signatures counted apart; past them, the last slot counts the others together */
 #define VF_VERIFY_WORDS 5    /* abi.h, VfCmpArgs.slot */
 
+/* A stream's scratch buffer, made at its first verified call and kept to the end of the process. One verification
+ * is several launches on the call's stream (the copy of C, the path's, 12.9's call, the comparison), which use the
+ * buffer's header and regions: mu is held from the first to the last of them (verify_pre to verify_post), so that
+ * the calls of several threads on one stream are verified one after the other, each on the buffer alone. The
+ * per-thread default stream (CU_STREAM_PER_THREAD) is another stream in each thread: its buffers are per thread. */
 typedef struct VScratch {
     CUstream s;
-    CUdeviceptr base;
+    pthread_t thread; /* for CU_STREAM_PER_THREAD: the thread whose stream it is */
+    pthread_mutex_t mu;
+    CUdeviceptr base; /* base and size: read and replaced with mu held */
     size_t size;
     struct VScratch *next;
 } VScratch;
@@ -1165,11 +1172,18 @@ static void vsig_text(const Call *c, int tc, char *out, size_t n)
              c->o.beta_mode == 2 ? "device" : "host", tail);
 }
 
+#ifdef VF_BF16_TEST
+static atomic_ullong st_ver_texts; /* test builds: the signatures' texts made (vf_bf16_test_verify_texts) */
+#endif
+
 /* The signature's slot: its text, looked up (or added) in the table. */
-static int vsig_slot(const Call *c, int tc)
+static int vsig_slot_text(const Call *c, int tc)
 {
     char text[1536];
     vsig_text(c, tc, text, sizeof text);
+#ifdef VF_BF16_TEST
+    atomic_fetch_add(&st_ver_texts, 1);
+#endif
     unsigned long long h = 1469598103934665603ull;
     for (const char *q = text; *q; ++q) h = (h ^ (unsigned char)*q) * 1099511628211ull;
     const int n = VF_VERIFY_SLOTS - 1;
@@ -1190,6 +1204,89 @@ static int vsig_slot(const Call *c, int tc)
     if (found < 0) g_vsig.full = 1;
     pthread_mutex_unlock(&g_vsig_mu);
     return found >= 0 ? found : VF_VERIFY_SLOTS - 1;
+}
+
+/* A call's signature as the values its text is made of (vsig_text), before any text: a call looks its slot up from
+ * them, without a lock, and its text is made only for values not seen before. */
+typedef struct {
+    unsigned long long w[19];
+    uint64_t algo[8]; /* cuBLASLt: the algorithm's bytes, when the call gives one */
+} VKey;
+
+static void vsig_key(const Call *c, int tc, VKey *k)
+{
+    const VRef *r = c->ref;
+    memset(k, 0, sizeof *k);
+    k->w[0] = (unsigned long long)r->api | (unsigned long long)tc << 8 | (unsigned long long)c->opA << 9 |
+              (unsigned long long)c->opB << 10 | (unsigned long long)c->o.dtype << 11 |
+              (unsigned long long)c->o.beta_mode << 12 | (unsigned long long)(c->o.C == c->o.D) << 14 |
+              (unsigned long long)(c->o.btype >= 0) << 15 | (unsigned long long)(r->lalgo != NULL) << 16;
+    k->w[1] = (unsigned long long)c->m, k->w[2] = (unsigned long long)c->n, k->w[3] = (unsigned long long)c->k;
+    k->w[4] = (unsigned long long)c->lda, k->w[5] = (unsigned long long)c->ldb;
+    k->w[6] = (unsigned long long)c->o.ldc, k->w[7] = (unsigned long long)c->o.ldd;
+    k->w[8] = mod256(c->A) | (unsigned long long)mod256(c->B) << 8 | (unsigned long long)mod256(c->o.C) << 16 |
+              (unsigned long long)mod256(c->o.D) << 24 |
+              (unsigned long long)(c->o.btype >= 0 ? mod256(c->o.bias) : 0) << 32;
+    if (c->o.beta_mode == 2) {
+        k->w[9] = mod256(r->alpha), k->w[10] = mod256(r->beta);
+    } else {
+        uint32_t a, b;
+        memcpy(&a, r->alpha, 4);
+        memcpy(&b, r->beta, 4);
+        k->w[9] = a, k->w[10] = b;
+    }
+    if (r->api != API_LT) {
+        HState *hs = handle_state(r->h);
+        cublasMath_t mm = CUBLAS_DEFAULT_MATH;
+        cb.GetMathMode(r->h, &mm);
+        k->w[11] = hs ? atomic_load(&hs->ws_size) : (unsigned long long)SIZE_MAX;
+        k->w[12] = hs ? atomic_load(&hs->ws_mod) : 0u;
+        k->w[13] = (unsigned long long)mm, k->w[14] = (unsigned long long)r->algo;
+        k->w[15] = (unsigned long long)r->sa, k->w[16] = (unsigned long long)r->sb;
+        k->w[17] = (unsigned long long)r->sc, k->w[18] = (unsigned long long)r->batch;
+    } else {
+        k->w[11] = r->wss, k->w[12] = mod256(r->ws);
+        if (r->lalgo) memcpy(k->algo, r->lalgo, sizeof k->algo);
+    }
+}
+
+#define VF_VERIFY_KEYS 1024 /* the signatures' values looked up without a lock; past them, the text each time */
+static struct {
+    atomic_int ready; /* set (release) once h, k and slot are written; never changed after */
+    unsigned long long h;
+    VKey k;
+    int slot;
+} g_vkey[VF_VERIFY_KEYS];
+
+/* The call's signature's slot: from its values when they were seen before (no lock, no text), else from its text
+ * (vsig_slot_text), and its values then added (under g_vsig_mu). The control verify-text-each: the text every time. */
+static int vsig_slot(const Call *c, int tc)
+{
+    if (CONTROL("verify-text-each")) return vsig_slot_text(c, tc);
+    VKey k;
+    vsig_key(c, tc, &k);
+    unsigned long long h = 1469598103934665603ull;
+    for (size_t i = 0; i < sizeof k; ++i) h = (h ^ ((const unsigned char *)&k)[i]) * 1099511628211ull;
+    unsigned i = (unsigned)(h % VF_VERIFY_KEYS);
+    for (int probe = 0; probe < VF_VERIFY_KEYS; ++probe, i = (i + 1) % VF_VERIFY_KEYS) {
+        if (!atomic_load_explicit(&g_vkey[i].ready, memory_order_acquire)) break;
+        if (g_vkey[i].h == h && !memcmp(&g_vkey[i].k, &k, sizeof k)) return g_vkey[i].slot;
+    }
+    const int slot = vsig_slot_text(c, tc);
+    pthread_mutex_lock(&g_vsig_mu);
+    i = (unsigned)(h % VF_VERIFY_KEYS);
+    for (int probe = 0; probe < VF_VERIFY_KEYS; ++probe, i = (i + 1) % VF_VERIFY_KEYS) {
+        if (!atomic_load_explicit(&g_vkey[i].ready, memory_order_relaxed)) {
+            g_vkey[i].h = h;
+            g_vkey[i].k = k;
+            g_vkey[i].slot = slot;
+            atomic_store_explicit(&g_vkey[i].ready, 1, memory_order_release);
+            break;
+        }
+        if (g_vkey[i].h == h && !memcmp(&g_vkey[i].k, &k, sizeof k)) break; /* another thread's, meanwhile */
+    }
+    pthread_mutex_unlock(&g_vsig_mu);
+    return slot;
 }
 
 /* A slot that a signature has (the last when the table was full). */
@@ -1221,62 +1318,100 @@ static int vsetup(Ctx *x)
     return st > 0;
 }
 
-/* A stream's scratch buffer: a header (one call's counters, zero between calls) and room for 12.9's output and a
- * copy of C. Allocated outside any graph (cuMemAlloc, in relaxed capture mode) and its header zeroed on the
- * runtime's stream. A call that needs more gets a larger one, and the old one is kept: a graph captured before
- * still uses it. The calls of one stream run in order and share it; two streams have two. */
-static CUdeviceptr vscratch(Ctx *x, CUstream s, size_t need)
+/* The scratch entry of a stream (VScratch), made at its first verified call. The context's list only grows, and an
+ * entry is never changed once added but for its buffer (under its lock): a call finds its stream's entry without a
+ * lock of the whole process, and only a stream's first call takes g_setup_mu, to add it. On the per-thread default
+ * stream, the thread's own entry (the control verify-unlocked: one entry for every thread's, as before this lock). */
+static VScratch *vstream_find(VScratch *v, CUstream s, int per_thread, pthread_t self)
 {
-    CUdeviceptr base = 0;
+    while (v && !(v->s == s && (!per_thread || pthread_equal(v->thread, self)))) v = v->next;
+    return v;
+}
+static VScratch *vstream(Ctx *x, CUstream s)
+{
+    const int per_thread = s == CU_STREAM_PER_THREAD && !CONTROL("verify-unlocked");
+    const pthread_t self = pthread_self();
+    VScratch *v = vstream_find(__atomic_load_n(&x->vscr, __ATOMIC_ACQUIRE), s, per_thread, self);
+    if (v) return v;
     pthread_mutex_lock(&g_setup_mu);
-    VScratch *v = x->vscr;
-    while (v && v->s != s) v = v->next;
-    if (v && v->size >= need) {
-        base = v->base;
-    } else {
-        size_t size = need < ((size_t)1 << 20) ? (size_t)1 << 20 : need;
-        if (v && size < 2 * v->size) size = 2 * v->size;
-        CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
-        const int relaxed = cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
-        CUdeviceptr d = 0;
-        CUresult r = cu.MemAlloc(&d, size);
-        if (r == CUDA_SUCCESS) r = cu.MemsetD32Async(d, 0, 64, x->vstream);
-        if (r == CUDA_SUCCESS) r = cu.StreamSynchronize(x->vstream);
-        if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
-        if (r == CUDA_SUCCESS && !v && (v = calloc(1, sizeof *v))) {
-            v->s = s;
-            v->next = x->vscr;
-            x->vscr = v;
-        }
-        if (r == CUDA_SUCCESS && v) {
-            v->base = d;
-            v->size = size;
-            base = d;
-        }
+    v = vstream_find(x->vscr, s, per_thread, self);
+    if (!v && (v = calloc(1, sizeof *v))) {
+        v->s = s;
+        v->thread = self;
+        pthread_mutex_init(&v->mu, NULL);
+        v->next = x->vscr;
+        __atomic_store_n(&x->vscr, v, __ATOMIC_RELEASE); /* published whole */
     }
     pthread_mutex_unlock(&g_setup_mu);
-    return base;
+    return v;
 }
 
-/* One call's verification: its signature, its scratch buffer, and where 12.9's output goes. */
+/* The entry's buffer, of need bytes or more: a header (one call's counters, zero between calls) and room for 12.9's
+ * output and a copy of C. Allocated outside any graph (cuMemAlloc, in relaxed capture mode) and its header zeroed on
+ * the runtime's stream. A call that needs more gets a larger one, and the old one is kept: a graph captured before
+ * still uses it. Called with the entry's lock held. */
+static CUdeviceptr vscratch(Ctx *x, VScratch *v, size_t need)
+{
+    if (v->base && v->size >= need) return v->base;
+    size_t size = need < ((size_t)1 << 20) ? (size_t)1 << 20 : need;
+    if (size < 2 * v->size) size = 2 * v->size;
+    CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+    const int relaxed = cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
+    CUdeviceptr d = 0;
+    CUresult r = cu.MemAlloc(&d, size);
+    if (r == CUDA_SUCCESS) r = cu.MemsetD32Async(d, 0, 64, x->vstream);
+    if (r == CUDA_SUCCESS) r = cu.StreamSynchronize(x->vstream);
+    if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
+    if (r != CUDA_SUCCESS) return 0;
+    v->base = d;
+    v->size = size;
+    return d;
+}
+
+/* One call's verification: its signature, its scratch buffer, where 12.9's output goes, and the stream's entry
+ * whose lock it holds (from verify_pre to verify_post, or verify_end). */
 typedef struct {
     int on, slot;
     CUdeviceptr base, Cs, Ds;
+    VScratch *held;
 } VCall;
 
-/* Before the path writes D: the scratch buffer, and C copied there when the call reads it (beta != 0, or scalars
- * on the device), since D may be C. The launches go on the call's stream: in a graph capture they are nodes. */
+/* The stream's lock given back: the call's launches are all enqueued (or it is not verified after all). */
+static void verify_end(VCall *v)
+{
+    if (v->held) pthread_mutex_unlock(&v->held->mu);
+    v->held = NULL;
+    v->on = 0;
+}
+
+/* Before the path writes D: the stream's lock (held to verify_post, or verify_end), its scratch buffer, and C copied
+ * there when the call reads it (beta != 0, or scalars on the device), since D may be C. The launches go on the call's
+ * stream: in a graph capture they are nodes. On return, v->on says whether the call is verified (the lock held). */
 static void verify_pre(const Call *c, int tc, VCall *v)
 {
     v->on = 0;
+    v->held = NULL;
     if (!cfg.verify || !c->ref) return;
     Ctx *x = c->x;
     const long long es = c->o.dtype ? 2 : 4;
     const int same = !c->o.C || c->o.C == c->o.D;
     const long long spanD = ((long long)(c->n - 1) * c->o.ldd + c->m) * es;
     const long long spanC = c->o.C ? ((long long)(c->n - 1) * c->o.ldc + c->m) * es : 0;
+    VScratch *e = vsetup(x) ? vstream(x, c->stream) : NULL;
+    if (!e) {
+        atomic_fetch_add(&st_ver_skip[0], 1);
+        return;
+    }
+    /* The control verify-unlocked: no lock across the call's launches, the buffer looked at under g_setup_mu (as
+     * before), so that two threads' launches on one stream can interleave on it. */
+    const int unlocked = CONTROL("verify-unlocked");
+    pthread_mutex_lock(unlocked ? &g_setup_mu : &e->mu);
     /* the header (256 bytes), D's region from the next 256-byte boundary at D's address modulo 256, then C's likewise */
-    if (!vsetup(x) || !(v->base = vscratch(x, c->stream, (size_t)(spanD + (same ? 0 : spanC) + 2048)))) {
+    v->base = vscratch(x, e, (size_t)(spanD + (same ? 0 : spanC) + 2048));
+    if (unlocked) pthread_mutex_unlock(&g_setup_mu);
+    else v->held = e;
+    if (!v->base) {
+        verify_end(v);
         atomic_fetch_add(&st_ver_skip[0], 1);
         return;
     }
@@ -1287,6 +1422,7 @@ static void verify_pre(const Call *c, int tc, VCall *v)
         VfCopyArgs a = {(const unsigned short *)c->o.C, (unsigned short *)(uintptr_t)v->Cs, spanC / 2};
         const long long most = (long long)x->sms * 4, blocks = (a.n + 2047) / 2048 < most ? (a.n + 2047) / 2048 : most;
         if (INJECT("verify-copy") || launch(x, x->copy, (unsigned)blocks, 1, 256, 0, c->stream, &a) != CUDA_SUCCESS) {
+            verify_end(v);
             atomic_fetch_add(&st_ver_skip[2], 1);
             return;
         }
@@ -1294,11 +1430,20 @@ static void verify_pre(const Call *c, int tc, VCall *v)
     v->on = 1;
 }
 
-/* After the path's last launch: 12.9's call into the scratch buffer, then the comparison, on the call's stream.
- * eA and eB (the tensor-core path's check results): only the fallback's elements are compared. */
-static void verify_post(const Call *c, const VCall *v, CUdeviceptr eA, CUdeviceptr eB)
+static void verify_post_launch(const Call *c, const VCall *v, CUdeviceptr eA, CUdeviceptr eB);
+
+/* After the path's last launch: 12.9's call into the scratch buffer, then the comparison, on the call's stream; then
+ * the stream's lock given back. eA and eB (the tensor-core path's check results): only the fallback's elements are
+ * compared. */
+static void verify_post(const Call *c, VCall *v, CUdeviceptr eA, CUdeviceptr eB)
 {
     if (!v->on) return;
+    verify_post_launch(c, v, eA, eB);
+    verify_end(v);
+}
+
+static void verify_post_launch(const Call *c, const VCall *v, CUdeviceptr eA, CUdeviceptr eB)
+{
     const cublasStatus_t st = CONTROL("verify-skip-129") ? CUBLAS_STATUS_NOT_SUPPORTED
                                                            : vref_call(c->ref, (void *)(uintptr_t)v->Cs,
                                                                        (void *)(uintptr_t)v->Ds);
@@ -1431,6 +1576,7 @@ static cublasStatus_t run_skinny(const Call *c, int *reason)
                                          : launch(c->x, c->x->skinny[fast][shape], (unsigned)((c->m + rb - 1) / rb), 1,
                                                   (unsigned)(ncp * rb), 0, c->stream, &a);
     if (r != CUDA_SUCCESS) {
+        verify_end(&v); /* forwarded: not verified */
         *reason = R_LAUNCH;
         return FWD;
     }
@@ -1723,10 +1869,10 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                       A16 = base + p.off_A16, Cp = base + p.off_Cp;
     const size_t es = c->o.dtype ? 2 : 4;
     int written = 0; /* the output may have been changed */
+    VCall v = {0};   /* verify mode: nothing held until verify_pre */
     /* 0. counters, once for the call: [0] failed rows of op(A), [1] failed columns of op(B) */
     r = CONTROL("no-reset") ? CUDA_SUCCESS : cu.MemsetD32Async(cnt, 0, 2, c->stream);
     if (r != CUDA_SUCCESS) goto fail;
-    VCall v;
     verify_pre(c, 1, &v); /* verify mode: C copied before the epilogue writes D */
     for (int jc = 0; jc < p.nch; ++jc) {
         const int j0 = jc * p.NS;
@@ -1858,6 +2004,7 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
     free_workspace(base, c->stream, capturing);
     return CUBLAS_STATUS_SUCCESS;
 fail:
+    verify_end(&v); /* verify mode: the call is not verified, the stream's lock given back */
     free_workspace(base, c->stream, capturing);
     {
         static atomic_int said;
@@ -2501,6 +2648,10 @@ EXPORT int vf_bf16_test_verify(unsigned long long *out, int n)
     out[4] = atomic_load(&st_ver_skip[0]) + atomic_load(&st_ver_skip[1]) + atomic_load(&st_ver_skip[2]);
     return 7;
 }
+
+/* Test builds: the signatures' texts that verify mode has made (once per signature; once per verified call with the
+ * control verify-text-each). */
+EXPORT unsigned long long vf_bf16_test_verify_texts(void) { return atomic_load(&st_ver_texts); }
 
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded
  * by reason). Returns the number of values written. */

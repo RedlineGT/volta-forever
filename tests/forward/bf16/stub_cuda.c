@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -198,6 +199,16 @@ EXPORT CUresult cuFuncGetAttribute(int *pi, CUfunction_attribute a, CUfunction f
     return CUDA_SUCCESS;
 }
 
+/* A pause after each launch of one function (stub_pause_launch("vf_bf16_copy", 2000): 2 ms), set before the threads
+ * that launch it start, so that another thread's launches can come in between where nothing holds them apart. */
+static char pause_name[64];
+static int pause_us;
+EXPORT void stub_pause_launch(const char *name, int us)
+{
+    snprintf(pause_name, sizeof pause_name, "%s", name ? name : "");
+    pause_us = us;
+}
+
 /* Launches: the function's name, the configuration, the stream, and the argument structure's first
  * STUB_ARGS bytes in hexadecimal (the kernels take one structure by value). */
 EXPORT CUresult cuLaunchKernel(CUfunction f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by,
@@ -209,6 +220,10 @@ EXPORT CUresult cuLaunchKernel(CUfunction f, unsigned gx, unsigned gy, unsigned 
     for (int i = 0; i < STUB_ARGS; ++i) sprintf(hex + 2 * i, "%02x", a[i]);
     stub_event("launch %s grid=%u,%u,%u block=%u smem=%u stream=%p%s args=%s", ((Func *)f)->name, gx, gy, gz, bx, smem,
                (void *)s, fail ? " FAILED" : "", hex);
+    if (pause_us > 0 && !strcmp(((Func *)f)->name, pause_name)) {
+        const struct timespec t = {pause_us / 1000000, (long)(pause_us % 1000000) * 1000};
+        nanosleep(&t, NULL);
+    }
     return fail ? CUDA_ERROR_LAUNCH_FAILED : CUDA_SUCCESS;
 }
 
