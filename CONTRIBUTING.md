@@ -38,14 +38,15 @@ failure, 2 when a step could not run here (what it needs is missing). Two and a 
 or to a lowering, run at least:
 
 ```sh
-tests/gpu/run.sh 0                       # 0: the GPU's index in PCI order; 165 cases at 0.1.4
+tests/gpu/run.sh 0                       # 0: the GPU's index in PCI order; 200 cases on main
 VF_CAPABILITY=8.0 tests/gpu/run.sh 0
 ```
 
 A minute or two each once compiled; the first run of a suite compiles its kernels (minutes), and
 `tests/README.md` gives each suite's time (1 to 20 minutes). The suites write their builds and logs
 under `VF_OUT` (default `VF_TEST_ROOT`, default `~/.cache/volta-forever/tests`; `tests/site.env`
-can set them), and the layer's cache in a new directory under `TMPDIR`, removed at the end.
+can set them), and the layer's cache in a new directory under `TMPDIR`, removed at the end
+(`TMPDIR` must be a local directory of whoever runs: `tests/gpu/cache.sh`).
 
 ## What a change must show
 
@@ -120,10 +121,13 @@ here).
 
 Read the last Xid line of the kernel's log before and after GPU work (`sudo dmesg | grep Xid |
 tail -1`), and report every new one with what was running: a fault is a result. Do not run a case
-that faulted again on a GPU that others share. No test here faults the GPU on purpose, and a new
-one must not: a test of a path that once faulted checks that no Xid line was added, as the
-`guard-*` cases of `tests/gpu/run.sh` do (for a user who cannot read the kernel's log, they pass
-and their log says it was not read: read it as root then).
+that faulted again on a GPU that others share. No test of the default suites faults a GPU on
+purpose; an opt-in test may, behind a documented switch (the `native` mode of
+`tests/kernels/test_nocode.c`, which `tests/README.md` names), and whoever runs it reports the Xid
+lines. A test of a path that once faulted checks that no Xid line was added, as the `guard-*` and
+`nocode-*` cases of `tests/gpu/run.sh` do (for a user who cannot read the kernel's log, they pass,
+and the last line of `run.sh` says "Xid lines could not be checked (dmesg not readable)": read it
+as root then).
 
 ## Licence
 

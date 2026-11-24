@@ -36,6 +36,12 @@ Steps, in this order:
      The program gets error 218 (`CUDA_ERROR_INVALID_PTX`) and a NULL handle when it looks the
      kernel up. The reason names what is missing (an instruction with no Volta sequence,
      machine code that is not translated, registers).
+   - `kernel NAME has no code in its image (...): its body is a trap and nothing else; CALL with
+     it is refused (error 218)` is a launch refused. The kernel was given at the lookup, as
+     NVIDIA's driver gives it, but its code in the image is only a trap (how a kernel built for
+     other GPUs only is emitted): launched, it would end the context on any GPU. The program
+     chose a kernel that has no code for this GPU; look for a setting of the program that
+     chooses another (the engine guides say which).
    - `emulated in NAME: ...` is logged when VF gives the program a handle to a kernel with
      emulated instructions. Launch it and check its output to verify execution. Measure it
      before drawing conclusions about speed.

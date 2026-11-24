@@ -85,15 +85,21 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 165 cases at 0.1.4, including nonconsecutive MMA fragments, a partial warp
-  reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
+  an RTX 5090 say. 200 cases on main (165 at 0.1.4), including nonconsecutive MMA fragments, a
+  partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
   (`CUDA_MODULE_LOADING`), a refused kernel launched with a handle taken from NVIDIA's driver
   itself (218 from every launch function and graph node, and no line more with "Xid" in the
   kernel's log, where it can be read: where it cannot, the last line of the output says "Xid lines
-  could not be checked (dmesg not readable)"), and lookup tables asked for by name, answered as
-  NVIDIA's driver answers them, except where the layer refuses one (`tables.py`).
+  could not be checked (dmesg not readable)"), a kernel whose code is a trap and nothing else,
+  from PTX and from sm_75 machine code, given at the lookup and its launch refused with 218, the
+  context going on (`nocode-*`, with the same check of the kernel's log; the control against
+  NVIDIA's driver, `test_nocode IMAGE native` of `tests/kernels/test_nocode.c`, stops the context
+  with an Xid line and is not run by the suite), the words of fp16 products of machine code
+  translated in pairs and each by itself, and with `VF_SAFE=1` (`pair-bits`), and lookup tables
+  asked for by name, answered as NVIDIA's driver answers them, except where the layer refuses one
+  (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result, five of them again under
   `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
