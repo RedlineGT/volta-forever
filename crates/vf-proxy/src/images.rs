@@ -60,6 +60,9 @@ pub struct Replacement {
     program_image: Option<(usize, u64)>,
     /// How the code reached the device, for the profiler.
     pub origin: Option<kernels::Origin>,
+    /// The architecture of the program's PTX that the layer retargeted, when it was a later one than
+    /// this GPU's: what the program's code was compiled for (`kernels::retargeted`).
+    pub retargeted_from: Option<u32>,
     /// For a second translation at launch (`fit`): the cubin that this is the translation of, when
     /// a kernel of the translation takes more registers than its budget.
     pub original_image: Option<Vec<u8>>,
@@ -107,6 +110,7 @@ impl Replacement {
             trap_only: Vec::new(),
             program_image: None,
             origin: None,
+            retargeted_from: None,
             original_image: None,
             shown: None,
             how: None,
@@ -150,6 +154,7 @@ impl Replacement {
         next.trap_only = self.trap_only.clone();
         next.program_image = self.program_image;
         next.origin = self.origin;
+        next.retargeted_from = self.retargeted_from;
         next.original_image = self.original_image.clone();
         next.shown = self.shown.clone();
         next.how = self.how.clone();
@@ -251,6 +256,7 @@ impl Replacement {
         loaded.trap_only = self.trap_only;
         loaded.program_image = self.program_image;
         loaded.origin = self.origin;
+        loaded.retargeted_from = self.retargeted_from;
         loaded.original_image = self.original_image;
         loaded.shown = self.shown;
         loaded.how = self.how;
@@ -310,6 +316,9 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         && let Some(origin) = replacement.origin
     {
         kernels::set_origin(handle, origin);
+    }
+    if let Some(sm) = replacement.retargeted_from {
+        kernels::retargeted(handle, sm, FOR_LIBRARY.get());
     }
     kernels::describe(
         handle,
@@ -727,6 +736,18 @@ fn made_of(what: &str, outcome: &Outcome) -> Option<String> {
     }
 }
 
+/// The architecture of the program's PTX that `outcome` retargeted, when it is a later one than this
+/// GPU's. The driver compiles the PTX that the layer gives it, for this GPU, and says that the code
+/// was compiled from PTX for this GPU (`CU_FUNC_ATTRIBUTE_PTX_VERSION`): a program that chooses among
+/// what it was built for by that answer (the algorithms of CUB and Thrust) finds nothing it was built
+/// for, where a GPU of the architecture it is told says what its PTX was for (`hooks::versions`).
+fn retargeted_from(outcome: &Outcome) -> Option<u32> {
+    match outcome {
+        Outcome::Retargeted { from_sm, .. } if *from_sm > config().policy.device_sm => Some(*from_sm),
+        _ => None,
+    }
+}
+
 /// What the layer made of the image of `owner`, a module or library that the program holds, for the
 /// line of its kernel `kernel` (the handle it took) after a fault (`fault`): how the code reached
 /// the driver, the image given to the driver (its size, and its XXH64, taken now), and the program's
@@ -969,6 +990,7 @@ fn finish(
         _ => None,
     };
     let how = made_of(what, &adapted.outcome);
+    let retargeted_from = retargeted_from(&adapted.outcome);
     let paired = match &adapted.outcome {
         Outcome::Translated { paired, .. } => paired.clone(),
         _ => Vec::new(),
@@ -979,6 +1001,7 @@ fn finish(
     }
     let mut replacement = Replacement::new(image, wrapper);
     replacement.origin = origin;
+    replacement.retargeted_from = retargeted_from;
     replacement.how = how;
     replacement.paired = paired;
     if over_budget
@@ -1119,6 +1142,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     let mut emulated = Vec::new();
     let mut trap_only = Vec::new();
     let mut origin = None;
+    let mut retargeted = None;
     let mut object_traps = Vec::new();
     let mut check_external_calls = false;
     let mut next = wrapper.extra.cast::<*const u8>();
@@ -1160,6 +1184,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
         match finish(who, "relocatable fat binary", lowering, None, false, Some(source)) {
             Some(replaced) => {
                 origin = origin.or(replaced.origin);
+                retargeted = retargeted.into_iter().chain(replaced.retargeted_from).min();
                 refused.extend(replaced.refused);
                 emulated.extend(replaced.emulated);
                 trap_only.extend(replaced.trap_only);
@@ -1214,6 +1239,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     result.emulated = emulated;
     result.trap_only = trap_only;
     result.origin = Some(origin);
+    result.retargeted_from = retargeted;
     result.how = match origin {
         kernels::Origin::PtxRewritten => {
             Some("relocatable PTX retargeted by the layer, linked by the driver".to_string())
@@ -1714,6 +1740,36 @@ mod tests {
             "keeping an image without kernels without code took a digest"
         );
         assert_eq!(with, 1);
+    }
+
+    #[test]
+    fn the_architecture_of_the_ptx_retargeted_is_kept_with_the_image() {
+        // PTX for sm_75, retargeted: 7.5, kept through a retry and what was loaded in the end.
+        let retargeted = unsafe { adapt("cuModuleLoadData", EMULATED.as_ptr().cast(), None) }.unwrap();
+        assert_eq!(retargeted.retargeted_from, Some(75));
+        let loaded = Replacement::new(retargeted.data.to_vec(), None);
+        let loaded = Replacement {
+            retargeted_from: Some(80),
+            ..loaded
+        }
+        .loaded_as(Vec::new(), Vec::new());
+        assert_eq!(loaded.retargeted_from, Some(80));
+        // PTX for this GPU in a dialect too new for its driver is retargeted from sm_70: nothing to
+        // say; PTX that the driver takes as it is, and machine code translated, are not retargeted.
+        let newer = b".version 9.5\n.target sm_70\n.address_size 64\n.visible .entry k()\n{\n ret;\n}\n\0";
+        let dialect = unsafe { adapt("cuModuleLoadData", newer.as_ptr().cast(), None) }.unwrap();
+        assert_eq!(dialect.origin, Some(kernels::Origin::PtxRewritten));
+        assert_eq!(dialect.retargeted_from, None);
+        let native = b".version 8.8\n.target sm_70\n.address_size 64\n.visible .entry k()\n{\n ret;\n}\n\0";
+        assert!(unsafe { adapt("cuModuleLoadData", native.as_ptr().cast(), None) }.is_none());
+        let cubin = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/kernels/k_basic.135.sm75.cubin"
+        ))
+        .unwrap();
+        let translated = unsafe { adapt("cuModuleLoadData", cubin.as_ptr().cast(), Some(cubin.len())) }.unwrap();
+        assert_eq!(translated.origin, Some(kernels::Origin::MachineCodeTranslated));
+        assert_eq!(translated.retargeted_from, None);
     }
 
     #[test]

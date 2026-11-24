@@ -6,7 +6,9 @@
 //! of the layer, so that a later run that loads the same module finds:
 //!
 //! - a **manifest**: every entry point with the flags the lazy path needs, the refusal reason when
-//!   it is refused, and the emulated-instruction counts when they are announced;
+//!   it is refused, and the emulated-instruction counts when they are announced; and the
+//!   architecture of the PTX that was retargeted, which the program's kernels are said to be
+//!   compiled for (`hooks::versions`);
 //! - **sub-module PTX** for each independent kernel, stored when the kernel is first extracted;
 //! - for an image that has machine code only, its **translation**: the image to load in its
 //!   place, with the kernels that are refused and those that have instructions added.
@@ -54,7 +56,7 @@ use crate::{generated, log};
 /// Magic at the start of every cached file.
 const FILE_MAGIC: [u8; 4] = *b"S70C";
 /// Format version; bump to invalidate all entries when the on-disk layout changes.
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 8;
 /// File header: magic(4) + format_version(4) + key(16) + content_len(4) + checksum(8) = 36.
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
@@ -391,6 +393,9 @@ fn enforce_limit(cs: &CacheState) {
 #[derive(Clone)]
 pub struct CachedManifest {
     pub entries: Vec<ManifestEntry>,
+    /// The architecture of the program's PTX that was retargeted, when it was a later one than this
+    /// GPU's (`images::Replacement::retargeted_from`; format 8).
+    pub retargeted_from: Option<u32>,
 }
 
 /// One entry in the manifest.
@@ -413,6 +418,8 @@ pub struct ManifestEntry {
 /// Encode the manifest to bytes.
 fn encode_manifest(m: &CachedManifest) -> Vec<u8> {
     let mut buf = Vec::new();
+    // (0: none.)
+    buf.extend_from_slice(&m.retargeted_from.unwrap_or(0).to_le_bytes());
     buf.extend_from_slice(&(m.entries.len() as u32).to_le_bytes());
     for e in &m.entries {
         // name
@@ -495,6 +502,7 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
         *pos += len;
         Some(s)
     };
+    let retargeted_from = Some(read_u32(&mut pos)?).filter(|&sm| sm != 0);
     let count = read_u32(&mut pos)? as usize;
     // (An entry takes 5 bytes at least: no more room than the data can fill.)
     let mut entries = Vec::with_capacity(count.min(data.len() / 5));
@@ -559,7 +567,10 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
             trap_only,
         });
     }
-    Some(CachedManifest { entries })
+    Some(CachedManifest {
+        entries,
+        retargeted_from,
+    })
 }
 
 // ---- public API ----------------------------------------------------------------------------------
@@ -873,6 +884,7 @@ mod tests {
                     trap_only: true,
                 },
             ],
+            retargeted_from: Some(75),
         }
     }
 
@@ -901,6 +913,13 @@ mod tests {
         assert!(decoded.entries[2].independent);
         // A kernel whose code is a trap is kept as such, and only it.
         assert!(decoded.entries[2].trap_only && !decoded.entries[0].trap_only && !decoded.entries[1].trap_only);
+        // The architecture of the PTX retargeted, and none (format 8).
+        assert_eq!(decoded.retargeted_from, Some(75));
+        let none = CachedManifest {
+            retargeted_from: None,
+            ..manifest
+        };
+        assert_eq!(decode_manifest(&encode_manifest(&none)).unwrap().retargeted_from, None);
     }
 
     #[test]

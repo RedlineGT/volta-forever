@@ -154,7 +154,7 @@ unsafe extern "C" fn device_capability(major: *mut c_int, minor: *mut c_int, dev
     result
 }
 
-// ---- the architecture of a kernel's machine code ----------------------------------------------------
+// ---- the architectures a kernel's code was compiled for ------------------------------------------------
 //
 // A program may ask which architecture the machine code of one of its kernels is for
 // (`cudaFuncGetAttributes`, `binaryVersion`), to see that the driver took the code it meant: the
@@ -162,29 +162,78 @@ unsafe extern "C" fn device_capability(major: *mut c_int, minor: *mut c_int, dev
 // variant it chose. What the driver has is the layer's code for this GPU in place of the
 // program's, and it answers 7.0. Runtimes and callers with later GPU code are answered at least the
 // capability they were told. A launcher client with no embedded GPU code gets the actual binary version.
+//
+// It may also ask for which architecture the PTX of a kernel was written (`ptxVersion`): the
+// algorithms of CUB and Thrust choose by that answer among the architectures they were compiled
+// for, and answer "invalid device function" when it is none of them (`runtime_cc_to_compiletime` of
+// CCCL 3). A GPU answers the target of the PTX it compiled, which can be below its own (a Turing or
+// an Ampere card that compiles a program's PTX for sm_75 answers 7.5), never above. The driver
+// compiled the layer's PTX, retargeted to sm_70, and answers 7.0: for code that the layer retargeted
+// from a later architecture's PTX (`kernels::retargeted_from`), the answer is that architecture, at
+// most what the binary version is answered (the capability told). (Translated machine code says the
+// architecture of its PTX itself: the translation keeps it, `docs/translator.md`.) On a later card in
+// the same machine, a library deferred by the layer, or loaded from PTX text, runs the layer's PTX
+// too: the answer is the same, at most the card's own architecture; elsewhere the program's code
+// runs there, and the driver tells the truth.
 
-/// `CUfunction_attribute` value of the architecture of a function's machine code: major * 10 + minor.
+/// `CUfunction_attribute` values of the architecture of the PTX a function was compiled from and of
+/// its machine code: major * 10 + minor.
+const FUNCTION_PTX_VERSION: c_int = 5;
 const FUNCTION_BINARY_VERSION: c_int = 6;
 
-/// After NVIDIA's answer `result` to a question about a function: the architecture of its machine
-/// code may need to match the variant selected by the caller, when the code is on this GPU
-/// (`on_this_gpu`): a later card in the same machine runs the program's own code, of which the
-/// driver tells the truth.
-unsafe fn binary_version(
+/// What a function whose code the driver says is of `found` (`attribute`'s answer) is answered, by a
+/// caller answered `told` as the architecture of its machine code (`None`: told the truth), when the
+/// layer retargeted its code from PTX for `retargeted`: `None` when the driver's answer stands.
+fn version_answer(
+    attribute: c_int,
+    found: c_int,
+    told: Option<c_int>,
+    retargeted: impl FnOnce() -> Option<u32>,
+) -> Option<c_int> {
+    let told = told.filter(|&told| found < told)?;
+    match attribute {
+        FUNCTION_BINARY_VERSION => Some(told),
+        FUNCTION_PTX_VERSION => {
+            let sm = c_int::try_from(retargeted()?).ok()?;
+            (sm > found).then_some(sm.min(told))
+        }
+        _ => None,
+    }
+}
+
+/// After NVIDIA's answer `result` to a question about the function or kernel `handle`: the
+/// architectures its code was compiled for may need to be those of the program's code. On this GPU
+/// (`on_this_gpu`), as told to the caller (`callers::binary_capability`); on a later card, which
+/// runs the program's own code but where the layer's PTX was loaded for every GPU, the PTX's alone,
+/// at most the architecture of the machine code there (`machine_code`, the driver's answer).
+unsafe fn versions(
     value: *mut c_int,
     attribute: c_int,
     result: CUresult,
     caller: usize,
+    handle: *mut c_void,
     on_this_gpu: impl FnOnce() -> bool,
+    machine_code: impl FnOnce() -> Option<c_int>,
 ) {
-    if result != CUDA_SUCCESS || value.is_null() || attribute != FUNCTION_BINARY_VERSION || !on_this_gpu() {
+    if result != CUDA_SUCCESS || value.is_null() || !matches!(attribute, FUNCTION_PTX_VERSION | FUNCTION_BINARY_VERSION)
+    {
         return;
     }
-    if let Some((major, minor)) = callers::binary_capability(caller) {
-        let told = major * 10 + minor;
-        if unsafe { *value } < told {
-            unsafe { *value = told };
-        }
+    // SAFETY: `handle` is the one the driver answered about.
+    let retargeted = || unsafe { kernels::retargeted_from(handle as usize) };
+    let found = unsafe { *value };
+    let answer = if on_this_gpu() {
+        let told = callers::binary_capability(caller).map(|(major, minor)| major * 10 + minor);
+        version_answer(attribute, found, told, retargeted)
+    } else if attribute == FUNCTION_PTX_VERSION
+        && let Some(sm) = retargeted()
+    {
+        version_answer(attribute, found, machine_code(), || Some(sm))
+    } else {
+        None
+    };
+    if let Some(answer) = answer {
+        unsafe { *value = answer };
     }
 }
 
@@ -205,8 +254,22 @@ unsafe extern "C" fn function_attribute(
     }
     let real = real!(cuFuncGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void) -> CUresult);
     let result = unsafe { real(value, attribute, function) };
+    let machine_code = || {
+        let mut binary = 0;
+        (unsafe { real(&mut binary, FUNCTION_BINARY_VERSION, function) } == CUDA_SUCCESS).then_some(binary)
+    };
     // (A function is asked about in its context, as a function is launched there.)
-    unsafe { binary_version(value, attribute, result, caller, context_needs_adapting) };
+    unsafe {
+        versions(
+            value,
+            attribute,
+            result,
+            caller,
+            function,
+            context_needs_adapting,
+            machine_code,
+        )
+    };
     result
 }
 
@@ -233,7 +296,12 @@ unsafe extern "C" fn kernel_attribute(
     }
     let real = real!(cuKernelGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void, c_int) -> CUresult);
     let result = unsafe { real(value, attribute, kernel, device) };
-    unsafe { binary_version(value, attribute, result, caller, || device_needs_adapting(device)) };
+    let machine_code = || {
+        let mut binary = 0;
+        (unsafe { real(&mut binary, FUNCTION_BINARY_VERSION, kernel, device) } == CUDA_SUCCESS).then_some(binary)
+    };
+    let here = || device_needs_adapting(device);
+    unsafe { versions(value, attribute, result, caller, kernel, here, machine_code) };
     result
 }
 
@@ -1007,6 +1075,7 @@ unsafe extern "C" fn library_load_data(
                 replacement.refused(),
                 replacement.emulated(),
                 replacement.trap_only(),
+                replacement.retargeted_from,
                 jit_options,
                 jit_values,
                 jit_count,
@@ -3519,4 +3588,52 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
         contexts::primary_reset(modules);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_function_retargeted_from_later_ptx_is_said_to_be_compiled_from_it() {
+        let never = || -> Option<u32> { panic!("asked what the code was retargeted from") };
+        // Machine code: the capability told, as before; nothing else is asked.
+        assert_eq!(version_answer(FUNCTION_BINARY_VERSION, 70, Some(75), never), Some(75));
+        assert_eq!(version_answer(FUNCTION_BINARY_VERSION, 70, Some(80), never), Some(80));
+        // PTX retargeted from sm_75: 7.5, whatever more the caller is told (a GPU of 8.0 that
+        // compiles PTX for sm_75 says 7.5); from sm_80 to a caller told 7.5: no more than that.
+        assert_eq!(
+            version_answer(FUNCTION_PTX_VERSION, 70, Some(75), || Some(75)),
+            Some(75)
+        );
+        assert_eq!(
+            version_answer(FUNCTION_PTX_VERSION, 70, Some(80), || Some(75)),
+            Some(75)
+        );
+        assert_eq!(
+            version_answer(FUNCTION_PTX_VERSION, 70, Some(80), || Some(80)),
+            Some(80)
+        );
+        assert_eq!(
+            version_answer(FUNCTION_PTX_VERSION, 70, Some(75), || Some(80)),
+            Some(75)
+        );
+        assert_eq!(
+            version_answer(FUNCTION_PTX_VERSION, 70, Some(120), || Some(90)),
+            Some(90)
+        );
+        // Code that the layer did not retarget (the program's own PTX for this GPU, or for an
+        // earlier one), and translated machine code, which says its PTX's architecture itself.
+        assert_eq!(version_answer(FUNCTION_PTX_VERSION, 70, Some(75), || None), None);
+        assert_eq!(version_answer(FUNCTION_PTX_VERSION, 60, Some(75), || None), None);
+        assert_eq!(version_answer(FUNCTION_PTX_VERSION, 75, Some(75), never), None);
+        assert_eq!(version_answer(FUNCTION_PTX_VERSION, 80, Some(75), never), None);
+        // A caller told the truth (code of its own for this GPU, a launcher client without code,
+        // VF_CAPABILITY=7.0): the driver's answers stand.
+        assert_eq!(version_answer(FUNCTION_PTX_VERSION, 70, None, never), None);
+        assert_eq!(version_answer(FUNCTION_BINARY_VERSION, 70, None, never), None);
+        assert_eq!(version_answer(FUNCTION_PTX_VERSION, 70, Some(70), never), None);
+        // Other attributes are not changed.
+        assert_eq!(version_answer(4, 70, Some(75), never), None);
+    }
 }

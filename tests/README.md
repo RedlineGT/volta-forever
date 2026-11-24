@@ -97,7 +97,10 @@ Where the GPU scripts write:
   context going on (`nocode-*`, with the same check of the kernel's log; the control against
   NVIDIA's driver, `test_nocode IMAGE native` of `tests/kernels/test_nocode.c`, stops the context
   with an Xid line and is not run by the suite), the words of fp16 products of machine code
-  translated in pairs and each by itself, and with `VF_SAFE=1` (`pair-bits`), and lookup tables
+  translated in pairs and each by itself, and with `VF_SAFE=1` (`pair-bits`), CUB's sort, sum and
+  scan of a program whose code is PTX for sm_75 only, of its sm_75 machine code and of its sm_70
+  build, and told 8.0 (`cub-*`: the PTX version of its kernels is that of its PTX, 7.5, where it was
+  7.0 and CUB answered "invalid device function" until 2026-11-24), and lookup tables
   asked for by name, answered as NVIDIA's driver answers them, except where the layer refuses one
   (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
@@ -318,7 +321,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Seventeen more host regressions exercise the built libraries directly:
+Eighteen more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -338,6 +341,7 @@ python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
 python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
 python3 tests/proxy/fault.py dist/lib/libcuda.so.1
 python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
+python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -472,7 +476,21 @@ the two getters that the report calls without a fault, which it names: `cuCtxGet
 synchronisation that succeeded, `cuStreamGetCaptureInfo_v2` while a capture is under way (any
 other call fails the test, and so does one of these that no case shows); given a second
 `libcuda.so.1` (of 0.1.5), that the calls with `VF_FAULT_REPORT=0` are the very same as with it, on
-both paths. It needs a C compiler.
+both paths. It needs a C compiler. The eighteenth checks, with the stand-in of the ninth, which
+answers the questions about a function or a kernel as NVIDIA's driver does (the architecture of the
+device for its machine code, the latest `.target` of its PTX that the device reaches for its PTX),
+that code the layer retargeted from PTX for sm_75 or sm_80 is said to be compiled from that PTX
+(`CU_FUNC_ATTRIBUTE_PTX_VERSION`), at most the capability that the caller is told, and its machine
+code for that capability: through a module loaded from memory and from a file, a library loaded from
+memory (deferred, its kernels compiled alone, and whole) and from a file, its kernel asked about as a
+kernel and as a function, the kernel's function, the function of the library's module in a context,
+and a kernel asked for after that module; set up from the layer's cache; for a program whose code is
+PTX for sm_75 only, the CUDA 13 runtime and a library with code for the V100 (told the truth: the
+driver's answers), by default, with `VF_CAPABILITY=8.0` (and `VF_CAPABILITY_ALL=1`) and 7.0, under
+the launcher and not; on a later card, the driver's answers for the program's own code, and the
+PTX's architecture for the layer's code there (of a deferred library, or of one loaded from PTX
+text). Until 2026-11-24 the PTX was said to be for sm_70, which made CUB's algorithms answer
+"invalid device function". Each setting in a process of its own; it needs gcc and objcopy.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -499,8 +517,8 @@ On every push and pull request, `.github/workflows/ci.yml` runs the formatting a
 checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
-`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py` and `nvml_capability.py` of
-`tests/proxy/`; `tests/forward/stack.sh` and
+`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py` and
+`nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test

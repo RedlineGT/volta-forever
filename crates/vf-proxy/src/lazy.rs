@@ -280,6 +280,7 @@ pub unsafe fn setup(
     refused: &[vf_adapt::Refused],
     emulated: &[vf_adapt::Emulated],
     trap_only: &[String],
+    retargeted_from: Option<u32>,
     jit_options: *mut c_int,
     jit_values: *mut *mut c_void,
     jit_count: c_uint,
@@ -338,7 +339,7 @@ pub unsafe fn setup(
 
     // Save the manifest to the proxy cache so that a subsequent run skips adaptation and analysis.
     if let Some(ref ck) = cache_key {
-        save_manifest_from_info(&info, refused, emulated, trap_only, ck);
+        save_manifest_from_info(&info, refused, emulated, trap_only, retargeted_from, ck);
     }
 
     // SAFETY: options pointers are the originals from the caller, still valid.
@@ -368,6 +369,7 @@ fn save_manifest_from_info(
     refused: &[vf_adapt::Refused],
     emulated: &[vf_adapt::Emulated],
     trap_only: &[String],
+    retargeted_from: Option<u32>,
     ck: &crate::cache::CacheKey,
 ) {
     use crate::cache::{CachedManifest, ManifestEntry};
@@ -387,7 +389,13 @@ fn save_manifest_from_info(
             }
         })
         .collect();
-    crate::cache::save_manifest(ck, &CachedManifest { entries });
+    crate::cache::save_manifest(
+        ck,
+        &CachedManifest {
+            entries,
+            retargeted_from,
+        },
+    );
 }
 
 /// Set up a lazy library from a cached manifest: no adaptation, no analysis. The original image
@@ -496,6 +504,8 @@ pub unsafe fn setup_from_cache(
             .collect();
         let mut kept = crate::images::Replacement::from_vec(Vec::new());
         kept.set_identity(identity);
+        // What the program's kernels are said to be compiled for, as without the cache.
+        kept.retargeted_from = manifest.retargeted_from;
         // (Only PTX is compiled kernel by kernel.)
         kept.how =
             Some("PTX retargeted by the layer, set up from the layer's cache (an earlier run adapted it)".into());
