@@ -52,7 +52,7 @@ cp "$out/forward/bf16tc/libcublas.so.13" "$out/forward/bf16tc/libcublasLt.so.13"
 "${cc[@]}" -shared -fvisibility=hidden -DVF_BF16_TEST -Wa,-I"$rt" -Wl,-soname,libvf_cublas_bf16.so \
     -o "$out/test/libvf_cublas_bf16.so" "$rt/runtime.c" "$rt/kernels.S" -Wl,-z,defs -ldl -lpthread || exit 1
 "${cc[@]}" -o "$out/host_test" "$src/host_test.c" -L"$out/old/lib" -Wl,-rpath,"$out/old/lib" -l:libcuda.so.1 \
-    -l:libcublas.so.12 -l:libcublasLt.so.12 -ldl || exit 1
+    -l:libcublas.so.12 -l:libcublasLt.so.12 -ldl -lpthread || exit 1
 # The variant built as the generator builds it, with the control that aborts when the runtime is missing.
 g=$out/forward/gen/bf16tc/libcublas.so.13
 gcc -shared -fPIC -O2 -fvisibility=hidden -DVF_BF16_CONTROL_ABORT -I"$out/new/include" -o "$out/abort/libcublas.so.13" \
@@ -129,6 +129,24 @@ if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 1 ]; then
 else
     echo "FAIL  the fallback's counters: status $status, the exit report's line $said times ($log)"; failed=1
 fi
+run verify "$out/test" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1 -- verify
+tot=$(grep -cF "verify: the skinny path's calls against cuBLAS 12.9's, bit for bit: 3 calls verified (eager calls and graph replays), in 3 call signatures; 3 differed, in 6 elements" "$log")
+diffs=$(grep -c "verify: DIFFERED: the skinny path's .*: 1 of 1 calls, 2 elements; the first: row 0, column 0, the call's 0x3f800001, 12.9's 0x3f800000$" "$log")
+dups=$(grep "verify: DIFFERED: " "$log" | sort | uniq -d | wc -l)
+if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$tot" = 1 ] && [ "$diffs" = 3 ] && [ "$dups" = 0 ]; then
+    echo "PASS  verify mode: each skinny call also made through 12.9 into a scratch buffer of the stream (C's alignment, copied first when read), compared on the device; the report's totals, and each signature that differed once"
+else
+    echo "FAIL  verify mode: status $status, totals line $tot times, $diffs signatures that differed ($dups said twice) ($log)"; failed=1
+fi
+run verify-threads "$out/test" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1 -- verify-threads
+pass verify-threads "verify mode, two threads: the launches of each call together on a stream that both use (the stand-in pausing after every copy), a scratch buffer for each thread's per-thread default stream"
+run verify-off "$out/test" VF_CUBLAS_BF16_SKINNY=1 -- verify
+said=$(grep -c "verify:" "$log")
+if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 0 ]; then
+    echo "PASS  verify mode off: a skinny call launches its kernel only, nothing made, nothing said"
+else
+    echo "FAIL  verify mode off: status $status, $said lines of verify mode ($log)"; failed=1
+fi
 run lazy "$out/test" VF_CUBLAS_BF16_TC=1 -- lazy
 pass lazy "lazy setup: nothing made with a handle; the module at the first served call, the tensor-core path's pool and cuBLASLt handle at its first call, in relaxed capture mode"
 for step in module alloc scale gemm16 epilogue fallback; do
@@ -174,6 +192,9 @@ control tc-tall rule "(an output layer over a vocabulary of 151936, n at the tal
 control tc-wide rule "(k one step past the wide bound, n past it): tc" VF_CUBLAS_BF16_TC=1
 control safe-lenient notsafe "not safe: a tensor-core call was not served" VF_SAFE=yes VF_CUBLAS_BF16_TC=1
 control no-stats stats "stats: the first tensor-core call did not make the fallback's counters" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2
+control verify-skip-129 verify "verify: not the skinny kernel, then 12.9's cublasGemmEx" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1
+control verify-text-each verify "verify: the same call again made its signature's text again" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1
+control verify-unlocked verify-threads "verify, two threads on one stream: a call's launches came between another's" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1
 control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1
 # The tensor-core path's gate moved to 512 (test builds): the rule's table must fail at its k boundary; and the
 # test runtime given to the release-gate mode, where the variable is read, must make it fail.

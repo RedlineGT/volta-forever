@@ -18,6 +18,7 @@
 #include "stub.h"
 #include "../../../crates/vf-fwdgen/bf16tc/abi.h"
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -415,6 +416,262 @@ static void stats_mode(void)
     stub_fail("cuCtxPushCurrent_v2", 1);
     CHECK(fc && fc(out, 4) == 0, "stats: the counters of a context that could not be made current were read");
     /* at exit, the report's line (tests/forward/bf16.sh checks it): 2 calls, 5, 2, 777 of 393216 elements */
+}
+
+/* ---- verify mode (VF_CUBLAS_BF16_VERIFY=1, with the skinny path): every call the skinny path serves is also made
+ * through cuBLAS 12.9's own entry point, on the same handle and stream (or with the same descriptors, algorithm and
+ * workspace), with its output in a scratch buffer of the stream that has the output's address modulo 256 and its
+ * leading dimension, C copied there first when the call reads it, then compared on the device; at the first call
+ * of a context, the runtime's own non-blocking stream and the signatures' counters, zeroed on it; nothing of it
+ * with the switch off. The report at exit (bf16.sh checks it) gives the totals, and each signature that differed
+ * once. ---- */
+static unsigned long long hexfield(const char *l, const char *key)
+{
+    char b[64];
+    return strtoull(field(l, key, b, sizeof b), NULL, 16);
+}
+/* The signatures' texts the runtime has made (vf_bf16_test_verify_texts), or -1 without the export. */
+static long long verify_texts(void)
+{
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    unsigned long long (*f)(void) = NULL;
+    if (rt) *(void **)&f = dlsym(rt, "vf_bf16_test_verify_texts");
+    return f ? (long long)f() : -1;
+}
+static void verify_mode(int on)
+{
+    G g = gemm(1, 0, 1536, 8, 1536);
+    g.C = (char *)DEV(3) + 64; /* C 64 bytes past a 256-byte boundary: the scratch must have it too */
+    take();
+    call(&g);
+    take();
+    if (!on) {
+        CHECK(count("launch vf_bf16_skinny") == 1 && count("stream create") == 0 && count("memalloc ") == 0 &&
+                  count("gemmex ") == 0 && count("launch vf_bf16_copy") == 0 && count("launch vf_bf16_compare") == 0,
+              "verify off: the skinny call did more than its kernel:\n%s", ev);
+        return;
+    }
+    /* the first call: the runtime's stream, the signatures' counters and the stream's scratch, zeroed on it */
+    const char *m0 = where("memalloc ", 0), *m1 = where("memalloc ", 1);
+    char l0[256], l1[256];
+    snprintf(l0, sizeof l0, "%s", m0 ? line("memalloc ", 0) : "");
+    snprintf(l1, sizeof l1, "%s", m1 ? line("memalloc ", 1) : "");
+    const unsigned long long slots = hexfield(l0, "ptr="), base = hexfield(l1, "ptr=");
+    char b[64];
+    const long long slots_bytes = atoll(field(l0, "bytes=", b, sizeof b)), base_bytes = atoll(field(l1, "bytes=", b, sizeof b));
+    CHECK(count("stream create flags=1") == 1 && count("memalloc ") == 2 && count("synchronize ") == 2 && slots &&
+              base && slots_bytes == 1024 * 5 * 8 && base_bytes >= 1536 * 8 * 4,
+          "verify: the first call did not make the runtime's stream, the signatures' counters and the stream's "
+          "scratch buffer, zeroed:\n%s", ev);
+    /* the skinny kernel, then 12.9's cublasGemmEx into the scratch (C's address modulo 256, its ldc, every other
+     * argument as given), then the comparison */
+    const char *sk = where("launch vf_bf16_skinny", 0), *gx = where("gemmex ", 0), *cm = where("launch vf_bf16_compare", 0);
+    char lg[1024];
+    snprintf(lg, sizeof lg, "%s", gx ? line("gemmex ", 0) : "");
+    const unsigned long long cs = hexfield(lg, "C=");
+    char want[512];
+    snprintf(want, sizeof want, "gemmex handle=%p ta=%d tb=%d m=%d n=%d k=%d lda=%d ldb=%d ldc=%d alpha=%p A=%p at=%d "
+             "B=%p bt=%d beta=%p ", (void *)H, g.ta, g.tb, g.m, g.n, g.k, g.lda, g.ldb, g.ldc, (void *)&g.alpha, g.A,
+             g.at, g.B, g.bt, (void *)&g.beta);
+    CHECK(sk && gx && cm && sk < gx && gx < cm && !strncmp(lg, want, strlen(want)) && cs % 256 == 64 && cs >= base &&
+              cs + 1536 * 8 * 4 <= base + (unsigned long long)base_bytes && count("launch vf_bf16_copy") == 0,
+          "verify: not the skinny kernel, then 12.9's cublasGemmEx with the same arguments into the scratch (C at 64 "
+          "mod 256), then the comparison (no copy of C for beta 0):\n      want %s\n%s", want, ev);
+    VfCmpArgs a;
+    launch_args(cm ? line("launch vf_bf16_compare", 0) : "", &a, sizeof a);
+    CHECK(a.D == g.C && (unsigned long long)(uintptr_t)a.S == cs && a.ldd == g.ldc && a.lds == g.ldc && !a.eA && !a.eB &&
+              (unsigned long long)(uintptr_t)a.call == base && (unsigned long long)(uintptr_t)a.slot >= slots &&
+              (unsigned long long)(uintptr_t)a.slot < slots + 1024 * 40 && ((uintptr_t)a.slot - slots) % 40 == 0 &&
+              a.m == 1536 && a.n == 8 && a.dtype == 0,
+          "verify: the comparison's arguments (D %p, S %p, ldd %lld, lds %lld, call %p, slot %p, m %d, n %d)", a.D, a.S,
+          a.ldd, a.lds, (void *)a.call, (void *)a.slot, a.m, a.n);
+    /* the same call again: nothing allocated, the same signature */
+    take();
+    call(&g);
+    take();
+    VfCmpArgs a2;
+    launch_args(count("launch vf_bf16_compare") == 1 ? line("launch vf_bf16_compare", 0) : "", &a2, sizeof a2);
+    CHECK(count("memalloc ") == 0 && count("stream create") == 0 && count("synchronize ") == 0 && a2.slot == a.slot &&
+              a2.call == a.call, "verify: the same call again allocated something, or took another signature:\n%s", ev);
+    /* its signature found from the call's values: the text made once, at the first call */
+    const long long t2 = verify_texts();
+    CHECK(t2 == 1, "verify: the same call again made its signature's text again (%lld texts made, not 1)", t2);
+    /* beta != 0: C copied to the scratch before the skinny kernel writes it; another signature */
+    G gb = g;
+    gb.beta = 0.5f;
+    take();
+    call(&gb);
+    take();
+    const char *cp = where("launch vf_bf16_copy", 0), *sk2 = where("launch vf_bf16_skinny", 0);
+    VfCopyArgs ca;
+    launch_args(cp ? line("launch vf_bf16_copy", 0) : "", &ca, sizeof ca);
+    VfCmpArgs a3;
+    launch_args(count("launch vf_bf16_compare") == 1 ? line("launch vf_bf16_compare", 0) : "", &a3, sizeof a3);
+    snprintf(lg, sizeof lg, "%s", count("gemmex ") == 1 ? line("gemmex ", 0) : "");
+    CHECK(cp && sk2 && cp < sk2 && ca.src == g.C && (unsigned long long)(uintptr_t)ca.dst == hexfield(lg, "C=") &&
+              ca.n == 1536LL * 8 * 2 && a3.slot != a.slot,
+          "verify: beta 0.5: C not copied to the scratch before the skinny kernel (src %p, dst %p, %lld units), or the "
+          "same signature:\n%s", (const void *)ca.src, (void *)ca.dst, ca.n, ev);
+    const long long t3 = verify_texts();
+    CHECK(t3 == 2, "verify: beta 0.5, a new signature: %lld texts made, not 2", t3);
+    /* cuBLASLt: 12.9's cublasLtMatmul with the call's descriptors, algorithm and workspace, C and D in the scratch */
+    cublasLtHandle_t lt;
+    v.LtCreate(&lt);
+    cublasLtMatmulDesc_t d;
+    cublasLtMatrixLayout_t la, lb, lc;
+    v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    const int32_t tb = CUBLAS_OP_T;
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof tb);
+    v.LayoutCreate(&la, CUDA_R_16BF, 1536, 1920, 1536);
+    v.LayoutCreate(&lb, CUDA_R_16BF, 8, 1920, 8);
+    v.LayoutCreate(&lc, CUDA_R_32F, 1536, 8, 1536);
+    const float one = 1.0f, zero = 0.0f;
+    take();
+    v.LtMatmul(lt, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(4), lc, DEV(4), lc, NULL, DEV(9), 4u << 20, S1);
+    take();
+    snprintf(lg, sizeof lg, "%s", count("ltmatmul ") == 1 ? line("ltmatmul ", 0) : "");
+    const unsigned long long lcs = hexfield(lg, "C="), lds = hexfield(lg, "D=");
+    char wantws[64];
+    snprintf(wantws, sizeof wantws, "ws=%u ", 4u << 20);
+    CHECK(count("launch vf_bf16_skinny") == 1 && count("ltmatmul ") == 1 && lcs == lds && lcs >= base &&
+              lcs % 256 == 0 && strstr(lg, wantws) && count("launch vf_bf16_compare") == 1 &&
+              where("ltmatmul ", 0) > where("launch vf_bf16_skinny", 0),
+          "verify: cuBLASLt: not 12.9's cublasLtMatmul into the scratch with the call's workspace, after the kernel:\n%s",
+          ev);
+    v.LayoutDestroy(la);
+    v.LayoutDestroy(lb);
+    v.LayoutDestroy(lc);
+    v.DescDestroy(d);
+    /* read as the report reads them: every slot as one call that differed in 2 elements, the first at (0, 0) */
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    int (*tv)(unsigned long long *, int) = NULL;
+    if (rt) *(void **)&tv = dlsym(rt, "vf_bf16_test_verify");
+    const unsigned long long rec[5] = {1, 1, 2, 1, (0x3f800001ull << 32) | 0x3f800000ull};
+    stub_set_dtoh_repeat(rec, 5);
+    unsigned long long out[7] = {0};
+    CHECK(tv && tv(out, 7) == 7 && out[0] == 3 && out[1] == 3 && out[2] == 6 && out[3] == 4 && out[4] == 0 &&
+              out[5] == 3 && out[6] == 3,
+          "verify: the counters read: %llu calls, %llu differed, %llu elements, %llu set up, %llu not verified, %llu "
+          "signatures, %llu differed (not 3 3 6 4 0 3 3)", out[0], out[1], out[2], out[3], out[4], out[5], out[6]);
+    /* at exit, the report (bf16.sh checks it): 3 calls in 3 signatures, each signature that differed once */
+}
+
+/* ---- verify mode with two threads (VF_CUBLAS_BF16_SKINNY=1, VF_CUBLAS_BF16_VERIFY=1): calls that two threads make
+ * on one stream are verified one after the other. A call's launches (the copy of C, the skinny kernel, 12.9's call
+ * into the stream's scratch buffer, the comparison) must come together, though the stand-in pauses after every copy
+ * so that the other thread's launches would come in between were nothing holding them apart. On the per-thread
+ * default stream (another stream in each thread), each thread's calls get a buffer of their own. ---- */
+#define VT_CALLS 8
+static cublasHandle_t vt_h[2];
+static pthread_barrier_t vt_bar;
+static int vt_one; /* the per-thread phase: one call each, thread 0 first */
+static void vt_call(int t)
+{
+    G g = gemm(1, 0, 1536, 8, 1536);
+    g.beta = 0.5f; /* C read: copied first */
+    g.C = DEV(20 + t);
+    v.GemmEx(vt_h[t], (cublasOperation_t)g.ta, (cublasOperation_t)g.tb, g.m, g.n, g.k, &g.alpha, g.A, g.at, g.lda, g.B,
+             g.bt, g.ldb, &g.beta, g.C, g.ct, g.ldc, g.compute, g.algo);
+}
+static void *vt_worker(void *arg)
+{
+    const int t = (int)(intptr_t)arg;
+    if (vt_one) { /* both threads alive (a thread's identity may be reused once it ends), one call each in turn */
+        if (t == 0) vt_call(0);
+        pthread_barrier_wait(&vt_bar);
+        if (t == 1) vt_call(1);
+        pthread_barrier_wait(&vt_bar);
+        return NULL;
+    }
+    pthread_barrier_wait(&vt_bar);
+    for (int i = 0; i < VT_CALLS; ++i) vt_call(t);
+    return NULL;
+}
+static void vt_run(void)
+{
+    pthread_t th[2];
+    pthread_barrier_init(&vt_bar, NULL, 2);
+    for (int t = 0; t < 2; ++t) pthread_create(&th[t], NULL, vt_worker, (void *)(intptr_t)t);
+    for (int t = 0; t < 2; ++t) pthread_join(th[t], NULL);
+    pthread_barrier_destroy(&vt_bar);
+}
+/* Which thread's call an event belongs to: the copy by its source (C), 12.9's call by its handle, the comparison by
+ * D; -1 for another event, -2 for one of no thread's. The kind: 0 copy, 1 skinny kernel, 2 12.9's call, 3 comparison. */
+static int vt_event(const char *l, int *kind)
+{
+    if (!strncmp(l, "launch vf_bf16_copy", 19)) {
+        VfCopyArgs a;
+        launch_args(l, &a, sizeof a);
+        *kind = 0;
+        return (const void *)a.src == DEV(20) ? 0 : (const void *)a.src == DEV(21) ? 1 : -2;
+    }
+    if (!strncmp(l, "launch vf_bf16_skinny", 21)) {
+        *kind = 1;
+        return -1; /* its place only */
+    }
+    if (!strncmp(l, "gemmex ", 7)) {
+        char b[64];
+        const unsigned long long h = strtoull(field(l, "handle=", b, sizeof b), NULL, 16);
+        *kind = 2;
+        return h == (unsigned long long)(uintptr_t)vt_h[0] ? 0 : h == (unsigned long long)(uintptr_t)vt_h[1] ? 1 : -2;
+    }
+    if (!strncmp(l, "launch vf_bf16_compare", 22)) {
+        VfCmpArgs a;
+        launch_args(l, &a, sizeof a);
+        *kind = 3;
+        return a.D == DEV(20) ? 0 : a.D == DEV(21) ? 1 : -2;
+    }
+    *kind = -1;
+    return -1;
+}
+static void verify_threads_mode(void)
+{
+    for (int t = 0; t < 2; ++t) v.Create(&vt_h[t]);
+    /* one stream for both: its buffer made by a first call, then both threads at once */
+    for (int t = 0; t < 2; ++t) v.SetStream(vt_h[t], S1);
+    vt_call(0);
+    stub_pause_launch("vf_bf16_copy", 2000);
+    take();
+    vt_run();
+    take();
+    stub_pause_launch(NULL, 0);
+    int blocks = 0, bad = 0, want = 0, owner = -1;
+    char first_bad[512] = "";
+    for (const char *p = ev; p && *p;) {
+        const char *e = strchr(p, '\n');
+        char l[4096];
+        const size_t n = e ? (size_t)(e - p) : strlen(p);
+        memcpy(l, p, n < sizeof l - 1 ? n : sizeof l - 1);
+        l[n < sizeof l - 1 ? n : sizeof l - 1] = 0;
+        p = e ? e + 1 : NULL;
+        int kind;
+        const int t = vt_event(l, &kind);
+        if (kind < 0) continue;
+        if (kind == 0) owner = t;
+        const int ok = kind == want && t != -2 && (t == -1 || t == owner) && owner >= 0;
+        if (!ok && !bad++) snprintf(first_bad, sizeof first_bad, "%.200s (a launch of kind %d where %d was due)", l, kind, want);
+        if (kind == 3) ++blocks;
+        want = (kind + 1) % 4;
+    }
+    CHECK(!bad && blocks == 2 * VT_CALLS,
+          "verify, two threads on one stream: a call's launches came between another's (%d of the %d calls' events out "
+          "of their place; the first: %s)", bad, blocks, first_bad);
+    /* the per-thread default stream: a buffer for each thread's calls */
+    for (int t = 0; t < 2; ++t) v.SetStream(vt_h[t], CU_STREAM_PER_THREAD);
+    vt_one = 1;
+    take();
+    vt_run();
+    take();
+    unsigned long long cs[2] = {0, 0};
+    for (int i = 0; i < count("gemmex "); ++i) {
+        int kind;
+        const char *l = line("gemmex ", i);
+        const int t = vt_event(l, &kind);
+        if (t >= 0) cs[t] = hexfield(l, "C=");
+    }
+    CHECK(count("memalloc ") == 2 && cs[0] && cs[1] && (cs[0] > cs[1] ? cs[0] - cs[1] : cs[1] - cs[0]) >= (1u << 20),
+          "verify, the per-thread default stream: the two threads' calls in one scratch buffer (%d made, 12.9's outputs "
+          "at 0x%llx and 0x%llx)", count("memalloc "), cs[0], cs[1]);
 }
 
 /* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
@@ -1150,6 +1407,10 @@ int main(int argc, char **argv)
         }
     } else if (!strcmp(mode, "stats")) { /* VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2: the fallback's counters */
         stats_mode();
+    } else if (!strcmp(mode, "verify")) { /* VF_CUBLAS_BF16_SKINNY=1, VF_CUBLAS_BF16_VERIFY=1 or not */
+        verify_mode(getenv("VF_CUBLAS_BF16_VERIFY") && !strcmp(getenv("VF_CUBLAS_BF16_VERIFY"), "1"));
+    } else if (!strcmp(mode, "verify-threads")) { /* VF_CUBLAS_BF16_SKINNY=1, VF_CUBLAS_BF16_VERIFY=1 */
+        verify_threads_mode();
     } else if (!strcmp(mode, "noruntime")) {
         G g = gemm(0, 1, 1536, 8, 1920);
         take();

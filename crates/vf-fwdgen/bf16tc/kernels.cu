@@ -9,8 +9,10 @@
 // __fadd_rn, cvt.rn), so that no rounding is the compiler's choice (the build adds -fmad=false).
 // What nvcc's forced cuda_runtime.h provides and is used here is one instruction each: __ldg,
 // __shfl_xor_sync, __any_sync, atomicAdd (to append to the lists of failed vectors, whose order
-// does not matter, and to add a call's figures to the counters of the exit report), __uint_as_float,
-// __float_as_uint. No module variable: the counters are the runtime's memory, passed with the call.
+// does not matter, to add a call's figures to the counters of the exit report, and in verify mode
+// to count the elements that differ), atomicCAS and __threadfence (verify mode: the first element
+// that differs, the last block of a comparison), __uint_as_float, __float_as_uint. No module
+// variable: the counters are the runtime's memory, passed with the call.
 #include "abi.h"
 
 // Controls (tests/gpu/forward-bf16.sh builds them apart, never into kernels.fatbin): each breaks one
@@ -988,6 +990,14 @@ static __device__ __forceinline__ void skinny_body(const VfSkArgs &p)
         const Scal sc = scalars(p.o);
         const float v = finalize(p.o, sc, __fmul_rn(sc.alpha, acc), i, (long long)c * p.o.ldc + i);
         wr_d(p.o, (long long)c * p.o.ldd + i, v);
+#ifdef VF_KERNEL_CONTROL_PERTURB  // the control changes the last bit of the skinny path's element (0, 0)
+        if (i == 0 && c == 0) {
+            if (p.o.dtype)
+                reinterpret_cast<unsigned short *>(p.o.D)[0] ^= 1u;
+            else
+                reinterpret_cast<unsigned *>(p.o.D)[0] ^= 1u;
+        }
+#endif
     }
 }
 
@@ -1006,3 +1016,69 @@ VF_SKINNY(16, 8)
 VF_SKINNY(16, 16)
 VF_SKINNY(32, 4)
 VF_SKINNY(32, 8)
+
+// ---- verify mode ---------------------------------------------------------------------------------
+// The copy of C into the scratch buffer, before the call writes D (D may be C): 16 bytes at a time when both ends
+// are aligned (the scratch buffer has C's address modulo 256), else 2 bytes.
+extern "C" __global__ void __launch_bounds__(256) vf_bf16_copy(VfCopyArgs a)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x, st = (long long)gridDim.x * blockDim.x;
+    long long done = 0;
+    if ((reinterpret_cast<unsigned long long>(a.src) | reinterpret_cast<unsigned long long>(a.dst)) % 16 == 0) {
+        const long long n8 = a.n / 8;
+        const uint4 *s = reinterpret_cast<const uint4 *>(a.src);
+        uint4 *d = reinterpret_cast<uint4 *>(a.dst);
+        for (long long i = t; i < n8; i += st) d[i] = s[i];
+        done = n8 * 8;
+    }
+    for (long long i = done + t; i < a.n; i += st) a.dst[i] = a.src[i];
+}
+
+// The call's output against 12.9's, bit for bit (a NaN's payload too): each block counts the elements that differ,
+// the first of them is kept in the signature (once), and the last block to finish adds the call to its signature
+// and clears the call's counters for the next call on the stream.
+extern "C" __global__ void __launch_bounds__(256) vf_bf16_compare(VfCmpArgs p)
+{
+    __shared__ unsigned cnt;
+    __shared__ int last;
+    if (threadIdx.x == 0) cnt = 0;
+    __syncthreads();
+    const long long total = (long long)p.m * p.n, st = (long long)gridDim.x * blockDim.x;
+    unsigned mine = 0;
+    for (long long e = (long long)blockIdx.x * blockDim.x + threadIdx.x; e < total; e += st) {
+        const int i = (int)(e % p.m), j = (int)(e / p.m);
+        if (p.eA && p.eA[i] != VF_BF16_SENT && p.eB[j] != VF_BF16_SENT) continue;
+        unsigned a, b;
+        if (p.dtype) {
+            a = reinterpret_cast<const unsigned short *>(p.D)[(long long)j * p.ldd + i];
+            b = reinterpret_cast<const unsigned short *>(p.S)[(long long)j * p.lds + i];
+        } else {
+            a = reinterpret_cast<const unsigned *>(p.D)[(long long)j * p.ldd + i];
+            b = reinterpret_cast<const unsigned *>(p.S)[(long long)j * p.lds + i];
+        }
+        if (a != b) {
+            ++mine;
+            if (atomicCAS(p.slot + 3, 0ull, (unsigned long long)(1 + e)) == 0ull)
+                p.slot[4] = (static_cast<unsigned long long>(a) << 32) | b;
+        }
+    }
+    if (mine) atomicAdd(&cnt, mine);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        if (cnt) atomicAdd(p.call, cnt);
+        __threadfence();
+        last = atomicAdd(p.call + 1, 1u) == gridDim.x - 1;
+    }
+    __syncthreads();
+    if (last && threadIdx.x == 0) {
+        __threadfence();
+        const unsigned d = atomicAdd(p.call, 0u);
+        atomicAdd(p.slot, 1ull);
+        if (d) {
+            atomicAdd(p.slot + 1, 1ull);
+            atomicAdd(p.slot + 2, static_cast<unsigned long long>(d));
+        }
+        p.call[0] = 0u;
+        p.call[1] = 0u;
+    }
+}

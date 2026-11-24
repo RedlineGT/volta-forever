@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -167,7 +168,7 @@ EXPORT CUresult cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode)
 typedef struct {
     char name[64];
 } Func;
-static Func funcs[256];
+static Func funcs[512];
 static int nfuncs;
 EXPORT CUresult cuModuleLoadData(CUmodule *m, const void *image)
 {
@@ -181,7 +182,7 @@ EXPORT CUresult cuModuleLoadData(CUmodule *m, const void *image)
 }
 EXPORT CUresult cuModuleGetFunction(CUfunction *f, CUmodule m, const char *name)
 {
-    if (nfuncs >= 256) return CUDA_ERROR_OUT_OF_MEMORY;
+    if (nfuncs >= 512) return CUDA_ERROR_OUT_OF_MEMORY;
     snprintf(funcs[nfuncs].name, sizeof funcs[nfuncs].name, "%s", name);
     *f = (CUfunction)&funcs[nfuncs++];
     return CUDA_SUCCESS;
@@ -198,6 +199,16 @@ EXPORT CUresult cuFuncGetAttribute(int *pi, CUfunction_attribute a, CUfunction f
     return CUDA_SUCCESS;
 }
 
+/* A pause after each launch of one function (stub_pause_launch("vf_bf16_copy", 2000): 2 ms), set before the threads
+ * that launch it start, so that another thread's launches can come in between where nothing holds them apart. */
+static char pause_name[64];
+static int pause_us;
+EXPORT void stub_pause_launch(const char *name, int us)
+{
+    snprintf(pause_name, sizeof pause_name, "%s", name ? name : "");
+    pause_us = us;
+}
+
 /* Launches: the function's name, the configuration, the stream, and the argument structure's first
  * STUB_ARGS bytes in hexadecimal (the kernels take one structure by value). */
 EXPORT CUresult cuLaunchKernel(CUfunction f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by,
@@ -209,6 +220,10 @@ EXPORT CUresult cuLaunchKernel(CUfunction f, unsigned gx, unsigned gy, unsigned 
     for (int i = 0; i < STUB_ARGS; ++i) sprintf(hex + 2 * i, "%02x", a[i]);
     stub_event("launch %s grid=%u,%u,%u block=%u smem=%u stream=%p%s args=%s", ((Func *)f)->name, gx, gy, gz, bx, smem,
                (void *)s, fail ? " FAILED" : "", hex);
+    if (pause_us > 0 && !strcmp(((Func *)f)->name, pause_name)) {
+        const struct timespec t = {pause_us / 1000000, (long)(pause_us % 1000000) * 1000};
+        nanosleep(&t, NULL);
+    }
     return fail ? CUDA_ERROR_LAUNCH_FAILED : CUDA_SUCCESS;
 }
 
@@ -250,10 +265,17 @@ EXPORT CUresult cuMemsetD32Async(CUdeviceptr d, unsigned v, size_t n, CUstream s
 /* The fallback's counters: made on a stream that is then waited for, read back with their context pushed. The
  * copies to the host return what the test set (stub_set_dtoh). */
 static unsigned long long dtoh_values[8];
+static int dtoh_repeat; /* the values repeated over the whole copy, every dtoh_repeat words */
 EXPORT void stub_set_dtoh(const unsigned long long *v, int n)
 {
     memset(dtoh_values, 0, sizeof dtoh_values);
     memcpy(dtoh_values, v, (size_t)(n < 8 ? n : 8) * sizeof *v);
+    dtoh_repeat = 0;
+}
+EXPORT void stub_set_dtoh_repeat(const unsigned long long *v, int n)
+{
+    stub_set_dtoh(v, n);
+    dtoh_repeat = n < 8 ? n : 8;
 }
 EXPORT CUresult cuStreamSynchronize(CUstream s)
 {
@@ -266,7 +288,33 @@ EXPORT CUresult cuMemcpyDtoH_v2(void *dst, CUdeviceptr src, size_t bytes)
     const int fail = failing("cuMemcpyDtoH_v2");
     stub_event("copy to host ptr=0x%llx bytes=%zu context=%llu%s", src, bytes, cur()->id, fail ? " FAILED" : "");
     if (fail) return CUDA_ERROR_INVALID_CONTEXT;
-    memcpy(dst, dtoh_values, bytes < sizeof dtoh_values ? bytes : sizeof dtoh_values);
+    memset(dst, 0, bytes);
+    if (dtoh_repeat)
+        for (size_t w = 0; (w + 1) * 8 <= bytes; ++w) ((unsigned long long *)dst)[w] = dtoh_values[w % dtoh_repeat];
+    else
+        memcpy(dst, dtoh_values, bytes < sizeof dtoh_values ? bytes : sizeof dtoh_values);
+    return CUDA_SUCCESS;
+}
+/* Verify mode: the runtime's own stream, and memory allocated outside the pool ("memalloc" events). */
+EXPORT CUresult cuStreamCreate(CUstream *s, unsigned flags)
+{
+    static int n;
+    const int fail = failing("cuStreamCreate");
+    *s = fail ? NULL : (CUstream)(uintptr_t)(0x6000 + ++n);
+    stub_event("stream create flags=%u%s", flags, fail ? " FAILED" : "");
+    return fail ? CUDA_ERROR_OUT_OF_MEMORY : CUDA_SUCCESS;
+}
+EXPORT CUresult cuMemAlloc_v2(CUdeviceptr *d, size_t bytes)
+{
+    if (failing("cuMemAlloc_v2")) {
+        stub_event("memalloc bytes=%zu FAILED", bytes);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    pthread_mutex_lock(&mu);
+    *d = next_ptr;
+    next_ptr += (bytes + 0xffff) & ~0xffffull;
+    pthread_mutex_unlock(&mu);
+    stub_event("memalloc bytes=%zu ptr=0x%llx", bytes, *d);
     return CUDA_SUCCESS;
 }
 static __thread int pushed[8], npushed;
