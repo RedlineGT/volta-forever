@@ -553,24 +553,32 @@ impl<'a> Body<'a> {
             }
         } else {
             // (Before the destination is forgotten: it may be its own source.)
-            let parts = scan::split_operands(operands);
-            let zero = match (opcode, guarded, parts.as_slice()) {
-                ("mov.b32" | "mov.u32" | "mov.s32" | "mov.f32", false, [register, value]) => {
-                    scan::register(register).is_some() && (is_zero(value) || self.zeros.contains(*value))
-                }
-                _ => false,
+            let mov32 = !guarded && matches!(opcode, "mov.b32" | "mov.u32" | "mov.s32" | "mov.f32");
+            let mov16 = !guarded && matches!(opcode, "mov.b16" | "mov.u16" | "mov.s16");
+            let parts = if mov32 || mov16 {
+                scan::split_operands(operands)
+            } else {
+                Vec::new()
+            };
+            let zero = if mov32 && let [register, value] = parts.as_slice() {
+                scan::register(register).is_some() && (is_zero(value) || self.zeros.contains(*value))
+            } else {
+                false
             };
             for name in scan::names(first_operand(operands)) {
                 self.written(name);
             }
             // A member mask of all lanes is usually put in a register first.
-            if let ("mov.b32" | "mov.u32" | "mov.s32", false, [register, value]) = (opcode, guarded, parts.as_slice())
+            if mov32
+                && opcode != "mov.f32"
+                && let [register, value] = parts.as_slice()
                 && all_ones(value)
                 && scan::register(register).is_some()
             {
                 self.all_ones.insert(register.to_string());
             }
-            if let ("mov.b16" | "mov.u16" | "mov.s16", false, [register, value]) = (opcode, guarded, parts.as_slice())
+            if mov16
+                && let [register, value] = parts.as_slice()
                 && super::types::integer(value) == Some(0x8000)
                 && scan::register(register).is_some()
             {

@@ -59,6 +59,28 @@ impl<'a> Declared<'a> {
         }
     }
 
+    /// Fast zero-allocation filter: true only if `name` is a zero-padded member (`%d00` for
+    /// `%d<4>`) of at least one declared family.
+    fn has_noncanonical_member(&self, name: &str) -> bool {
+        let bytes = name.as_bytes();
+        let mut digit_start = bytes.len();
+        while digit_start > 0 && bytes[digit_start - 1].is_ascii_digit() {
+            digit_start -= 1;
+        }
+        let digits = &bytes[digit_start..];
+        if digits.len() < 2 || !digits[..digits.len() - 1].contains(&b'0') {
+            return false;
+        }
+        self.families.iter().any(|(prefix, count)| {
+            name.strip_prefix(prefix).is_some_and(|number| {
+                number.len() > 1
+                    && number.as_bytes()[0] == b'0'
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+                    && number.parse::<usize>().is_ok_and(|index| index < *count)
+            })
+        })
+    }
+
     /// The members of families that `name` can be, each as its family declares it (`%d0` for
     /// `%d00` under `%d<4>`), without repetition.
     fn members(&self, name: &str) -> Vec<String> {
@@ -118,6 +140,9 @@ pub(super) fn canonical(text: &str, items: &[scan::Item], outside: &[String]) ->
         for range in [item.range.start..opcode.start, operands.clone()] {
             let part = &text[range.clone()];
             for name in scan::names(part) {
+                if !declared.has_noncanonical_member(name) {
+                    continue;
+                }
                 let members = declared.members(name);
                 let Some(member) = members.iter().find(|member| member.as_str() != name) else {
                     continue;

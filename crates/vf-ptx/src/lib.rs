@@ -152,13 +152,102 @@ fn contains(text: &[u8], needle: &[u8]) -> bool {
     text.windows(needle.len()).any(|w| w == needle)
 }
 
+struct NeedleMatcher {
+    b0: [u64; 256],
+    b1: [u64; 256],
+    b2: [u64; 256],
+    b3: [u64; 256],
+    rewritten_mask: u64,
+    all_mask: u64,
+}
+
+const NEEDLE_COUNT: usize = lower::REWRITTEN.len() + CLUSTER_DIRECTIVES.len();
+const _: () = assert!(NEEDLE_COUNT <= 64);
+
+const MATCHER: NeedleMatcher = {
+    let mut b0 = [0u64; 256];
+    let mut b1 = [0u64; 256];
+    let mut b2 = [0u64; 256];
+    let mut b3 = [0u64; 256];
+    let mut i = 0;
+    while i < lower::REWRITTEN.len() {
+        let s = lower::REWRITTEN[i].as_bytes();
+        assert!(s.len() >= 4);
+        let bit = 1u64 << i;
+        b0[s[0] as usize] |= bit;
+        b1[s[1] as usize] |= bit;
+        b2[s[2] as usize] |= bit;
+        b3[s[3] as usize] |= bit;
+        i += 1;
+    }
+    let rewritten_mask = if i == 64 { u64::MAX } else { (1u64 << i) - 1 };
+    let mut j = 0;
+    while j < CLUSTER_DIRECTIVES.len() {
+        let s = CLUSTER_DIRECTIVES[j];
+        assert!(s.len() >= 4);
+        let bit = 1u64 << (i + j);
+        b0[s[0] as usize] |= bit;
+        b1[s[1] as usize] |= bit;
+        b2[s[2] as usize] |= bit;
+        b3[s[3] as usize] |= bit;
+        j += 1;
+    }
+    let total = i + j;
+    let all_mask = if total == 64 { u64::MAX } else { (1u64 << total) - 1 };
+    NeedleMatcher {
+        b0,
+        b1,
+        b2,
+        b3,
+        rewritten_mask,
+        all_mask,
+    }
+};
+
+fn needle_at(bit: usize) -> &'static [u8] {
+    if bit < lower::REWRITTEN.len() {
+        lower::REWRITTEN[bit].as_bytes()
+    } else {
+        CLUSTER_DIRECTIVES[bit - lower::REWRITTEN.len()]
+    }
+}
+
+fn any_needle(text: &[u8], allowed: u64) -> bool {
+    if text.len() < 4 {
+        return false;
+    }
+    for (pos, w) in text.windows(4).enumerate() {
+        let mut mask = MATCHER.b0[w[0] as usize] & allowed;
+        if mask == 0 {
+            continue;
+        }
+        mask &= MATCHER.b1[w[1] as usize];
+        if mask == 0 {
+            continue;
+        }
+        mask &= MATCHER.b2[w[2] as usize];
+        if mask == 0 {
+            continue;
+        }
+        mask &= MATCHER.b3[w[3] as usize];
+        while mask != 0 {
+            let bit = mask.trailing_zeros() as usize;
+            if text[pos..].starts_with(needle_at(bit)) {
+                return true;
+            }
+            mask &= mask - 1;
+        }
+    }
+    false
+}
+
 /// `text` holds something `lower_to_volta` rewrites or refuses: its header alone is not enough.
 pub fn needs_lowering(text: &[u8]) -> bool {
-    body_needs_lowering(text) || CLUSTER_DIRECTIVES.iter().any(|needle| contains(text, needle))
+    any_needle(text, MATCHER.all_mask)
 }
 
 fn body_needs_lowering(text: &[u8]) -> bool {
-    lower::REWRITTEN.iter().any(|needle| contains(text, needle.as_bytes()))
+    any_needle(text, MATCHER.rewritten_mask)
 }
 
 /// Names of the Turing-only instructions that `text` uses: such a module cannot be compiled for Volta
@@ -463,6 +552,9 @@ fn outside_names(text: &[u8], functions: &[Function]) -> Vec<String> {
         at = function.body.end;
     }
     between.extend(scan::without_comments(&text[at..]));
+    if !between.contains(&b'%') {
+        return Vec::new();
+    }
     lower::outside_names(&String::from_utf8_lossy(&between))
 }
 
@@ -482,40 +574,82 @@ pub fn lower_to_volta(text: &[u8]) -> (Vec<u8>, Lowering) {
     lower_to_volta_with(text, lower::Options::default())
 }
 
+struct LowerTarget<'a> {
+    function: &'a Function,
+    cluster: Vec<std::ops::Range<usize>>,
+    body: &'a [u8],
+}
+
+struct LoweredTarget {
+    lowered: Result<(String, lower::Counts), lower::Unsupported>,
+    emulated: EmulatedCounts,
+}
+
+fn lower_single_target(
+    target: &LowerTarget<'_>,
+    outside: &[String],
+    address_bits: u32,
+    options: lower::Options,
+) -> LoweredTarget {
+    let lowered = if target.cluster.is_empty() {
+        std::str::from_utf8(target.body)
+            .map_err(|_| lower::Unsupported("not text".to_string()))
+            .and_then(|body| lower::body_in(body, outside, address_bits, options))
+    } else {
+        Err(lower::Unsupported(
+            "the kernel asks for a cluster of blocks, which this GPU does not have".to_string(),
+        ))
+    };
+    let emulated = if lowered.is_ok() {
+        count_emulated(target.body)
+    } else {
+        EmulatedCounts::default()
+    };
+    LoweredTarget { lowered, emulated }
+}
+
 /// `lower_to_volta` with what the rewriting may take for granted about the program.
 pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lowering) {
-    let mut out = Vec::with_capacity(text.len() + text.len() / 2);
-    let mut lowering = Lowering::default();
-    let address_bits = address_bits(text);
-    let mut copied = 0;
-    let mut changed = Vec::new();
     let functions = functions(text);
-    // What the module names outside the bodies (`lower::body_in`), looked for at the first
-    // function that is lowered.
-    let mut outside: Option<Vec<String>> = None;
+    let mut targets = Vec::new();
+    let mut need_outside = false;
     for function in &functions {
         let body = &text[function.body.clone()];
         let cluster = cluster_directives(text, function);
         if cluster.is_empty() && !body_needs_lowering(body) {
             continue;
         }
-        for line in &cluster {
+        need_outside |= cluster.is_empty();
+        targets.push(LowerTarget {
+            function,
+            cluster,
+            body,
+        });
+    }
+    if targets.is_empty() {
+        return (text.to_vec(), Lowering::default());
+    }
+
+    let outside = if need_outside {
+        outside_names(text, &functions)
+    } else {
+        Vec::new()
+    };
+    let address_bits = address_bits(text);
+
+    let mut out = Vec::with_capacity(text.len() + text.len() / 2);
+    let mut lowering = Lowering::default();
+    let mut copied = 0;
+    let mut changed = Vec::new();
+    for target in &targets {
+        let LoweredTarget { lowered, emulated } = lower_single_target(target, &outside, address_bits, options);
+        for line in &target.cluster {
             out.extend_from_slice(&text[copied..line.start]);
             copied = line.end;
         }
-        out.extend_from_slice(&text[copied..function.body.start]);
-        copied = function.body.end;
-        let name = String::from_utf8_lossy(&text[function.name.clone()]).into_owned();
-        let lowered = if cluster.is_empty() {
-            let outside = outside.get_or_insert_with(|| outside_names(text, &functions));
-            std::str::from_utf8(body)
-                .map_err(|_| lower::Unsupported("not text".to_string()))
-                .and_then(|body| lower::body_in(body, outside, address_bits, options))
-        } else {
-            Err(lower::Unsupported(
-                "the kernel asks for a cluster of blocks, which this GPU does not have".to_string(),
-            ))
-        };
+        out.extend_from_slice(&text[copied..target.function.body.start]);
+        copied = target.function.body.end;
+        let name = String::from_utf8_lossy(&text[target.function.name.clone()]).into_owned();
         match lowered {
             Ok((new_body, counts)) => {
                 out.extend_from_slice(new_body.as_bytes());
@@ -524,9 +658,9 @@ pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lo
                 lowering.other_rewritten += counts.other;
                 changed.push(Changed {
                     name,
-                    entry: function.entry,
+                    entry: target.function.entry,
                     trapped: None,
-                    counts: count_emulated(body),
+                    counts: emulated,
                 });
             }
             Err(lower::Unsupported(reason)) => {
@@ -537,7 +671,7 @@ pub fn lower_to_volta_with(text: &[u8], options: lower::Options) -> (Vec<u8>, Lo
                 });
                 changed.push(Changed {
                     name,
-                    entry: function.entry,
+                    entry: target.function.entry,
                     trapped: Some(reason),
                     counts: EmulatedCounts::default(),
                 });
@@ -982,5 +1116,49 @@ mod tests {
         assert_eq!(names, [&b"vprintf"[..], b"__assertfail"]);
         let defined: Vec<_> = functions(text).into_iter().map(|f| &text[f.name]).collect();
         assert_eq!(defined, [&b"defined"[..], b"k"]);
+    }
+
+    #[test]
+    fn bitmask_scanner_matches_naive_needles_exactly() {
+        let naive_body = |t: &[u8]| lower::REWRITTEN.iter().any(|n| contains(t, n.as_bytes()));
+        let naive_all = |t: &[u8]| naive_body(t) || CLUSTER_DIRECTIVES.iter().any(|n| contains(t, n));
+
+        for needle in lower::REWRITTEN {
+            let doc = format!(".version 8.0\n// prefix {needle} suffix\n");
+            assert_eq!(
+                body_needs_lowering(doc.as_bytes()),
+                naive_body(doc.as_bytes()),
+                "{needle}"
+            );
+            assert_eq!(needs_lowering(doc.as_bytes()), naive_all(doc.as_bytes()), "{needle}");
+            assert!(body_needs_lowering(needle.as_bytes()), "exact {needle}");
+        }
+        for dir in CLUSTER_DIRECTIVES {
+            let s = std::str::from_utf8(dir).unwrap();
+            assert!(!body_needs_lowering(dir), "{s}");
+            assert!(needs_lowering(dir), "{s}");
+        }
+        for sample in [
+            "",
+            "a",
+            "mma",
+            ".v8",
+            "mov.b32 %r0, 1;",
+            "min.f64 %fd0, %fd1, %fd2;",
+            ".v4.f32 ld.global.v4.f32",
+            ".explicitcluste",
+            "tanh.approx.f64 %fd0, %fd1;",
+        ] {
+            assert_eq!(
+                body_needs_lowering(sample.as_bytes()),
+                naive_body(sample.as_bytes()),
+                "body sample {sample}"
+            );
+            assert_eq!(
+                needs_lowering(sample.as_bytes()),
+                naive_all(sample.as_bytes()),
+                "all sample {sample}"
+            );
+        }
     }
 }
