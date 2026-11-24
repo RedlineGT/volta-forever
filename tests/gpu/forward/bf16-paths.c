@@ -125,15 +125,16 @@ static void skinny_cases(void)
             }
 }
 
-/* The tensor-core path: served, within 32 units of fp64 (2^-24 sum |a b|), deterministic; the same
- * call captured in a graph goes to 12.9 (its workspace would be a node of the graph): the replay has
- * 12.9's bits. */
+/* The tensor-core path: served in the TN layout, within 32 units of fp64 (2^-24 sum |a b|), deterministic; the same
+ * call captured in a graph goes to 12.9 (its workspace would be a node of the graph): the replay has 12.9's bits. The
+ * other layouts go to 12.9, with its bits, for the layout's reason (the path's layout rule). */
 static void tc_cases(void)
 {
     const int layouts[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
     for (int L = 0; L < 4; ++L)
         for (int ct = 0; ct < 2; ++ct) {
             Shape s = shape(layouts[L][0], layouts[L][1], 520, 72, 2051, ct ? CUDA_R_16BF : CUDA_R_32F);
+            const int tn = s.ta && !s.tb;
             Data d = make_data(&s, 0.05, 1.0);
             void *ov, *o12, *ov2, *o122;
             cublasStatus_t a, b;
@@ -141,9 +142,21 @@ static void tc_cases(void)
             both(&s, &d, 1.0f, 0.0f, CUBLAS_GEMM_DEFAULT, &ov, &o12, &a, &b);
             both(&s, &d, 1.0f, 0.0f, CUBLAS_GEMM_DEFAULT, &ov2, &o122, &a, &b);
             const Counts c1 = counts(API_GEMMEX);
+            const size_t es = s.ctype == CUDA_R_32F ? 4 : 2;
+            if (!tn) {
+                CHECK(!rt_counters || delta(&c0, &c1, FWD(R_LAYOUT)) == 2, "tc %s: not forwarded for the layout",
+                      layout_name(&s));
+                CHECK(ndiff(ov, o12, d.cbytes, es) == 0 && ndiff(ov2, o122, d.cbytes, es) == 0, "tc %s %s: not 12.9's bits",
+                      layout_name(&s), ct ? "bf16" : "fp32");
+                free(ov);
+                free(o12);
+                free(ov2);
+                free(o122);
+                free_data(&d);
+                continue;
+            }
             CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 2, "tc %s: not served by the tensor-core path",
                   layout_name(&s));
-            const size_t es = s.ctype == CUDA_R_32F ? 4 : 2;
             CHECK(ndiff(ov, ov2, d.cbytes, es) == 0, "tc %s: two runs differ", layout_name(&s));
             float *f = as_f32(&s, ov);
             const double e = err_units(s.ta, s.tb, s.m, s.n, s.k, 1.0f, d.hA, s.lda, d.hB, s.ldb, 0.0f, d.hC0, f, s.ldc);
@@ -263,35 +276,49 @@ static void beta_zero_case(int n)
     free_data(&d);
 }
 
-/* Rows and columns that fail the check (infinities, NaN, values out of the window) take the
- * fallback; C in place with beta != 0. Their elements are 12.9's where 12.9 runs its sequential
- * kernel (NT); the others stay within the bound. */
+/* Rows and columns that fail the check (infinities, NaN, values out of the window) take the fallback (TN, the path's
+ * layout); C in place with beta != 0. Their elements are 12.9's sequential kernel's, which 12.9 runs for TN at this m
+ * and k up to 16 columns: compared with 12.9 called on the same operands 16 columns at a time. */
 static void failing_case(void)
 {
-    Shape s = shape(0, 1, 640, 96, 2048, CUDA_R_32F);
+    Shape s = shape(1, 0, 640, 96, 2048, CUDA_R_32F);
     Data d = make_data(&s, 0.05, 1.0);
     const int bad_rows[] = {3, 77, 500};
-    for (int r = 0; r < 3; ++r) d.hA[bad_rows[r] + (size_t)200 * s.lda] = f2bf(r == 0 ? INFINITY : r == 1 ? 3e38f : 1e-30f);
-    const int bad_col = 17; /* op(B) = B^T: column j of op(B) is row j of B */
-    d.hB[bad_col + (size_t)5 * s.ldb] = f2bf(-INFINITY);
-    CU(cudaMemcpy(d.dA, d.hA, (size_t)s.lda * s.k * 2, cudaMemcpyHostToDevice));
-    CU(cudaMemcpy(d.dB, d.hB, (size_t)s.ldb * s.k * 2, cudaMemcpyHostToDevice));
+    for (int r = 0; r < 3; ++r) d.hA[200 + (size_t)bad_rows[r] * s.lda] = f2bf(r == 0 ? INFINITY : r == 1 ? 3e38f : 1e-30f);
+    const int bad_col = 17; /* op(B) = B: column j of op(B) is column j of B */
+    d.hB[5 + (size_t)bad_col * s.ldb] = f2bf(-INFINITY);
+    CU(cudaMemcpy(d.dA, d.hA, (size_t)s.lda * s.m * 2, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(d.dB, d.hB, (size_t)s.ldb * s.n * 2, cudaMemcpyHostToDevice));
     void *ov, *o12;
     cublasStatus_t a, b;
     const Counts c0 = counts(API_GEMMEX);
     both(&s, &d, 0.75f, 0.5f, CUBLAS_GEMM_DEFAULT, &ov, &o12, &a, &b);
     const Counts c1 = counts(API_GEMMEX);
     CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 1, "failing rows: not served by the tensor-core path");
-    const float *fv = ov, *f12 = o12;
+    /* 12.9's sequential kernel, 16 columns at a time from the same C */
+    void *C12 = to_device(d.hCraw, d.cbytes);
+    const float alpha = 0.75f, beta = 0.5f;
+    for (int j0 = 0; j0 < s.n; j0 += 16)
+        CHECK(c129.GemmEx(h12, CUBLAS_OP_T, CUBLAS_OP_N, s.m, 16, s.k, &alpha, d.dA, CUDA_R_16BF, (int)s.lda,
+                          (const uint16_t *)d.dB + (size_t)j0 * s.ldb, CUDA_R_16BF, (int)s.ldb, &beta,
+                          (float *)C12 + (size_t)j0 * s.ldc, CUDA_R_32F, (int)s.ldc, CUBLAS_COMPUTE_32F,
+                          CUBLAS_GEMM_DEFAULT) == 0,
+              "failing rows: 12.9's call of 16 columns from %d failed", j0);
+    CU(cudaStreamSynchronize(stream));
+    float *f16c = from_device(C12, d.cbytes);
+    const float *fv = ov;
     size_t bad = 0, checked = 0;
     for (int j = 0; j < s.n; ++j)
         for (int i = 0; i < s.m; ++i) {
             const int fails = i == 3 || i == 77 || i == 500 || j == bad_col;
             if (!fails) continue;
             ++checked;
-            if (memcmp(&fv[i + (size_t)j * s.ldc], &f12[i + (size_t)j * s.ldc], 4)) ++bad;
+            if (memcmp(&fv[i + (size_t)j * s.ldc], &f16c[i + (size_t)j * s.ldc], 4)) ++bad;
         }
-    CHECK(checked > 0 && bad == 0, "failing rows and column: %zu of %zu fallback elements differ from 12.9", bad, checked);
+    CHECK(checked > 0 && bad == 0, "failing rows and column: %zu of %zu fallback elements differ from 12.9's sequential "
+          "kernel", bad, checked);
+    cudaFree(C12);
+    free(f16c);
     free(ov);
     free(o12);
     free_data(&d);

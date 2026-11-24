@@ -62,12 +62,13 @@ want() { [ ${#cases[@]} -eq 0 ] && return 0; local c; for c in "${cases[@]}"; do
 cases=("$@")
 
 # Fat binaries with a kernel control (VF_BF16_FATBIN=<file> makes the test runtime load one), when
-# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them.
+# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them, and bf16-fallback with NO_STATS
+# (the exit report's counters left at zero).
 controls=()
 if [ -x "$T12/bin/nvcc" ]; then
     . "$W/scripts/nvcc-host.sh"
     nvcc_host_args "$T12/bin/nvcc"
-    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS; do
+    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS NO_STATS; do
         (cd "$rt" && "$T12/bin/nvcc" "${NVCC_HOST_ARGS[@]}" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
             -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
     done
@@ -138,6 +139,22 @@ if want bf16-lmhead; then
             else run bf16-lmhead "$test_dir"; fi
             if [ "$status" = 0 ] && grep -qx "ok bf16-lmhead" "$log"; then echo "PASS  bf16-lmhead $sw"
             else echo "FAIL  bf16-lmhead $sw (exit status $status; $log)"; failed=1; fi
+        done
+    fi
+fi
+# The tensor-core path's layout rule, tall rule and wide rule: a fine-tuning step's input and weight gradients (NN,
+# NT), an output layer up to the tall rule's n (TN, m = 151936) and a wide down projection past the wide rule's n go to
+# 12.9 with its bits; the TN products of the step, the output layer one column more and the wide down projection at
+# the wide rule's n to the tensor-core path. Each control that removes a rule (test builds) must make it fail there.
+if want bf16-rules; then
+    if build bf16-rules; then
+        run bf16-rules "$test_dir"; verdict bf16-rules
+        for c in tc-layouts:layout tc-tall:"tall rule" tc-wide:"wide rule"; do
+            run bf16-rules "$test_dir" VF_BF16_CONTROL=${c%%:*} >/dev/null
+            cp "$log" "$out/logs/forward-bf16-rules-${c%%:*}.log"
+            if [ "$status" != 0 ] && grep -q "^FAIL .*: not forwarded for the ${c#*:}$" "$log"; then
+                echo "PASS  bf16-rules control: without the ${c#*:} (${c%%:*}) it fails there"
+            else echo "FAIL  bf16-rules control ${c%%:*}: did not fail at the ${c#*:} ($out/logs/forward-bf16-rules-${c%%:*}.log)"; failed=1; fi
         done
     fi
 fi

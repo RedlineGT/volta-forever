@@ -1,8 +1,9 @@
 /* Discriminating arithmetic of the bf16 paths against cuBLAS 12.9 (review section 5, G2): inputs on
  * which a fused multiply-add chain, a multiply-and-add chain, flushing subnormals, and the orders of
- * the epilogue give different bits. The cases use the NT layout (op(A) = A, op(B) = B^T), where 12.9
- * runs its sequential kernel at every size of the kernel sweep, and the cuBLASLt signed zeros with a
- * bias also TN, and compare every bit with 12.9. Prints "ok bf16-arith". Controls
+ * the epilogue give different bits. The skinny path's cases use the NT layout (op(A) = A, op(B) = B^T),
+ * where 12.9 runs its sequential kernel at every size of the kernel sweep, the tensor-core path's the TN
+ * layout (op(A) = A^T, op(B) = B), the only one it serves, and the cuBLASLt signed zeros with a bias
+ * also TN; they compare every bit with 12.9. Prints "ok bf16-arith". Controls
  * (tests/gpu/forward-bf16.sh): kernels with separate multiply and add, with beta * C rounded before it
  * is added, without the +0 term, with it only when beta is zero, and with it also with a bias, must
  * fail. */
@@ -14,11 +15,15 @@ static cublasLtHandle_t lt12;
 static uint16_t bfv(float f) { return f2bf(f); }
 
 /* C = alpha A B^T + beta C through the variant and through 12.9 (A m x k, B n x k, both column-major,
- * leading dimensions m and n); the number of output elements whose bits differ, over every row, or
- * with row_step > 0 over the rows i % row_step == 0 only. */
+ * leading dimensions m and n) or, with tn, C = alpha A^T B + beta C (A k x m, B k x n, leading
+ * dimensions k); the number of output elements whose bits differ, over every row, or with
+ * row_step > 0 over the rows i % row_step == 0 only. */
 static size_t gemm_pair_rows(const char *what, int m, int n, int k, const uint16_t *hA, const uint16_t *hB, float alpha,
-                             float beta, const void *hC, cudaDataType ct, int devmode, int want_path, int row_step)
+                             float beta, const void *hC, cudaDataType ct, int devmode, int want_path, int row_step,
+                             int tn)
 {
+    const cublasOperation_t oa = tn ? CUBLAS_OP_T : CUBLAS_OP_N, ob = tn ? CUBLAS_OP_N : CUBLAS_OP_T;
+    const int lda = tn ? k : m, ldb = tn ? k : n;
     const size_t es = ct == CUDA_R_32F ? 4 : 2, cb = (size_t)m * n * es;
     void *dA = to_device(hA, (size_t)m * k * 2), *dB = to_device(hB, (size_t)n * k * 2);
     void *Cv = to_device(hC, cb), *C12 = to_device(hC, cb);
@@ -32,10 +37,10 @@ static size_t gemm_pair_rows(const char *what, int m, int n, int k, const uint16
     cublasSetPointerMode(hv, pm);
     c129.SetPointerMode(h12, pm);
     const Counts c0 = counts(API_GEMMEX);
-    const cublasStatus_t s1 = cublasGemmEx(hv, CUBLAS_OP_N, CUBLAS_OP_T, m, n, k, pa, dA, CUDA_R_16BF, m, dB,
-                                           CUDA_R_16BF, n, pb, Cv, ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    const cublasStatus_t s2 = c129.GemmEx(h12, CUBLAS_OP_N, CUBLAS_OP_T, m, n, k, pa, dA, CUDA_R_16BF, m, dB,
-                                          CUDA_R_16BF, n, pb, C12, ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    const cublasStatus_t s1 = cublasGemmEx(hv, oa, ob, m, n, k, pa, dA, CUDA_R_16BF, lda, dB, CUDA_R_16BF, ldb, pb, Cv,
+                                           ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    const cublasStatus_t s2 = c129.GemmEx(h12, oa, ob, m, n, k, pa, dA, CUDA_R_16BF, lda, dB, CUDA_R_16BF, ldb, pb, C12,
+                                          ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     CU(cudaDeviceSynchronize());
     const Counts c1 = counts(API_GEMMEX);
     cublasSetPointerMode(hv, CUBLAS_POINTER_MODE_HOST);
@@ -72,7 +77,7 @@ static size_t gemm_pair_rows(const char *what, int m, int n, int k, const uint16
 static size_t gemm_pair(const char *what, int m, int n, int k, const uint16_t *hA, const uint16_t *hB, float alpha,
                         float beta, const void *hC, cudaDataType ct, int devmode, int want_path)
 {
-    return gemm_pair_rows(what, m, n, k, hA, hB, alpha, beta, hC, ct, devmode, want_path, 0);
+    return gemm_pair_rows(what, m, n, k, hA, hB, alpha, beta, hC, ct, devmode, want_path, 0, 0);
 }
 
 static void *c_random(int m, int n, cudaDataType ct)
@@ -282,10 +287,10 @@ static void special_values(void)
 /* Signed zeros: with alpha < 0 and an exactly zero dot product, alpha * acc = -0; when beta * C = -0
  * is added next (beta 1 or 0.5 with C = -0, beta -1 with C = +0), cuBLAS 12.9 gives +0, as when +0 is
  * added to alpha * acc before beta * C. A's rows i % 3 == 0 are zeros (+0 and -0 by turns); host and
- * device pointer modes, both output types. The skinny path: every element compared with 12.9. The
- * tensor-core path (its epilogue and its fallback finish the same way): the zero rows compared, since
- * elsewhere its bits are not 12.9's. The kernel control ZERO_BETA0 (+0 only when beta is zero, as
- * before) must fail these cases. */
+ * device pointer modes, both output types. The skinny path (NT): every element compared with 12.9. The
+ * tensor-core path (TN, its layout; its epilogue and its fallback finish the same way): the zero rows
+ * compared, since elsewhere its bits are not 12.9's. The kernel control ZERO_BETA0 (+0 only when beta
+ * is zero, as before) must fail these cases. */
 static void signed_zeros(void)
 {
     static const struct {
@@ -305,8 +310,10 @@ static void signed_zeros(void)
         for (int ct = 0; ct < 2; ++ct) {
             const cudaDataType t = ct ? CUDA_R_16BF : CUDA_R_32F;
             uint16_t *A = bf16_random((size_t)m * k, 0.05), *B = bf16_random((size_t)n * k, 1.0);
+            /* row i of op(A): A's row i (NT, A m x k) or its column i (TN, A k x m) */
             for (int i = 0; i < m; i += 3)
-                for (int l = 0; l < k; ++l) A[i + (size_t)l * m] = (i / 3) % 2 ? 0x8000 : 0x0000;
+                for (int l = 0; l < k; ++l)
+                    A[tc ? l + (size_t)i * k : i + (size_t)l * m] = (i / 3) % 2 ? 0x8000 : 0x0000;
             void *C = malloc((size_t)m * n * 4);
             for (size_t c = 0; c < sizeof cases / sizeof *cases; ++c) {
                 for (size_t e = 0; e < (size_t)m * n; ++e) {
@@ -319,7 +326,7 @@ static void signed_zeros(void)
                 snprintf(what, sizeof what, "signed zeros, %s path, %s, %s", tc ? "tensor-core" : "skinny", cases[c].what,
                          ct ? "bf16" : "fp32");
                 const size_t d = gemm_pair_rows(what, m, n, k, A, B, cases[c].alpha, cases[c].beta, C, t, cases[c].dev,
-                                                tc ? SERVED_TC : SERVED_SKINNY, tc ? 3 : 0);
+                                                tc ? SERVED_TC : SERVED_SKINNY, tc ? 3 : 0, tc);
                 CHECK(d == 0, "%s: %zu elements differ from 12.9", what, d);
             }
             free(A);

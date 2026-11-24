@@ -11,7 +11,12 @@
 // paths; any other call is forwarded to CUDA 12.9 with its arguments unchanged.
 // - The skinny path (VF_CUBLAS_BF16_SKINNY=1, or with VF_CUBLAS_BF16_TC=1 unless SKINNY=0): one
 //   kernel, one fp32 fused multiply-add chain per element in increasing k from +0, no workspace.
-// - The tensor-core path (VF_CUBLAS_BF16_TC=1), for calls that are not captured in a graph: rows of
+// - The tensor-core path (VF_CUBLAS_BF16_TC=1), for TN products (op(A) = A^T, op(B) = B: the layout of
+//   linear layers) that are not captured in a graph, but for the classes of shapes that its rules of speed leave to
+//   cuBLAS 12.9 (below: a class is served when layers of real models were measured in it, and over every layer and
+//   n measured its median speed is 1.10 times 12.9's or more and its slowest 0.90 or more, and no model measured has
+//   its products' summed time above 12.9's at any n; a product of a served class can still run below 12.9's speed,
+//   LIMITS.md): rows of
 //   op(A) and columns of op(B) scaled by exact powers of two and converted to fp16 when every element
 //   converts exactly; CUDA 12.9's fp16 GEMM over fixed k-slices of 256, on a cuBLASLt handle of this
 //   runtime's own; an exact rescale; the rows and columns that do not convert by a fused multiply-add
@@ -62,6 +67,41 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
  * gate, and the test judges their bias from k = 2048 and 4096 (docs/emulations.md, "The tensor-core path's gate").
  * A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
 #define VF_TC_MIN_K 1024
+/* The tensor-core path's layout: op(A) = A^T and op(B) = B (TN, how cuBLAS sees a framework's linear layer
+ * y = x W^T, in inference and in the forward pass of training). A rule of speed (the class of the other layouts
+ * fails the class criterion above: down to 0.24 times 12.9's speed on a fine-tuning step's products): in the other
+ * layouts the path reads strided vectors, 64 to a block of its scale kernel and again for every chunk of columns, and
+ * its fallback is the generic tiled kernel, so it was slow at long k even when every row and column converted; and
+ * the products of a backward pass are in those layouts (input gradients NN, weight gradients NT with k the
+ * batch's tokens), whose gradients' rows and columns fail the exact check. On fine-tuning steps' own operands
+ * most of the NN and NT products the path would serve ran below 12.9's speed, several at under half of it, where
+ * its TN products ran faster (docs/performance.md, section 7, gives each). Every other layout goes to cuBLAS
+ * 12.9. */
+#define VF_TC_TRANS_A 1
+#define VF_TC_TRANS_B 0
+/* The tall rule, a rule of speed: TN with m >= VF_TC_TALL_M is served only with n > VF_TC_TALL_MAX_N, and TN with
+ * m >= VF_TC_TALL_LONG_M only with k <= VF_TC_TALL_MAX_K. With so many rows cuBLAS 12.9 fills the GPU: up to 64
+ * columns (its tile's width) it computed such products about as fast as the path from m = 8256 on, and output layers
+ * over a vocabulary up to 1.5 times as fast: that class fails the class criterion above. The class from 65 to 128
+ * columns passes it on the layers of real models and is served. The long products of many rows (m from 6144 on with
+ * k beyond 9216) have no layer of a real model measured: with operands that convert exactly 12.9 was within 3 % of
+ * the path or faster in narrow bands of m and n that follow its waves, with inputs whose columns fail the exact check
+ * well below it, and the class goes to 12.9 (docs/performance.md, section 7, gives each class, and the sweeps on both
+ * sides of the bounds). */
+#define VF_TC_TALL_M 8192
+#define VF_TC_TALL_MAX_N 64
+#define VF_TC_TALL_LONG_M 6144
+#define VF_TC_TALL_MAX_K 9216
+/* The wide rule, a rule of speed (its two classes fail the class criterion above on their slowest products: from 257
+ * to 320 columns 0.85 times 12.9's speed, beyond 0.62, on real text): TN with k > VF_TC_WIDE_K is served only with
+ * n <= VF_TC_WIDE_MAX_N. Such products
+ * are the down projections of SiLU-gated MLPs, whose inputs (the gated activations) hold values far below their
+ * columns' largest: on real text, up to 75 % of a layer's columns fail the exact check, and the fallback computes
+ * them, one fused multiply-add chain over the whole k each, which costs more than the path saves over 12.9 from
+ * a few hundred columns on. Whether a layer loses depends on its data, which a static rule cannot see: the whole
+ * class goes to 12.9 (docs/performance.md, section 7, gives every layer measured). */
+#define VF_TC_WIDE_K 8192
+#define VF_TC_WIDE_MAX_N 256
 #define VF_STR_(x) #x
 #define VF_STR(x) VF_STR_(x)
 #define VF_MIN_K 16                  /* shorter products are forwarded */
@@ -204,6 +244,10 @@ static struct {
     FN(cuMemFreeAsync) MemFreeAsync;
     FN(cuMemsetD32Async) MemsetD32Async;
     FN(cuGetErrorName) GetErrorName;
+    FN(cuStreamSynchronize) StreamSynchronize; /* the fallback's counters: zeroed once per context */
+    FN(cuMemcpyDtoH_v2) MemcpyDtoH;            /* and read for the exit report */
+    FN(cuCtxPushCurrent_v2) CtxPushCurrent;
+    FN(cuCtxPopCurrent_v2) CtxPopCurrent;
 } cu;
 #undef FN
 
@@ -277,7 +321,9 @@ static void bind_driver(void)
                 BIND(d, cu.MemPoolSetAttribute, "cuMemPoolSetAttribute") &&
                 BIND(d, cu.MemAllocFromPoolAsync, "cuMemAllocFromPoolAsync") &&
                 BIND(d, cu.MemFreeAsync, "cuMemFreeAsync") && BIND(d, cu.MemsetD32Async, "cuMemsetD32Async") &&
-                BIND(d, cu.GetErrorName, "cuGetErrorName");
+                BIND(d, cu.GetErrorName, "cuGetErrorName") && BIND(d, cu.StreamSynchronize, "cuStreamSynchronize") &&
+                BIND(d, cu.MemcpyDtoH, "cuMemcpyDtoH_v2") && BIND(d, cu.CtxPushCurrent, "cuCtxPushCurrent_v2") &&
+                BIND(d, cu.CtxPopCurrent, "cuCtxPopCurrent_v2");
     if (!g_cuda_ok) say("a function is missing from libcuda.so.1; every call is forwarded");
 #ifdef VF_BF16_TEST
     *(void **)&test_module_unload = dlsym(d, "cuModuleUnload");
@@ -310,6 +356,10 @@ enum {
     R_K,       /* k beyond the tensor-core path's limit */
     R_SHORT_K, /* in the tensor-core path's gate but for k, shorter than VF_TC_MIN_K */
     R_SAFE,    /* a call the tensor-core path would serve, with VF_SAFE=1 */
+    R_LAYOUT,  /* in the tensor-core path's gate, in another layout than TN */
+    R_TALL,    /* TN in the tensor-core path's gate with m >= VF_TC_TALL_M and n <= VF_TC_TALL_MAX_N, or with
+                * m >= VF_TC_TALL_LONG_M and k > VF_TC_TALL_MAX_K */
+    R_WIDE,    /* TN in the tensor-core path's gate with k > VF_TC_WIDE_K and n > VF_TC_WIDE_MAX_N */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
     R_MATH,    /* pedantic or unknown math mode */
@@ -327,12 +377,19 @@ static const char *const reason_name[R_N] = {
     "not bf16 with fp32 accumulation", "explicit algorithm", "batch", "64-bit size", "shape",
     "arguments left to cuBLAS", "outside the paths' domains", "12.9 would not run its sequential kernel",
     "another cuBLAS build",
-    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1", "unknown handle",
+    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1",
+    "not TN (the tensor-core path's layout)",
+    "m >= " VF_STR(VF_TC_TALL_M) " with n <= " VF_STR(VF_TC_TALL_MAX_N) ", or m >= " VF_STR(VF_TC_TALL_LONG_M)
+    " with k > " VF_STR(VF_TC_TALL_MAX_K) " (12.9 as fast at some of these shapes)",
+    "k > " VF_STR(VF_TC_WIDE_K) " with n > " VF_STR(VF_TC_WIDE_MAX_N) " (the fallback's cost on real activations)",
+    "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
     "no chunking", "tensor-core call in a graph capture", "allocation failed", "launch failed"};
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
 static atomic_ullong st_fwd[API_N][R_N];
 static atomic_ullong st_tc_captured[API_N];
+static atomic_ullong st_tc_elems; /* the elements (m * n) of the calls the tensor-core path served, every entry point */
+static int read_stats(unsigned long long out[3], int *made);
 
 static void report(void)
 {
@@ -353,6 +410,24 @@ static void report(void)
         }
         say("%s", line);
     }
+    /* The fallback's counters (abi.h, VfFbArgs.stats): how many of the tensor-core path's calls had rows or
+     * columns failing the exact check, how many more than a quarter (LIMITS.md: such a product can run below
+     * cuBLAS 12.9's speed), and the share of elements the fallback computed. */
+    unsigned long long tc = 0;
+    for (int a = 0; a < API_N; ++a) tc += atomic_load(&st_tc[a]);
+    if (!tc) return;
+    unsigned long long v[3];
+    int made = 0;
+    if (!read_stats(v, &made)) {
+        say("tensor-core path: the fallback's counters could not be read at exit");
+        return;
+    }
+    if (!made) return;
+    const unsigned long long elems = atomic_load(&st_tc_elems);
+    say("tensor-core path: of its %llu calls, %llu had rows or columns that failed the exact check, %llu of them more "
+        "than a quarter of their rows or of their columns (such products can run below cuBLAS 12.9's speed: "
+        "LIMITS.md); the fallback computed %llu of their %llu elements (%.2f %%)",
+        tc, v[0], v[1], v[2], elems, elems ? 100.0 * (double)v[2] / (double)elems : 0.0);
 }
 
 /* ---- switches and libraries, once ------------------------------------------------------- */
@@ -433,6 +508,8 @@ typedef struct Ctx {
     CUfunction scale, epilogue, fb_wide, fb_narrow, fb_tn, skinny[2][SK_N]; /* skinny[fast][shape] */
     CUmemoryPool pool;
     cublasLtHandle_t lt; /* the internal fp16 GEMM's, never the caller's */
+    atomic_int stats_made;  /* the fallback's counters (abi.h, VfFbArgs.stats): 0 not made yet, 1 there, -1 not */
+    CUdeviceptr stats;
 } Ctx;
 
 static Ctx g_no_ctx = {.kernels = -1, .tc = -1}; /* a handle whose context has no state: every call forwarded */
@@ -523,7 +600,7 @@ static void setup_kernels(Ctx *x)
     atomic_store_explicit(&x->kernels, 1, memory_order_release);
     static atomic_int said;
     if (!atomic_exchange(&said, 1))
-        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (outside graph captures)",
+        SAY(1, "bf16 products served by the skinny path %s, by the tensor-core path %s (TN, outside graph captures)",
             cfg.skinny ? "on" : "off", cfg.tc ? "on" : "off");
     return;
 fail:
@@ -888,8 +965,10 @@ static int choose_path(const Shape *s, int *reason)
         if (cfg.measured_build && sequential_kernel_129(s)) return PATH_SKINNY;
         not_sequential = cfg.measured_build ? 1 : 2;
     }
-    /* The tensor-core path (n >= 2, checked before): a large product, or a wide one, with k from
-     * VF_TC_MIN_K to VF_TC_MAX_K. Its gate depends on n, so one element's bits can depend on the batch:
+    /* The tensor-core path (n >= 2, checked before): a large product, or a wide one, in the TN layout, not tall
+     * and narrow, with k from VF_TC_MIN_K to VF_TC_MAX_K. The layout and the tall shape are decided before the
+     * shortest k, so that such calls are 12.9's whatever VF_TC_MIN_K is. Its gate depends on n, so one element's
+     * bits can depend on the batch:
      * 12.9's (forwarded, or the skinny path) for a narrow product, the tensor-core path's for a wide one
      * (LIMITS.md). n = 1 is never served: 12.9 computes it faster. Were the tensor-core path to take it,
      * its internal fp16 GEMM would give column 0 other bits than at n >= 2 (measured on 15 shapes, where
@@ -899,6 +978,19 @@ static int choose_path(const Shape *s, int *reason)
     if ((cfg.tc || cfg.tc_safe) && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
         if (k > VF_TC_MAX_K && !CONTROL("tc-k")) {
             *reason = R_K;
+            return PATH_NONE;
+        }
+        if ((s->ta != VF_TC_TRANS_A || s->tb != VF_TC_TRANS_B) && !CONTROL("tc-layouts")) {
+            *reason = R_LAYOUT;
+            return PATH_NONE;
+        }
+        if (((m >= VF_TC_TALL_M && n <= VF_TC_TALL_MAX_N) || (m >= VF_TC_TALL_LONG_M && k > VF_TC_TALL_MAX_K)) &&
+            !CONTROL("tc-tall")) {
+            *reason = R_TALL;
+            return PATH_NONE;
+        }
+        if (k > VF_TC_WIDE_K && n > VF_TC_WIDE_MAX_N && !CONTROL("tc-wide")) {
+            *reason = R_WIDE;
             return PATH_NONE;
         }
         if (k >= cfg.tc_min_k) {
@@ -959,7 +1051,9 @@ static cublasStatus_t run_skinny(const Call *c, int *reason)
 }
 
 /* The workspace of a tensor-core call, and its chunks: a static function of (m, n, k, layout),
- * never of the operands, of a capture or of what came before. */
+ * never of the operands, of a capture or of what came before. It holds the check's results for
+ * every row of op(A) and column of op(B) of the call (exponents, lists of the failed ones: the
+ * fallback runs once, over all of them), then one chunk's fp16 copies and partial sums. */
 typedef struct {
     int ns;           /* k-slices */
     long long Ls, kp; /* slice length, padded k (ns * Ls) */
@@ -971,7 +1065,8 @@ typedef struct {
 
 static long long rup(long long x, long long a) { return (x + a - 1) / a * a; }
 
-static size_t plan_layout(Plan *p, long long MS, long long NS)
+/* LA rows of op(A) and LB columns of op(B) in the lists. */
+static size_t plan_layout(Plan *p, long long MS, long long NS, long long LA, long long LB)
 {
     p->MS = (int)MS;
     p->NS = (int)NS;
@@ -984,11 +1079,11 @@ static size_t plan_layout(Plan *p, long long MS, long long NS)
         off += (size_t)rup((bytes), 256); \
     } while (0)
     TAKE(off_cnt, 16);
-    TAKE(off_eB, 4LL * NS);
-    TAKE(off_listB, 4LL * NS);
+    TAKE(off_eB, 4LL * LB);
+    TAKE(off_listB, 4LL * LB);
     TAKE(off_B16, 2LL * p->kp * (p->b_contig ? NS : p->r16B));
-    TAKE(off_eA, 4LL * MS);
-    TAKE(off_listA, 4LL * MS);
+    TAKE(off_eA, 4LL * LA);
+    TAKE(off_listA, 4LL * LA);
     TAKE(off_A16, 2LL * p->kp * (p->a_contig ? MS : p->r16A));
     TAKE(off_Cp, 4LL * p->ns * MS * NS);
 #undef TAKE
@@ -1020,11 +1115,11 @@ static int make_plan(const Call *c, Plan *p)
         if (NS > max_ns) continue;
         if ((n + NS - 1) / NS != nch) continue; /* the same chunks as a smaller count */
         const long long m0 = m < 8 ? m : 8;
-        if (plan_layout(p, m0, NS) > cap) continue;
+        if (plan_layout(p, m0, NS, m0, NS) > cap) continue;
         long long lo = m0, hi = m; /* the largest MS that fits (the size grows with MS) */
         while (lo < hi) {
             const long long mid = (lo + hi + 1) / 2;
-            if (plan_layout(p, mid, NS) <= cap)
+            if (plan_layout(p, mid, NS, mid, NS) <= cap)
                 lo = mid;
             else
                 hi = mid - 1;
@@ -1044,10 +1139,14 @@ static int make_plan(const Call *c, Plan *p)
         if (nch >= best) break;
     }
     if (best < 0) return -1;
-    plan_layout(p, bMS, bNS);
+    /* The chunks are chosen with lists of one chunk's rows and columns, as when the fallback ran once
+     * per chunk: so they are what they were, and so is the kernel cuBLAS chooses for each internal
+     * GEMM. The lists then take the whole call (16 bytes per row and column beyond the cap). */
+    if (plan_layout(p, bMS, bNS, bMS, bNS) > cap) return -1;
+    plan_layout(p, bMS, bNS, m, n);
     p->mch = (int)((m + bMS - 1) / bMS);
     p->nch = (int)((n + bNS - 1) / bNS);
-    return p->total <= cap ? 0 : -1;
+    return 0;
 }
 
 /* fp16 x fp16 -> fp32 partials of one chunk, one per k-slice (a strided batch over the slices), on
@@ -1135,6 +1234,54 @@ static void free_workspace(CUdeviceptr base, CUstream stream, int capturing)
     if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
 }
 
+/* The context's counters for the exit report (abi.h, VfFbArgs.stats), made at its first eager tensor-core call
+ * (in relaxed capture mode, as that call's workspace): 32 bytes of its pool, never freed, zeroed on the call's
+ * stream, which is then waited for once, so that a call on any stream finds them zeroed. Without them (an
+ * allocation or a copy failed), the path serves its calls and does not count them. */
+static void make_stats(Ctx *x, CUstream s)
+{
+    if (atomic_load_explicit(&x->stats_made, memory_order_acquire)) return;
+    pthread_mutex_lock(&g_setup_mu);
+    if (!atomic_load_explicit(&x->stats_made, memory_order_relaxed)) {
+        CUdeviceptr d = 0;
+        CUresult r = CONTROL("no-stats") ? CUDA_ERROR_NOT_SUPPORTED : cu.MemAllocFromPoolAsync(&d, 32, x->pool, s);
+        if (r == CUDA_SUCCESS) r = cu.MemsetD32Async(d, 0, 8, s);
+        if (r == CUDA_SUCCESS) r = cu.StreamSynchronize(s);
+        x->stats = r == CUDA_SUCCESS ? d : 0;
+        atomic_store_explicit(&x->stats_made, r == CUDA_SUCCESS ? 1 : -1, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_setup_mu);
+}
+
+/* The fallback's counters summed over the contexts that have them (out[0..2] as VfFbArgs.stats), each read with
+ * its context made current for the copy, after checking that it is still the context the counters were made in.
+ * *made: the contexts that have counters. 1 when every one of them could be read, 0 otherwise (a context
+ * destroyed, the driver shut down). */
+static int read_stats(unsigned long long out[3], int *made)
+{
+    out[0] = out[1] = out[2] = 0;
+    *made = 0;
+    int ok = 1;
+    pthread_mutex_lock(&g_ctx_mu);
+    for (Ctx *x = g_ctxs; x; x = x->next) {
+        if (atomic_load_explicit(&x->stats_made, memory_order_acquire) <= 0) continue;
+        ++*made;
+        unsigned long long id = 0, v[3] = {0, 0, 0};
+        CUcontext prev = NULL;
+        if (cu.CtxGetId(x->ctx, &id) != CUDA_SUCCESS || id != x->id || cu.CtxPushCurrent(x->ctx) != CUDA_SUCCESS) {
+            ok = 0;
+            continue;
+        }
+        if (cu.MemcpyDtoH(v, x->stats, sizeof v) == CUDA_SUCCESS)
+            out[0] += v[0], out[1] += v[1], out[2] += v[2];
+        else
+            ok = 0;
+        cu.CtxPopCurrent(&prev);
+    }
+    pthread_mutex_unlock(&g_ctx_mu);
+    return ok;
+}
+
 static cublasStatus_t run_tc(const Call *c, int *reason)
 {
     Plan p;
@@ -1172,6 +1319,7 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
     CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
     const int relaxed = !capturing && !CONTROL("no-relaxed") && cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
     CUresult r = INJECT("alloc") ? CUDA_ERROR_OUT_OF_MEMORY : cu.MemAllocFromPoolAsync(&base, p.total, x->pool, alloc_stream);
+    if (r == CUDA_SUCCESS && base && !capturing) make_stats(x, c->stream); /* once per context, eager */
     if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode); /* the thread's mode given back, whatever happened */
     if (r != CUDA_SUCCESS || !base) {
         static atomic_int said;
@@ -1187,6 +1335,9 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                       A16 = base + p.off_A16, Cp = base + p.off_Cp;
     const size_t es = c->o.dtype ? 2 : 4;
     int written = 0; /* the output may have been changed */
+    /* 0. counters, once for the call: [0] failed rows of op(A), [1] failed columns of op(B) */
+    r = CONTROL("no-reset") ? CUDA_SUCCESS : cu.MemsetD32Async(cnt, 0, 2, c->stream);
+    if (r != CUDA_SUCCESS) goto fail;
     for (int jc = 0; jc < p.nch; ++jc) {
         const int j0 = jc * p.NS;
         const int nc = (c->n - j0) < p.NS ? (c->n - j0) : p.NS;
@@ -1194,11 +1345,8 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         for (int ic = 0; ic < p.mch; ++ic) {
             const int i0 = ic * p.MS;
             const int mc = (c->m - i0) < p.MS ? (c->m - i0) : p.MS;
-            /* 0. counters: [0] failed rows of op(A) of this chunk, [1] failed columns of op(B) of this
-             * column chunk (counted again at each column chunk) */
-            r = CONTROL("no-reset") ? CUDA_SUCCESS : cu.MemsetD32Async(cnt, 0, ic == 0 ? 2 : 1, c->stream);
-            if (r != CUDA_SUCCESS) goto fail;
-            /* 1. scale + strict check (the columns once per column chunk) */
+            /* 1. scale + strict check: the columns once, at their chunk's first row chunk; the rows at
+             * every chunk (A16 holds one chunk of rows), listed at the first chunk of columns only */
             VfScaleArgs sa;
             memset(&sa, 0, sizeof sa);
             VfSeg *s0 = &sa.seg[0], *s1 = &sa.seg[1];
@@ -1208,9 +1356,11 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
             s0->dst = (unsigned short *)(uintptr_t)A16;
             s0->dvstride = p.a_contig ? p.kp : 1;
             s0->dlstride = p.a_contig ? 1 : p.r16A;
-            s0->e = (int *)(uintptr_t)eA;
+            s0->e = (int *)(uintptr_t)eA + i0;
             s0->list = (int *)(uintptr_t)listA;
-            s0->count = (int *)(uintptr_t)cnt;
+            s0->count = jc == 0 ? (int *)(uintptr_t)cnt : NULL;
+            s0->base = i0;
+            s0->lim = c->m;
             s0->R = mc;
             s0->contig = p.a_contig;
             s0->vec = p.a_contig && (uintptr_t)c->A % 16 == 0 && c->lda % 8 == 0;
@@ -1222,9 +1372,11 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                 s1->dst = (unsigned short *)(uintptr_t)B16;
                 s1->dvstride = p.b_contig ? p.kp : 1;
                 s1->dlstride = p.b_contig ? 1 : p.r16B;
-                s1->e = (int *)(uintptr_t)eB;
+                s1->e = (int *)(uintptr_t)eB + j0;
                 s1->list = (int *)(uintptr_t)listB;
                 s1->count = (int *)(uintptr_t)(cnt + 4);
+                s1->base = j0;
+                s1->lim = c->n;
                 s1->R = nc;
                 s1->contig = p.b_contig;
                 s1->vec = p.b_contig && (uintptr_t)c->B % 16 == 0 && c->ldb % 8 == 0;
@@ -1251,8 +1403,8 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
             memset(&ea, 0, sizeof ea);
             ea.cp = (const float *)(uintptr_t)Cp;
             ea.cpstride = (long long)mc * nc;
-            ea.eA = (const int *)(uintptr_t)eA;
-            ea.eB = (const int *)(uintptr_t)eB;
+            ea.eA = (const int *)(uintptr_t)eA + i0;
+            ea.eB = (const int *)(uintptr_t)eB + j0;
             ea.ns = p.ns;
             ea.mc = mc;
             ea.n = nc;
@@ -1263,42 +1415,54 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
                                             &ea);
             if (r != CUDA_SUCCESS) goto fail;
             written = 1;
-            /* 4. fallback (failed rows and columns), always launched: an empty list costs one read */
-            VfFbArgs fb;
-            memset(&fb, 0, sizeof fb);
-            fb.A = s0->src;
-            fb.a_si = s0->vstride;
-            fb.a_sl = s0->lstride;
-            fb.B = Bc;
-            fb.b_sl = p.b_contig ? 1 : c->ldb;
-            fb.b_sj = p.b_contig ? c->ldb : 1;
-            fb.cntA = (const int *)(uintptr_t)cnt;
-            fb.listA = (const int *)(uintptr_t)listA;
-            fb.eA = (const int *)(uintptr_t)eA;
-            fb.cntB = (const int *)(uintptr_t)(cnt + 4);
-            fb.listB = (const int *)(uintptr_t)listB;
-            fb.eB = (const int *)(uintptr_t)eB;
-            fb.mc = mc;
-            fb.n = nc;
-            fb.k = c->k;
-            fb.o = o;
-            const int fast = p.a_contig && p.b_contig && (uintptr_t)c->A % 16 == 0 && c->lda % 8 == 0 &&
-                             (uintptr_t)c->B % 16 == 0 && c->ldb % 8 == 0 && c->k % 8 == 0;
+        }
+    }
+    /* 4. fallback, once for the call, after every chunk: all failed rows and columns (an empty list
+     * costs one read). Its elements are one FMA chain each, whatever its tiles: launched once per
+     * chunk as it was, it cost one tile's whole chain over k in every chunk with a failed row or
+     * column, more than all the tensor-core work of a call with many chunks. */
+    {
+        VfFbArgs fb;
+        memset(&fb, 0, sizeof fb);
+        fb.A = c->A;
+        fb.a_si = p.a_contig ? c->lda : 1;
+        fb.a_sl = p.a_contig ? 1 : c->lda;
+        fb.B = c->B;
+        fb.b_sl = p.b_contig ? 1 : c->ldb;
+        fb.b_sj = p.b_contig ? c->ldb : 1;
+        fb.cntA = (const int *)(uintptr_t)cnt;
+        fb.listA = (const int *)(uintptr_t)listA;
+        fb.eA = (const int *)(uintptr_t)eA;
+        fb.cntB = (const int *)(uintptr_t)(cnt + 4);
+        fb.listB = (const int *)(uintptr_t)listB;
+        fb.eB = (const int *)(uintptr_t)eB;
+        fb.stats = atomic_load_explicit(&x->stats_made, memory_order_acquire) > 0 ? (unsigned long long *)(uintptr_t)x->stats
+                                                                                  : NULL;
+        fb.mc = c->m;
+        fb.n = c->n;
+        fb.k = c->k;
+        fb.o = c->o;
+        const int fast = p.a_contig && p.b_contig && (uintptr_t)c->A % 16 == 0 && c->lda % 8 == 0 &&
+                         (uintptr_t)c->B % 16 == 0 && c->ldb % 8 == 0 && c->k % 8 == 0;
+        /* Control: the fallback launched again for every chunk, the cost it had (its elements are written
+         * again with the same values unless C is D with beta != 0). */
+        const int times = CONTROL("fb-per-chunk") ? p.mch * p.nch : 1;
+        for (int t = 0; t < times && r == CUDA_SUCCESS; ++t) {
             if (INJECT("fallback")) {
                 r = CUDA_ERROR_LAUNCH_FAILED;
             } else if (fast) {
                 r = launch(x, x->fb_tn, (unsigned)(x->sms * VF_FB_TN_CTAS_PER_SM), 1, 256, VF_BF16_FB_TN_SMEM,
                            c->stream, &fb);
             } else {
-                const int narrow = nc <= 32;
+                const int narrow = c->n <= 32;
                 const long long BM = 64, BN = narrow ? 8 : 64;
-                const long long tiles = 2 * ((nc + BN - 1) / BN) * ((mc + BM - 1) / BM);
+                const long long tiles = 2 * ((c->n + BN - 1) / BN) * ((c->m + BM - 1) / BM);
                 const long long most = (long long)x->sms * (narrow ? VF_FB_NARROW_CTAS_PER_SM : VF_FB_WIDE_CTAS_PER_SM);
                 r = launch(x, narrow ? x->fb_narrow : x->fb_wide, (unsigned)(tiles < most ? tiles : most), 1, 256, 0,
                            c->stream, &fb);
             }
-            if (r != CUDA_SUCCESS) goto fail;
         }
+        if (r != CUDA_SUCCESS) goto fail;
     }
     free_workspace(base, c->stream, capturing);
     return CUBLAS_STATUS_SUCCESS;
@@ -1353,6 +1517,7 @@ static cublasStatus_t serve(Call *c, int path, int *reason)
 {
     const cublasStatus_t s = path == PATH_SKINNY ? run_skinny(c, reason) : run_tc(c, reason);
     if (s != FWD) atomic_fetch_add(path == PATH_SKINNY ? &st_skinny[c->api] : &st_tc[c->api], 1);
+    if (s != FWD && path != PATH_SKINNY) atomic_fetch_add(&st_tc_elems, (unsigned long long)c->m * (unsigned long long)c->n);
     return s;
 }
 
@@ -1723,8 +1888,9 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     if (m > INT_MAX || n > INT_MAX) goto forward;
     reason = R_SHAPE;
     if (m < 1 || n < 2) goto forward;
-    reason = R_DOMAIN; /* n >= 32: wider than the skinny path's widest, and the tensor-core path is off */
-    if (!cfg.tc && n >= 32) goto forward;
+    reason = R_DOMAIN; /* n >= 32: wider than the skinny path's widest, and the tensor-core path is off (with
+                        * VF_SAFE=1 the call goes on, to be counted under safe mode's reason, as in the legacy entry) */
+    if (!cfg.tc && !cfg.tc_safe && n >= 32) goto forward;
     int32_t transa = 0, transb = 0, pmode = 0, btype = -1;
     uint32_t epilogue = 0;
     const void *bias = NULL;
@@ -1863,6 +2029,14 @@ EXPORT int vf_bf16_test_tc_min_k(void)
     return cfg.tc_min_k;
 }
 
+/* Test builds: the bounds of the tall and wide rules (0: VF_TC_TALL_M, 1: VF_TC_TALL_MAX_N, 2: VF_TC_TALL_MAX_K,
+ * 3: VF_TC_WIDE_K, 4: VF_TC_WIDE_MAX_N, 5: VF_TC_TALL_LONG_M), so that the tests write their rows from them. */
+EXPORT int vf_bf16_test_rule_bound(int i)
+{
+    static const int b[] = {VF_TC_TALL_M, VF_TC_TALL_MAX_N, VF_TC_TALL_MAX_K, VF_TC_WIDE_K, VF_TC_WIDE_MAX_N, VF_TC_TALL_LONG_M};
+    return i >= 0 && i < (int)(sizeof b / sizeof *b) ? b[i] : -1;
+}
+
 /* Test builds: what the runtime has made. out[0] and out[1]: the current context's kernels and its
  * tensor-core pool and handle (0 not tried yet, 1 there, -1 not; 0 too for a context it has no state
  * of); out[2], out[3], out[4]: the modules, memory pools and cuBLASLt handles it has made in the
@@ -1887,6 +2061,18 @@ EXPORT int vf_bf16_test_state(int *out, int n)
     out[3] = atomic_load(&test_pools);
     out[4] = atomic_load(&test_lt_handles);
     return 5;
+}
+
+/* Test builds: the fallback's counters as the exit report reads them (out[0] calls with failed rows or columns,
+ * out[1] those with more than a quarter of their rows or of their columns failed, out[2] the elements the fallback
+ * computed), summed over the contexts, and out[3] the elements of the calls the tensor-core path served. Returns 4,
+ * or 0 when a context's counters could not be read. */
+EXPORT int vf_bf16_test_fallback_counters(unsigned long long *out, int n)
+{
+    int made = 0;
+    if (n < 4 || !read_stats(out, &made)) return 0;
+    out[3] = atomic_load(&st_tc_elems);
+    return 4;
 }
 
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded

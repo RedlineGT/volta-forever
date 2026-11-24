@@ -135,7 +135,10 @@ Everything is under the Apache License 2.0 but `crates/vf-tables`, under the LGP
 (`crates/vf-tables/README.md`, `NOTICE`). By section 5 of the Apache License, what you submit for
 inclusion is under that licence unless you say otherwise; the tables change only through
 `reference/generate.py` and stay under the LGPL 2.1. There is nothing else to sign. Send only what
-you have the right to give, and nothing of NVIDIA's (library, header, documentation, tool). The one
+you have the right to give, and nothing of NVIDIA's (library, header, documentation, tool, or text
+taken from them). The one header that declares NVIDIA's interfaces, `crates/vf-fwdgen/bf16tc/decls.h`,
+is this project's own text (names, types and values only, checked against the toolkits' headers when
+the runtime is built; `NOTICE`, section 2). The one
 piece of compiler output in the release archive, `crates/vf-fwdgen/bf16tc/kernels.fatbin`, is made
 by `scripts/build-bf16-kernels.sh` (`--check` rebuilds the same bytes) and committed with its source
 and `kernels.manifest`.

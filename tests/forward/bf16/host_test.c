@@ -110,6 +110,16 @@ static int count(const char *prefix)
     }
     return n;
 }
+/* Where the i-th line beginning with prefix starts in the events, or NULL. */
+static const char *where(const char *prefix, int i)
+{
+    for (const char *p = ev; p && *p;) {
+        if (!strncmp(p, prefix, strlen(prefix)) && i-- == 0) return p;
+        p = strchr(p, '\n');
+        if (p) ++p;
+    }
+    return NULL;
+}
 /* The i-th line beginning with prefix (static buffer), or NULL. */
 static const char *line(const char *prefix, int i)
 {
@@ -151,8 +161,9 @@ static void launch_args(const char *l, void *out, size_t size)
 }
 
 /* ---- counters ---- */
-enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_SAFE, R_HANDLE,
-       R_CONTEXT, R_MATH, R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
+enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_SAFE, R_LAYOUT,
+       R_TALL, R_WIDE, R_HANDLE, R_CONTEXT, R_MATH, R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC,
+       R_LAUNCH, R_N };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 typedef struct {
     unsigned long long v[4 + R_N];
@@ -307,8 +318,11 @@ static void h1_served(void)
     CHECK(st == 0 && count("gemmex ") == 0, "tc 1536 x 128 x 4096: forwarded (status %d)", st);
     const char *al = line("alloc ", 0);
     const long long bytes = atoll(field(al, "bytes=", buf, sizeof buf));
-    CHECK(count("alloc ") == 1 && bytes > 0 && bytes <= (32ll << 20), "tc: one allocation of at most 32 MiB (%lld)", bytes);
-    CHECK(count("memset ") == 1 && strstr(line("memset ", 0), "words=2"), "tc: the counters not reset once");
+    /* the process's first tensor-core call also makes the context's counters for the exit report (mode stats) */
+    CHECK(count("alloc ") == 2 && bytes > 0 && bytes <= (32ll << 20) && strstr(line("alloc ", 1), "bytes=32 "),
+          "tc: one allocation of at most 32 MiB (%lld), then the fallback's counters", bytes);
+    CHECK(count("memset ") == 2 && strstr(line("memset ", 0), "words=8") && strstr(line("memset ", 1), "words=2"),
+          "tc: the counters not reset once");
     CHECK(count("launch vf_bf16_scale") == 1 && count("launch vf_bf16_epilogue") == 1 &&
               count("launch vf_bf16_fallback_tn") == 1 && count("free ") == 1,
           "tc: not scale, epilogue, fallback, free:\n%s", ev);
@@ -324,7 +338,8 @@ static void h1_served(void)
                *pf = strstr(ev, "launch vf_bf16_fallback"), *pr = strstr(ev, "free ");
     CHECK(pa && pm && ps && pl && pe && pf && pr && pa < pm && pm < ps && ps < pl && pl < pe && pe < pf && pf < pr,
           "tc: not in the order allocation, counters, scale, GEMM, epilogue, fallback, free");
-    /* chunks: static, at most 32 MiB each (16384 x 1024 x 4096 needs several) */
+    /* chunks: static, at most 32 MiB each of fp16 copies and partial sums (16384 x 1024 x 4096 needs several),
+     * beside the check's results for the whole call (16 bytes per row and column) */
     g = gemm(1, 0, 16384, 1024, 4096);
     g.ldc = 16384;
     take();
@@ -332,10 +347,20 @@ static void h1_served(void)
     take();
     const int chunks = count("launch vf_bf16_epilogue");
     al = line("alloc ", 0);
-    CHECK(st == 0 && count("alloc ") == 1 && atoll(field(al, "bytes=", buf, sizeof buf)) <= (32ll << 20) && chunks > 1 &&
-              count("ltmatmul ") == chunks && count("launch vf_bf16_fallback") == chunks,
+    CHECK(st == 0 && count("alloc ") == 1 &&
+              atoll(field(al, "bytes=", buf, sizeof buf)) <= (32ll << 20) + 16ll * (16384 + 1024) + 1024 && chunks > 1 &&
+              count("ltmatmul ") == chunks,
           "tc 16384 x 1024 x 4096: %d chunks, %d internal GEMMs, allocation %s", chunks, count("ltmatmul "),
           field(al, "bytes=", buf, sizeof buf));
+    /* the counters reset once, and the fallback launched once, after the last chunk, over the whole call: its
+     * cost is one pass over the failed rows and columns, not one in every chunk */
+    VfFbArgs fa;
+    launch_args(line("launch vf_bf16_fallback", 0) ? line("launch vf_bf16_fallback", 0) : "", &fa, sizeof fa);
+    const char *last_epi = where("launch vf_bf16_epilogue", chunks - 1), *fbl = where("launch vf_bf16_fallback", 0);
+    CHECK(count("memset ") == 1 && count("launch vf_bf16_fallback") == 1 && last_epi && fbl > last_epi &&
+              fa.mc == 16384 && fa.n == 1024 && fa.k == 4096,
+          "tc 16384 x 1024 x 4096 (%d chunks): counters reset %d times, %d fallback launches (not one over the call, after "
+          "the last chunk: m %d, n %d)", chunks, count("memset "), count("launch vf_bf16_fallback"), fa.mc, fa.n);
     /* the same call again: the same chunks (static) */
     char *first = strdup(ev);
     take();
@@ -345,17 +370,97 @@ static void h1_served(void)
     free(first);
 }
 
+/* ---- the fallback's counters, the exit report's last line (VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2): made at a
+ * context's first eager tensor-core call (32 bytes of its pool, zeroed on the call's stream, which is waited for
+ * once), given to every fallback launch, read for the report with the context made current for the copy; a
+ * context that cannot be made current is not read. The stand-in's copies return what the test sets. ---- */
+static void stats_mode(void)
+{
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    int (*fc)(unsigned long long *, int) = NULL;
+    G g = gemm(1, 0, 1536, 128, 4096);
+    take();
+    call(&g);
+    take();
+    if (!rt) rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    if (rt) *(void **)&fc = dlsym(rt, "vf_bf16_test_fallback_counters");
+    char b[64];
+    const char *ca = line("alloc ", 1);
+    const unsigned long long sp = ca && strstr(ca, "bytes=32 ") ? strtoull(field(ca, "ptr=", b, sizeof b), NULL, 16) : 0;
+    VfFbArgs f;
+    launch_args(line("launch vf_bf16_fallback", 0) ? line("launch vf_bf16_fallback", 0) : "", &f, sizeof f);
+    const char *m0 = line("memset ", 0), *sy = where("synchronize ", 0), *fl = where("launch vf_bf16_fallback", 0);
+    CHECK(sp && count("alloc ") == 2 && m0 && strstr(m0, "words=8") && count("synchronize ") == 1 && sy && fl && sy < fl &&
+              (unsigned long long)(uintptr_t)f.stats == sp,
+          "stats: the first tensor-core call did not make the fallback's counters (32 bytes zeroed, the stream waited for, "
+          "before the fallback) and give them to the fallback (0x%llx):\n%s", (unsigned long long)(uintptr_t)f.stats, ev);
+    take();
+    call(&g);
+    take();
+    launch_args(line("launch vf_bf16_fallback", 0) ? line("launch vf_bf16_fallback", 0) : "", &f, sizeof f);
+    CHECK(count("alloc ") == 1 && count("synchronize ") == 0 && sp && (unsigned long long)(uintptr_t)f.stats == sp,
+          "stats: a later call made counters again, or did not give them to the fallback:\n%s", ev);
+    /* read as the exit report reads them: the stand-in's copy returns 5, 2 and 777 */
+    const unsigned long long want[3] = {5, 2, 777};
+    stub_set_dtoh(want, 3);
+    unsigned long long out[4] = {0, 0, 0, 0};
+    take();
+    const int got = fc ? fc(out, 4) : -1;
+    take();
+    CHECK(got == 4 && out[0] == 5 && out[1] == 2 && out[2] == 777 && out[3] == 2ull * 1536 * 128 &&
+              count("push context=101") == 1 && count("copy to host ptr=0x") == 1 && count("pop context") == 1,
+          "stats: the counters read (%d): %llu %llu %llu of %llu elements, not 5 2 777 of 393216 with the context made "
+          "current for the copy:\n%s", got, out[0], out[1], out[2], out[3], ev);
+    /* a context that cannot be made current: not read (the report says so) */
+    stub_fail("cuCtxPushCurrent_v2", 1);
+    CHECK(fc && fc(out, 4) == 0, "stats: the counters of a context that could not be made current were read");
+    /* at exit, the report's line (tests/forward/bf16.sh checks it): 2 calls, 5, 2, 777 of 393216 elements */
+}
+
 /* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
  * path on. n = 1 goes to 12.9; the skinny path first (n <= 16, or n < 32 with m k < 2^20, where 12.9 runs its
- * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384; the rest
- * to 12.9, with its reason. Checked through the runtime's counters. The rows at the gate are written from RULE_GATE
- * (VF_TC_MIN_K, which the runtime must report): moving the gate means changing both, and a gate moved in the
- * runtime alone (VF_BF16_TC_MIN_K=512, a test build's way) makes the table fail. ---- */
+ * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384, in the TN
+ * layout only, for m >= RULE_TALL_M only with n > RULE_TALL_MAX_N, for m >= RULE_TALL_LONG_M only with
+ * k <= RULE_TALL_MAX_K, and for k > RULE_WIDE_K only with n <= RULE_WIDE_MAX_N; the rest to 12.9, with its reason. Checked through the runtime's counters. The rows
+ * at the gate and at the bounds of the tall and wide rules are written from these constants, which the runtime must
+ * report (VF_TC_MIN_K and the others): moving a bound means changing both, and a gate moved in the runtime alone
+ * (VF_BF16_TC_MIN_K=512, a test build's way) makes the first table fail; the second holds whatever the gate is. ---- */
 #define RULE_GATE 1024
+#define RULE_TALL_M 8192
+#define RULE_TALL_MAX_N 64
+#define RULE_TALL_LONG_M 6144
+#define RULE_TALL_MAX_K 9216
+#define RULE_WIDE_K 8192
+#define RULE_WIDE_MAX_N 256
+
+/* TC_K: the tensor-core path when k >= the runtime's gate, else 12.9 for the gate's reason */
+enum { SK = -1, TC = -2, TC_K = -3 };
+
+static void rule_row(int ta, int tb, int m, int n, int k, int want, const char *why, int gate)
+{
+    if (want == TC_K) want = k >= gate ? TC : R_SHORT_K;
+    G g = gemm(ta, tb, m, n, k);
+    g.A = DEV(1), g.B = DEV(17), g.C = DEV(33); /* 4 GiB apart: the largest operand here takes 1.3 GB */
+    const Counts c0 = counts(API_GEMMEX);
+    take();
+    const cublasStatus_t st = call(&g);
+    take();
+    const Counts c1 = counts(API_GEMMEX);
+    const int sk = c1.v[1] - c0.v[1] == 1, tc = c1.v[2] - c0.v[2] == 1;
+    int seen_why = -1;
+    for (int q = 0; q < R_N; ++q)
+        if (c1.v[4 + q] - c0.v[4 + q] == 1) seen_why = q;
+    const int got = sk ? SK : tc ? TC : seen_why;
+    char wants[32], seen[32];
+    snprintf(wants, sizeof wants, want == SK ? "skinny" : want == TC ? "tc" : "forwarded (reason %d)", want);
+    snprintf(seen, sizeof seen, got == SK ? "skinny" : got == TC ? "tc" : "forwarded (reason %d)", got);
+    CHECK(st == 0 && got == want && (got != SK && got != TC ? count("gemmex ") == 1 : count("gemmex ") == 0),
+          "rule: %s %d x %d x %d (%s): %s, not %s", ta ? (tb ? "TT" : "TN") : (tb ? "NT" : "NN"), m, n, k, why, seen,
+          wants);
+}
 
 static void tc_rule(void)
 {
-    enum { SK = -1, TC = -2 };
     const int G1 = RULE_GATE - 8; /* one step of k under the gate (k a multiple of 8) */
     const struct {
         int ta, tb, m, n, k, want; /* SK, TC, or the reason it is forwarded for */
@@ -381,38 +486,97 @@ static void tc_rule(void)
         {1, 0, 1545, 8, G1, R_SHORT_K, "TN n = 8, m = 1545 (not in the skinny path's TN rule), m k >= 2^20, k under the gate"},
         {1, 0, 384, 8, 1536, R_SEQ, "TN n = 8, m = 384, m k < 2^20"},
         {0, 1, 1536, 8, 1920, SK, "NT n = 8"},
-        {0, 1, 1536, 64, G1, R_SHORT_K, "NT n = 64, k one step under the gate"},
-        {0, 1, 1536, 64, 2048, TC, "NT n = 64, k = 2048"},
-        {0, 0, 2048, 128, 2048, TC, "NN n = 128"},
+        {0, 1, 1536, 64, G1, R_LAYOUT, "NT n = 64, k one step under the gate: not TN"},
+        {0, 1, 1536, 64, 2048, R_LAYOUT, "NT n = 64, k = 2048: not TN"},
+        {0, 0, 2048, 128, 2048, R_LAYOUT, "NN n = 128: not TN"},
         {0, 0, 2048, 8, 2048, SK, "NN n = 8"},
         {0, 0, 64, 8, 1920, R_DOMAIN, "NN m = 64 n = 8 (outside the skinny path's NN bounds), m k < 2^20"},
-        {1, 1, 1536, 48, 4096, TC, "TT n = 48"},
+        {1, 1, 1536, 48, 4096, R_LAYOUT, "TT n = 48: not TN"},
+    };
+    /* The products of a fine-tuning step in the layouts cuBLAS gets them (a model of hidden size 896, MLP size 4864,
+     * vocabulary 151936, rank-16 adapters; 2048 or 4096 tokens), and the tall rule. The layout and the tall shape are
+     * decided before the shortest k, so these rows hold whatever the gate is: a k of 0 or below stands for the
+     * runtime's gate plus that k, and TC_K rows are served from the gate on. */
+    static const struct {
+        int ta, tb, m, n, k, want;
+        const char *why;
+    } train[] = {
+        {0, 0, 896, 2048, 4864, R_LAYOUT, "the gradient of an MLP's input through its gate and up projections"},
+        {0, 0, 896, 4096, 4864, R_LAYOUT, "the gradient of an MLP's input, 4096 tokens"},
+        {0, 0, 16, 4096, 4864, R_LAYOUT, "the gradient of a rank-16 adapter's activations"},
+        {0, 1, 896, 4864, 2048, R_LAYOUT, "the weight gradient of a gate or up projection, k = 2048 tokens"},
+        {0, 1, 896, 4864, 4096, R_LAYOUT, "the weight gradient of a gate or up projection, k = 4096 tokens"},
+        {0, 1, 896, 151936, 4096, R_LAYOUT, "the weight gradient of the output layer"},
+        {0, 1, 4864, 896, 4096, R_LAYOUT, "the weight gradient of the down projection"},
+        {0, 1, 896, 128, 2048, R_LAYOUT, "the weight gradient of a k or v projection"},
+        {0, 1, 16, 4864, 4096, R_LAYOUT, "a rank-16 adapter's B gradient, gate or up projection"},
+        {0, 1, 4864, 16, 4096, R_LAYOUT, "a rank-16 adapter's A gradient, down projection (beyond the skinny bounds)"},
+        {0, 1, 896, 16, 4096, SK, "a rank-16 adapter's A gradient, q to up projections: the skinny path"},
+        {0, 0, 896, 2048, -8, R_LAYOUT, "NN one step under the gate: the layout's reason"},
+        {0, 1, 896, 4864, 0, R_LAYOUT, "NT at the gate"},
+        {1, 1, 1536, 48, 0, R_LAYOUT, "TT at the gate"},
+        {1, 0, 896, 2048, 4864, TC_K, "the down projection (TN)"},
+        {1, 0, 16, 4096, 4864, TC_K, "a rank-16 adapter's A product, down projection (TN)"},
+        {1, 0, 896, 2048, 0, TC_K, "TN at the gate"},
+        {1, 0, 896, 2048, -8, TC_K, "TN one step under the gate"},
+        {1, 0, 151936, 2, 2048, R_TALL, "an output layer over a vocabulary of 151936, n = 2"},
+        {1, 0, 151936, RULE_TALL_MAX_N, 4096, R_TALL, "an output layer over a vocabulary of 151936, n at the tall bound"},
+        {1, 0, 151936, RULE_TALL_MAX_N + 1, 4096, TC_K, "an output layer over a vocabulary of 151936, n past the tall bound"},
+        {1, 0, 151936, RULE_TALL_MAX_N, 896, R_TALL, "an output layer, n at the tall bound, k = 896: the tall reason, not the gate's"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N, 4096, R_TALL, "m at the tall bound, n at its bound"},
+        {1, 0, RULE_TALL_M - 8, RULE_TALL_MAX_N, 4096, TC_K, "m one step under the tall bound, n at its bound"},
+        /* the tier from 65 to 128 columns, which the n bound of 128 left to 12.9: served */
+        {1, 0, 151936, 128, 4096, 128 > RULE_TALL_MAX_N ? TC_K : R_TALL, "an output layer over a vocabulary of 151936, n = 128"},
+        {1, 0, RULE_TALL_M, 96, 4096, 96 > RULE_TALL_MAX_N ? TC_K : R_TALL, "m at the tall bound, n = 96"},
+        /* long products of many rows (no layer of a real model measured: to 12.9), on both sides of the bounds */
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K, TC_K, "m at the tall bound, n past it, k at the long-k bound"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "m at the tall bound, n past it, k one step past the long-k bound"},
+        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, R_TALL, "m at the long-k bound, k one step past its bound"},
+        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, TC_K, "m one step under the long-k bound, k past its bound"},
+        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K, TC_K, "m at the long-k bound, k at its bound"},
+        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, 16384, TC_K, "m one step under the long-k bound, k = 16384 (the longest the path takes)"},
+        {1, 0, RULE_TALL_LONG_M, RULE_TALL_MAX_N, 4096, TC_K, "m at the long-k bound, n at the tall bound (below the tall m)"},
+        /* points of the sweeps behind the long-k bounds (docs/performance.md, section 7), on both sides */
+        {1, 0, 7680, 128, 9216, 7680 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 7680 x 128 x 9216"},
+        {1, 0, 7680, 128, 10240, 7680 >= RULE_TALL_LONG_M && 10240 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 7680 x 128 x 10240"},
+        {1, 0, 6144, 192, 9216, 6144 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 6144 x 192 x 9216"},
+        {1, 0, 6144, 192, 16384, 6144 >= RULE_TALL_LONG_M && 16384 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 6144 x 192 x 16384"},
+        {1, 0, 32768, 192, 9216, 32768 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 32768 x 192 x 9216"},
+        /* the served remainder's long products: the 9B hybrid's down projections, 4096 x n x 12288 (real members) */
+        {1, 0, 4096, RULE_WIDE_MAX_N, 12288, TC_K, "a down projection of an MLP of 12288, n at the wide bound (m under the long-k bound)"},
+        {1, 0, 8960, RULE_TALL_MAX_N, 1536, 8960 >= RULE_TALL_M ? R_TALL : TC_K, "a gate or up projection of an MLP of 8960, n at the tall bound"},
+        {1, 0, 8960, RULE_TALL_MAX_N + 1, 1536, TC_K, "a gate or up projection of an MLP of 8960, n past the tall bound"},
+        {1, 0, 1536, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, R_WIDE, "k one step past the wide bound, n past it"},
+        {1, 0, 1536, RULE_WIDE_MAX_N, RULE_WIDE_K + 8, TC_K, "k one step past the wide bound, n at its bound"},
+        {1, 0, 1536, RULE_WIDE_MAX_N + 1, RULE_WIDE_K, TC_K, "k at the wide bound, n past it"},
+        {1, 0, 1536, 2048, 8960, 8960 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 8960, 2048 tokens"},
+        {1, 0, 1536, 64, 8960, 8960 > RULE_WIDE_K && 64 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 8960, 64 tokens"},
+        {1, 0, 4096, 2048, 12288, 12288 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 12288, 2048 tokens"},
+        {1, 0, 896, 2048, 4864, 4864 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 4864, 2048 tokens"},
+        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "tall (past the long-k bounds) and wide: the tall reason first"},
+        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, RULE_WIDE_K + 8 > RULE_TALL_MAX_K ? R_TALL : R_WIDE, "m at the tall bound, k one step past the wide bound, n past it"},
+        {0, 1, 151936, 64, 4096, R_LAYOUT, "NT, m = 151936, n = 64: the layout first"},
     };
     int (*min_k)(void) = NULL;
     void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
     if (rt) *(void **)&min_k = dlsym(rt, "vf_bf16_test_tc_min_k");
-    CHECK(min_k && min_k() == RULE_GATE, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's %d",
-          min_k ? min_k() : -1, RULE_GATE);
-    for (size_t r = 0; r < sizeof rows / sizeof *rows; ++r) {
-        G g = gemm(rows[r].ta, rows[r].tb, rows[r].m, rows[r].n, rows[r].k);
-        const Counts c0 = counts(API_GEMMEX);
-        take();
-        const cublasStatus_t st = call(&g);
-        take();
-        const Counts c1 = counts(API_GEMMEX);
-        const int sk = c1.v[1] - c0.v[1] == 1, tc = c1.v[2] - c0.v[2] == 1;
-        int why = -1;
-        for (int q = 0; q < R_N; ++q)
-            if (c1.v[4 + q] - c0.v[4 + q] == 1) why = q;
-        const int got = sk ? SK : tc ? TC : why;
-        char want[32], seen[32];
-        snprintf(want, sizeof want, rows[r].want == SK ? "skinny" : rows[r].want == TC ? "tc" : "forwarded (reason %d)",
-                 rows[r].want);
-        snprintf(seen, sizeof seen, got == SK ? "skinny" : got == TC ? "tc" : "forwarded (reason %d)", got);
-        CHECK(st == 0 && got == rows[r].want && (got != SK && got != TC ? count("gemmex ") == 1 : count("gemmex ") == 0),
-              "rule: %s %d x %d x %d (%s): %s, not %s", rows[r].ta ? (rows[r].tb ? "TT" : "TN") : (rows[r].tb ? "NT" : "NN"),
-              rows[r].m, rows[r].n, rows[r].k, rows[r].why, seen, want);
-    }
+    const int gate = min_k ? min_k() : -1;
+    CHECK(gate == RULE_GATE, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's %d", gate,
+          RULE_GATE);
+    int (*bound)(int) = NULL;
+    if (rt) *(void **)&bound = dlsym(rt, "vf_bf16_test_rule_bound");
+    static const int want_bounds[] = {RULE_TALL_M, RULE_TALL_MAX_N, RULE_TALL_MAX_K, RULE_WIDE_K, RULE_WIDE_MAX_N,
+                                      RULE_TALL_LONG_M};
+    static const char *const bound_names[] = {"VF_TC_TALL_M", "VF_TC_TALL_MAX_N", "VF_TC_TALL_MAX_K",
+                                              "VF_TC_WIDE_K", "VF_TC_WIDE_MAX_N", "VF_TC_TALL_LONG_M"};
+    for (int b = 0; b < 6; ++b)
+        CHECK(bound && bound(b) == want_bounds[b], "rule: the runtime's %s is %d, not this table's %d", bound_names[b],
+              bound ? bound(b) : -1, want_bounds[b]);
+    for (size_t r = 0; r < sizeof rows / sizeof *rows; ++r)
+        rule_row(rows[r].ta, rows[r].tb, rows[r].m, rows[r].n, rows[r].k, rows[r].want, rows[r].why, gate);
+    for (size_t r = 0; r < sizeof train / sizeof *train; ++r)
+        rule_row(train[r].ta, train[r].tb, train[r].m, train[r].n, train[r].k > 0 ? train[r].k : gate + train[r].k,
+                 train[r].want, train[r].why, gate);
 }
 
 /* ---- H4: one runtime for both APIs ---- */
@@ -910,6 +1074,34 @@ int main(int argc, char **argv)
         expect_forwarded("safe: a large tensor-core call", &g, R_SAFE);
         g = gemm(0, 1, 1536, 8, 1920);
         expect_skinny("safe: a skinny call", &g, "vf_bf16_skinny_g_8_16");
+        /* a cuBLASLt call the tensor-core path would serve (n >= 32): forwarded, and counted under safe mode's
+         * reason in the exit report, as the legacy entry counts it, not as outside the paths' domains */
+        cublasLtHandle_t lt;
+        v.LtCreate(&lt);
+        cublasLtMatmulDesc_t d;
+        cublasLtMatrixLayout_t la, lb, lc;
+        v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+        const int32_t ta = CUBLAS_OP_T;
+        v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof ta);
+        v.LayoutCreate(&la, CUDA_R_16BF, 4096, 1536, 4096);
+        v.LayoutCreate(&lb, CUDA_R_16BF, 4096, 128, 4096);
+        v.LayoutCreate(&lc, CUDA_R_32F, 1536, 128, 1536);
+        const float one = 1.0f, zero = 0.0f;
+        const Counts c0 = counts(API_LT);
+        take();
+        const cublasStatus_t st = v.LtMatmul(lt, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), lc, DEV(3), lc, NULL, NULL,
+                                             0, S1);
+        take();
+        const Counts c1 = counts(API_LT);
+        CHECK(st == 0 && count("ltmatmul ") == 1 && count("launch") == 0,
+              "safe: a cuBLASLt tensor-core call (TN 1536 x 128 x 4096): not one call of 12.9's cublasLtMatmul");
+        CHECK(!rt_counters || (c1.v[4 + R_SAFE] - c0.v[4 + R_SAFE] == 1 && c1.v[4 + R_DOMAIN] == c0.v[4 + R_DOMAIN]),
+              "safe: a cuBLASLt tensor-core call (TN 1536 x 128 x 4096): counted as reason %d, not VF_SAFE=1 (%d)",
+              c1.v[4 + R_DOMAIN] != c0.v[4 + R_DOMAIN] ? R_DOMAIN : -1, R_SAFE);
+        v.LayoutDestroy(la);
+        v.LayoutDestroy(lb);
+        v.LayoutDestroy(lc);
+        v.DescDestroy(d);
     } else if (!strcmp(mode, "notsafe")) { /* VF_SAFE set to another value than 1, VF_CUBLAS_BF16_TC=1 */
         G g = gemm(1, 0, 1536, 128, 4096);
         take();
@@ -956,6 +1148,8 @@ int main(int argc, char **argv)
             take();
             CHECK(count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1, "after the failure: not served again");
         }
+    } else if (!strcmp(mode, "stats")) { /* VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2: the fallback's counters */
+        stats_mode();
     } else if (!strcmp(mode, "noruntime")) {
         G g = gemm(0, 1, 1536, 8, 1920);
         take();

@@ -16,12 +16,14 @@ typedef struct {
     unsigned short *dst;
     long long dvstride, dlstride;
     int *e;          /* exponent per vector, or VF_BF16_SENT */
-    int *list;       /* indices of the failed vectors, in no particular order */
-    int *count;      /* number of failed vectors (zeroed by the runtime before the launch) */
+    int *list;       /* indices (base + v) of the failed vectors, in no particular order */
+    int *count;      /* number of failed vectors (zeroed by the runtime once per call); NULL: not counted */
     int R;           /* number of vectors (0: segment absent) */
     int contig;      /* lstride == 1: one warp per vector */
     int vec;         /* contig and 16-byte loads possible */
     int nblocks;     /* blocks of the launch that serve this segment */
+    int base;        /* index in the call of vector 0 (the chunk's first row or column) */
+    int lim;         /* entries of list (the call's rows or columns) */
 } VfSeg;
 
 typedef struct {
@@ -55,12 +57,15 @@ typedef struct {
 } VfEpiArgs;
 
 typedef struct {
-    const unsigned short *A;   /* op(A)(i, l) = A[i * a_si + l * a_sl] (rows of this chunk) */
+    const unsigned short *A;   /* op(A)(i, l) = A[i * a_si + l * a_sl] */
     long long a_si, a_sl;
     const unsigned short *B;   /* op(B)(l, j) = B[l * b_sl + j * b_sj] */
     long long b_sl, b_sj;
     const int *cntA, *listA, *eA;
     const int *cntB, *listB, *eB;
+    unsigned long long *stats; /* the context's counters for the exit report, or NULL: [0] calls with failed rows or
+                                * columns, [1] those with more than a quarter of their rows or of their columns
+                                * failed, [2] the elements the fallback computed */
     int mc, n, k, pad_;
     VfOut o;
 } VfFbArgs;

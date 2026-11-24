@@ -9,7 +9,8 @@
 // __fadd_rn, cvt.rn), so that no rounding is the compiler's choice (the build adds -fmad=false).
 // What nvcc's forced cuda_runtime.h provides and is used here is one instruction each: __ldg,
 // __shfl_xor_sync, __any_sync, atomicAdd (to append to the lists of failed vectors, whose order
-// does not matter), __uint_as_float, __float_as_uint. No module variable, no counter.
+// does not matter, and to add a call's figures to the counters of the exit report), __uint_as_float,
+// __float_as_uint. No module variable: the counters are the runtime's memory, passed with the call.
 #include "abi.h"
 
 // Controls (tests/gpu/forward-bf16.sh builds them apart, never into kernels.fatbin): each breaks one
@@ -104,12 +105,14 @@ static __device__ __forceinline__ int classify(unsigned mx, int &e)
     return (e < -24) | (e > 31);
 }
 
+// The call's list of failed vectors gets each one once: a segment scaled again (the rows of op(A), at each
+// chunk of columns) comes without a count.
 static __device__ __forceinline__ void finish(const VfSeg &s, int v, int bad, int e)
 {
     s.e[v] = bad ? VF_BF16_SENT : e;
-    if (bad) {
+    if (bad && s.count) {
         const int pos = atomicAdd(s.count, 1);
-        if (pos >= 0 && pos < s.R) s.list[pos] = v;
+        if (pos >= 0 && pos < s.lim) s.list[pos] = s.base + v;
     }
 }
 
@@ -341,8 +344,23 @@ extern "C" __global__ void __launch_bounds__(128, 8) vf_bf16_epilogue(VfEpiArgs 
     }
 }
 
-// Fallback: tiles over (all rows of the chunk x failed columns of op(B)) and (failed rows of
-// op(A) x columns that passed). Each element is one fp32 FMA chain over l = 0, 1, ..., k-1 of the
+// A call's figures for the exit report, added by one thread of the fallback's grid to the context's counters
+// (p.stats, NULL for none): a call with failed rows or columns; one with more than a quarter of its rows or of its
+// columns failed (such products can run below cuBLAS 12.9's speed, LIMITS.md); the elements the fallback computes
+// (the failed columns' elements in every row, and the failed rows' in the other columns).
+static __device__ __forceinline__ void count_call(const VfFbArgs &p, int ca, int cb)
+{
+#ifndef VF_KERNEL_CONTROL_NO_STATS  // the control adds nothing
+    if (!p.stats || blockIdx.x != 0 || threadIdx.x != 0 || (ca == 0 && cb == 0)) return;
+    atomicAdd(p.stats, 1ull);
+    if (4LL * ca > p.mc || 4LL * cb > p.n) atomicAdd(p.stats + 1, 1ull);
+    atomicAdd(p.stats + 2, (unsigned long long)cb * (unsigned long long)p.mc +
+                               (unsigned long long)ca * (unsigned long long)(p.n - cb));
+#endif
+}
+
+// Fallback, launched once per call: tiles over (all rows x failed columns of op(B)) and (failed rows
+// of op(A) x columns that passed). Each element is one fp32 FMA chain over l = 0, 1, ..., k-1 of the
 // original bf16 operands (exact products, fp32 sums): its value does not depend on the tile
 // shape, the list order or the position in the tile. A persistent grid walks the tiles; with
 // empty lists every block exits after reading the two counts. Counts are clamped and list
@@ -362,6 +380,7 @@ static __device__ __forceinline__ void fallback_body(const VfFbArgs &p)
     const int tr = tid / TC, tc = tid % TC;
     const int ca = imin32(imax32(*p.cntA, 0), p.mc);
     const int cb = imin32(imax32(*p.cntB, 0), p.n);
+    count_call(p, ca, cb);
     const int mt = (p.mc + BM - 1) / BM, nt = (p.n + BN - 1) / BN;
     const int colTiles = ((cb + BN - 1) / BN) * mt;
     const int total = colTiles + ((ca + BM - 1) / BM) * nt;
@@ -471,8 +490,9 @@ extern "C" __global__ void __launch_bounds__(256) vf_bf16_fallback_narrow(VfFbAr
 // aligned bases), k a multiple of 8. Double-buffered shared memory, the next k-step's global
 // loads prefetched into registers, 16-byte loads. Same arithmetic as the generic kernel: one fp32
 // FMA chain per element over l = 0..k-1 (the zero padding after k leaves it unchanged), so its
-// values do not depend on the tile configuration. The column-tile width follows the number of
-// failed columns (read on the device), so the cost scales with the failed fraction.
+// values do not depend on the tile configuration. The tile shape follows the number of failed columns
+// and the rows (read on the device): the cost scales with the failed fraction, and a few failed
+// columns cost one short chain over k.
 
 template <int BM_, int BN_, int BK_, int TM_, int TN_, bool RF_>
 struct FbCfg {
@@ -492,7 +512,7 @@ using FbC3 = FbCfg<64, 64, 16, 4, 4, false>;   // more, when 128x64 tiles would 
 static_assert(FbC1::SMEM <= VF_BF16_FB_TN_SMEM && FbC2::SMEM <= VF_BF16_FB_TN_SMEM && FbC3::SMEM <= VF_BF16_FB_TN_SMEM,
               "smem");
 
-// k-major variant for few columns (decode, <= 8 failed columns) and for the failed rows of op(A):
+// k-major variant for few columns (chosen by the time of its waves, above) and for the failed rows of op(A):
 // one output per thread (32 rows x 8 columns), tiles stored row by row along k in shared memory,
 // so that 16-byte global loads become 16-byte shared stores and the operands are read as float4
 // (4 consecutive k per load, still accumulated one after the other).
@@ -801,10 +821,29 @@ extern "C" __global__ void __launch_bounds__(256, 2) vf_bf16_fallback_tn(VfFbArg
     extern __shared__ __align__(16) unsigned char smem[];
     const int ca = imin32(imax32(*p.cntA, 0), p.mc);
     const int cb = imin32(imax32(*p.cntB, 0), p.n);
-    // Column tiles: 128x64 when they fill the persistent grid twice, else 64x64; 64x32 for 9..32
-    // failed columns; the k-major 32x8 tiles for up to 8.
-    int cfg = cb > 32 ? 2 : (cb > 8 ? 1 : 0);
-    if (cfg == 2 && cdiv(cb, FbC2::BN) * cdiv(p.mc, FbC2::BM) < 2 * (int)gridDim.x) cfg = 3;
+    count_call(p, ca, cb);
+    // Column tiles: the configuration whose waves over the persistent grid take the least time, a tile
+    // taking its whole chain over k. Times of one tile per element of k, measured on a V100 with the
+    // grid busy: 32x8 k-major 15 ns, 64x32 63 ns, 64x64 100 ns, 128x64 150 ns, in units of 1.875 ns
+    // below, the k-major tile's raised to 9 (17 ns). Timed as whole calls (103 TN products, m = 896 to
+    // 4096, k = 2048 to 9728, n = 64 to 2048, 1 to 75 % of the columns failing, each configuration
+    // forced), four waves of k-major tiles took up to 22 % longer than one wave of 64x32 tiles, which
+    // runs faster per block than its busy-grid time when its wave leaves SMs to it; with 9, the choice
+    // was within 3 % of the fastest configuration on every product. A few failed columns, or a few tens
+    // over few rows, take the short k-major tiles, more of them at once; many take the wide ones. The
+    // values do not depend on the choice.
+    int cfg = 0;
+    if (cb > 0) {
+        const int G = (int)gridDim.x;
+        const int t0 = cdiv(cdiv(cb, FbK::BN) * cdiv(p.mc, FbK::BM), G) * 9;
+        const int t1 = cdiv(cdiv(cb, FbC1::BN) * cdiv(p.mc, FbC1::BM), G) * 32;
+        const int t3 = cdiv(cdiv(cb, FbC3::BN) * cdiv(p.mc, FbC3::BM), G) * 52;
+        const int t2 = cdiv(cdiv(cb, FbC2::BN) * cdiv(p.mc, FbC2::BM), G) * 80;
+        int best = t0;
+        if (t1 < best) best = t1, cfg = 1;
+        if (t3 < best) best = t3, cfg = 3;
+        if (t2 < best) best = t2, cfg = 2;
+    }
     const int mtile = cfg == 2 ? FbC2::BM : cfg == 3 ? FbC3::BM : cfg == 1 ? FbC1::BM : FbK::BM;
     const int ntile = cfg == 2 ? FbC2::BN : cfg == 3 ? FbC3::BN : cfg == 1 ? FbC1::BN : FbK::BN;
     const int mt = cdiv(p.mc, mtile);

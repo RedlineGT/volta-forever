@@ -21,9 +21,10 @@
  *     on deterministic data (bf16-accept-gen.h): 10 families and 3 configurations of the adversarial search,
  *     k = 256, 512, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a
  *     general C, the cuBLASLt bias
- *     epilogue. Calls below the gate are run but not judged (with VF_ACCEPT_EXPECT_GATE=1, a call below the
- *     gate that the path serves is a failure, and so is a call from the gate on that it does not serve: for when
- *     the runtime has its gate; the number judged is printed). Prints "ok bf16-accept" and exits 0, or FAIL lines
+ *     epilogue. Calls below the gate are run but not judged, and so are the NN, NT and TT calls, which go to 12.9
+ *     (the path's layout rule: TN only). With VF_ACCEPT_EXPECT_GATE=1, a call below the gate that the path serves
+ *     is a failure, and so is a TN call from the gate on that it does not serve, or a call in another layout that
+ *     it serves: for when the runtime has its gate; the number judged is printed). Prints "ok bf16-accept" and exits 0, or FAIL lines
  *     and exits 1. Controls, each of which must fail: VF_ACCEPT_GATE=256 and 512 (the path exceeds A on craftsub
  *     at 256, the bias bound below 1024); VF_ACCEPT_STRICT=1 (the two exceptions removed); the tensor-core path
  *     off (the skinny path on, for the test runtime's counters) with VF_ACCEPT_EXPECT_GATE=1 (nothing served).
@@ -378,11 +379,18 @@ static int bias_ok(const Res *r, int k)
 
 /* ---- the test ------------------------------------------------------------------------------------- */
 static int fails, njudged;
-/* VF_ACCEPT_EXPECT_GATE=1: a call at k >= the gate must be served, so that its bounds are judged. */
-static void expect_served(const char *what, int k, int served)
+/* VF_ACCEPT_EXPECT_GATE=1: a TN call at k >= the gate must be served, so that its bounds are judged; a call in
+ * another layout must go to 12.9 (the path's layout rule: TN only). */
+static void expect_served(const char *what, const Prob *p, int served)
 {
-    if (expect_gate && !served && k >= gate) {
-        printf("FAIL  %s: not served by the tensor-core path at k >= the gate (k %d >= %d)\n", what, k, gate);
+    if (!expect_gate || p->k < gate) return;
+    const int tn = p->ta && !p->tb;
+    if (tn && !served) {
+        printf("FAIL  %s: not served by the tensor-core path at k >= the gate (k %d >= %d)\n", what, p->k, gate);
+        ++fails;
+    }
+    if (!tn && served) {
+        printf("FAIL  %s: served by the tensor-core path in another layout than TN\n", what);
         ++fails;
     }
 }
@@ -394,7 +402,7 @@ static void judge(const char *what, const Prob *p, const Res *r)
         printf("FAIL  %s: served by the tensor-core path below the gate (k %d < %d)\n", what, p->k, gate);
         ++fails;
     }
-    expect_served(what, p->k, served);
+    expect_served(what, p, served);
     njudged += judged;
     const int a_ok = r->nfail == 0, s_ok = r->cls == 0 && r->nanbits == 0 && r->rerun_same && r->st12 == r->stv;
     const int b_ok = p->ct || bias_ok(r, p->k);
@@ -432,7 +440,7 @@ static void invariance(const Gen *g, Prob p)
     const int judged = p1 == 2 && p.k >= gate;
     char name[128];
     prob_name(name, sizeof name, g, &p);
-    expect_served(name, p.k, p1 == 2);
+    expect_served(name, &p, p1 == 2);
     njudged += judged;
     printf("%s S2 %s: path %s / %s / %s; no workspace: %s; half the columns: %s%s\n",
            judged && !(same_ws && (p3 != 2 || same_n)) ? "FAIL " : judged ? "ok   " : "note ", name, path_name(p1),
@@ -459,7 +467,7 @@ static void special_case(const char *name, const Prob *p, const uint16_t *A, con
         else if ((a & 0x7fffffffu) > 0x7f800000u && a != b) ++nanb;
     }
     const int judged = pv == 2 && p->k >= gate, bad = cls || nanb || s12 != sv;
-    expect_served(name, p->k, pv == 2);
+    expect_served(name, p, pv == 2);
     njudged += judged;
     printf("%s S1 %s %s alpha %g beta %g %s: path %s, class mismatches %ld, NaN bits %ld, status %d/%d%s\n",
            judged && bad ? "FAIL " : judged ? "ok   " : "note ", name, p->ct ? "bf16" : "fp32", p->alpha, p->beta,

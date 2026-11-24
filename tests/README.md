@@ -114,22 +114,33 @@ Where the GPU scripts write:
   by kernel nodes of the runtime's module, which replay after every handle is destroyed);
   cuBLASLt calls that keep 12.9's behaviour: an explicit algorithm other than 12.9's heuristic one,
   and a workspace size without a workspace (`bf16-lt.c`); the tensor-core path's fallback in the TN
-  layout of linear layers, bit for bit against a host model (`bf16-fallback.c`); the runtime told
+  layout of linear layers, bit for bit against a host model, also with failing rows and columns spread
+  over the chunks of a call, there against cuBLAS 12.9 too (`bf16-fallback.c`); the runtime told
   the real capability under the layer's settings, under both module loading modes
   (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the
   tensor-core path's special values against 12.9 (`bf16-s1.c`) and its acceptance test
   (`bf16-accept.c`: 12.9's classes, determinism, an error bound and a bias bound against the exact
-  product for every call it serves at k >= 1024, nothing served below and every call from there on
+  product for every call it serves at k >= 1024, nothing served below and every TN call from there on
   served, failing when the gate is moved to 512 or 256, with `VF_ACCEPT_STRICT=1` (its two documented
-  exceptions removed) and with the path off; with `VF_SAFE=1`, every result 12.9's); with
+  exceptions removed) and with the path off; with `VF_SAFE=1`, every result 12.9's); the path's layout
+  rule, tall rule and wide rule (`bf16-rules.c`: a fine-tuning step's input and weight gradients, NN and
+  NT, an output layer up to the tall rule's n, a wide down projection past the wide rule's n and a long
+  product of many rows at the tall rule's long-k m with k past its long-k bound forwarded with 12.9's
+  bits, the step's TN products, the output layer one column more and at 128 columns, the wide down
+  projection at the wide rule's n and the long product at the long-k bound or one step of m under it
+  served; with each rule removed by a control, it fails); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
-  column, writes outside them, error and time per shape), and `bf16-cost.c` the one behind the
-  documented host times, fallback cost and same-sign error; both run by hand.
+  column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the
+  documented host times, fallback cost and same-sign error, and `bf16-layout-cost.c` the one behind the
+  layout rule, the tall rule and the wide rule (the time of single products per layout, shape and share
+  of failing columns, through the variants and through 12.9); all run by hand.
 - `tests/forward/bf16.sh` (no GPU, in the CI): the variants generated from stand-in libraries, and
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
-  the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k,
+  the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k, with
+  the products of a fine-tuning step, the tall rule's edges and the classes it serves (rows that hold
+  whatever the gate is),
   each control making its test fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).

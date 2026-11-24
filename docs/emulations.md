@@ -845,7 +845,8 @@ times for TN).
 
 ### The tensor-core path (`VF_CUBLAS_BF16_TC=1`)
 
-For the other products (m k >= 2^20 or n >= 32, with 1024 <= k <= 16384: the gate below), when the
+For the other products in the TN layout (m k >= 2^20 or n >= 32, with 1024 <= k <= 16384, outside the shapes
+that the rules of speed below leave to 12.9, by class of shapes: the gate below), when the
 call is not captured in a graph, each row of op(A) and each column of
 op(B) is scaled by a power of two, 2^(15 - e) for e the exponent of its largest magnitude, and
 converted to fp16; a row or column is kept only when every element converts exactly (the exponent of
@@ -869,8 +870,10 @@ truncation does not act: largest 5.8, 3.2 and 1.8 units, mean 0.3, -0.1 and 0.0
 (`tests/gpu/forward/bf16-cost.c`). The GPU tests hold every tensor-core result to 32 units.
 
 The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
-tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue: they are 12.9's
-where 12.9 runs its sequential kernel. Every element has one writer; an element's value depends on
+tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue, in one launch
+after the tensor-core elements of every chunk: they are 12.9's where 12.9 runs its sequential kernel
+(also measured at TN 1536 x n x 8960 for n = 64, 512 and 2048, `tests/gpu/forward/bf16-fallback.c`).
+Every element has one writer; an element's value depends on
 its row and column of op(A) and op(B) and on the call's shape (the gates, the chunks of at most
 32 MiB of workspace, and the kernel cuBLAS chooses for a chunk's slices), never on other rows, other
 calls or what ran before. With beta = 0, C is not read. Two runs give the same bits.
@@ -882,8 +885,20 @@ handle's workspace as 12.9 does, with the same rules for threads and streams.
 
 ### The tensor-core path's gate
 
-The tensor-core path takes a product with n >= 2 and k from 1024 (`VF_TC_MIN_K`) to 16384 when m k >=
-2^20 or n >= 32, after the skinny path has declined it; a product it does not take goes to cuBLAS 12.9.
+The tensor-core path takes a TN product with n >= 2 and k from 1024 (`VF_TC_MIN_K`) to 16384 when m k >=
+2^20 or n >= 32, after the skinny path has declined it; a product it does not take goes to cuBLAS 12.9. Three
+rules of speed leave more products to 12.9, the classes of shapes in which the path's median speed was below
+1.10 times 12.9's or its slowest below 0.90 times, or with no layer of a real model measured, decided before the
+shortest k, so that they hold whatever
+`VF_TC_MIN_K` is: the layout (TN only: in the other layouts the path was slower than 12.9 on the backward
+products of training, input gradients NN and weight gradients NT), narrow products of tall matrices and long
+products of many rows (m >= 8192 with n <= 64, or m >= 6144 with k > 9216: 12.9 fills the GPU and was as fast or
+faster at some of these shapes; no layer of a real model was measured among the long ones), wide down projections
+(k > 8192 with n > 256: their gated inputs fail the exact check often enough on real text that the fallback cost
+more than the path saved) (`LIMITS.md`; `docs/performance.md`, section 7); a product they serve can still run below
+12.9's speed, down to 0.9 times by the classes' criterion, and below that when its input has many columns failing
+the exact check (`LIMITS.md`). The acceptance test's NN, NT and TT calls therefore go
+to 12.9.
 The gate depends on n, so one element's bits depend on the batch: the same row of op(A) times the same
 column of op(B) has 12.9's bits in a narrow product (n = 1, or within the skinny path's rule) and the
 tensor-core path's in a wide one (`LIMITS.md`). n = 1 is never taken: 12.9 computes it faster. Were

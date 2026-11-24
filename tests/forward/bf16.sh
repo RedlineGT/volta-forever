@@ -87,7 +87,7 @@ fails() {  # fails NAME WHAT CHECK : PASS when the program failed (a control) at
 run all "$out/test" VF_CUBLAS_BF16_TC=1 -- all
 pass all "H1-H7: forwarding with the same arguments, call sequences and chunks, explicit algorithms, bounds, one runtime, the internal GEMM, captured calls, the cuBLASLt allowlist"
 run rule "$out/test" VF_CUBLAS_BF16_TC=1 -- rule
-pass rule "the paths' rule: the path or the reason of each class of (n, m k, k), the tensor-core path from k = 1024"
+pass rule "the paths' rule: the path or the reason of each class of (n, m k, k), the tensor-core path from k = 1024, TN only, not tall and narrow; a fine-tuning step's products"
 # VF_BF16_TC_MIN_K exists in test builds only (the controls that move the gate): the release runtime, as the
 # generator builds it, does not read it, and its file does not hold the name.
 run release-gate "$out/forward/bf16tc" VF_CUBLAS_BF16_TC=1 VF_BF16_TC_MIN_K=512 -- release-gate
@@ -122,6 +122,13 @@ for value in true yes "" " 1"; do
         echo "FAIL  VF_SAFE='$value': status $status, said $said times ($log)"; failed=1
     fi
 done
+run stats "$out/test" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 -- stats
+said=$(grep -cF "tensor-core path: of its 2 calls, 5 had rows or columns that failed the exact check, 2 of them more than a quarter of their rows or of their columns (such products can run below cuBLAS 12.9's speed: LIMITS.md); the fallback computed 777 of their 393216 elements (0.20 %)" "$log")
+if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 1 ]; then
+    echo "PASS  the fallback's counters: made at a context's first tensor-core call, given to the fallback, read for the exit report (its line, once)"
+else
+    echo "FAIL  the fallback's counters: status $status, the exit report's line $said times ($log)"; failed=1
+fi
 run lazy "$out/test" VF_CUBLAS_BF16_TC=1 -- lazy
 pass lazy "lazy setup: nothing made with a handle; the module at the first served call, the tensor-core path's pool and cuBLASLt handle at its first call, in relaxed capture mode"
 for step in module alloc scale gemm16 epilogue fallback; do
@@ -148,6 +155,7 @@ control split-states all "a cuBLAS handle used as a cuBLASLt handle: not served"
 control caller-handle-any all "H5: the internal GEMM went" VF_CUBLAS_BF16_TC=1
 control capture-tc all "H6: a captured tensor-core call was not forwarded" VF_CUBLAS_BF16_TC=1
 control lt-drop all "H7: descriptor attribute" VF_CUBLAS_BF16_TC=1
+control fb-per-chunk all "fallback launches (not one over the call, after the last chunk" VF_CUBLAS_BF16_TC=1
 control skinny-k skinny "skinny alone, k = 16392: not one call" VF_CUBLAS_BF16_SKINNY=1
 control skinny-speed skinny "(slower than 12.9 there): not one call" VF_CUBLAS_BF16_SKINNY=1
 control seq-any skinny "skinny alone, TN with a 1 MiB workspace: not one call" VF_CUBLAS_BF16_SKINNY=1
@@ -158,7 +166,14 @@ control any-build otherbuild "skinny alone, another cuBLAS build: not one call" 
 control eager-setup lazy "lazy: the runtime made something with the handle" VF_CUBLAS_BF16_TC=1
 control safe-ignored safe "safe: a tensor-core call: not one call" VF_SAFE=1 VF_CUBLAS_BF16_TC=1
 control safe-domain safe "safe: a tensor-core call: not counted as reason" VF_SAFE=1 VF_CUBLAS_BF16_TC=1
+# The tensor-core path's layout rule, tall rule and wide rule removed: the products of training, an output layer at
+# a small batch and a wide down projection at many columns must then be served, and the rule's rows fail.
+control tc-layouts rule "rule: NT 896 x 4864 x 2048 (the weight gradient of a gate or up projection, k = 2048 tokens): tc" \
+    VF_CUBLAS_BF16_TC=1
+control tc-tall rule "(an output layer over a vocabulary of 151936, n at the tall bound): tc" VF_CUBLAS_BF16_TC=1
+control tc-wide rule "(k one step past the wide bound, n past it): tc" VF_CUBLAS_BF16_TC=1
 control safe-lenient notsafe "not safe: a tensor-core call was not served" VF_SAFE=yes VF_CUBLAS_BF16_TC=1
+control no-stats stats "stats: the first tensor-core call did not make the fallback's counters" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2
 control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1
 # The tensor-core path's gate moved to 512 (test builds): the rule's table must fail at its k boundary; and the
 # test runtime given to the release-gate mode, where the variable is read, must make it fail.
