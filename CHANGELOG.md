@@ -14,7 +14,7 @@
 ### Tests
 
 - `tests/proxy/fault.py` (in the CI): what the layer says after a fault, against a stand-in for the driver that shows a fault as NVIDIA's driver does. `tests/kernels/test_fault.c`: its `probe-*` modes recorded what NVIDIA's driver answers to each call after a fault (`crates/vf-proxy/src/fault.rs`), its `rate` mode measures launches per second (`docs/performance.md`).
-- `tests/proxy/driver_calls.py` (in the CI and the release check): the calls that reach the driver, recorded between the layer and the stand-ins of `lifecycle.c` and `fault.py` in the cases in which nothing faults, with the report of faults and with `VF_FAULT_REPORT=0`, the same but for the few the report makes without a fault, each said; given 0.1.5's `libcuda.so.1`, the very same with `VF_FAULT_REPORT=0`.
+- `tests/proxy/driver_calls.py` (in the CI and the release check): the calls that reach the driver, recorded between the layer and the stand-ins of `lifecycle.c` and `fault.py` in the cases in which nothing faults, and of `driver_calls.c`, which calls the driver through the pointers of `cuGetProcAddress_v2` (as the CUDA runtime does) and by exported names, with the report of faults and with `VF_FAULT_REPORT=0`: the same but for the two getters the report calls without a fault, each said (any other call fails the test); given 0.1.5's `libcuda.so.1`, the very same with `VF_FAULT_REPORT=0`, on both paths.
 - The `fault-*` cases of `tests/gpu/run.sh`: a kernel that writes through a null pointer on purpose, through the layer, run only with `VF_TEST_FAULTS=1` (each adds lines with "Xid" to the kernel's log); by default only the control runs, after which nothing is said.
 
 ## 0.1.5 (2026-11-24)

@@ -572,8 +572,8 @@ def main():
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         mock = str(Path(tmp) / "libcuda_mock.so")
-        subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-Bsymbolic", "-o", mock, str(here / "fault_mock_driver.c")],
-                       check=True)
+        subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-Bsymbolic", "-o", mock, str(here / "fault_mock_driver.c"),
+                        "-ldl"], check=True)
         cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("nofault-graph", {}),
                  ("nofault-release", {}), ("nofault-capture-exit", {}), ("exact", {"VF_FAULT_TRACE": "1"}),
                  ("streams", {}), ("contexts", {}), ("context-gone", {}),

@@ -20,6 +20,7 @@
 // while a blocking stream of the context is capturing is invalid"); a launch into an invalidated
 // capture and its end return 901.
 //
+// A lookup (cuGetProcAddress, cuGetProcAddress_v2) gives any function of this library by its name.
 // The primary context of each device: made at its first retain, destroyed at its last release or
 // at a reset. With MOCK_EXEC_FIXED set, every instantiated graph gets the same handle (as a driver
 // may give the handle of one destroyed to the next one made).
@@ -28,6 +29,8 @@
 // cuCtxPushCurrent_v2 and cuCtxPopCurrent_v2 take it, and with MOCK_SIGNAL set, cuCtxSynchronize
 // raises SIGUSR1 while it holds it (a signal delivered during a call of the driver, whose handler
 // may call exit: what the handlers of exit then ask of the driver waits for ever).
+#define _GNU_SOURCE
+#include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -366,14 +369,20 @@ CUresult cuEventRecord(void *event, void *stream) {
 CUresult cuEventSynchronize(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
 CUresult cuEventQuery(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
 
-// Lookups: the functions of this library that the tests look up.
-CUresult cuGetProcAddress(const char *symbol, void **pointer, int version, uint64_t flags) {
+// Lookups: any function of this library, by its name (as NVIDIA's driver gives its own).
+CUresult cuGetProcAddress_v2(const char *symbol, void **pointer, int version, uint64_t flags, int *status) {
     (void)version; (void)flags;
-    if (!strcmp(symbol, "cuStreamSynchronize")) *pointer = (void *)cuStreamSynchronize;
-    else if (!strcmp(symbol, "cuCtxSynchronize")) *pointer = (void *)cuCtxSynchronize;
-    else if (!strcmp(symbol, "cuLaunchKernel")) *pointer = (void *)cuLaunchKernel;
-    else return NOT_FOUND;
+    Dl_info info;
+    void *self = dladdr((void *)cuGetProcAddress_v2, &info) ? dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD) : NULL;
+    void *found = self ? dlsym(self, symbol) : NULL;
+    if (self) dlclose(self);
+    if (status) *status = found ? 0 : 1;
+    if (!found) return NOT_FOUND;
+    *pointer = found;
     return 0;
+}
+CUresult cuGetProcAddress(const char *symbol, void **pointer, int version, uint64_t flags) {
+    return cuGetProcAddress_v2(symbol, pointer, version, flags, NULL);
 }
 
 CUresult cuMemAlloc_v2(uint64_t *pointer, size_t size) {

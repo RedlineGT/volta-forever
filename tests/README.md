@@ -438,12 +438,16 @@ with no launch known nothing is said of where the kernel was launched; and that 
 destroys another context, or at whose end the program exits, is not invalidated. Each case in a
 process of its own; it needs a C compiler. The seventeenth records the calls that reach the driver
 (a recorder between the layer and the stand-ins of `lifecycle.c` and `fault.py`, which exports every
-function of NVIDIA's library) in the cases of those two in which nothing faults, with the report of
+function of NVIDIA's library and gives its own function for each pointer that a lookup gives) in the
+cases of those two in which nothing faults, and of `driver_calls.c`, which makes its calls through
+the pointers of `cuGetProcAddress_v2` as the CUDA runtime does, and by the exported names (the same
+calls, but for the lookups), with the report of
 faults and with `VF_FAULT_REPORT=0`, and checks that they are the same, thread by thread, but for
 the two getters that the report calls without a fault, which it names: `cuCtxGetCurrent` after a
 synchronisation that succeeded, `cuStreamGetCaptureInfo_v2` while a capture is under way (any
-other call fails the test); given a second `libcuda.so.1` (of 0.1.5), that the calls with
-`VF_FAULT_REPORT=0` are the very same as with it. It needs a C compiler.
+other call fails the test, and so does one of these that no case shows); given a second
+`libcuda.so.1` (of 0.1.5), that the calls with `VF_FAULT_REPORT=0` are the very same as with it, on
+both paths. It needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
