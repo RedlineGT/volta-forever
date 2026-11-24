@@ -126,11 +126,12 @@ class HelperFailed(Exception):
     its compilation, not the helper or its start; gone: the helper had ended on its own, as the
     request reached it)."""
 
-    def __init__(self, why, kernel, gone=False):
+    def __init__(self, why, kernel, gone=False, signal=None):
         Exception.__init__(self, why)
         self.why = why
         self.kernel = kernel
         self.gone = gone
+        self.signal = signal   # (the signal that ended the helper, for a crash)
 
 
 class _NoSlot(Exception):
@@ -401,6 +402,11 @@ def _helper_env():
 # processes, an exit with no answer) may be otherwise another time: the kernel is compiled by
 # Triton's own stages for this compilation, and not kept.
 CRASH_SIGNALS = {4: "SIGILL", 6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE", 11: "SIGSEGV"}
+# Of those, the ones that a lack of resources gives too: LLVM aborts when an allocation fails (at
+# RLIMIT_AS, with memory overcommit off), and a mapped library truncated under the helper (a
+# reinstall) gives SIGBUS. The kernel is compiled again at once in a new helper, once: a second such
+# end of the same request is the kernel's.
+AGAIN_SIGNALS = (6, 7)
 
 
 def _inode(fd):
@@ -839,7 +845,8 @@ class _Helper(object):
         if status == 0:
             raise HelperFailed("its helper had ended (status 0)", False, gone=True)
         if status is not None and -status in CRASH_SIGNALS:
-            raise HelperFailed("its sm_80 compilation ended its process (%s)" % CRASH_SIGNALS[-status], True)
+            raise HelperFailed("its sm_80 compilation ended its process (%s)" % CRASH_SIGNALS[-status], True,
+                               signal=-status)
         if status is not None and status < 0:
             raise HelperFailed("its sm_80 compilation was ended from outside (signal %d)" % -status, False)
         raise HelperFailed("its helper ended with no answer (status %s)" % status, False)
@@ -1099,7 +1106,8 @@ def compile80_isolated(backend, ttir, metadata, options):
         digest = request["digest"] = _digest(request)
     except (TypeError, ValueError) as e:
         return None, "its compilation could not be sent to a helper (%s)" % e, False
-    for attempt in (1, 2):
+    gone = again = False
+    while True:
         try:
             helper = _take()
         except _NoSlot as e:
@@ -1130,8 +1138,14 @@ def compile80_isolated(backend, ttir, metadata, options):
             if refused:
                 helper.kill()   # (before another thread may take it)
         except HelperFailed as e:
-            if e.gone and attempt == 1:
+            if e.gone and not gone:
+                gone = True
                 continue   # (it ended when its idle time was up, as the request reached it)
+            if e.kernel and e.signal in AGAIN_SIGNALS and not again:
+                again = True
+                say("Triton kernel %s: %s, which a lack of memory may give too: compiled again in a new helper"
+                    % (_kernel_name(ttir), e.why), level=2)
+                continue
             if not helper.ready:
                 _broken(e.why)
             raise
@@ -1154,4 +1168,3 @@ def compile80_isolated(backend, ttir, metadata, options):
         if kind == "error":
             raise HelperFailed(why, True)
         return None, why, kind == "transient"
-    raise HelperFailed("its helper had ended twice as a request reached it", False)

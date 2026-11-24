@@ -236,6 +236,13 @@ STANDIN = {
                     if name + "80" in mod.text and capability == 80:
                         os.kill(os.getpid(), getattr(signal, name))
                         time.sleep(10)
+                for name, sig in (("ABORTONCE80", signal.SIGABRT), ("BUSONCE80", signal.SIGBUS)):
+                    # (The first compilation of the kernel ends so, as at a lack of memory; the next does not.)
+                    once = os.path.join(os.environ["HOME"], "once-" + name)
+                    if name in mod.text and capability == 80 and not os.path.exists(once):
+                        open(once, "w").close()
+                        os.kill(os.getpid(), sig)
+                        time.sleep(10)
                 if "EXIT0" in mod.text and capability == 80 and not os.path.exists(os.environ["HOME"] + "/exit0-done"):
                     open(os.environ["HOME"] + "/exit0-done", "w").close()
                     os._exit(0)   # as a helper that ended on its own as the request reached it
@@ -1103,6 +1110,28 @@ class Decisions(Base):
                 number = {"SIGKILL": 9, "SIGTERM": 15}[name]
                 self.assertIn("compiled for sm_75, not kept in Triton's cache: its sm_80 compilation was ended "
                               "from outside (signal %d)" % number, r[4])
+
+    def test_an_abort_is_tried_again_once(self):
+        # A helper ended by SIGABRT or SIGBUS, which a lack of resources gives too (LLVM aborts when
+        # an allocation fails; a mapped library truncated under the helper gives SIGBUS), is not the
+        # kernel's at once: the kernel is compiled again in a new helper, once (said at
+        # VF_LOG_LEVEL=2), and gets sm_80 when that ends well; a second such end is the kernel's
+        # (Triton's own stages, kept). SIGSEGV is the kernel's at once.
+        for name, sig in (("ABORTONCE80", "SIGABRT"), ("BUSONCE80", "SIGBUS")):
+            once = self.root / ("once-" + name)
+            if once.exists():
+                once.unlink()
+            r = self.compile(dot("f16", name + "\n"))
+            self.assertTarget(r, 80)
+            self.assertEqual(r[4].count("its sm_80 compilation ended its process (%s), which a lack of memory may give "
+                                        "too: compiled again in a new helper" % sig), 1, r[4])
+            self.assertNotIn("not kept", r[4])
+        for name, sig, again in (("ABORT80", "SIGABRT", 1), ("SIGBUS80", "SIGBUS", 1), ("SIGSEGV80", "SIGSEGV", 0)):
+            r = self.compile(dot("f16", name + "\n"))
+            self.assertTarget(r, 75)
+            self.assertEqual(r[4].count("compiled again in a new helper"), again, r[4])
+            self.assertIn("compiled for sm_75: its sm_80 compilation ended its process (%s)" % sig, r[4])
+            self.assertNotIn("not kept", r[4])
 
 
     def test_options_that_a_helper_does_not_take(self):
