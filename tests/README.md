@@ -285,7 +285,7 @@ exit status, standard input, a child process), what it refuses, how it is turned
 
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
-| `launcher.sh` | 114 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
+| `launcher.sh` | 117 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
 | `install.py` | `install.sh` on local releases: an upgrade that keeps the CUDA 12.9.2 libraries and the `vf venv` environments of the release before, installs stopped half-way, two at once, what killed ones left, plain HTTP refused, redirections from HTTPS (through curl and through wget); under `dash`, or `bash --posix` with `VF_TEST_SHELL=bash` | seconds | dash, flock, python3 3.10 or later with `venv`; openssl for the redirections (skipped without it) |
 | `fetch-redist.py` | `scripts/fetch-redist.py` on local archives: retries after an interruption, concurrent fetches, runtime-only installs, the NCCL wheel, a failure or a signal half-way, a component killed while it is moved into place (the journal, which the next fetch completes), what an interrupted fetch left, a manifest over plain HTTP | seconds | python3, tar |
 
@@ -293,7 +293,7 @@ Run the last two with `python3 tests/launcher/install.py` and `python3 tests/lau
 
 ### Tests of `VF_TRITON_TC` (`tests/python/`)
 
-No GPU needed. `python3 tests/python/triton_tc.py` (74 cases, 67 without a Triton; the layer
+No GPU needed. `python3 tests/python/triton_tc.py` (86 cases, 79 without a Triton; the layer
 built, for the marker of its `libcuda.so.1`; python3 3.9 or later with `venv`; a short `TMPDIR`,
 for the socket of `multiprocessing`'s forkserver) runs the launcher on an installation of the
 archive's layout made for the test, with a stand-in for the offline tool and a stand-in for Triton

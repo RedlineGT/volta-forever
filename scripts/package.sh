@@ -195,7 +195,7 @@ for f in "$pkg/bin/"*; do
     esac
 done
 
-# Check python/: the two modules alone
+# Check python/: its four modules and the empty file __pycache__ alone
 for f in "$pkg/python/"*; do
     fname=$(basename "$f")
     case " $expected_python " in
