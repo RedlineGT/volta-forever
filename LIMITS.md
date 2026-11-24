@@ -509,7 +509,10 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   n = 480, a tensor-core call took 32 to 71 % longer than cuBLAS 12.9's on six shapes of linear
   layers, TN m x k = 1536 x 1536, 4608 x 1536, 1536 x 4608, 7344 x 1536, 9728 x 896 and 896 x 4864
   (`tests/gpu/forward/bf16-cost.c`), against 1.7 to 2.8 times as fast when nothing fails (measured
-  before the gate on k, which sends 9728 x 896 to 12.9).
+  before the gate on k, which sends 9728 x 896 to 12.9). From `VF_LOG_LEVEL=2` the report at exit says
+  how many tensor-core calls had rows or columns failing the check, how many of them more than a quarter
+  of their rows or of their columns, and the share of the calls' elements that the fallback computed;
+  `VF_PROFILE` gives the fallback kernel's own time (`vf_bf16_fallback_tn`).
 - **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
   layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
   the pool of the context keeps up to 64 MiB between eager calls.

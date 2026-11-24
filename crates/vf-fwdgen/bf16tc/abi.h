@@ -63,6 +63,9 @@ typedef struct {
     long long b_sl, b_sj;
     const int *cntA, *listA, *eA;
     const int *cntB, *listB, *eB;
+    unsigned long long *stats; /* the context's counters for the exit report, or NULL: [0] calls with failed rows or
+                                * columns, [1] those with more than a quarter of their rows or of their columns
+                                * failed, [2] the elements the fallback computed */
     int mc, n, k, pad_;
     VfOut o;
 } VfFbArgs;

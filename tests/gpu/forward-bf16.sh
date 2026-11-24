@@ -62,12 +62,13 @@ want() { [ ${#cases[@]} -eq 0 ] && return 0; local c; for c in "${cases[@]}"; do
 cases=("$@")
 
 # Fat binaries with a kernel control (VF_BF16_FATBIN=<file> makes the test runtime load one), when
-# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them.
+# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them, and bf16-fallback with NO_STATS
+# (the exit report's counters left at zero).
 controls=()
 if [ -x "$T12/bin/nvcc" ]; then
     . "$W/scripts/nvcc-host.sh"
     nvcc_host_args "$T12/bin/nvcc"
-    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS; do
+    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS NO_STATS; do
         (cd "$rt" && "$T12/bin/nvcc" "${NVCC_HOST_ARGS[@]}" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
             -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
     done

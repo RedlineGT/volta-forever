@@ -9,7 +9,8 @@
 // __fadd_rn, cvt.rn), so that no rounding is the compiler's choice (the build adds -fmad=false).
 // What nvcc's forced cuda_runtime.h provides and is used here is one instruction each: __ldg,
 // __shfl_xor_sync, __any_sync, atomicAdd (to append to the lists of failed vectors, whose order
-// does not matter), __uint_as_float, __float_as_uint. No module variable, no counter.
+// does not matter, and to add a call's figures to the counters of the exit report), __uint_as_float,
+// __float_as_uint. No module variable: the counters are the runtime's memory, passed with the call.
 #include "abi.h"
 
 // Controls (tests/gpu/forward-bf16.sh builds them apart, never into kernels.fatbin): each breaks one
@@ -343,6 +344,21 @@ extern "C" __global__ void __launch_bounds__(128, 8) vf_bf16_epilogue(VfEpiArgs 
     }
 }
 
+// A call's figures for the exit report, added by one thread of the fallback's grid to the context's counters
+// (p.stats, NULL for none): a call with failed rows or columns; one with more than a quarter of its rows or of its
+// columns failed (such products can run below cuBLAS 12.9's speed, LIMITS.md); the elements the fallback computes
+// (the failed columns' elements in every row, and the failed rows' in the other columns).
+static __device__ __forceinline__ void count_call(const VfFbArgs &p, int ca, int cb)
+{
+#ifndef VF_KERNEL_CONTROL_NO_STATS  // the control adds nothing
+    if (!p.stats || blockIdx.x != 0 || threadIdx.x != 0 || (ca == 0 && cb == 0)) return;
+    atomicAdd(p.stats, 1ull);
+    if (4LL * ca > p.mc || 4LL * cb > p.n) atomicAdd(p.stats + 1, 1ull);
+    atomicAdd(p.stats + 2, (unsigned long long)cb * (unsigned long long)p.mc +
+                               (unsigned long long)ca * (unsigned long long)(p.n - cb));
+#endif
+}
+
 // Fallback, launched once per call: tiles over (all rows x failed columns of op(B)) and (failed rows
 // of op(A) x columns that passed). Each element is one fp32 FMA chain over l = 0, 1, ..., k-1 of the
 // original bf16 operands (exact products, fp32 sums): its value does not depend on the tile
@@ -364,6 +380,7 @@ static __device__ __forceinline__ void fallback_body(const VfFbArgs &p)
     const int tr = tid / TC, tc = tid % TC;
     const int ca = imin32(imax32(*p.cntA, 0), p.mc);
     const int cb = imin32(imax32(*p.cntB, 0), p.n);
+    count_call(p, ca, cb);
     const int mt = (p.mc + BM - 1) / BM, nt = (p.n + BN - 1) / BN;
     const int colTiles = ((cb + BN - 1) / BN) * mt;
     const int total = colTiles + ((ca + BM - 1) / BM) * nt;
@@ -804,6 +821,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) vf_bf16_fallback_tn(VfFbArg
     extern __shared__ __align__(16) unsigned char smem[];
     const int ca = imin32(imax32(*p.cntA, 0), p.mc);
     const int cb = imin32(imax32(*p.cntB, 0), p.n);
+    count_call(p, ca, cb);
     // Column tiles: the configuration whose waves over the persistent grid take the least time, a tile
     // taking its whole chain over k. Times of one tile per element of k, measured on a V100 with the
     // grid busy: 32x8 k-major 15 ns, 64x32 63 ns, 64x64 100 ns, 128x64 150 ns (units of 7.5 ns below).

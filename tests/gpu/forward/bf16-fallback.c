@@ -14,11 +14,44 @@
  * n = 512 and 6 x 4 at n = 2048, with 1 failing column, 2 % of them, every column, and failing rows too;
  * fp32 output with alpha 0.7, beta 0.3 and C in place, and bf16 output. Every fallback element must have
  * the host model's bits (a sample of 4096 of them when there are more) and cuBLAS 12.9's bits from the
- * same call (all of them). Prints "ok bf16-fallback". */
+ * same call (all of them).
+ * Every call also adds to the exit report's counters (a test build's vf_bf16_test_fallback_counters): one call
+ * with failed rows or columns, one with more than a quarter of its rows or of its columns failed when it has, and
+ * its fallback elements, exactly. A fat binary whose fallback adds nothing (VF_BF16_FATBIN=control-NO_STATS.fatbin)
+ * makes the test fail there. Prints "ok bf16-fallback". */
 #include "bf16-common.h"
 
 static cublasHandle_t hv, h12;
 static cudaStream_t st;
+
+/* The exit report's counters of the fallback (test builds only; NULL with a release runtime): [0] calls with
+ * failed rows or columns, [1] those with more than a quarter of their rows or of their columns failed, [2] the
+ * fallback's elements, [3] the elements of the calls the tensor-core path served. */
+static int (*rt_fb_counters)(unsigned long long *, int);
+typedef struct {
+    unsigned long long v[4];
+} FbCounts;
+static FbCounts fb_counts(void)
+{
+    FbCounts c;
+    memset(&c, 0, sizeof c);
+    if (rt_fb_counters && rt_fb_counters(c.v, 4) != 4) {
+        printf("FAIL  the fallback's counters could not be read\n");
+        exit(1);
+    }
+    return c;
+}
+/* The counters' change over one call with ca failed rows and cb failed columns (m x n) and fb fallback elements. */
+static void check_fb_counts(const char *what, const FbCounts *a, const FbCounts *b, int m, int n, int ca, int cb, size_t fb)
+{
+    if (!rt_fb_counters) return;
+    const unsigned long long calls = b->v[0] - a->v[0], quarter = b->v[1] - a->v[1], elems = b->v[2] - a->v[2],
+                             all = b->v[3] - a->v[3];
+    const unsigned long long want_q = 4LL * ca > m || 4LL * cb > n;
+    CHECK(calls == (ca > 0 || cb > 0) && quarter == want_q && elems == fb && all == (unsigned long long)m * n,
+          "%s: the exit report's counters added %llu call, %llu over a quarter, %llu fallback elements of %llu (not %d, "
+          "%llu, %zu of %llu)", what, calls, quarter, elems, all, ca > 0 || cb > 0, want_q, fb, (unsigned long long)m * n);
+}
 
 static uint32_t fbits(float f)
 {
@@ -42,8 +75,9 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
 {
     const int lda = k, ldb = k;
     uint16_t *hA = bf16_random((size_t)m * k, 0.05), *hB = bf16_random((size_t)n * k, 1.0);
-    /* tiny: rows of op(A) of both signs near 2^-70..2^-75 and columns of op(B) near 2^-66..2^-71 (one
-     * element of 2^-110 makes each column fail the check), as in bf16-arith.c: their products, below
+    /* tiny: rows of op(A) of both signs near 2^-70..2^-75 (whose largest, below 2^-24, makes each row fail the
+     * check) and columns of op(B) near 2^-66..2^-71 (one element of 2^-110 makes each column fail it), as in
+     * bf16-arith.c: their products, below
      * 2^-126, are fp32 subnormals that a separate multiply rounds to the subnormal grid, and with mixed
      * signs the sum stays small enough for that rounding to show: a chain of fused multiply-adds and
      * one of multiplies and adds then differ in those elements. */
@@ -84,11 +118,13 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
     void *dA = to_device(hA, (size_t)m * k * 2), *dB = to_device(hB, (size_t)n * k * 2), *dC = to_device(hC0, cb);
     CU(cudaDeviceSynchronize());
     const Counts c0 = counts(API_GEMMEX);
+    const FbCounts f0 = fb_counts();
     const cublasStatus_t s = cublasGemmEx(hv, CUBLAS_OP_T, CUBLAS_OP_N, m, n, k, &alpha, dA, CUDA_R_16BF, lda, dB,
                                           CUDA_R_16BF, ldb, &beta, dC, bf16_out ? CUDA_R_16BF : CUDA_R_32F, m,
                                           CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     CU(cudaStreamSynchronize(st));
     const Counts c1 = counts(API_GEMMEX);
+    const FbCounts f1 = fb_counts();
     void *hC = from_device(dC, cb);
     size_t fb = 0, fb_bad = 0, tc_bad = 0;
     double worst_tc = 0;
@@ -96,7 +132,7 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
         for (int i = 0; i < m; ++i) {
             const size_t at = (size_t)i + (size_t)j * m;
             const float c_in = bf16_out ? 0.0f : ((float *)hC0)[at];
-            if (colbad[j] || rowbad[i] || tinycol[j]) {
+            if (colbad[j] || rowbad[i] || tinycol[j] || tinyrow[i]) { /* tiny rows fail the check too (largest < 2^-24) */
                 ++fb;
                 const float want = model(hA, lda, hB, ldb, k, i, j, alpha, beta, c_in);
                 int same;
@@ -134,6 +170,10 @@ static void one_case(int m, int n, int k, int ncols, int nrows, int bad_kind, in
     CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 1, "not served by the tensor-core path");
     CHECK(fb_bad == 0, "%zu of %zu fallback elements differ from the host model", fb_bad, fb);
     CHECK(tc_bad == 0, "%zu tensor-core elements beyond the bound", tc_bad);
+    int fr = 0, fc = 0;
+    for (int i = 0; i < m; ++i) fr += rowbad[i] || tinyrow[i];
+    for (int j = 0; j < n; ++j) fc += colbad[j] || tinycol[j];
+    check_fb_counts("case", &f0, &f1, m, n, fr, fc, fb);
     cudaFree(dA);
     cudaFree(dB);
     cudaFree(dC);
@@ -179,10 +219,12 @@ static void chunk_case(int n, int cols, int nrows, int bf16_out)
     const cudaDataType ct = bf16_out ? CUDA_R_16BF : CUDA_R_32F;
     CU(cudaDeviceSynchronize());
     const Counts c0 = counts(API_GEMMEX);
+    const FbCounts f0 = fb_counts();
     const cublasStatus_t s = cublasGemmEx(hv, CUBLAS_OP_T, CUBLAS_OP_N, m, n, k, &alpha, dA, CUDA_R_16BF, lda, dB,
                                           CUDA_R_16BF, ldb, &beta, dC, ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     CU(cudaStreamSynchronize(st));
     const Counts c1 = counts(API_GEMMEX);
+    const FbCounts f1 = fb_counts();
     const cublasStatus_t s12 = c129.GemmEx(h12, CUBLAS_OP_T, CUBLAS_OP_N, m, n, k, &alpha, dA, CUDA_R_16BF, lda, dB,
                                            CUDA_R_16BF, ldb, &beta, dC12, ct, m, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     CU(cudaStreamSynchronize(st));
@@ -214,6 +256,10 @@ static void chunk_case(int n, int cols, int nrows, int bf16_out)
     CHECK(!rt_counters || delta(&c0, &c1, SERVED_TC) == 1, "not served by the tensor-core path");
     CHECK(vsmodel == 0, "%zu of %zu sampled fallback elements differ from the host model", vsmodel, sampled);
     CHECK(vs129 == 0, "%zu of %zu fallback elements differ from cuBLAS 12.9's", vs129, fb);
+    int fr = 0, fc = 0;
+    for (int i = 0; i < m; ++i) fr += rowbad[i];
+    for (int j = 0; j < n; ++j) fc += colbad[j];
+    check_fb_counts("chunks", &f0, &f1, m, n, fr, fc, fb);
     cudaFree(dA);
     cudaFree(dB);
     cudaFree(dC);
@@ -235,6 +281,10 @@ int main(void)
     CU(cudaStreamCreate(&st)); /* blocking: ordered after the uploads */
     if (cublasCreate(&hv) || c129.Create(&h12)) return 1;
     open_runtime();
+    {
+        void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+        if (rt) *(void **)&rt_fb_counters = dlsym(rt, "vf_bf16_test_fallback_counters");
+    }
     cublasSetStream(hv, st);
     c129.SetStream(h12, st);
     static const int cols[] = {1, 5, 8, 9, 20, 32, 33, 100, 300};

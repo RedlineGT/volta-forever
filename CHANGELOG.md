@@ -6,8 +6,13 @@
 
 - The tensor-core path of the bf16 cuBLAS variants launched its fallback (the rows and columns that do not convert exactly to fp16) once for every chunk of its workspace, and each launch costs one whole fused multiply-add chain over k, however few rows and columns failed: a call of many chunks with a few failing columns was several times slower than with none (TN 1536 x 2048 x 8960, 24 chunks, with 2 % of its columns failing: 17.1 ms against 3.9 ms, 0.32 times the speed of cuBLAS 12.9). It now launches it once per call, after the last chunk, over all of them: 4.6 ms there (1.20 times 12.9's speed), 7.9 ms instead of 21.0 with every column failing. The results are the same bits, and a call of one chunk costs what it did.
 
+### Added
+
+- From `VF_LOG_LEVEL=2`, the exit report of the bf16 cuBLAS variants ends with what the tensor-core path's fallback did: how many of the path's calls had rows or columns that failed the exact conversion to fp16, how many of them more than a quarter of their rows or of their columns, and how many of the calls' elements the fallback computed (`LIMITS.md`, "Speed that depends on the data"). The fallback adds a call's figures to counters of the CUDA context (32 bytes of its pool, made and zeroed at its first eager tensor-core call), which the report reads with each context made current; the results are unchanged.
+
 ### Tests
 
+- `tests/forward/bf16.sh` (mode `stats`): the fallback's counters are made once, at a context's first tensor-core call, given to every fallback launch and read with the context made current, and the exit report says them once; the control `VF_BF16_CONTROL=no-stats` (no counters made) makes it fail. `bf16-fallback`: every case adds exactly one call, one over a quarter when more than a quarter of its rows or columns fail, and its fallback elements; the fat binary `control-NO_STATS.fatbin` (the fallback adds nothing) makes it fail.
 - `tests/forward/bf16.sh`: a tensor-core call of several chunks resets its counters once and launches its fallback once, after its last chunk, over the whole call; the control `VF_BF16_CONTROL=fb-per-chunk` launches it again for every chunk, and the test fails. `bf16-fallback`: failing rows and columns spread over the chunks of TN 1536 x n x 8960 (n = 64, 512 and 2048; one column, 2 % of them, all, and failing rows), bit for bit against the host model and against cuBLAS 12.9.
 
 ## 0.1.5 (2026-11-24)

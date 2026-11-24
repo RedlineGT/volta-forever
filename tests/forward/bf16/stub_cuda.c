@@ -247,6 +247,48 @@ EXPORT CUresult cuMemsetD32Async(CUdeviceptr d, unsigned v, size_t n, CUstream s
     return failing("cuMemsetD32Async") ? CUDA_ERROR_LAUNCH_FAILED : CUDA_SUCCESS;
 }
 
+/* The fallback's counters: made on a stream that is then waited for, read back with their context pushed. The
+ * copies to the host return what the test set (stub_set_dtoh). */
+static unsigned long long dtoh_values[8];
+EXPORT void stub_set_dtoh(const unsigned long long *v, int n)
+{
+    memset(dtoh_values, 0, sizeof dtoh_values);
+    memcpy(dtoh_values, v, (size_t)(n < 8 ? n : 8) * sizeof *v);
+}
+EXPORT CUresult cuStreamSynchronize(CUstream s)
+{
+    const int fail = failing("cuStreamSynchronize");
+    stub_event("synchronize stream=%p%s", (void *)s, fail ? " FAILED" : "");
+    return fail ? CUDA_ERROR_LAUNCH_FAILED : CUDA_SUCCESS;
+}
+EXPORT CUresult cuMemcpyDtoH_v2(void *dst, CUdeviceptr src, size_t bytes)
+{
+    const int fail = failing("cuMemcpyDtoH_v2");
+    stub_event("copy to host ptr=0x%llx bytes=%zu context=%llu%s", src, bytes, cur()->id, fail ? " FAILED" : "");
+    if (fail) return CUDA_ERROR_INVALID_CONTEXT;
+    memcpy(dst, dtoh_values, bytes < sizeof dtoh_values ? bytes : sizeof dtoh_values);
+    return CUDA_SUCCESS;
+}
+static __thread int pushed[8], npushed;
+EXPORT CUresult cuCtxPushCurrent_v2(CUcontext c)
+{
+    if (failing("cuCtxPushCurrent_v2") || npushed == 8) {
+        stub_event("push context=%llu FAILED", ((Ctx *)c)->id);
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    pushed[npushed++] = current;
+    current = (int)((Ctx *)c - ctxs) + 1;
+    stub_event("push context=%llu", ((Ctx *)c)->id);
+    return CUDA_SUCCESS;
+}
+EXPORT CUresult cuCtxPopCurrent_v2(CUcontext *pc)
+{
+    if (pc) *pc = (CUcontext)cur();
+    current = npushed ? pushed[--npushed] : 0;
+    stub_event("pop context");
+    return CUDA_SUCCESS;
+}
+
 EXPORT CUresult cuGetErrorName(CUresult e, const char **s)
 {
     *s = "CUDA_ERROR_STUB";

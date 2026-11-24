@@ -270,6 +270,11 @@ calls whose workspace cannot be allocated. An eager tensor-core call (TN 1536 x 
 16.5 microseconds of host time against
 6.5 for 12.9's, a skinny call (TN 1536 x 8 x 1536) 2.4 against 5.8 (`tests/gpu/forward/bf16-cost.c`,
 mean over 100 calls).
+From `VF_LOG_LEVEL=2` the variants' report at exit gives, for each entry point, its calls, the path that
+served them and why the others were forwarded, then what the tensor-core path's fallback did: how many of
+the path's calls had rows or columns that failed the exact conversion to fp16, how many of them more than
+a quarter of their rows or of their columns, and the share of the calls' elements that the fallback
+computed (`LIMITS.md`, "Speed that depends on the data").
 The layer's workspace is not the program's: a framework's allocator does not see it. The variables do nothing without the
 launcher: by hand, put `forward/bf16tc` before `forward` and set the variable.
 

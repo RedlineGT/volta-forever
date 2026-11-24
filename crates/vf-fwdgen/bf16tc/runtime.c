@@ -204,6 +204,10 @@ static struct {
     FN(cuMemFreeAsync) MemFreeAsync;
     FN(cuMemsetD32Async) MemsetD32Async;
     FN(cuGetErrorName) GetErrorName;
+    FN(cuStreamSynchronize) StreamSynchronize; /* the fallback's counters: zeroed once per context */
+    FN(cuMemcpyDtoH_v2) MemcpyDtoH;            /* and read for the exit report */
+    FN(cuCtxPushCurrent_v2) CtxPushCurrent;
+    FN(cuCtxPopCurrent_v2) CtxPopCurrent;
 } cu;
 #undef FN
 
@@ -277,7 +281,9 @@ static void bind_driver(void)
                 BIND(d, cu.MemPoolSetAttribute, "cuMemPoolSetAttribute") &&
                 BIND(d, cu.MemAllocFromPoolAsync, "cuMemAllocFromPoolAsync") &&
                 BIND(d, cu.MemFreeAsync, "cuMemFreeAsync") && BIND(d, cu.MemsetD32Async, "cuMemsetD32Async") &&
-                BIND(d, cu.GetErrorName, "cuGetErrorName");
+                BIND(d, cu.GetErrorName, "cuGetErrorName") && BIND(d, cu.StreamSynchronize, "cuStreamSynchronize") &&
+                BIND(d, cu.MemcpyDtoH, "cuMemcpyDtoH_v2") && BIND(d, cu.CtxPushCurrent, "cuCtxPushCurrent_v2") &&
+                BIND(d, cu.CtxPopCurrent, "cuCtxPopCurrent_v2");
     if (!g_cuda_ok) say("a function is missing from libcuda.so.1; every call is forwarded");
 #ifdef VF_BF16_TEST
     *(void **)&test_module_unload = dlsym(d, "cuModuleUnload");
@@ -333,6 +339,8 @@ static const char *const reason_name[R_N] = {
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
 static atomic_ullong st_fwd[API_N][R_N];
 static atomic_ullong st_tc_captured[API_N];
+static atomic_ullong st_tc_elems; /* the elements (m * n) of the calls the tensor-core path served, every entry point */
+static int read_stats(unsigned long long out[3], int *made);
 
 static void report(void)
 {
@@ -353,6 +361,24 @@ static void report(void)
         }
         say("%s", line);
     }
+    /* The fallback's counters (abi.h, VfFbArgs.stats): how many of the tensor-core path's calls had rows or
+     * columns failing the exact check, how many more than a quarter (LIMITS.md: such a product can run below
+     * cuBLAS 12.9's speed), and the share of elements the fallback computed. */
+    unsigned long long tc = 0;
+    for (int a = 0; a < API_N; ++a) tc += atomic_load(&st_tc[a]);
+    if (!tc) return;
+    unsigned long long v[3];
+    int made = 0;
+    if (!read_stats(v, &made)) {
+        say("tensor-core path: the fallback's counters could not be read at exit");
+        return;
+    }
+    if (!made) return;
+    const unsigned long long elems = atomic_load(&st_tc_elems);
+    say("tensor-core path: of its %llu calls, %llu had rows or columns that failed the exact check, %llu of them more "
+        "than a quarter of their rows or of their columns (such products can run below cuBLAS 12.9's speed: "
+        "LIMITS.md); the fallback computed %llu of their %llu elements (%.2f %%)",
+        tc, v[0], v[1], v[2], elems, elems ? 100.0 * (double)v[2] / (double)elems : 0.0);
 }
 
 /* ---- switches and libraries, once ------------------------------------------------------- */
@@ -433,6 +459,8 @@ typedef struct Ctx {
     CUfunction scale, epilogue, fb_wide, fb_narrow, fb_tn, skinny[2][SK_N]; /* skinny[fast][shape] */
     CUmemoryPool pool;
     cublasLtHandle_t lt; /* the internal fp16 GEMM's, never the caller's */
+    atomic_int stats_made;  /* the fallback's counters (abi.h, VfFbArgs.stats): 0 not made yet, 1 there, -1 not */
+    CUdeviceptr stats;
 } Ctx;
 
 static Ctx g_no_ctx = {.kernels = -1, .tc = -1}; /* a handle whose context has no state: every call forwarded */
@@ -1142,6 +1170,54 @@ static void free_workspace(CUdeviceptr base, CUstream stream, int capturing)
     if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
 }
 
+/* The context's counters for the exit report (abi.h, VfFbArgs.stats), made at its first eager tensor-core call
+ * (in relaxed capture mode, as that call's workspace): 32 bytes of its pool, never freed, zeroed on the call's
+ * stream, which is then waited for once, so that a call on any stream finds them zeroed. Without them (an
+ * allocation or a copy failed), the path serves its calls and does not count them. */
+static void make_stats(Ctx *x, CUstream s)
+{
+    if (atomic_load_explicit(&x->stats_made, memory_order_acquire)) return;
+    pthread_mutex_lock(&g_setup_mu);
+    if (!atomic_load_explicit(&x->stats_made, memory_order_relaxed)) {
+        CUdeviceptr d = 0;
+        CUresult r = CONTROL("no-stats") ? CUDA_ERROR_NOT_SUPPORTED : cu.MemAllocFromPoolAsync(&d, 32, x->pool, s);
+        if (r == CUDA_SUCCESS) r = cu.MemsetD32Async(d, 0, 8, s);
+        if (r == CUDA_SUCCESS) r = cu.StreamSynchronize(s);
+        x->stats = r == CUDA_SUCCESS ? d : 0;
+        atomic_store_explicit(&x->stats_made, r == CUDA_SUCCESS ? 1 : -1, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_setup_mu);
+}
+
+/* The fallback's counters summed over the contexts that have them (out[0..2] as VfFbArgs.stats), each read with
+ * its context made current for the copy, after checking that it is still the context the counters were made in.
+ * *made: the contexts that have counters. 1 when every one of them could be read, 0 otherwise (a context
+ * destroyed, the driver shut down). */
+static int read_stats(unsigned long long out[3], int *made)
+{
+    out[0] = out[1] = out[2] = 0;
+    *made = 0;
+    int ok = 1;
+    pthread_mutex_lock(&g_ctx_mu);
+    for (Ctx *x = g_ctxs; x; x = x->next) {
+        if (atomic_load_explicit(&x->stats_made, memory_order_acquire) <= 0) continue;
+        ++*made;
+        unsigned long long id = 0, v[3] = {0, 0, 0};
+        CUcontext prev = NULL;
+        if (cu.CtxGetId(x->ctx, &id) != CUDA_SUCCESS || id != x->id || cu.CtxPushCurrent(x->ctx) != CUDA_SUCCESS) {
+            ok = 0;
+            continue;
+        }
+        if (cu.MemcpyDtoH(v, x->stats, sizeof v) == CUDA_SUCCESS)
+            out[0] += v[0], out[1] += v[1], out[2] += v[2];
+        else
+            ok = 0;
+        cu.CtxPopCurrent(&prev);
+    }
+    pthread_mutex_unlock(&g_ctx_mu);
+    return ok;
+}
+
 static cublasStatus_t run_tc(const Call *c, int *reason)
 {
     Plan p;
@@ -1179,6 +1255,7 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
     CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
     const int relaxed = !capturing && !CONTROL("no-relaxed") && cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
     CUresult r = INJECT("alloc") ? CUDA_ERROR_OUT_OF_MEMORY : cu.MemAllocFromPoolAsync(&base, p.total, x->pool, alloc_stream);
+    if (r == CUDA_SUCCESS && base && !capturing) make_stats(x, c->stream); /* once per context, eager */
     if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode); /* the thread's mode given back, whatever happened */
     if (r != CUDA_SUCCESS || !base) {
         static atomic_int said;
@@ -1295,6 +1372,8 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         fb.cntB = (const int *)(uintptr_t)(cnt + 4);
         fb.listB = (const int *)(uintptr_t)listB;
         fb.eB = (const int *)(uintptr_t)eB;
+        fb.stats = atomic_load_explicit(&x->stats_made, memory_order_acquire) > 0 ? (unsigned long long *)(uintptr_t)x->stats
+                                                                                  : NULL;
         fb.mc = c->m;
         fb.n = c->n;
         fb.k = c->k;
@@ -1374,6 +1453,7 @@ static cublasStatus_t serve(Call *c, int path, int *reason)
 {
     const cublasStatus_t s = path == PATH_SKINNY ? run_skinny(c, reason) : run_tc(c, reason);
     if (s != FWD) atomic_fetch_add(path == PATH_SKINNY ? &st_skinny[c->api] : &st_tc[c->api], 1);
+    if (s != FWD && path != PATH_SKINNY) atomic_fetch_add(&st_tc_elems, (unsigned long long)c->m * (unsigned long long)c->n);
     return s;
 }
 
@@ -1909,6 +1989,18 @@ EXPORT int vf_bf16_test_state(int *out, int n)
     out[3] = atomic_load(&test_pools);
     out[4] = atomic_load(&test_lt_handles);
     return 5;
+}
+
+/* Test builds: the fallback's counters as the exit report reads them (out[0] calls with failed rows or columns,
+ * out[1] those with more than a quarter of their rows or of their columns failed, out[2] the elements the fallback
+ * computed), summed over the contexts, and out[3] the elements of the calls the tensor-core path served. Returns 4,
+ * or 0 when a context's counters could not be read. */
+EXPORT int vf_bf16_test_fallback_counters(unsigned long long *out, int n)
+{
+    int made = 0;
+    if (n < 4 || !read_stats(out, &made)) return 0;
+    out[3] = atomic_load(&st_tc_elems);
+    return 4;
 }
 
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded

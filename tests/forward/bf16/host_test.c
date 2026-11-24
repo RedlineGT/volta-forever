@@ -317,8 +317,11 @@ static void h1_served(void)
     CHECK(st == 0 && count("gemmex ") == 0, "tc 1536 x 128 x 4096: forwarded (status %d)", st);
     const char *al = line("alloc ", 0);
     const long long bytes = atoll(field(al, "bytes=", buf, sizeof buf));
-    CHECK(count("alloc ") == 1 && bytes > 0 && bytes <= (32ll << 20), "tc: one allocation of at most 32 MiB (%lld)", bytes);
-    CHECK(count("memset ") == 1 && strstr(line("memset ", 0), "words=2"), "tc: the counters not reset once");
+    /* the process's first tensor-core call also makes the context's counters for the exit report (mode stats) */
+    CHECK(count("alloc ") == 2 && bytes > 0 && bytes <= (32ll << 20) && strstr(line("alloc ", 1), "bytes=32 "),
+          "tc: one allocation of at most 32 MiB (%lld), then the fallback's counters", bytes);
+    CHECK(count("memset ") == 2 && strstr(line("memset ", 0), "words=8") && strstr(line("memset ", 1), "words=2"),
+          "tc: the counters not reset once");
     CHECK(count("launch vf_bf16_scale") == 1 && count("launch vf_bf16_epilogue") == 1 &&
               count("launch vf_bf16_fallback_tn") == 1 && count("free ") == 1,
           "tc: not scale, epilogue, fallback, free:\n%s", ev);
@@ -364,6 +367,53 @@ static void h1_served(void)
     take();
     CHECK(count("launch vf_bf16_epilogue") == chunks, "tc 16384 x 1024 x 4096: chunks differ between two calls");
     free(first);
+}
+
+/* ---- the fallback's counters, the exit report's last line (VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2): made at a
+ * context's first eager tensor-core call (32 bytes of its pool, zeroed on the call's stream, which is waited for
+ * once), given to every fallback launch, read for the report with the context made current for the copy; a
+ * context that cannot be made current is not read. The stand-in's copies return what the test sets. ---- */
+static void stats_mode(void)
+{
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    int (*fc)(unsigned long long *, int) = NULL;
+    G g = gemm(1, 0, 1536, 128, 4096);
+    take();
+    call(&g);
+    take();
+    if (!rt) rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    if (rt) *(void **)&fc = dlsym(rt, "vf_bf16_test_fallback_counters");
+    char b[64];
+    const char *ca = line("alloc ", 1);
+    const unsigned long long sp = ca && strstr(ca, "bytes=32 ") ? strtoull(field(ca, "ptr=", b, sizeof b), NULL, 16) : 0;
+    VfFbArgs f;
+    launch_args(line("launch vf_bf16_fallback", 0) ? line("launch vf_bf16_fallback", 0) : "", &f, sizeof f);
+    const char *m0 = line("memset ", 0), *sy = where("synchronize ", 0), *fl = where("launch vf_bf16_fallback", 0);
+    CHECK(sp && count("alloc ") == 2 && m0 && strstr(m0, "words=8") && count("synchronize ") == 1 && sy && fl && sy < fl &&
+              (unsigned long long)(uintptr_t)f.stats == sp,
+          "stats: the first tensor-core call did not make the fallback's counters (32 bytes zeroed, the stream waited for, "
+          "before the fallback) and give them to the fallback (0x%llx):\n%s", (unsigned long long)(uintptr_t)f.stats, ev);
+    take();
+    call(&g);
+    take();
+    launch_args(line("launch vf_bf16_fallback", 0) ? line("launch vf_bf16_fallback", 0) : "", &f, sizeof f);
+    CHECK(count("alloc ") == 1 && count("synchronize ") == 0 && sp && (unsigned long long)(uintptr_t)f.stats == sp,
+          "stats: a later call made counters again, or did not give them to the fallback:\n%s", ev);
+    /* read as the exit report reads them: the stand-in's copy returns 5, 2 and 777 */
+    const unsigned long long want[3] = {5, 2, 777};
+    stub_set_dtoh(want, 3);
+    unsigned long long out[4] = {0, 0, 0, 0};
+    take();
+    const int got = fc ? fc(out, 4) : -1;
+    take();
+    CHECK(got == 4 && out[0] == 5 && out[1] == 2 && out[2] == 777 && out[3] == 2ull * 1536 * 128 &&
+              count("push context=101") == 1 && count("copy to host ptr=0x") == 1 && count("pop context") == 1,
+          "stats: the counters read (%d): %llu %llu %llu of %llu elements, not 5 2 777 of 393216 with the context made "
+          "current for the copy:\n%s", got, out[0], out[1], out[2], out[3], ev);
+    /* a context that cannot be made current: not read (the report says so) */
+    stub_fail("cuCtxPushCurrent_v2", 1);
+    CHECK(fc && fc(out, 4) == 0, "stats: the counters of a context that could not be made current were read");
+    /* at exit, the report's line (tests/forward/bf16.sh checks it): 2 calls, 5, 2, 777 of 393216 elements */
 }
 
 /* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
@@ -1005,6 +1055,8 @@ int main(int argc, char **argv)
             take();
             CHECK(count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1, "after the failure: not served again");
         }
+    } else if (!strcmp(mode, "stats")) { /* VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2: the fallback's counters */
+        stats_mode();
     } else if (!strcmp(mode, "noruntime")) {
         G g = gemm(0, 1, 1536, 8, 1920);
         take();

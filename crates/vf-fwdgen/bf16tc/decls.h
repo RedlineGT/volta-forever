@@ -101,6 +101,8 @@ typedef struct CUmemPoolProps_st {
 typedef CUmemPoolProps_v1 CUmemPoolProps;
 
 CUresult cuCtxGetCurrent(CUcontext *pctx);
+CUresult cuCtxPushCurrent_v2(CUcontext ctx);
+CUresult cuCtxPopCurrent_v2(CUcontext *pctx);
 CUresult cuCtxGetId(CUcontext ctx, unsigned long long *ctxId);
 CUresult cuCtxGetDevice(CUdevice *device);
 CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev);
@@ -121,6 +123,8 @@ CUresult cuMemPoolSetAttribute(CUmemoryPool pool, CUmemPool_attribute attr, void
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream);
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
 CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream);
+CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuStreamSynchronize(CUstream hStream);
 CUresult cuGetErrorName(CUresult error, const char **pStr);
 
 /* ---- library types (library_types.h) ----------------------------------------------------- */
