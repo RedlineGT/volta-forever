@@ -473,8 +473,9 @@ extern "C" __global__ void __launch_bounds__(256) vf_bf16_fallback_narrow(VfFbAr
 // aligned bases), k a multiple of 8. Double-buffered shared memory, the next k-step's global
 // loads prefetched into registers, 16-byte loads. Same arithmetic as the generic kernel: one fp32
 // FMA chain per element over l = 0..k-1 (the zero padding after k leaves it unchanged), so its
-// values do not depend on the tile configuration. The column-tile width follows the number of
-// failed columns (read on the device), so the cost scales with the failed fraction.
+// values do not depend on the tile configuration. The tile shape follows the number of failed columns
+// and the rows (read on the device): the cost scales with the failed fraction, and a few failed
+// columns cost one short chain over k.
 
 template <int BM_, int BN_, int BK_, int TM_, int TN_, bool RF_>
 struct FbCfg {
@@ -494,7 +495,7 @@ using FbC3 = FbCfg<64, 64, 16, 4, 4, false>;   // more, when 128x64 tiles would 
 static_assert(FbC1::SMEM <= VF_BF16_FB_TN_SMEM && FbC2::SMEM <= VF_BF16_FB_TN_SMEM && FbC3::SMEM <= VF_BF16_FB_TN_SMEM,
               "smem");
 
-// k-major variant for few columns (decode, <= 8 failed columns) and for the failed rows of op(A):
+// k-major variant for few columns (chosen by the time of its waves, above) and for the failed rows of op(A):
 // one output per thread (32 rows x 8 columns), tiles stored row by row along k in shared memory,
 // so that 16-byte global loads become 16-byte shared stores and the operands are read as float4
 // (4 consecutive k per load, still accumulated one after the other).
@@ -803,10 +804,23 @@ extern "C" __global__ void __launch_bounds__(256, 2) vf_bf16_fallback_tn(VfFbArg
     extern __shared__ __align__(16) unsigned char smem[];
     const int ca = imin32(imax32(*p.cntA, 0), p.mc);
     const int cb = imin32(imax32(*p.cntB, 0), p.n);
-    // Column tiles: 128x64 when they fill the persistent grid twice, else 64x64; 64x32 for 9..32
-    // failed columns; the k-major 32x8 tiles for up to 8.
-    int cfg = cb > 32 ? 2 : (cb > 8 ? 1 : 0);
-    if (cfg == 2 && cdiv(cb, FbC2::BN) * cdiv(p.mc, FbC2::BM) < 2 * (int)gridDim.x) cfg = 3;
+    // Column tiles: the configuration whose waves over the persistent grid take the least time, a tile
+    // taking its whole chain over k. Times of one tile per element of k, measured on a V100 with the
+    // grid busy: 32x8 k-major 15 ns, 64x32 63 ns, 64x64 100 ns, 128x64 150 ns (units of 7.5 ns below).
+    // A few failed columns, or a few tens over few rows, take the short k-major tiles, more of them at
+    // once; many take the wide ones. The values do not depend on the choice.
+    int cfg = 0;
+    if (cb > 0) {
+        const int G = (int)gridDim.x;
+        const int t0 = cdiv(cdiv(cb, FbK::BN) * cdiv(p.mc, FbK::BM), G) * 2;
+        const int t1 = cdiv(cdiv(cb, FbC1::BN) * cdiv(p.mc, FbC1::BM), G) * 8;
+        const int t3 = cdiv(cdiv(cb, FbC3::BN) * cdiv(p.mc, FbC3::BM), G) * 13;
+        const int t2 = cdiv(cdiv(cb, FbC2::BN) * cdiv(p.mc, FbC2::BM), G) * 20;
+        int best = t0;
+        if (t1 < best) best = t1, cfg = 1;
+        if (t3 < best) best = t3, cfg = 3;
+        if (t2 < best) best = t2, cfg = 2;
+    }
     const int mtile = cfg == 2 ? FbC2::BM : cfg == 3 ? FbC3::BM : cfg == 1 ? FbC1::BM : FbK::BM;
     const int ntile = cfg == 2 ? FbC2::BN : cfg == 3 ? FbC3::BN : cfg == 1 ? FbC1::BN : FbK::BN;
     const int mt = cdiv(p.mc, mtile);
