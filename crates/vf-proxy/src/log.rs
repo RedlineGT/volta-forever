@@ -9,6 +9,26 @@ use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 static FILE: Mutex<Option<File>> = Mutex::new(None);
 static LEVEL: AtomicU8 = AtomicU8::new(1);
 
+#[cfg(test)]
+thread_local! {
+    /// For a unit test: the level in this thread, whatever `VF_LOG_LEVEL` says.
+    static TEST_LEVEL: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// For a unit test: log at `level` in this thread (`None`: as the process does).
+#[cfg(test)]
+pub fn set_test_level(level: Option<u8>) {
+    TEST_LEVEL.set(level);
+}
+
+fn level() -> u8 {
+    #[cfg(test)]
+    if let Some(level) = TEST_LEVEL.get() {
+        return level;
+    }
+    LEVEL.load(Relaxed)
+}
+
 pub fn open() {
     if let Some(level) = std::env::var("VF_LOG_LEVEL").ok().and_then(|v| v.parse().ok()) {
         LEVEL.store(level, Relaxed);
@@ -22,7 +42,7 @@ pub fn open() {
 }
 
 fn write(level: u8, args: Arguments<'_>) {
-    if LEVEL.load(Relaxed) < level {
+    if self::level() < level {
         return;
     }
     let line = format!("[volta-forever] {args}\n");
@@ -60,12 +80,12 @@ pub fn trace(args: Arguments<'_>) {
 }
 
 pub fn tracing() -> bool {
-    LEVEL.load(Relaxed) >= 3
+    level() >= 3
 }
 
 /// Whether the current log level is at least `level`.
 pub fn at_level(level: u8) -> bool {
-    LEVEL.load(Relaxed) >= level
+    self::level() >= level
 }
 
 /// Per-stage timing, printed at level 0 (always visible) when `VF_TIMING` is set.

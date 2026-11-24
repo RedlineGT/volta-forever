@@ -1140,8 +1140,18 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    /// For a unit test: `xxh64` panics in this thread.
+    static PANIC_IN_DIGEST: Cell<bool> = const { Cell::new(false) };
+}
+
 /// The XXH64 of `bytes` (seed 0: what `xxhsum -H1` prints for a file of these bytes).
 pub fn xxh64(bytes: &[u8]) -> u64 {
+    #[cfg(test)]
+    if PANIC_IN_DIGEST.get() {
+        panic!("a panic put in xxh64 by a test");
+    }
     use std::hash::Hasher;
     let mut hasher = twox_hash::XxHash64::with_seed(0);
     hasher.write(bytes);
@@ -1216,24 +1226,23 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
     if !config().adapt || ptr.is_null() {
         return None;
     }
-    let digest = || unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
-    let identity = log::at_level(2).then(digest).flatten();
-    let named = identity.map(|(size, digest)| format!("{who} of {size} bytes, XXH64 {digest:016x}"));
-    let mut replacement = unsafe { adapt_as(named.as_deref().unwrap_or(who), ptr, len) }?;
-    if !replacement.refused.is_empty() || !replacement.emulated.is_empty() {
-        // What is said of its kernels is said once for each kernel of each image.
-        replacement.source = identity.or_else(digest).map_or(0, |(_, digest)| digest);
-    }
-    Some(replacement)
+    guarded(who, || {
+        let digest = || unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
+        let identity = log::at_level(2).then(digest).flatten();
+        let named = identity.map(|(size, digest)| format!("{who} of {size} bytes, XXH64 {digest:016x}"));
+        let mut replacement = unsafe { adapt_unguarded(named.as_deref().unwrap_or(who), ptr, len) }?;
+        if !replacement.refused.is_empty() || !replacement.emulated.is_empty() {
+            // What is said of its kernels is said once for each kernel of each image.
+            replacement.source = identity.or_else(digest).map_or(0, |(_, digest)| digest);
+        }
+        Some(replacement)
+    })
 }
 
-/// `adapt`, its lines said as `who`.
-///
-/// # Safety
-/// As for `adapt`.
-unsafe fn adapt_as(who: &str, ptr: *const c_void, len: Option<usize>) -> Option<Replacement> {
-    // Whatever goes wrong here, the program must get what it would get without this library.
-    catch_unwind(AssertUnwindSafe(|| unsafe { adapt_unguarded(who, ptr, len) })).unwrap_or_else(|_| {
+/// `adapt` (whatever it reads and computes of the image, its digest included) under a guard:
+/// whatever goes wrong there, the program must get what it would get without this library.
+fn guarded(who: &str, adapt: impl FnOnce() -> Option<Replacement>) -> Option<Replacement> {
+    catch_unwind(AssertUnwindSafe(adapt)).unwrap_or_else(|_| {
         log::error(format_args!(
             "{who}: internal error while adapting an image; loaded as is"
         ));
@@ -1250,31 +1259,33 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     if !config().adapt {
         return None;
     }
-    let named = log::at_level(2).then(|| format!("{who} of {}", path.to_string_lossy()));
-    let who = named.as_deref().unwrap_or(who);
     // A path is bytes, in whatever encoding: it is read as the driver would read it.
     let mut contents = std::fs::read(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
-    let source = xxh64(&contents);
-    if contents.len() < 4 {
-        return None;
-    }
-    if contents.starts_with(&fatbin::MAGIC.to_le_bytes()) {
-        // A file cut short must not be read past its end.
-        fatbin::parse(&contents).ok()?;
-    } else if fatbin::is_elf(&contents) {
-        // A file cut short must not be read past its end either.
-        if contents.len() < 0x40 || fatbin::cubin_len(&contents).is_none_or(|length| length > contents.len()) {
+    guarded(who, || {
+        let named = log::at_level(2).then(|| format!("{who} of {}", path.to_string_lossy()));
+        let who = named.as_deref().unwrap_or(who);
+        let source = xxh64(&contents);
+        if contents.len() < 4 {
             return None;
         }
-    } else if contents.starts_with(&fatbin::WRAPPER_MAGIC.to_le_bytes()) {
-        return None; // a wrapper holds pointers: it has no meaning in a file
-    } else {
-        contents.push(0); // text
-    }
-    // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
-    let mut replacement = unsafe { adapt_as(who, contents.as_ptr().cast(), None) }?;
-    replacement.source = source;
-    Some(replacement)
+        if contents.starts_with(&fatbin::MAGIC.to_le_bytes()) {
+            // A file cut short must not be read past its end.
+            fatbin::parse(&contents).ok()?;
+        } else if fatbin::is_elf(&contents) {
+            // A file cut short must not be read past its end either.
+            if contents.len() < 0x40 || fatbin::cubin_len(&contents).is_none_or(|length| length > contents.len()) {
+                return None;
+            }
+        } else if contents.starts_with(&fatbin::WRAPPER_MAGIC.to_le_bytes()) {
+            return None; // a wrapper holds pointers: it has no meaning in a file
+        } else {
+            contents.push(0); // text
+        }
+        // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
+        let mut replacement = unsafe { adapt_unguarded(who, contents.as_ptr().cast(), None) }?;
+        replacement.source = source;
+        Some(replacement)
+    })
 }
 
 #[cfg(test)]
@@ -1294,5 +1305,26 @@ mod tests {
         assert_eq!(unsafe { image_extent(unknown.as_ptr().cast(), None) }, None);
         assert_eq!(xxh64(b""), 0xEF46_DB37_51D8_E999);
         assert_eq!(xxh64(b"abc"), 0x44BC_2CF5_AD77_0999);
+    }
+
+    const PTX: &[u8] = b".version 8.8\n.target sm_75\n.address_size 64\n.visible .entry k()\n{\n ret;\n}\n\0";
+
+    #[test]
+    fn a_panic_where_the_image_is_named_leaves_the_image_as_it_is() {
+        // Without one, the image is adapted (the guard below is what changes the answer).
+        assert!(unsafe { adapt("cuModuleLoadData", PTX.as_ptr().cast(), None) }.is_some());
+        let path = std::env::temp_dir().join(format!("vf-panic-test-{}.ptx", std::process::id()));
+        std::fs::write(&path, &PTX[..PTX.len() - 1]).unwrap();
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes().to_vec()).unwrap();
+        log::set_test_level(Some(2));
+        PANIC_IN_DIGEST.set(true);
+        let from_memory = std::panic::catch_unwind(|| unsafe { adapt("cuModuleLoadData", PTX.as_ptr().cast(), None) });
+        let from_file = std::panic::catch_unwind(|| adapt_file("cuModuleLoad", &path));
+        PANIC_IN_DIGEST.set(false);
+        log::set_test_level(None);
+        let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(path.as_bytes()));
+        // The panic is the layer's: the program gets the image as it gave it.
+        assert!(matches!(from_memory, Ok(None)), "a panic in the digest left adapt");
+        assert!(matches!(from_file, Ok(None)), "a panic in the digest left adapt_file");
     }
 }
