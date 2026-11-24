@@ -569,13 +569,14 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   every product the rules serve ran at 1.04 times 12.9's speed or more but in one layer, and on the sweeps of the
   served classes at 0.95 or more. What takes a product below it is its data, not its shape: an input with many
   columns failing the exact check, which the fallback computes, one fused multiply-add chain over the whole k for
-  each element of a failing column. At long k such a product can run well below the floor, down to about half of
-  12.9's speed: on synthetic operands with 30 and 60 % of their input's columns failing (measured in review; 12.9
-  and the path alternated in one process, 3 rounds; a failing column made by one element at 2^-40), served shapes
-  ran at 0.83 and 0.74 times 12.9's speed (TN 4096 x 256 x 12288, the 9B hybrid's down projection's shape), 0.67
-  and 0.55 (TN 5120 x 256 x 13824), 0.77 and 0.70 at 128 columns with 60 % failing, and the 4B hybrid's 2560 x 256
-  x 9216 at 0.84 with 60 %; where the path's margin with converting inputs is wide it stayed faster (the 1.5B
-  model's 1536 x 256 x 8960, 1.18 with 60 %). The real layers measured at long k had few failing columns (at most
+  each element of a failing column. At long k such a product can run well below the floor, at about half of
+  12.9's speed at the slowest point measured, and more failing columns cost more: on synthetic operands with 30
+  and 60 % of their input's columns failing (measured in review; 12.9 and the path alternated in one process, 3
+  rounds; a failing column made by one element at 2^-40), served shapes ran at 0.83 and 0.74 times 12.9's speed
+  (TN 4096 x 256 x 12288, the 9B hybrid's down projection's shape), 0.67 and 0.55 (TN 5120 x 256 x 13824), the
+  same two shapes at 128 columns at 0.77 and 0.70 with 60 % failing, and the 4B hybrid's 2560 x 256 x 9216 at
+  0.84 with 60 %; where the path's margin with converting inputs is wide it stayed faster (the 1.5B model's 1536 x
+  256 x 8960, 1.18 with 60 %). The real layers measured at long k had few failing columns (at most
   2 % in the 9B hybrid's down projections, 3 % in the 4B hybrid's; the 1.5B model's layer with 53 to 70 %, of k =
   8960, is in the wide classes and goes to 12.9 from 257 columns), and the report at exit counts the calls with
   more than a quarter of their rows or columns failing (above; in review it counted each of the 338 synthetic

@@ -897,8 +897,9 @@ products of many rows (m >= 8192 with n <= 64, or m >= 6144 with k > 9216: 12.9 
 faster at some of these shapes; no layer of a real model was measured among the long ones), wide down projections
 (k > 8192 with n > 256: their gated inputs fail the exact check often enough on real text that the fallback cost
 more than the path saved) (`LIMITS.md`; `docs/performance.md`, section 7); a product they serve can still run below
-12.9's speed, down to 0.9 times by the classes' criterion, and below that when its input has many columns failing
-the exact check (`LIMITS.md`). The acceptance test's NN, NT and TT calls therefore go
+12.9's speed: the classes' floor of 0.9 times holds for the products measured, and a product whose input has many
+columns failing the exact check can run well below it, at long k at about half of 12.9's speed on synthetic inputs
+(`LIMITS.md`). The acceptance test's NN, NT and TT calls therefore go
 to 12.9.
 The gate depends on n, so one element's bits depend on the batch: the same row of op(A) times the same
 column of op(B) has 12.9's bits in a narrow product (n = 1, or within the skinny path's rule) and the
