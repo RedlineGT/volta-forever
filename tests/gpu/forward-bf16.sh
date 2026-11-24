@@ -11,6 +11,7 @@
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
+vf_clear_settings
 T12=$W/toolkits/cuda-12.9.2
 T13=$W/toolkits/cuda-13.5.0
 out=${VF_OUT:-$VF_TEST_ROOT}

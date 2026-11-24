@@ -44,6 +44,14 @@ A setting of one script alone is described in the header of that script (for exa
 `VF_ZML_CUDNN` of `zml.sh`, `VF_BENCH` of `llamacpp-bench.sh`, `VF_TOOL` and `JOBS` of the
 scripts of `tests/sass/`).
 
+`run.sh`, `forward.sh`, `forward-bf16.sh` and `triton.sh`, whose cases set the layer's settings that
+they need, unset those left in the environment (the settings of `INSTALL.md`, "Environment
+variables", that change what the layer does, not those that say where something is, such as
+`VF_PROXY_CACHE`) and print one line that names them, except `VF_CAPABILITY` for `run.sh` (a release
+is checked with it at 8.0; its cases of what a program is told by default run without it); the other
+scripts take the layer's settings from the environment (as `torch.sh` is run at `VF_CAPABILITY=8.0`
+or with `VF_SAFE=1`).
+
 ## What PASS means
 
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,

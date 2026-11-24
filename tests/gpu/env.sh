@@ -44,3 +44,25 @@ vf_torch_map() {
     fi
     echo "$map"
 }
+
+# vf_clear_settings [NAME...]: unset the settings of the layer that change what it does (INSTALL.md,
+# "Environment variables"; not those that say where something is: VF_PROXY_CACHE, VF_REAL_LIBCUDA,
+# VF_AUDIT_MAP_FILE, VF_JITLINK_REAL, VF_FWD_<KEY>, VF_CUDA12), except the NAMEs, which the calling
+# script takes from its caller, and print one line that names those unset. For the scripts whose
+# cases expect what the layer does by default and set what each case needs: a setting left in the
+# shell (VF_CAPABILITY_ALL=1, VF_SAFE=1, VF_LOG) would make a right answer fail.
+vf_clear_settings() {
+    local name keep cleared=
+    for name in VF_LOG_LEVEL VF_LOG VF_EMULATION_WARNINGS VF_SAFE VF_PROXY_CACHE_MAX VF_CAPABILITY \
+        VF_CAPABILITY_ALL VF_TRANSLATE VF_PAIRS VF_BORROW VF_FIT VF_FIT_SHARED VF_BF16_TC_GROUPS \
+        VF_BF16_TC_TILES VF_BF16_COLUMN VF_BF16_ROW VF_ALIGNED_ROWS VF_LAZY VF_ADAPT VF_STATS \
+        VF_PROFILE VF_SUMMARY VF_SUMMARY_INTERVAL VF_TIMING VF_TRACE_LAUNCH VF_TRANSLATE_DUMP \
+        VF_BORROW_SAY VF_AUDIT_MAP VF_JITLINK_DUMP VF_FWD_VERBOSE VF_CUBLAS_BF16_TC \
+        VF_CUBLAS_BF16_SKINNY VF_QUIET VF_VENV VF_JIT_LINEINFO; do
+        [ -n "${!name+set}" ] || continue
+        for keep in "$@"; do [ "$name" = "$keep" ] && continue 2; done
+        unset "$name"
+        cleared="$cleared $name"
+    done
+    [ -z "$cleared" ] || echo "$(basename "$0"): unset the layer's settings that this suite does not take from the environment:$cleared"
+}
