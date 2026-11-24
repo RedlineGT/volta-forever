@@ -4,9 +4,9 @@
 //! GPU the program was built for. It is announced once, when it is given to the program; past a number
 //! of kernels the following are only counted, and the totals are given when the process ends. A kernel
 //! is its name and the image it comes from: two kernels of one name in two images (two
-//! specializations of one kernel) are two kernels.
+//! specializations of one kernel) are two kernels (`Said`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use vf_ptx::EmulatedCounts;
@@ -14,12 +14,71 @@ use vf_ptx::EmulatedCounts;
 /// Kernel names are shortened to this many characters in the list (C++ names run to hundreds).
 const NAME_SHOWN: usize = 100;
 
+/// One load of an image: the handle the driver gave it and the number of that load (a handle that
+/// the driver gives again, after an unload, is another load). `Load::default()`: one load for all.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Load {
+    pub handle: usize,
+    pub number: u64,
+}
+
+/// What `Said::see` makes of a kernel.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// The first kernel of its name.
+    First,
+    /// A kernel of a name seen before, of another image than those seen.
+    Another,
+    /// A kernel seen before: from the same load, or from an image of the same digest.
+    Again,
+}
+
+/// The kernels of each name seen: the first by its load, the others by the digest of their image. A
+/// digest is asked for (`see`) only when a kernel of a name seen before comes from another load, so
+/// that nothing is computed for the kernels that are seen once, or from one load.
+#[derive(Default)]
+pub struct Said {
+    first: HashMap<String, Load>,
+    images: HashSet<(String, u64)>,
+}
+
+impl Said {
+    /// Kernel `name` of `load` is given or refused. `digest(load)` gives the digest of the image of a
+    /// load, or 0 when it is not known (images of unknown digests are taken as one).
+    pub fn see(&mut self, name: &str, load: Load, digest: &dyn Fn(Load) -> u64) -> Seen {
+        let Some(&first) = self.first.get(name) else {
+            self.first.insert(name.to_string(), load);
+            return Seen::First;
+        };
+        if first == load {
+            return Seen::Again;
+        }
+        let image = digest(load);
+        if image != 0 && image == digest(first) {
+            return Seen::Again;
+        }
+        if self.images.insert((name.to_string(), image)) {
+            Seen::Another
+        } else {
+            Seen::Again
+        }
+    }
+
+    /// How many kernels are kept.
+    pub fn len(&self) -> usize {
+        self.first.len() + self.images.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.first.is_empty()
+    }
+}
+
 #[derive(Default)]
 struct State {
-    /// The kernels announced, by name and digest of their image.
-    announced: HashSet<(String, u64)>,
-    /// Their names.
-    names: HashSet<String>,
+    said: Said,
+    /// How many kernels were announced.
+    count: usize,
     totals: EmulatedCounts,
 }
 
@@ -42,23 +101,35 @@ impl Announcer {
     }
 
     /// The lines to print when `kernel`, which has `counts` of emulated instructions, is given to the
-    /// program from an image whose digest is `image` (0: not known): none if it was announced before
-    /// or has none. The first `limit` kernels are listed, or all of them with `all`; with a limit of
-    /// zero nothing is ever printed. A kernel of a name announced before, from another image, is
-    /// listed with that image's digest.
-    pub fn given(&self, kernel: &str, image: u64, counts: &EmulatedCounts, limit: usize, all: bool) -> Vec<String> {
+    /// program from `load` (`Said::see`, with `digest`): none if it was announced before or has none.
+    /// The first `limit` kernels are listed, or all of them with `all`; with a limit of zero nothing
+    /// is ever printed. A kernel of a name announced before, from another image, is listed as another,
+    /// with `shown` (what names its image, when that is known: "image XXH64 ...").
+    #[allow(clippy::too_many_arguments)]
+    pub fn given(
+        &self,
+        kernel: &str,
+        load: Load,
+        digest: &dyn Fn(Load) -> u64,
+        shown: Option<&str>,
+        counts: &EmulatedCounts,
+        limit: usize,
+        all: bool,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         if !counts.any() {
             return lines;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let state = state.get_or_insert_with(State::default);
-        if !state.announced.insert((kernel.to_string(), image)) {
-            return lines;
-        }
-        let again = !state.names.insert(kernel.to_string());
+        let again = match state.said.see(kernel, load, digest) {
+            Seen::Again => return lines,
+            Seen::First => false,
+            Seen::Another => true,
+        };
+        state.count += 1;
         state.totals.add(counts);
-        let rank = state.announced.len();
+        let rank = state.count;
         if limit == 0 {
             return lines;
         }
@@ -74,10 +145,10 @@ impl Announcer {
                 Some((end, _)) if !all => format!("{}...", &kernel[..end]),
                 _ => kernel.to_string(),
             };
-            let which = match (again, image) {
+            let which = match (again, shown) {
                 (false, _) => String::new(),
-                (true, 0) => " (another kernel of this name)".to_string(),
-                (true, image) => format!(" (another kernel of this name, image XXH64 {image:016x})"),
+                (true, None) => " (another kernel of this name)".to_string(),
+                (true, Some(shown)) => format!(" (another kernel of this name, {shown})"),
             };
             lines.push(format!("  emulated in {name}{which}: {}", counts.summary()));
         } else if rank == limit + 1 {
@@ -95,10 +166,10 @@ impl Announcer {
     pub fn summary(&self, limit: usize) -> Option<String> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let state = state.as_ref()?;
-        if limit == 0 || state.announced.is_empty() {
+        if limit == 0 || state.count == 0 {
             return None;
         }
-        let count = state.announced.len();
+        let count = state.count;
         Some(format!(
             "{count} {} with emulated instructions {} given to the program: {}",
             if count == 1 { "kernel" } else { "kernels" },
@@ -119,28 +190,47 @@ mod tests {
         }
     }
 
+    /// Kernels of one load, whose image has no digest: a kernel is its name.
+    fn by_name(announcer: &Announcer, kernel: &str, counts: &EmulatedCounts, limit: usize, all: bool) -> Vec<String> {
+        announcer.given(kernel, Load::default(), &|_| 0, None, counts, limit, all)
+    }
+
+    /// A kernel of load `number`, whose image's digest is `number / 10`, shown as such.
+    fn of_load(announcer: &Announcer, kernel: &str, number: u64, counts: &EmulatedCounts) -> Vec<String> {
+        let shown = format!("image XXH64 {:016x}", number / 10);
+        announcer.given(
+            kernel,
+            Load { handle: 1, number },
+            &|load| load.number / 10,
+            Some(&shown),
+            counts,
+            3,
+            false,
+        )
+    }
+
     #[test]
     fn announces_each_kernel_once_up_to_the_limit() {
         let announcer = Announcer::new();
         assert_eq!(announcer.summary(2), None);
-        assert!(announcer.given("plain", 0, &counts(0), 2, false).is_empty());
-        let first = announcer.given("a", 0, &counts(1), 2, false);
+        assert!(by_name(&announcer, "plain", &counts(0), 2, false).is_empty());
+        let first = by_name(&announcer, "a", &counts(1), 2, false);
         assert_eq!(first.len(), 2);
         assert!(first[0].starts_with("warning: this GPU lacks instructions"));
         assert_eq!(first[1], "  emulated in a: 1 tanh");
-        assert!(announcer.given("a", 0, &counts(1), 2, false).is_empty());
+        assert!(by_name(&announcer, "a", &counts(1), 2, false).is_empty());
         assert_eq!(
-            announcer.given("b", 0, &counts(2), 2, false),
+            by_name(&announcer, "b", &counts(2), 2, false),
             ["  emulated in b: 2 tanh"]
         );
-        let third = announcer.given("c", 0, &counts(4), 2, false);
+        let third = by_name(&announcer, "c", &counts(4), 2, false);
         assert_eq!(third.len(), 1);
         assert!(third[0].contains("counted, not listed"));
-        assert!(announcer.given("d", 0, &counts(8), 2, false).is_empty());
+        assert!(by_name(&announcer, "d", &counts(8), 2, false).is_empty());
         // Listed whatever the limit when all are asked for, with the whole name.
         let long = "k".repeat(300);
         assert_eq!(
-            announcer.given(&long, 0, &counts(16), 2, true),
+            by_name(&announcer, &long, &counts(16), 2, true),
             [format!("  emulated in {long}: 16 tanh")]
         );
         assert_eq!(
@@ -153,39 +243,61 @@ mod tests {
     fn shortens_long_names_and_can_be_silenced() {
         let announcer = Announcer::new();
         let long = "k".repeat(300);
-        let lines = announcer.given(&long, 0, &counts(1), 20, false);
+        let lines = by_name(&announcer, &long, &counts(1), 20, false);
         assert_eq!(lines[1], format!("  emulated in {}...: 1 tanh", "k".repeat(100)));
         assert_eq!(
             announcer.summary(20).unwrap(),
             "1 kernel with emulated instructions was given to the program: 1 tanh"
         );
         let silent = Announcer::new();
-        assert!(silent.given("a", 0, &counts(1), 0, false).is_empty());
+        assert!(by_name(&silent, "a", &counts(1), 0, false).is_empty());
         assert_eq!(silent.summary(0), None);
     }
 
     #[test]
     fn a_kernel_is_its_name_and_its_image() {
         let announcer = Announcer::new();
-        assert_eq!(announcer.given("k", 0x11, &counts(1), 3, false).len(), 2);
-        // The same kernel given again, from the same image: nothing.
-        assert!(announcer.given("k", 0x11, &counts(1), 3, false).is_empty());
+        assert_eq!(of_load(&announcer, "k", 10, &counts(1)).len(), 2);
+        // The same kernel given again, from the same load, or from another load of the same image:
+        // nothing.
+        assert!(of_load(&announcer, "k", 10, &counts(1)).is_empty());
+        assert!(of_load(&announcer, "k", 11, &counts(1)).is_empty());
         // Another kernel of the name, from another image: announced, with its image.
         assert_eq!(
-            announcer.given("k", 0x22, &counts(2), 3, false),
-            ["  emulated in k (another kernel of this name, image XXH64 0000000000000022): 2 tanh"]
+            of_load(&announcer, "k", 220, &counts(2)),
+            ["  emulated in k (another kernel of this name, image XXH64 0000000000000016): 2 tanh"]
         );
-        assert_eq!(
-            announcer.given("k", 0, &counts(4), 3, false),
-            ["  emulated in k (another kernel of this name): 4 tanh"]
-        );
+        assert!(of_load(&announcer, "k", 221, &counts(2)).is_empty());
+        let unknown = announcer.given("k", Load { handle: 2, number: 3 }, &|_| 0, None, &counts(4), 3, false);
+        assert_eq!(unknown, ["  emulated in k (another kernel of this name): 4 tanh"]);
         // Still within the limit, counted as kernels of their own.
-        let fourth = announcer.given("k", 0x44, &counts(8), 3, false);
+        let fourth = of_load(&announcer, "k", 440, &counts(8));
         assert!(fourth[0].contains("counted, not listed"), "{fourth:?}");
-        assert!(announcer.given("k", 0x55, &counts(16), 3, false).is_empty());
+        assert!(of_load(&announcer, "k", 550, &counts(16)).is_empty());
         assert_eq!(
             announcer.summary(3).unwrap(),
             "5 kernels with emulated instructions were given to the program: 31 tanh"
         );
+    }
+
+    #[test]
+    fn a_digest_is_asked_for_only_when_another_load_has_a_kernel_of_the_name() {
+        let asked = std::cell::Cell::new(0);
+        let digest = |load: Load| {
+            asked.set(asked.get() + 1);
+            load.number / 10
+        };
+        let mut said = Said::default();
+        let load = |number| Load { handle: 7, number };
+        assert_eq!(said.see("k", load(10), &digest), Seen::First);
+        assert_eq!(said.see("k", load(10), &digest), Seen::Again);
+        assert_eq!(said.see("other", load(20), &digest), Seen::First);
+        assert_eq!(asked.get(), 0);
+        // Another load of the first's image, then another image.
+        assert_eq!(said.see("k", load(11), &digest), Seen::Again);
+        assert_eq!(said.see("k", load(30), &digest), Seen::Another);
+        assert_eq!(said.see("k", load(31), &digest), Seen::Again);
+        assert_eq!(asked.get(), 6);
+        assert_eq!(said.len(), 3);
     }
 }

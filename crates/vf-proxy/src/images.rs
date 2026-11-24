@@ -4,9 +4,10 @@
 //! often without a length. `adapt` looks at what the pointer leads to and, when the image carries
 //! nothing the driver can use on this GPU but can be adapted, builds the image to load instead.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_int, c_void};
+use std::fmt::Display;
 use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -56,9 +57,12 @@ pub struct Replacement {
     /// For a second translation at launch (`fit`): the cubin that this is the translation of, when
     /// a kernel of the translation takes more registers than its budget.
     pub original_image: Option<Vec<u8>>,
-    /// The digest of the image that the program gave (`xxh64`), when it has kernels to refuse or to
-    /// announce (`kernels::describe`); 0 otherwise.
-    pub source: u64,
+    /// What names, in the lines of its kernels, the image that the program gave, when that is known
+    /// without computing anything more: its file, or its digest once a line of its load printed it
+    /// (`Who`, `kernels::describe`).
+    pub shown: Option<String>,
+    /// The digest of the image given to the driver (`identity`), once it was asked for.
+    identity: OnceLock<u64>,
 }
 
 // SAFETY: the wrapper points at owned, immutable data. Its fourth word is either the program
@@ -87,7 +91,8 @@ impl Replacement {
             emulated: Vec::new(),
             origin: None,
             original_image: None,
-            source: 0,
+            shown: None,
+            identity: OnceLock::new(),
         }
     }
 
@@ -119,7 +124,7 @@ impl Replacement {
         next.emulated = self.emulated.clone();
         next.origin = self.origin;
         next.original_image = self.original_image.clone();
-        next.source = self.source;
+        next.shown = self.shown.clone();
         Some((next, retry.functions))
     }
 
@@ -215,13 +220,26 @@ impl Replacement {
         loaded.emulated = self.emulated;
         loaded.origin = self.origin;
         loaded.original_image = self.original_image;
-        loaded.source = self.source;
+        loaded.shown = self.shown;
         loaded
     }
 
     /// The raw bytes of the image (fat binary or PTX text).
     pub fn data_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    /// The digest of the image given to the driver, computed when it is first asked for (two kernels
+    /// of one name from two loads, `kernels`); 0 for a replacement without bytes.
+    pub fn identity(&self) -> u64 {
+        *self
+            .identity
+            .get_or_init(|| if self.data.is_empty() { 0 } else { xxh64(&self.data) })
+    }
+
+    /// For a replacement without bytes (a library set up from the cache): its identity, given.
+    pub fn set_identity(&self, identity: u64) {
+        let _ = self.identity.set(identity);
     }
 }
 
@@ -259,7 +277,7 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
     }
     kernels::describe(
         handle,
-        replacement.source,
+        replacement.shown.take(),
         std::mem::take(&mut replacement.refused),
         std::mem::take(&mut replacement.emulated),
         FOR_LIBRARY.get(),
@@ -298,7 +316,22 @@ fn given(handle: usize) {
     LOADS.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, number);
 }
 
-fn load_of(handle: usize) -> u64 {
+/// The digest of the image given to the driver in `load` (`Replacement::identity`), or 0 when that
+/// load is not kept any more.
+pub fn digest_of(load: vf_adapt::emulation::Load) -> u64 {
+    if load_of(load.handle) != load.number {
+        return 0;
+    }
+    let kept = KEPT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&load.handle)
+        .cloned();
+    kept.map_or(0, |kept| kept.identity())
+}
+
+/// The number of the load whose handle `handle` is (0: none known).
+pub fn load_of(handle: usize) -> u64 {
     LOADS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -524,7 +557,7 @@ fn known_of(cubin: &[u8], length: usize) -> Found {
 }
 
 /// Say where the kernels that cannot run in a cubin that was loaded as it is were found.
-fn say_known(who: &str, what: &str, found: &Found) {
+fn say_known(who: &dyn Display, what: &str, found: &Found) {
     if let Some(first) = found.refused.first() {
         log::info(format_args!(
             "{who}: {what}, in which {} kernels cannot run on this GPU (the first is {}: {}); they are refused if \
@@ -542,7 +575,7 @@ fn say_known(who: &str, what: &str, found: &Found) {
 ///
 /// # Safety
 /// As for `adapt`, with `bytes` at a cubin.
-unsafe fn linked(who: &str, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
+unsafe fn linked(who: &dyn Display, bytes: *const u8, len: Option<usize>) -> Option<Replacement> {
     let length = unsafe { cubin_extent(bytes, len) }?;
     let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
     let found = known_of(cubin, length);
@@ -586,7 +619,7 @@ fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
     found
 }
 
-fn report(who: &str, what: &str, outcome: &Outcome) {
+fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
     match outcome {
         Outcome::Native => log::trace(format_args!("{who}: {what} with code for this GPU")),
         Outcome::Unknown => log::trace(format_args!("{who}: {what} not recognised, loaded as is")),
@@ -746,7 +779,7 @@ pub unsafe fn loaded_as_is(result: c_int, handle: *mut *mut c_void) {
 /// `original`: the image as the program gave it, when it is machine code that may have been
 /// translated (kept, for `fit`, when the translation has a kernel over its budget).
 fn finish(
-    who: &str,
+    who: &dyn Display,
     what: &str,
     adapted: Adapted,
     wrapper: Option<Wrapper>,
@@ -790,7 +823,7 @@ fn finish(
 /// What `adapt` makes of `image`, a whole fat binary or cubin. The translation of machine code
 /// takes a tenth of a second a megabyte: it is kept (`cache`), and taken from there when the same
 /// image was translated by an earlier run of the same build with the same policy.
-fn adapted(who: &str, image: &[u8], adapt: impl FnOnce() -> Adapted) -> Adapted {
+fn adapted(who: &dyn Display, image: &[u8], adapt: impl FnOnce() -> Adapted) -> Adapted {
     let key = crate::cache::enabled().then(|| crate::cache::key_for(image));
     let start = std::time::Instant::now();
     if let Some(kept) = key.as_ref().and_then(crate::cache::load_translation) {
@@ -813,7 +846,7 @@ fn adapted(who: &str, image: &[u8], adapt: impl FnOnce() -> Adapted) -> Adapted 
     adapted
 }
 
-fn adapt_container(who: &str, bytes: &[u8], fat: &fatbin::FatBinary<'_>) -> Result<Adapted, fatbin::Error> {
+fn adapt_container(who: &dyn Display, bytes: &[u8], fat: &fatbin::FatBinary<'_>) -> Result<Adapted, fatbin::Error> {
     let mut failed = None;
     let result = adapted(who, bytes, || {
         policy().adapt_fatbin(fat).unwrap_or_else(|e| {
@@ -829,7 +862,7 @@ fn adapt_container(who: &str, bytes: &[u8], fat: &fatbin::FatBinary<'_>) -> Resu
 
 /// `at`: where the fat binary is, for the bytes of the whole of it.
 fn adapt_fatbin(
-    who: &str,
+    who: &dyn Display,
     at: *const u8,
     fat: Result<fatbin::FatBinary<'_>, fatbin::Error>,
     wrapper: Option<Wrapper>,
@@ -866,7 +899,7 @@ fn adapt_fatbin(
 /// # Safety
 /// The wrapper and the null-terminated array in `extra` are supplied by the CUDA runtime.
 /// Each non-null array member is the address of a complete fat binary, not another wrapper.
-unsafe fn adapt_linked(who: &str, wrapper: Wrapper) -> Option<Replacement> {
+unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacement> {
     let policy = policy();
     let primary = unsafe { fatbin::parse_at(wrapper.data) }.ok()?;
     let linked = unsafe { std::slice::from_raw_parts(wrapper.data, primary.len) };
@@ -1051,7 +1084,7 @@ unsafe fn image_bytes_inner(ptr: *const c_void, len: Option<usize>) -> Option<Ve
 
 /// # Safety
 /// As for `adapt`.
-unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> Option<Replacement> {
+unsafe fn adapt_unguarded(who: &dyn Display, ptr: *const c_void, len: Option<usize>) -> Option<Replacement> {
     let bytes = ptr as *const u8;
     let policy = policy();
     // The first four bytes tell the binary formats apart. Text may be shorter than that: stop at its
@@ -1144,13 +1177,18 @@ unsafe fn adapt_unguarded(who: &str, ptr: *const c_void, len: Option<usize>) -> 
 thread_local! {
     /// For a unit test: `xxh64` panics in this thread.
     static PANIC_IN_DIGEST: Cell<bool> = const { Cell::new(false) };
+    /// For a unit test: how many digests this thread took.
+    static DIGESTS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// The XXH64 of `bytes` (seed 0: what `xxhsum -H1` prints for a file of these bytes).
 pub fn xxh64(bytes: &[u8]) -> u64 {
     #[cfg(test)]
-    if PANIC_IN_DIGEST.get() {
-        panic!("a panic put in xxh64 by a test");
+    {
+        DIGESTS.set(DIGESTS.get() + 1);
+        if PANIC_IN_DIGEST.get() {
+            panic!("a panic put in xxh64 by a test");
+        }
     }
     use std::hash::Hasher;
     let mut hasher = twox_hash::XxHash64::with_seed(0);
@@ -1214,7 +1252,8 @@ unsafe fn image_extent<'a>(ptr: *const c_void, len: Option<usize>) -> Option<&'a
 
 /// The image to load in place of the one at `ptr`, if it has to be adapted. `len` is its length when
 /// the caller states one (`cuLinkAddData`). From log level 2, the lines said of it name it by its size
-/// and digest (`xxh64`), so that two images loaded for kernels of one name can be told apart.
+/// and digest (`xxh64`, taken when such a line is written: `Who`), so that two images loaded for
+/// kernels of one name can be told apart.
 ///
 /// # Safety
 /// `ptr` must be null or point to an image the driver itself could read: a complete fat-binary wrapper,
@@ -1227,16 +1266,63 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
         return None;
     }
     guarded(who, || {
-        let digest = || unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
-        let identity = log::at_level(2).then(digest).flatten();
-        let named = identity.map(|(size, digest)| format!("{who} of {size} bytes, XXH64 {digest:016x}"));
-        let mut replacement = unsafe { adapt_unguarded(named.as_deref().unwrap_or(who), ptr, len) }?;
-        if !replacement.refused.is_empty() || !replacement.emulated.is_empty() {
-            // What is said of its kernels is said once for each kernel of each image.
-            replacement.source = identity.or_else(digest).map_or(0, |(_, digest)| digest);
-        }
+        let named = Who {
+            call: who,
+            image: Named::Memory(ptr, len),
+            name: OnceCell::new(),
+        };
+        let mut replacement = unsafe { adapt_unguarded(&named, ptr, len) }?;
+        replacement.shown = named.shown();
         Some(replacement)
     })
+}
+
+/// What the lines of the adaptation of an image call it: the call, and from log level 2 the image,
+/// by its file or by its size and digest, made when a line that is written names it (`fmt`): nothing
+/// is computed for a line that the log level does not let through.
+struct Who<'a> {
+    call: &'a str,
+    image: Named<'a>,
+    /// The name, once a line made it; with the digest, what names the image in later lines.
+    name: OnceCell<Option<(String, Option<String>)>>,
+}
+
+enum Named<'a> {
+    /// An image at an address, of a length when it is known.
+    Memory(*const c_void, Option<usize>),
+    File(&'a CStr),
+}
+
+impl Who<'_> {
+    /// What names the image in the lines of its kernels, if that is known without computing anything:
+    /// its file, or the digest that a line printed.
+    fn shown(&self) -> Option<String> {
+        match self.image {
+            Named::File(path) => Some(format!("file {}", path.to_string_lossy())),
+            Named::Memory(..) => self.name.get()?.as_ref()?.1.clone(),
+        }
+    }
+}
+
+impl Display for Who<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !log::at_level(2) {
+            return f.write_str(self.call);
+        }
+        let name = self.name.get_or_init(|| match self.image {
+            // SAFETY: what `adapt` was given.
+            Named::Memory(ptr, len) => unsafe { image_extent(ptr, len) }.map(|image| {
+                let digest = xxh64(image);
+                let shown = format!("image XXH64 {digest:016x}");
+                (
+                    format!("{} of {} bytes, XXH64 {digest:016x}", self.call, image.len()),
+                    Some(shown),
+                )
+            }),
+            Named::File(path) => Some((format!("{} of {}", self.call, path.to_string_lossy()), None)),
+        });
+        f.write_str(name.as_ref().map_or(self.call, |(name, _)| name))
+    }
 }
 
 /// `adapt` (whatever it reads and computes of the image, its digest included) under a guard:
@@ -1262,9 +1348,11 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
     // A path is bytes, in whatever encoding: it is read as the driver would read it.
     let mut contents = std::fs::read(std::ffi::OsStr::from_bytes(path.to_bytes())).ok()?;
     guarded(who, || {
-        let named = log::at_level(2).then(|| format!("{who} of {}", path.to_string_lossy()));
-        let who = named.as_deref().unwrap_or(who);
-        let source = xxh64(&contents);
+        let named = Who {
+            call: who,
+            image: Named::File(path),
+            name: OnceCell::new(),
+        };
         if contents.len() < 4 {
             return None;
         }
@@ -1282,8 +1370,8 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
             contents.push(0); // text
         }
         // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
-        let mut replacement = unsafe { adapt_unguarded(who, contents.as_ptr().cast(), None) }?;
-        replacement.source = source;
+        let mut replacement = unsafe { adapt_unguarded(&named, contents.as_ptr().cast(), None) }?;
+        replacement.shown = named.shown();
         Some(replacement)
     })
 }
@@ -1323,8 +1411,47 @@ mod tests {
         PANIC_IN_DIGEST.set(false);
         log::set_test_level(None);
         let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(path.as_bytes()));
-        // The panic is the layer's: the program gets the image as it gave it.
+        // The panic is the layer's: the program gets the image as it gave it. (A file is named by its
+        // name: no digest is taken of it.)
         assert!(matches!(from_memory, Ok(None)), "a panic in the digest left adapt");
-        assert!(matches!(from_file, Ok(None)), "a panic in the digest left adapt_file");
+        assert!(
+            matches!(from_file, Ok(Some(_))),
+            "adapt_file took a digest, or a panic left it"
+        );
+    }
+
+    const EMULATED: &[u8] =
+        b".version 8.8\n.target sm_75\n.address_size 64\n.visible .entry k()\n{\n .reg .f32 %f<3>;\n \
+        tanh.approx.f32 %f1, %f2;\n ret;\n}\n\0";
+
+    #[test]
+    fn a_digest_is_taken_only_for_a_line_that_prints_it() {
+        let path = std::env::temp_dir().join(format!("vf-digest-test-{}.ptx", std::process::id()));
+        std::fs::write(&path, &EMULATED[..EMULATED.len() - 1]).unwrap();
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes().to_vec()).unwrap();
+        // At level 1: an image with a kernel that runs emulated instructions, from memory and from a
+        // file: no digest.
+        log::set_test_level(Some(1));
+        DIGESTS.set(0);
+        let from_memory = unsafe { adapt("cuModuleLoadData", EMULATED.as_ptr().cast(), None) }.unwrap();
+        let from_file = adapt_file("cuModuleLoad", &path).unwrap();
+        let at_level_1 = DIGESTS.get();
+        // At level 2 the line of the load names the image: one digest, then what names it later.
+        log::set_test_level(Some(2));
+        let named = unsafe { adapt("cuModuleLoadData", EMULATED.as_ptr().cast(), None) }.unwrap();
+        let at_level_2 = DIGESTS.get() - at_level_1;
+        log::set_test_level(None);
+        let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(path.as_bytes()));
+        assert_eq!(at_level_1, 0);
+        assert_eq!(from_memory.emulated.len(), 1);
+        assert_eq!(from_memory.shown, None);
+        assert!(
+            from_file.shown.as_deref().unwrap().starts_with("file "),
+            "{:?}",
+            from_file.shown
+        );
+        assert_eq!(at_level_2, 1);
+        let digest = xxh64(&EMULATED[..EMULATED.len() - 1]);
+        assert_eq!(named.shown, Some(format!("image XXH64 {digest:016x}")));
     }
 }

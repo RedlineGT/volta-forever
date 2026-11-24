@@ -477,7 +477,9 @@ fn refuses_compilation(
     for kernel in emulated {
         for line in ANNOUNCER.given(
             &kernel.kernel,
-            0,
+            vf_adapt::emulation::Load::default(),
+            &|_| 0,
+            None,
             &kernel.counts,
             emulation_warnings(),
             log::at_level(2),

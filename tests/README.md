@@ -330,9 +330,10 @@ with the stand-in of the fourth, that from `VF_LOG_LEVEL=2` the lines about an i
 the file of `cuModuleLoad`, by the size and XXH64 digest of an image that `cuModuleLoadData` or
 `cuLibraryLoadData` is given), so that two kernels of one name in two images are told apart, and
 that the default level prints none of them; and that the lines of a kernel with emulated
-instructions and of a refused kernel are said once for each kernel, a kernel being its name and
-its image (a second kernel of a name, from another image, said with that image's digest; the same
-image loaded again not said again), within `VF_EMULATION_WARNINGS`; it needs a C compiler. The
+instructions and of a refused kernel are said once for each kernel, its name and its code, or for
+a refused kernel its name and why (a second kernel of a name, of other code or refused otherwise,
+said, from level 2 with its image's digest; the same image loaded again not said again), within
+`VF_EMULATION_WARNINGS`; it needs a C compiler. The
 thirteenth checks, with the same stand-in, that with `VF_SUMMARY` the report at exit is in its file
 while the process runs, rewritten when it changes, and still there, as it last was, once the
 process is killed with SIGKILL; that it is written at exit (with `VF_STATS`'s counts); that no

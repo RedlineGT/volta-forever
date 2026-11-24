@@ -7,8 +7,10 @@ specializations of a kernel, can be told apart. At the default level these lines
 printed.
 
 At the default level, "emulated in NAME" and "kernel NAME cannot run" are said once for each
-kernel, a kernel being its name and its image: a second kernel of a name, from another image, is
-said too, with its image's digest; the same image loaded again is not said again. Past
+kernel: a kernel with emulated instructions is its name and its code, a refused kernel its name
+and why it is refused. A second kernel of a name, of other code or refused otherwise, is said too
+(from level 2 with its image's digest, which the line of its load printed); the same image loaded
+again is not said again. Past
 VF_EMULATION_WARNINGS kernels with emulated instructions, and as many refusals of a name said
 before, a line says that the next are not listed. A stand-in driver (link_mock_driver.c) loads
 the modules.
@@ -72,10 +74,14 @@ def entry(name, body):
     return HEADER + b".visible .entry " + name + b"()\n{\n .reg .f32 %f<3>;\n" + body + b" ret;\n}\n"
 
 
-# A kernel with an emulated instruction (tanh.approx.f32 has no Volta instruction), and one that is
-# refused (barrier.cluster has no Volta sequence), each in four images of different code.
+# A kernel with an emulated instruction (tanh.approx.f32 has no Volta instruction), in four images of
+# different code; and one that is refused, in four images: two for barrier.cluster.arrive (of
+# different code, which becomes the same trap), one for barrier.cluster.wait, one for
+# fence.proxy.async (none has a Volta sequence).
 EMULATED = [entry(b"k", b" tanh.approx.f32 %f1, %f2;\n" + b" add.f32 %f1, %f1, %f2;\n" * i) for i in range(4)]
-REFUSED = [entry(b"r", b" barrier.cluster.arrive;\n" + b" add.f32 %f1, %f1, %f2;\n" * i) for i in range(4)]
+REFUSED = [entry(b"r", b" barrier.cluster.arrive;\n"), entry(b"r", b" barrier.cluster.arrive;\n add.f32 %f1, %f1, %f2;\n"),
+           entry(b"r", b" barrier.cluster.wait;\n"), entry(b"r", b" fence.proxy.async;\n")]
+WHY = ["barrier.cluster.arrive", "barrier.cluster.arrive", "barrier.cluster.wait", "fence.proxy.async"]
 
 
 def kernels(proxy):
@@ -134,29 +140,33 @@ if __name__ == "__main__":
         assert said["1"] == [], "\n".join(said["1"])
         print("PASS nothing of it at the default level")
 
-        def kernel_lines(limit):
+        def kernel_lines(limit, level="1"):
+            settings = {"VF_LOG_LEVEL": level, **({"VF_EMULATION_WARNINGS": limit} if limit else {})}
             run = subprocess.run([sys.executable, __file__, sys.argv[1], mock, "kernels"],
-                                 env=dict(env, **({"VF_EMULATION_WARNINGS": limit} if limit else {})),
-                                 check=True, stderr=subprocess.PIPE, text=True)
+                                 env=dict(env, **settings), check=True, stderr=subprocess.PIPE, text=True)
             return [line.split("] ", 1)[1] for line in run.stderr.splitlines()
                     if "emulated in " in line or "kernel r " in line or "further kernels" in line
                     or "not said any more" in line]
-        image = lambda data: f"image XXH64 {xxh64(data):016x}"
-        why = "barrier.cluster.arrive"
-        lines = kernel_lines(None)
-        assert len(lines) == 8, "\n".join(lines)
-        assert lines[0] == "  emulated in k: 1 tanh", lines[0]
-        for i in (1, 2, 3):
-            assert lines[i] == f"  emulated in k (another kernel of this name, {image(EMULATED[i])}): 1 tanh", lines[i]
-        assert lines[4].startswith("kernel r cannot run on this GPU and is not given to the program: ") and \
-            why in lines[4] and "another" not in lines[4], lines[4]
-        for i, line in zip((1, 2, 3), lines[5:], strict=True):
-            assert line.startswith("kernel r cannot run") and why in line and \
-                line.endswith(f"(another kernel of this name, {image(REFUSED[i])})"), line
-        print("PASS each kernel of a name said once, by its name and its image")
+        image = lambda data: f", image XXH64 {xxh64(data):016x}"
+        # At level 1 no digest is taken: another kernel of a name is said as such; at level 2, with the
+        # digest of its image that the line of its load printed.
+        for level, shown in (("1", lambda data: ""), ("2", image)):
+            lines = kernel_lines(None, level)
+            assert len(lines) == 7, "\n".join(lines)
+            assert lines[0] == "  emulated in k: 1 tanh", lines[0]
+            for i in (1, 2, 3):
+                assert lines[i] == f"  emulated in k (another kernel of this name{shown(EMULATED[i])}): 1 tanh", lines[i]
+            assert lines[4].startswith("kernel r cannot run on this GPU and is not given to the program: ") and \
+                WHY[0] in lines[4] and "another" not in lines[4], lines[4]
+            # The second image of barrier.cluster.arrive is refused as the first: not said again.
+            for i, line in zip((2, 3), lines[5:], strict=True):
+                assert line.startswith("kernel r cannot run") and WHY[i] in line and \
+                    line.endswith(f"(another kernel of this name{shown(REFUSED[i])})"), line
+        print("PASS each kernel of a name said once: by its code, or for a refusal by its reason")
         lines = kernel_lines("1")
         assert len(lines) == 5, "\n".join(lines)
         assert lines[0] == "  emulated in k: 1 tanh" and "counted, not listed" in lines[1], "\n".join(lines)
-        assert "another" not in lines[2] and lines[3].endswith(f"another kernel of this name, {image(REFUSED[1])})"), "\n".join(lines)
+        assert "another" not in lines[2] and WHY[2] in lines[3] and lines[3].endswith("(another kernel of this name)"), \
+            "\n".join(lines)
         assert lines[4].startswith("kernels refused under a name already said are not said any more"), lines[4]
         print("PASS within VF_EMULATION_WARNINGS")
