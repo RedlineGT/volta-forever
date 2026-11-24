@@ -430,6 +430,26 @@ capability it was told. A direct client with no embedded GPU code under the
 launcher gets the driver's actual kernel binary version, including 70 for a
 native Volta kernel, even when its device query returns 7.5 or a configured value.
 
+It may ask for which architecture the kernel's PTX was written, too
+(`CU_FUNC_ATTRIBUTE_PTX_VERSION`, `ptxVersion` of `cudaFuncGetAttributes`, which the
+CUDA 13 runtime asks through `cuKernelGetAttribute`): the device-wide algorithms of
+CUB and Thrust choose by it among the architectures the program was built for, and
+fail with "invalid device function" when it is none of them. A GPU answers the target
+of the PTX it compiled, which can be below its own (an Ampere card that compiles PTX
+for sm_75 answers 7.5), never above. The driver compiled the layer's PTX, retargeted
+to sm_70, and answers 7.0. When the layer retargets PTX for a later architecture, it
+records that architecture with the image (`images::Replacement::retargeted_from`,
+kept in the cache's manifest of a deferred library), and with the module or library
+that the driver made of it (`kernels::retargeted`), the module of a library in a
+context and the kernels compiled alone included. For a function or kernel of such
+code, the proxy answers that architecture, at most what it answers for the machine
+code (the capability told: told 8.0, a program whose PTX is for sm_75 is answered 7.5
+and 8.0). A caller told the truth (code of its own for the V100, a direct client of
+the launcher) gets the driver's answers. On a later card, the code of a deferred
+library or of a library loaded from PTX text is the layer's there too, and is
+answered the same, at most the card's architecture. Translated machine code keeps the
+architecture of its PTX in its header (`docs/translator.md`), which the driver gives.
+
 A program that wants to know what is really there can ask the layer itself
 (`crates/vf-proxy/src/marker.rs`): `libcuda.so.1` has the functions
 `volta_forever_version()` (the layer's version, a C string) and `volta_forever_abi()`

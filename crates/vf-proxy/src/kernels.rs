@@ -62,6 +62,10 @@ struct Kernels {
     /// its size and digest, for the line that says why one is not launched.
     trap_only: HashSet<String>,
     image: Option<(usize, u64)>,
+    /// The architecture of the program's PTX that the layer retargeted for this GPU, when it was a
+    /// later one (`retargeted`): what the program's code was compiled for, where the driver, which
+    /// compiled the layer's PTX, says this GPU's (`retargeted_from`).
+    retargeted_from: Option<u32>,
 }
 
 static KNOWN: LazyLock<Mutex<HashMap<usize, Kernels>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -290,6 +294,31 @@ pub fn without_code(handle: usize, names: Vec<String>, image: (usize, u64), libr
     kernels.image.get_or_insert(image);
     kernels.trap_only.extend(names);
     changed(&known);
+}
+
+/// The code of the image loaded as `handle` (a library's when `library`) was retargeted by the
+/// layer from PTX for `sm`, a later architecture than this GPU's. (Nothing that `guard` concludes
+/// changes: no new generation.)
+pub fn retargeted(handle: usize, sm: u32, library: bool) {
+    let mut known = known();
+    let kernels = known.entry(handle).or_default();
+    kernels.is_library |= library;
+    kernels.retargeted_from = Some(sm);
+}
+
+/// The architecture of the program's PTX from which the layer made the code of `handle`, a function
+/// or a kernel (`retargeted`), as the driver says what `handle` is (`owner_of`): a function of a
+/// module, of the module of a library in a context on this GPU (`share`), or in any context for a
+/// deferred library (`lazy::module_owner`), or a kernel of a library, deferred or not. `None` when
+/// its code is not known here as retargeted.
+///
+/// # Safety
+/// `handle` must be one that the driver accepts for a question about a function or a kernel, or
+/// that it refuses.
+pub unsafe fn retargeted_from(handle: usize) -> Option<u32> {
+    let (owner, _) = unsafe { owner_of(handle) }?;
+    let of = |owner: usize| metadata(&known(), owner).and_then(|kernels| kernels.retargeted_from);
+    of(owner).or_else(|| crate::lazy::module_owner(owner).and_then(of))
 }
 
 /// Record the code origin for the image loaded as `handle`.
@@ -565,22 +594,29 @@ unsafe fn name_by(getter: usize, handle: usize) -> Option<String> {
 
 /// What the driver says `handle` is: a kernel of a library (`cuKernelGetLibrary`; a kernel of a
 /// deferred library is the library the program holds), or a function of a module
-/// (`cuFuncGetModule`), with its name. `None` when it says neither. (The library first: NVIDIA's
+/// (`cuFuncGetModule`): that library or module, with the driver's function that names it
+/// (`cuKernelGetName`, `cuFuncGetName`). `None` when it says neither. (The library first: NVIDIA's
 /// driver answers 400 to `cuKernelGetLibrary` for a function, measured on a V100 with driver
 /// 580.178.04; `cuFuncGetName` takes a function only.)
-unsafe fn identify(handle: usize) -> Option<(usize, String)> {
+unsafe fn owner_of(handle: usize) -> Option<(usize, usize)> {
     let get_library: GetHandle = unsafe { driver(idx::cuKernelGetLibrary) };
     let mut library = std::ptr::null_mut();
     if unsafe { get_library(&mut library, handle as *mut c_void) } == 0 && !library.is_null() {
         let owner = crate::lazy::kernel_library(handle).unwrap_or(library as usize);
-        return unsafe { name_by(idx::cuKernelGetName, handle) }.map(|name| (owner, name));
+        return Some((owner, idx::cuKernelGetName));
     }
     let get_module: GetHandle = unsafe { driver(idx::cuFuncGetModule) };
     let mut module = std::ptr::null_mut();
     if unsafe { get_module(&mut module, handle as *mut c_void) } != 0 || module.is_null() {
         return None;
     }
-    unsafe { name_by(idx::cuFuncGetName, handle) }.map(|name| (module as usize, name))
+    Some((module as usize, idx::cuFuncGetName))
+}
+
+/// What the driver says `handle` is (`owner_of`), with its name.
+unsafe fn identify(handle: usize) -> Option<(usize, String)> {
+    let (owner, getter) = unsafe { owner_of(handle) }?;
+    unsafe { name_by(getter, handle) }.map(|name| (owner, name))
 }
 
 /// Whether `handle` is the kernel `name` of `library` (a library's, in the driver), or its function
@@ -807,6 +843,36 @@ pub fn summary_line() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_architecture_retargeted_from_holds_for_the_modules_of_a_library() {
+        let (library, module, other) = (0x7e57_1000, 0x7e57_1010, 0x7e57_1020);
+        retargeted(library, 75, true);
+        assert_eq!(metadata(&known(), library).and_then(|k| k.retargeted_from), Some(75));
+        assert!(known().get(&library).is_some_and(|k| k.is_library));
+        // The module that the driver gives for the library in a context.
+        share(module, library);
+        assert_eq!(metadata(&known(), module).and_then(|k| k.retargeted_from), Some(75));
+        // What is known of refusals merges with it.
+        describe(
+            library,
+            None,
+            vec![Refused {
+                kernel: "bad".into(),
+                function: "bad".into(),
+                reason: "a test".into(),
+            }],
+            Vec::new(),
+            true,
+        );
+        assert_eq!(metadata(&known(), module).and_then(|k| k.retargeted_from), Some(75));
+        assert!(metadata(&known(), module).is_some_and(|k| k.refused.contains_key("bad")));
+        // Gone with the library, and nothing for a module that was not retargeted.
+        forget(library);
+        assert!(metadata(&known(), module).is_none());
+        assert!(metadata(&known(), other).is_none());
+        forget(module);
+    }
 
     #[test]
     fn nccl_kernels_are_known_by_their_names() {

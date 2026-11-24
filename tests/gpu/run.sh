@@ -562,6 +562,36 @@ VF_STATS=1 rt stats rt_probe.129.sm70 "$T/cuda-12.9.2/lib" "half gemm check: 0 w
 VF_ADAPT=0 rt adapt-off rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "cudaGetLastError\(\) +-> 209"
 VF_LAZY=0 rt lazy-off rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "own kernel: 0/65536 wrong" "lazy off,"
 
+# CUB's device-wide algorithms (tests/kernels/cub_sort.cu: a radix sort of pairs, a sum, an
+# inclusive scan) choose among the architectures that the program was built for by the PTX version
+# of a kernel of the program (cudaFuncGetAttributes), and answer "invalid device function" when it
+# is none of them. A program whose code is PTX for sm_75 only (as Ollama's cuda_v13 runner) is
+# answered 7.5, as a Turing or later GPU answers for PTX for sm_75, and its machine code 7.5 (the
+# capability told); told 8.0 (VF_CAPABILITY_ALL=1, its CUDA runtime a shared library), its machine
+# code 8.0 and its PTX still 7.5. Its sm_75 machine code, translated, is answered 7.5 for both; a
+# program with code for sm_70 is answered the truth, 7.0. (Until 2026-11-24 the PTX of the first was
+# said to be for sm_70, and its algorithms answered "invalid device function".)
+cub() {  # cub NAME TOOLKIT NVCC-FLAGS...
+    local program=$out/bin/cub_sort.$1 tk=$2
+    shift 2
+    [ -x "$program" ] && [ "$program" -nt "$G/cub_sort.cu" ] ||
+        nvcc_host "$T/cuda-$tk/bin/nvcc" -O2 "$@" "$G/cub_sort.cu" -o "$program" || exit 2
+}
+cub 135.ptx75 13.5.0 -gencode arch=compute_75,code=compute_75
+cub 135.ptx75-shared 13.5.0 --cudart=shared -gencode arch=compute_75,code=compute_75
+cub 135.sm75 13.5.0 -gencode arch=compute_75,code=sm_75
+cub 129.sm70 12.9.2 -arch=sm_70 -Wno-deprecated-gpu-targets
+sorted=("SortPairs: no error, right" "Sum: no error, right" "InclusiveSum: no error, right" "ALL CHECKS PASSED")
+by_default rt cub-ptx75 cub_sort.135.ptx75 "$T/cuda-13.5.0/lib" "ptxVersion 75, binaryVersion 75" \
+    "PTX for sm_75 retargeted" "${sorted[@]}"
+VF_CAPABILITY=8.0 rt cub-ptx75-told-8.0 cub_sort.135.ptx75 "$T/cuda-13.5.0/lib" "ptxVersion 75, binaryVersion 75" \
+    "is told compute capability 7.5, not the 8.0 that VF_CAPABILITY asks" "${sorted[@]}"
+VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1 rt cub-ptx75-all-8.0 cub_sort.135.ptx75-shared "$T/cuda-13.5.0/lib" \
+    "ptxVersion 75, binaryVersion 80" "${sorted[@]}"
+by_default rt cub-sm75 cub_sort.135.sm75 "$T/cuda-13.5.0/lib" "ptxVersion 75, binaryVersion 75" \
+    "machine code for sm_75 translated" "${sorted[@]}"
+rt cub-sm70 cub_sort.129.sm70 "$T/cuda-12.9.2/lib" "ptxVersion 70, binaryVersion 70" "${sorted[@]}"
+
 # A fat binary of the program with a kernel that the layer refuses beside two that it runs, under
 # the runtimes of CUDA 13.5 and 12.9 and both loading modes. The CUDA 13 runtime takes each kernel
 # by itself (cuLibraryGetKernel) and goes on without the refused one; so does the CUDA 12 runtime
@@ -625,7 +655,10 @@ refuse refuse-link link "ALL CHECKS PASSED" \
 # the context still runs a kernel afterwards, and the GPU did not stop (no line more with "Xid" in
 # the kernel's log, where it can be read). Until 2026-11-23 the first launch trapped (Xid 43).
 [ -x "$out/bin/test_guard" ] && [ "$out/bin/test_guard" -nt "$G/test_guard.c" ] || gcc -O2 -Wall -o "$out/bin/test_guard" "$G/test_guard.c" -ldl || exit 2
-xids() { dmesg 2>/dev/null | grep -c Xid; }
+# The kernel's log is read from dmesg, else from `journalctl -k`, else from `sudo -n dmesg`
+# (tests/gpu/kernel-log.sh), whichever can be read here first.
+. "$W/tests/gpu/kernel-log.sh"
+xids() { kernel_log | grep -c Xid; }
 xid_unchecked=  # a guard or nocode case whose check of the kernel's log could not be made: said at the end
 guard() {  # guard NAME INTERFACE
     local name=$1 interface=$2 before after
@@ -633,8 +666,8 @@ guard() {  # guard NAME INTERFACE
     before=$(xids)
     DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_guard" "$interface" >"$log" 2>&1
     after=$(xids)
-    if dmesg >/dev/null 2>&1; then
-        echo "lines with Xid in the kernel's log: $before before, $after after" >>"$log"
+    if [ -n "$kernel_log_source" ]; then
+        echo "lines with Xid in the kernel's log ($kernel_log_source): $before before, $after after" >>"$log"
         [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
     else
         echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
@@ -665,8 +698,8 @@ nocode() {  # nocode NAME IMAGE INTERFACE
     before=$(xids)
     DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_nocode" "$image" "$interface" >"$log" 2>&1
     after=$(xids)
-    if dmesg >/dev/null 2>&1; then
-        echo "lines with Xid in the kernel's log: $before before, $after after" >>"$log"
+    if [ -n "$kernel_log_source" ]; then
+        echo "lines with Xid in the kernel's log ($kernel_log_source): $before before, $after after" >>"$log"
         [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
     else
         echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
@@ -800,6 +833,7 @@ if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
 fi
 
 # The guard and nocode cases above pass their check of the kernel's log where it cannot be read
-# (dmesg needs privileges that the user may not have): said once, at the end, so that it is seen.
-[ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (dmesg not readable)"
+# (dmesg, the journal and sudo need privileges that the user may not have): said once, at the end,
+# so that it is seen.
+[ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (the kernel's log could not be read: dmesg, journalctl -k and sudo -n dmesg were tried)"
 exit $failed

@@ -138,8 +138,8 @@ purpose; an opt-in test may, behind a documented switch (the `native` mode of
 `tests/kernels/test_nocode.c`, which `tests/README.md` names), and whoever runs it reports the Xid
 lines. A test of a path that once faulted checks that no Xid line was added, as the `guard-*` and
 `nocode-*` cases of `tests/gpu/run.sh` do (for a user who cannot read the kernel's log, they pass,
-and the last line of `run.sh` says "Xid lines could not be checked (dmesg not readable)": read it
-as root then).
+and the last line of `run.sh` says "Xid lines could not be checked": it tried `dmesg`,
+`journalctl -k` and `sudo -n dmesg`; read the log as root then).
 
 ## Licence
 

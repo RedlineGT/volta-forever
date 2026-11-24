@@ -18,10 +18,17 @@
 // cuGetExportTable gives a table whose entry 1 (after its size) is a private function that gives
 // the function of the first entry of a module, as cuFFT takes its functions (`first_function`).
 //
+// The questions about a function or a kernel are answered as NVIDIA's driver answers them on the
+// device of the question for the two architectures of its code (ptx_version.py): the binary version
+// (attribute 6) is the device's (7.0 or 9.0), the PTX version (attribute 5) the latest `.target` of
+// the PTX that the module or library was given that the device reaches (the PTX that the driver
+// compiles there); the others are answered 1.
+//
 // Its compiler refuses a library whose PTX has the entries late() and other() and a line with 54321
 // (in late): error 218, and that line in the error log, as ptxas writes it. Alone, late() is
 // accepted: the layer learns that it is refused when a deferred library is loaded whole, after it
 // gave the kernel compiled alone.
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -42,6 +49,8 @@ static struct {
     int library; // of a CONTEXT_MODULE: the index of its library
     char names[NAMES][32];
     int count;
+    int targets[NAMES]; // the architectures of the `.target` lines of its PTX
+    int target_count;
 } objects[MAX];
 static int object_count;
 
@@ -62,6 +71,18 @@ static int find_object(void *handle) {
     return -1;
 }
 
+// The bytes of an image: a fat binary (its header says how far it reaches: the PTX of the layer's
+// is stored as it is), else text.
+static size_t extent(const char *image) {
+    unsigned magic;
+    unsigned long long size;
+    if (!image) return 0;
+    memcpy(&magic, image, 4);
+    if (magic != 0xBA55ED50u) return strlen(image);
+    memcpy(&size, image + 8, 8);
+    return 16 + size;
+}
+
 static int new_object(int kind, const char *text) {
     int i = object_count++;
     uintptr_t handle = next_handle ? next_handle : counter++;
@@ -71,12 +92,19 @@ static int new_object(int kind, const char *text) {
     objects[i].kind = kind;
     objects[i].live = 1;
     objects[i].context = current;
-    for (const char *p = text; p && (p = strstr(p, ".entry ")) && objects[i].count < NAMES;) {
+    const char *end = text + extent(text);
+    for (const char *p = text; p && (p = memmem(p, end - p, ".entry ", 7)) && objects[i].count < NAMES;) {
         p += 7;
         int n = 0;
-        while (p[n] && p[n] != '(' && p[n] != ' ' && p[n] != '\n' && n < 31) ++n;
+        while (p + n < end && p[n] && p[n] != '(' && p[n] != ' ' && p[n] != '\n' && n < 31) ++n;
         memcpy(objects[i].names[objects[i].count], p, n);
         objects[i].names[objects[i].count++][n] = 0;
+    }
+    for (const char *p = text; p && (p = memmem(p, end - p, ".target sm_", 11)) && objects[i].target_count < NAMES;) {
+        p += 11;
+        int sm = 0;
+        while (p < end && *p >= '0' && *p <= '9') sm = sm * 10 + *p++ - '0';
+        objects[i].targets[objects[i].target_count++] = sm;
     }
     return i;
 }
@@ -126,6 +154,8 @@ static int context_module(int library) {
     objects[i].library = library;
     objects[i].count = objects[library].count;
     memcpy(objects[i].names, objects[library].names, sizeof objects[i].names);
+    objects[i].target_count = objects[library].target_count;
+    memcpy(objects[i].targets, objects[library].targets, sizeof objects[i].targets);
     return i;
 }
 
@@ -208,6 +238,25 @@ CUresult cuModuleUnload(void *module) {
     return 0;
 }
 CUresult cuLibraryUnload(void *library) { return cuModuleUnload(library); }
+// From a file: its bytes, as from memory (what is kept of an image is read when it is loaded).
+static char *contents(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    static char bytes[1 << 20];
+    size_t n = fread(bytes, 1, sizeof bytes - 1, file);
+    fclose(file);
+    bytes[n] = 0;
+    return bytes;
+}
+CUresult cuModuleLoad(void **module, const char *path) {
+    const char *image = contents(path);
+    return image ? cuModuleLoadData(module, image) : 301;
+}
+CUresult cuLibraryLoadFromFile(void **library, const char *path, int *jo, void **jv, unsigned jc, int *lo, void **lv,
+                               unsigned lc) {
+    const char *image = contents(path);
+    return image ? cuLibraryLoadData(library, image, jo, jv, jc, lo, lv, lc) : 301;
+}
 
 CUresult cuModuleGetFunction(void **function, void *module, const char *name) {
     int i = find_object(module), n = i < 0 ? -1 : name_index(i, name);
@@ -381,7 +430,27 @@ static CUresult ask(void *handle) {
     ++asked;
     return 0;
 }
-CUresult cuFuncGetAttribute(int *value, int attribute, void *f) { (void)attribute; *value = 1; return ask(f); }
+// The architecture of device `device` (0, the V100: 7.0; 1: 9.0), and what code of `object` the
+// driver compiles there: its latest PTX that the device reaches.
+static int device_sm(int device) { return device == 1 ? 90 : 70; }
+static int compiled_for(int object, int device) {
+    int best = 0;
+    for (int t = 0; t < objects[object].target_count; ++t)
+        if (objects[object].targets[t] <= device_sm(device) && objects[object].targets[t] > best)
+            best = objects[object].targets[t];
+    return best;
+}
+static CUresult answer(int *value, int attribute, void *handle, int device) {
+    int h = find_handle(handle);
+    *value = 1;
+    if (h >= 0 && attribute == 5) *value = compiled_for(handles[h].owner, device);
+    if (h >= 0 && attribute == 6) *value = device_sm(device);
+    return ask(handle);
+}
+// (A function is asked about on the device of the current context, a kernel on the device named.)
+CUresult cuFuncGetAttribute(int *value, int attribute, void *f) {
+    return answer(value, attribute, f, current ? devices[current % 64] : 0);
+}
 // What a synchronisation of a stream returns (`sync_result`, set by a test: 719 is what a kernel
 // that faulted leaves), and that no stream is capturing.
 int sync_result;
@@ -395,10 +464,7 @@ CUresult cuFuncGetParamInfo(void *f, size_t index, size_t *offset, size_t *size)
     return ask(f);
 }
 CUresult cuFuncLoad(void *f) { return ask(f); }
-CUresult cuKernelGetAttribute(int *value, int attribute, void *k, int device) {
-    (void)attribute; (void)device; *value = 1;
-    return ask(k);
-}
+CUresult cuKernelGetAttribute(int *value, int attribute, void *k, int device) { return answer(value, attribute, k, device); }
 CUresult cuKernelSetAttribute(int attribute, int value, void *k, int device) {
     (void)attribute; (void)value; (void)device;
     return ask(k);

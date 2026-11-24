@@ -432,6 +432,23 @@ build calls cuBLAS). Flash attention, 196 cases of llama.cpp's own backend test 
 times the native build's time over all of them; most of the worst cases compare two different
 kernels, since llama.cpp picks another kernel on a Volta than on the Turing it is told.
 
+**Told 7.5, llama.cpp takes its MMQ kernels for every quantized batch.** ggml computes the
+products of quantized weights by prompt batches of any size with its MMQ kernels, which make the
+activations 8-bit integers and use integer tensor-core products, emulated on Volta (eight `dp4a`
+a product, `docs/emulations.md`). Built for sm_70, it keeps its MMQ kernels (on `dp4a`) for
+batches of fewer than 64 rows and sends the others to cuBLAS on the V100's fp16 tensor cores,
+the weights made fp16. On dense layers the layer's way is the slower: a 4096 x 512 x 14336
+product took 3,112 µs through the layer against 1,084 µs in a native sm_70 build (cuBLAS) and
+1,752 µs in a native build with its MMQ kernels forced (Q8_0 weights; Q4_K: 3,308, 1,284 and
+2,128 µs; Q6_K: 3,693, 1,162 and 1,950 µs), and prompts of 512 tokens of a 0.5B model in Q8_0 ran
+at 0.47 times the native build's speed. On mixtures of experts it is the faster, the sm_70 build
+calling cuBLAS expert by expert: 128 experts of which 8 are used, a batch of 512, 2,674 µs
+through the layer against 4,217 µs natively (Q4_K; Q8_0: 1,839 against 3,950 µs) (2026-11-24, one
+V100). An outside report on Ollama 0.40.4 says the same of whole models (`docs/reports/`): prompts
+at 1.3 to 1.9 times the native runner's speed on two mixture-of-experts models, 0.40 to 0.67
+times on two dense ones, generation at the same speed. For a dense model, a native sm_70 build
+of llama.cpp is the faster.
+
 **llama.cpp with NVFP4 weights** (Qwen3.8-27B, 2026-11-20): generation at 98.5 % of the native
 build's speed; prompts at 299 tokens a second, 1.33 times faster than the native build as it
 is (224) and 1.95 times slower than the native build with its quantized kernels forced (582).
@@ -1070,11 +1087,19 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   which is for every card); a handle to it that the program holds all the same is launched in a
   context on the later card and refused on the V100. A library whose PTX is compiled kernel by
   kernel (deferred) gives the later card the V100's PTX.
-- MPS (the Multi-Process Service)
-- Drivers of the 580 branch other than 580.178.04, with which everything was run: 580.173.02, and
-  the drivers after 580.196.07. 580.196.07 was reported by users, not run by the project: one report
-  has `tests/gpu/run.sh` passing its 165 cases at 0.1.4, another an engine that ran there until a bug
-  of its own, on long prompts.
+- MPS (the Multi-Process Service). Several processes on one V100 without it were reported by an
+  outside tester, not run by the project: the two runner processes of one Ollama 0.40.4 through
+  the layer, adapting, compiling and writing the layer's and the driver's caches at once, each
+  reply the same text as alone (`docs/reports/`).
+- Drivers of the 580 branch other than 580.178.04, with which the project ran everything. Outside
+  reports (`docs/reports/`) have `tests/gpu/run.sh` pass its 200 cases of 0.1.5, at the default
+  and at `VF_CAPABILITY=8.0`, on 580.173.02, 580.178.04 and 580.196.07, with the V100 passed through
+  to a virtual machine (Proxmox VFIO), and its 165 cases of 0.1.4 on 580.196.07, where an engine
+  also ran until a bug of its own, on long prompts. The drivers after 580.196.07 were not tried.
+- Ollama, by the project. An outside tester ran Ollama 0.40.4's stock CUDA 13 runner through the
+  layer (told 7.5) against its stock CUDA 12 runner (sm_70), on four models: no kernel refused, no
+  Xid line, each runner's text the same from one run to the next (`docs/reports/`; its speed:
+  [Speed](#speed)).
 - Windows; ARM
 - CUDA 14 and later
 - Nsight Compute and Nsight Systems (CUPTI's sampling of the program counter was used through
@@ -1162,6 +1187,19 @@ same everywhere:
   bits with the same largest error in 56 of 146 shapes of vLLM's attention; int8 products exact,
   where without it Triton 3.3 to 3.9 cannot compile them for 7.5, so that there is no result
   without it to compare with ([Triton's matrix products](#tritons-matrix-products)).
+- **Told 7.5, llama.cpp computes some operations otherwise than an sm_70 build does** (its choice,
+  not the layer's): the products of quantized prompt batches on 8-bit activations
+  ([Speed](#speed)), where an sm_70 build's cuBLAS takes fp16 ones (their errors against the CPU
+  are about those of a native build with its MMQ kernels forced, on the same inputs), and the scan
+  of the state-space layers of hybrid models (`SSM_SCAN`, Mamba-2) over chunks of more than 128
+  tokens, which at 7.5 and later is made of matrix products with fp16 intermediates, where at 7.0
+  it is a sequential scan in fp32: a normalized mean squared error against the CPU of about 8.5e-8
+  instead of 2e-14 (llama.cpp's own test allows 2e-7 for that way). Through the layer, its results
+  are bit-identical to those of a native sm_70 build changed to take the same way. So a hybrid
+  model's tokens differ more from an sm_70 build's than a dense model's do: granite4:tiny-h
+  (Q4_K_M), over 2,048 tokens, at a mean KL divergence of 0.0083 from the native build, where the
+  native build with its MMQ kernels forced is at 0.0079, and with that scan forced at 0.0017
+  (2026-11-24).
 - **Conversions of the 4-bit and 8-bit formats**: identical to an RTX 5090's on every value of
   the formats.
 - **Block-scaled products**: see the table above.

@@ -156,7 +156,9 @@ int main(int argc, char** argv) {
     if (argc > 3) suffix = argv[3];
     FILE* fp = fopen(argv[1], "rb"); if (!fp) { perror(argv[1]); return 2; }
     fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
-    char* img = calloc(sz + 1, 1); fread(img, 1, sz, fp); fclose(fp);
+    char* img = sz < 0 ? NULL : calloc(sz + 1, 1);
+    if (!img || fread(img, 1, sz, fp) != (size_t)sz) { fprintf(stderr, "%s: cannot read it\n", argv[1]); return 2; }
+    fclose(fp);
 
     lib = dlopen(getenv("DRVRUN_LIBCUDA") ? getenv("DRVRUN_LIBCUDA") : "libcuda.so.1", RTLD_NOW|RTLD_GLOBAL);
     if (!lib) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
