@@ -164,11 +164,14 @@ machine code that it translates is given when the program asks for it and answer
 NVIDIA's driver does, but a launch of any kind and a kernel node of a graph return 218 without
 calling the driver, and a line names the kernel and its image; the context goes on. Code that the
 image already has for sm_70 is loaded as it is and not read: a stub there traps as without the
-layer. A kernel with an empty body is not refused: launched, it does nothing, as without the layer,
-and nothing says so but `VF_LOG_LEVEL=2`, which counts both kinds in each image adapted. A program
-that chooses, for the V100 it detects, kernels that its CUDA 13 build carries only as such stubs
-now stops with that error and no GPU fault: Strata's CUDA 13 engine 0.1.66 ([its
-guide](docs/guides/strata.md)).
+layer. Nor is what was found carried through a link: a kernel without code in an input of
+`cuLinkAddData` or of nvJitLink is launched from the image that the link makes, and traps, as
+without the layer (at `VF_LOG_LEVEL=2` the line of an input of `cuLinkAddData` says that its
+launch is refused, which it is not). A kernel with an empty body is not refused: launched, it does nothing, as
+without the layer, and nothing says so but `VF_LOG_LEVEL=2`, which counts both kinds in each
+image adapted. A program that chooses, for the V100 it detects, kernels that its CUDA 13 build
+carries only as such stubs now stops with that error and no GPU fault: Strata's CUDA 13 engine
+0.1.66 ([its guide](docs/guides/strata.md)).
 
 A kernel can be refused after it was given, though it runs: the layer learns a refusal after it
 gave a kernel only when the driver's compiler refuses a function of a deferred library loaded

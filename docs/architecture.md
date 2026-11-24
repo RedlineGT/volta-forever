@@ -533,8 +533,12 @@ with 218, the driver not being called, as for a refused kernel: the launches of 
 the kernel nodes of a graph (`guard::allows_run`). A line at the default level names the kernel, the
 image the program gave (its size and XXH64 digest) and the call, once for each kernel. The context
 goes on; a capture in progress goes on, without the kernel. The record goes with the image through
-every path that adapts it: modules, libraries compiled whole or kernel by kernel, retained PTX,
-translated machine code, and the cache. An image that already has sm_70 code is given to the driver
+the paths that adapt it for a load: modules, libraries compiled whole or kernel by kernel,
+retained PTX, translated machine code, and the cache. Not through a link: the inputs of
+`cuLinkAddData` and of nvJitLink are adapted, but what was found of their kernels without code is
+not passed on to the image that the link makes (as their refused kernels are, `Links` in
+`images.rs` and the note of `vf_fatbin::cubin_with_refused`), so such a kernel is launched from
+there and traps, as without the layer. An image that already has sm_70 code is given to the driver
 as it is and not read: a kernel without code there traps as it does without the layer.
 
 A kernel whose body does nothing (`ret`, or `EXIT` in machine code) is not refused: some are meant
