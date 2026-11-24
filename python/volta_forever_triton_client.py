@@ -13,7 +13,8 @@ runs in. It runs in a helper, a child of the program's process that compiles one
 time, started at the first kernel that needs one:
 
   - by the program's interpreter, with -I -S (nothing of the program's start, nothing of its
-    sys.path but the directory that holds its Triton, after the standard library), an
+    sys.path but the directory that holds its Triton, after the standard library; -B when the
+    program writes no bytecode), an
     environment of its own (_helper_env: no secret of the program's, no LD_PRELOAD), the working
     directory /, its own session and process group (ptxas, which Triton runs, is in it), every
     other descriptor closed;
@@ -593,7 +594,10 @@ class _Helper(object):
             fds = (theirs.fileno(), -1 if slot is None else slot, -1 if waiting is None else waiting)
             here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volta_forever_triton_helper.py")
             self.proc = subprocess.Popen(
-                [_state["python"], "-I", "-S", here, "--helper"] + [str(fd) for fd in fds] + [str(os.getpid()), root],
+                # (-B when the program writes no bytecode, which -I would not tell the helper: it then
+                # writes none into the program's Triton either.)
+                [_state["python"], "-I", "-S"] + (["-B"] if sys.dont_write_bytecode else []) + [here, "--helper"]
+                + [str(fd) for fd in fds] + [str(os.getpid()), root],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_helper_env(),
                 cwd="/", pass_fds=[fd for fd in fds if fd >= 0], start_new_session=True)
         except BaseException:

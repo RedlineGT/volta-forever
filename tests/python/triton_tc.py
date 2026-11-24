@@ -1516,6 +1516,20 @@ class Decisions(Base):
         self.assertTrue(saw["tmp"].startswith(tmp), saw["tmp"])
         self.assertEqual(saw["tmpmode"], 0o700)
 
+    def test_the_helper_writes_no_bytecode_where_the_program_writes_none(self):
+        # A program that writes no bytecode (PYTHONDONTWRITEBYTECODE, -B): its helper, which -I would
+        # not tell, writes none into the program's Triton either (a directory whose contents change
+        # makes the program's import system read it again); one that writes it: as Python does.
+        for dont, want in (("1", False), (None, True)):
+            standin = self.root / ("standin-bytecode-%s" % dont)
+            if standin.exists():
+                shutil.rmtree(standin)
+            shutil.copytree(self.standin, standin, ignore=shutil.ignore_patterns("__pycache__"))
+            r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16")],
+                            self.env(PYTHONPATH=str(standin), PYTHONDONTWRITEBYTECODE=dont))
+            self.assertEqual(self.last(r), ["cubin sm_80"], r.stderr)
+            self.assertEqual(any(standin.rglob("__pycache__")), want, dont)
+
     def test_the_temporary_files(self):
         # Triton's PTX, and the cubin that ptxas writes, are in the helper's own directory (mode 0700)
         # in the temporary directory (TMPDIR), where Triton's own compilation writes them, removed
