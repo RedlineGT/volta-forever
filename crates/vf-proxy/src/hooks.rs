@@ -650,7 +650,7 @@ pub unsafe extern "C" fn cuModuleGetFunction(
     let real =
         real!(cuModuleGetFunction: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> CUresult);
     let result = unsafe { lookup(module as usize, name, function, || real(function, module, name)) };
-    fault::check(result, "cuModuleGetFunction");
+    fault::check_module(result, "cuModuleGetFunction", module as usize);
     if result == CUDA_SUCCESS && !function.is_null() && !name.is_null() {
         let func_handle = unsafe { *function } as usize;
         let name_str = unsafe { CStr::from_ptr(name) }.to_string_lossy();
@@ -671,7 +671,7 @@ pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     if result != CUDA_SUCCESS {
         // (Known again first: a fault reported here names its kernels as they still are.)
         images::unload_failed(released);
-        fault::check(result, "cuModuleUnload");
+        fault::check_module(result, "cuModuleUnload", module as usize);
     }
     result
 }
@@ -3139,7 +3139,7 @@ pub unsafe extern "C" fn cuStreamQuery_ptsz(stream: *mut c_void) -> CUresult {
 pub unsafe extern "C" fn cuEventSynchronize(event: *mut c_void) -> CUresult {
     let real = real!(cuEventSynchronize: StreamCall);
     let result = unsafe { real(event) };
-    fault::check(result, "cuEventSynchronize");
+    fault::check_event(result, "cuEventSynchronize");
     result
 }
 
@@ -3147,7 +3147,7 @@ pub unsafe extern "C" fn cuEventSynchronize(event: *mut c_void) -> CUresult {
 pub unsafe extern "C" fn cuEventQuery(event: *mut c_void) -> CUresult {
     let real = real!(cuEventQuery: StreamCall);
     let result = unsafe { real(event) };
-    fault::check(result, "cuEventQuery");
+    fault::check_event(result, "cuEventQuery");
     result
 }
 

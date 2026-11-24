@@ -371,7 +371,12 @@ What the layer cannot say:
 - with `VF_ADAPT=0` and `VF_FIT=0`, the launches that a program makes through the entry points the
   driver gives it (the CUDA runtime's) go straight to the driver, unless `VF_FAULT_TRACE=1` is
   set: none of them is known. A synchronisation of an event bounds nothing (which stream an event
-  was recorded in is not known). A kernel of a library launched by its own handle runs in whatever
+  was recorded in is not known), and a fault that a wait for an event meets first, or a call made
+  with no context current, is said of a context that the layer cannot tell: the launches of every
+  context are named, each with its context, and the fault is said again, of its context, at the
+  first call that meets it there. The context of a stream's synchronisation or query that meets a
+  fault is that of the launches kept on the stream; on a stream with none of a context the layer
+  knows, it cannot be told either. A kernel of a library launched by its own handle runs in whatever
   context is current: it is a candidate in every context (in a process of several, the line says
   how many such). A kernel is named as the program asked for it; one of which it holds a handle that
   it did not take by name through the layer is named by the driver if it is a library's kernel,

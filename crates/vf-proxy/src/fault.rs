@@ -12,8 +12,14 @@
 //! returned that error; `cuKernelGetName`, `cuKernelGetLibrary`, `cuCtxGetCurrent`,
 //! `cuCtxPushCurrent`, `cuCtxPopCurrent`, `cuLibraryUnload`, `cuCtxDestroy` and the release of the
 //! primary context returned 0. Through the layer (2026-11-24, modes `fault-graph` and `fault-copy`),
-//! `cuStreamGetCtx` returned the error too (the context of a stream's call is then the current one,
-//! `context_of_stream`), and no other context could be made in the process.
+//! `cuStreamGetCtx` returned the error too, and no other context could be made in the process. So
+//! the context of a call that met a fault is never asked of the driver (`Of`): it is the current
+//! one for a call that takes it (a launch, a load, a synchronisation of the context or of a null
+//! stream), the module's for a lookup or an unload, and for a stream's synchronisation or query the
+//! context of the launches kept on that stream (a launch runs in its stream's context); a wait for
+//! an event, or a call with no context current, is of a context that the layer cannot tell, and its
+//! report names the launches of every context, each with its own, and takes no context for
+//! reported.
 //!
 //! What the layer can say then is which kernels were launched in that context and not seen to end,
 //! and what it did to each:
@@ -751,33 +757,76 @@ fn current_context() -> u64 {
     }
 }
 
-/// The context of `stream` (of the thread's current context for the null stream), as the driver
-/// says, else the current one.
-fn context_of_stream(stream: *mut c_void, per_thread: bool) -> u64 {
-    if matches!(stream_id(stream, per_thread), LEGACY | PER_THREAD) {
-        return current_context();
+/// Which context a call that met a fault is of, as the layer knows it: never asked of the driver
+/// after the fault (`cuStreamGetCtx` then returns the fault's error, and a wait for a stream or an
+/// event of one context can be made while another is current).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Of {
+    /// This context.
+    Context(u64),
+    /// The context of this stream: the context of the launches kept on it (a launch runs in its
+    /// stream's context), if the layer knows the context of one (`stream_context`).
+    Stream(u64),
+    /// Not known, for this reason.
+    Unknown(&'static str),
+}
+
+/// The context current in this thread, for a call that takes it.
+fn current() -> Of {
+    match current_context() {
+        0 => Of::Unknown("no CUDA context was current in the thread"),
+        context => Of::Context(context),
     }
-    let real = REALS[idx::cuStreamGetCtx].load(Relaxed);
-    if real != 0 {
-        // SAFETY: NVIDIA's cuStreamGetCtx, or a stub that ignores its arguments.
-        let get: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> CUresult = unsafe { std::mem::transmute(real) };
-        let mut context = std::ptr::null_mut();
-        if unsafe { get(stream, &mut context) } == CUDA_SUCCESS && !context.is_null() {
-            return context as u64;
-        }
+}
+
+/// The context of the stream `stream`, `per_thread` as for the call: the current one for the null
+/// stream, else the stream's (`Of::Stream`).
+fn of_stream(stream: *mut c_void, per_thread: bool) -> Of {
+    match stream_id(stream, per_thread) {
+        LEGACY | PER_THREAD => current(),
+        handle => Of::Stream(handle),
     }
-    current_context()
 }
 
 /// What the program's call `call` returned, when it is an error of a fault, is reported for the
-/// current context (once in each context).
+/// current context (once in each context): a call that takes the current context (a launch, a
+/// load).
 #[inline]
 pub fn check(result: CUresult, call: &str) {
     if !on() {
         return;
     }
     if is_fault(result) {
-        seen(result, call, None);
+        seen(result, call, current());
+    }
+}
+
+/// As `check`, for a call of the module `module` (a lookup, an unload): of the module's context,
+/// when the layer knows it, else of the current one.
+#[inline]
+pub fn check_module(result: CUresult, call: &str, module: usize) {
+    if !on() {
+        return;
+    }
+    if is_fault(result) {
+        let of = crate::contexts::context_of(module).map_or_else(current, |context| Of::Context(context as u64));
+        seen(result, call, of);
+    }
+}
+
+/// As `check`, for a wait for an event or a query of it: the layer does not keep which stream an
+/// event was recorded in, so its context is not known.
+#[inline]
+pub fn check_event(result: CUresult, call: &str) {
+    if !on() {
+        return;
+    }
+    if is_fault(result) {
+        seen(
+            result,
+            call,
+            Of::Unknown("a wait for an event, whose context the layer does not keep"),
+        );
     }
 }
 
@@ -799,12 +848,12 @@ pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
     }
     if result != CUDA_SUCCESS {
         if is_fault(result) {
-            let context = match scope {
-                Scope::Named(context) if !context.is_null() => context as u64,
-                Scope::Stream(stream, per_thread) => context_of_stream(stream, per_thread),
-                _ => current_context(),
+            let of = match scope {
+                Scope::Named(context) if !context.is_null() => Of::Context(context as u64),
+                Scope::Stream(stream, per_thread) => of_stream(stream, per_thread),
+                _ => current(),
             };
-            seen(result, call, Some(context));
+            seen(result, call, of);
         }
         return;
     }
@@ -877,10 +926,11 @@ pub unsafe fn settle(kept: Kept, stream: *mut c_void, per_thread: bool, call: &s
             ring.done.store(number + 1, Release);
         }
     } else if is_fault(result) {
+        // (Of the current context: the launch, just made, is of it.)
         seen(
             result,
             &format!("the synchronisation of the stream after {call} (VF_FAULT_TRACE=1)"),
-            Some(context_of_stream(stream, per_thread)),
+            current(),
         );
         return result;
     }
@@ -1444,6 +1494,10 @@ pub unsafe fn graph_launched(result: CUresult, exec: *mut c_void, stream: *mut c
 struct Found {
     /// The launches that may have faulted, the last first.
     launches: Vec<Launch>,
+    /// The context was not known (`Of::Unknown`, and why): the launches are of every context, and
+    /// `of` has the context of each named one, when the layer knows it.
+    unknown: Option<&'static str>,
+    of: Vec<Option<u64>>,
     /// Of them, those whose context the layer does not know (a library's kernel launched by its
     /// handle, a kernel the program did not take through the layer), in a process where it knows
     /// several contexts: they may be of another.
@@ -1458,7 +1512,7 @@ struct Found {
 /// The candidates among `launches` (of every ring, in any order) for a fault in `context`: those
 /// that no synchronisation covers and that are not known to be of another context (`context_of`)
 /// nor waited for in exact mode (`done`: by ring, the launches numbered below were). `wrapped`: the
-/// rings that no longer hold their earliest launches.
+/// rings that no longer hold their earliest launches. `contexts`: the number of contexts known.
 fn candidates(
     launches: &[Launch],
     covers: &Covers,
@@ -1482,6 +1536,47 @@ fn candidates(
         }
         found.launches.push(*launch);
     }
+    sorted(&mut found, launches, wrapped, covers.contexts.get(&context).copied());
+    found
+}
+
+/// The candidates among `launches` for a fault of a context that the layer cannot tell (`why`):
+/// the launches of every context that no synchronisation covers, each in its own context when the
+/// layer knows it, else in every context it knows (`known`).
+fn candidates_anywhere(
+    launches: &[Launch],
+    covers: &Covers,
+    done: &[u64],
+    wrapped: &[usize],
+    known: &[u64],
+    context_of: impl Fn(&Launch) -> Option<u64>,
+    why: &'static str,
+) -> Found {
+    let mut found = Found {
+        unknown: Some(why),
+        ..Found::default()
+    };
+    for launch in launches {
+        if done.get(launch.ring).is_some_and(|&done| launch.number < done) {
+            continue;
+        }
+        let covered = match context_of(launch) {
+            Some(of) => covers.covers(launch, of),
+            None => !known.is_empty() && known.iter().all(|&context| covers.covers(launch, context)),
+        };
+        if !covered {
+            found.launches.push(*launch);
+        }
+    }
+    sorted(&mut found, launches, wrapped, None);
+    found.of = found.launches.iter().take(NAMED).map(&context_of).collect();
+    found
+}
+
+/// The candidates of `found` in their order, and whether the rings that `wrapped` may have lost
+/// some (`Found::earlier`), of `launches` (all kept), when a synchronisation of the whole context
+/// covered the launches up to `context_covers`.
+fn sorted(found: &mut Found, launches: &[Launch], wrapped: &[usize], context_covers: Option<u64>) {
     // The last first: by the synchronisations begun before each, then in each thread's order.
     found.launches.sort_by(|a, b| {
         (b.epoch.cmp(&a.epoch))
@@ -1490,7 +1585,6 @@ fn candidates(
     });
     // The launches that a wrapped ring lost are older than its earliest kept: covered when that one
     // is, by a synchronisation of the whole context.
-    let context_covers = covers.contexts.get(&context).copied();
     found.earlier = wrapped.iter().any(|&ring| {
         let earliest = launches
             .iter()
@@ -1499,13 +1593,15 @@ fn candidates(
             .min();
         earliest.is_none_or(|epoch| context_covers.is_none_or(|covers| epoch > covers))
     });
-    found
 }
 
 // ---- the report ----------------------------------------------------------------------------------
 
 /// The contexts whose fault was reported.
 static REPORTED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+/// Whether a fault of a context that the layer could not tell was reported (once, until a context
+/// is destroyed): no context is taken as reported then.
+static REPORTED_ANYWHERE: AtomicBool = AtomicBool::new(false);
 /// The lines of the report at exit: one for each fault reported (at most `SUMMARIES_KEPT`).
 static SUMMARIES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 const SUMMARIES_KEPT: usize = 8;
@@ -1516,19 +1612,37 @@ fn reported() -> MutexGuard<'static, Vec<u64>> {
     REPORTED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A call returned `result`, an error of a fault, in `context` (`None`: the current one).
+/// A call returned `result`, an error of a fault, of the context `of`.
 #[cold]
 #[inline(never)]
-fn seen(result: CUresult, call: &str, context: Option<u64>) {
-    let context = context.unwrap_or_else(current_context);
-    {
-        let mut reported = reported();
-        if reported.contains(&context) {
-            return;
-        }
-        reported.push(context);
-    }
+fn seen(result: CUresult, call: &str, of: Of) {
     // Whatever goes wrong in making the report, the program gets what the driver answered.
+    let context = match of {
+        Of::Stream(stream) => match catch_unwind(|| stream_context(stream)) {
+            Ok(Some(context)) => Of::Context(context),
+            _ => Of::Unknown("a stream on which the layer kept no launch of a context it knows"),
+        },
+        of => of,
+    };
+    match context {
+        Of::Context(context) => {
+            let mut reported = reported();
+            if reported.contains(&context) {
+                return;
+            }
+            reported.push(context);
+        }
+        _ => {
+            if REPORTED_ANYWHERE.swap(true, Relaxed) {
+                return;
+            }
+        }
+    }
+    let context = match context {
+        Of::Context(context) => Ok(context),
+        Of::Unknown(why) => Err(why),
+        Of::Stream(_) => Err("a stream on which the layer kept no launch of a context it knows"),
+    };
     let made = catch_unwind(AssertUnwindSafe(|| report(result, call, context)));
     let Ok((lines, summary)) = made else {
         log::error(format_args!(
@@ -1602,8 +1716,29 @@ fn launch_context(launch: &Launch) -> Option<u64> {
     identify(launch.what as usize, Some(launch.epoch)).context
 }
 
-/// The report of a fault: its lines, and its line at exit.
-fn report(result: CUresult, call: &str, context: u64) -> (Vec<String>, String) {
+/// The context of the launches kept on the stream at `stream` (the stream there now: since its
+/// handle's last stream began), the last first, when the layer knows the context of one.
+fn stream_context(stream: u64) -> Option<u64> {
+    let from = {
+        let covers = record();
+        covers
+            .streams
+            .get(&stream)
+            .map_or(covers.streams_from, |cover| cover.from)
+    };
+    let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut on: Vec<Launch> = rings
+        .iter()
+        .flat_map(|ring| ring.launches())
+        .filter(|launch| launch.stream == stream && launch.epoch >= from)
+        .collect();
+    on.sort_by(|a, b| b.epoch.cmp(&a.epoch).then(b.number.cmp(&a.number)));
+    on.iter().find_map(launch_context)
+}
+
+/// The report of a fault of `context` (or of a context that the layer cannot tell, and why): its
+/// lines, and its line at exit.
+fn report(result: CUresult, call: &str, context: Result<u64, &'static str>) -> (Vec<String>, String) {
     let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let launches: Vec<Launch> = rings.iter().flat_map(|ring| ring.launches()).collect();
     let done: Vec<u64> = rings.iter().map(|ring| ring.done.load(Acquire)).collect();
@@ -1613,8 +1748,12 @@ fn report(result: CUresult, call: &str, context: u64) -> (Vec<String>, String) {
         .map(|ring| ring.index)
         .collect();
     let covers = record().clone();
-    let contexts = crate::contexts::known().len();
-    let mut found = candidates(&launches, &covers, &done, &wrapped, context, launch_context, contexts);
+    let known: Vec<u64> = crate::contexts::known().into_iter().map(|c| c as u64).collect();
+    let contexts = known.len();
+    let mut found = match context {
+        Ok(context) => candidates(&launches, &covers, &done, &wrapped, context, launch_context, contexts),
+        Err(why) => candidates_anywhere(&launches, &covers, &done, &wrapped, &known, launch_context, why),
+    };
     found.unkept = UNKEPT.load(Relaxed);
     compose(&found, config().fault_trace, contexts, result, call)
 }
@@ -1631,12 +1770,19 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
     let mut threads: Vec<u64> = found.launches.iter().map(|launch| launch.thread).collect();
     threads.sort_unstable();
     threads.dedup();
-    for launch in found.launches.iter().take(NAMED) {
-        let thread = if threads.len() > 1 {
+    for (i, launch) in found.launches.iter().take(NAMED).enumerate() {
+        let mut thread = if threads.len() > 1 {
             format!(", thread {}", launch.thread)
         } else {
             String::new()
         };
+        // (Of a context that the layer cannot tell: the context of each launch, as it knows it.)
+        if found.unknown.is_some() {
+            thread += &match found.of.get(i).copied().flatten() {
+                Some(context) => format!(", context {context:#x}"),
+                None => ", of a context that the layer does not know".to_string(),
+            };
+        }
         if launch.kind == GRAPH {
             let kernels = execs().at(launch.what as usize, launch.epoch);
             let Some(kernels) = kernels else {
@@ -1712,6 +1858,12 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
         );
     }
     match found.launches.len() {
+        count if found.unknown.is_some() => lines.push(format!(
+            "a kernel faulted on the GPU: {call} returned {error}, in a CUDA context that the layer cannot tell ({}), \
+             which can run nothing more. Faults are reported at a later call than the launch: the launches that no \
+             synchronisation that succeeded covers, in every context, are {count}{also}, the last first:",
+            found.unknown.unwrap_or_default()
+        )),
         0 => lines.push(format!(
             "a kernel faulted on the GPU: {call} returned {error}, and this CUDA context can run nothing more. The \
              layer knows no launch in this context since its last synchronisation that succeeded{also}: the kernel \
@@ -1807,7 +1959,11 @@ fn probe_at_exit(context: u64) {
         "fault: context {context:#x} asked at exit: cuStreamQuery returned {result}"
     ));
     if is_fault(result) {
-        seen(result, "cuStreamQuery, asked by the layer at exit", Some(context));
+        seen(
+            result,
+            "cuStreamQuery, asked by the layer at exit",
+            Of::Context(context),
+        );
     }
 }
 
@@ -1819,6 +1975,7 @@ pub fn context_gone(context: usize) {
     }
     let context = context as u64;
     reported().retain(|&c| c != context);
+    REPORTED_ANYWHERE.store(false, Relaxed);
     let epoch = begin();
     record().context_gone(context, epoch);
 }
@@ -2069,6 +2226,31 @@ mod tests {
             covers.context_gone(context, 2);
         }
         assert_eq!(live_contexts(&covers, &[8]), vec![7, 8]);
+    }
+
+    #[test]
+    fn a_fault_of_a_context_not_known_names_the_launches_of_every_context() {
+        let mut covers = Covers::default();
+        // Launch 1 of context 7, 2 of 8, 3 of no known context; 7's legacy stream synchronised.
+        let all = launches(0, LEGACY, &[1, 2, 3], 0);
+        let context_of = |l: &Launch| match l.what {
+            1 => Some(7),
+            2 => Some(8),
+            _ => None,
+        };
+        covers.legacy_synchronized(7, 0);
+        let found = candidates_anywhere(&all, &covers, &[], &[], &[7, 8], context_of, "why");
+        assert_eq!(whats(&found), vec![3, 2]);
+        assert_eq!(found.of, vec![None, Some(8)]);
+        // One of no known context is covered only when every context known covers it.
+        covers.legacy_synchronized(8, 0);
+        let found = candidates_anywhere(&all, &covers, &[], &[], &[7, 8], context_of, "why");
+        assert!(found.launches.is_empty());
+        let (lines, _) = compose(&found, false, 2, 700, "cuEventSynchronize");
+        assert!(
+            lines[0].contains("in a CUDA context that the layer cannot tell (why)"),
+            "{lines:?}"
+        );
     }
 
     #[test]

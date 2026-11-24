@@ -232,6 +232,27 @@ def case(name, proxy):
         out.append(run.api.cuCtxSynchronize())
         stop.set()
         other.join()
+    elif name in ("other-context-stream", "other-context-event", "no-context"):
+        # A fault of context A met by a wait for a stream (or an event) of A made while context B is
+        # current, where B has launches of its own not synchronised: the fault is A's. (With
+        # no-context, the wait is made with no context current.)
+        a, functions_a = run.context, run.functions
+        stream, event = run.stream(), c.c_void_p()
+        assert run.api.cuEventCreate(c.byref(event), 0) == 0
+        b, functions_b = run.new_context()
+        out.append(run.launch("add_one", grid=21, functions=functions_b))
+        out.append(run.launch("add_one", grid=22, functions=functions_b))
+        out.append(run.api.cuCtxSetCurrent(a))
+        out.append(run.launch("write_null", stream, grid=11, functions=functions_a))
+        out.append(run.api.cuEventRecord(event, stream))
+        out.append(run.api.cuCtxSetCurrent(None if name == "no-context" else b))
+        if name == "other-context-stream":
+            out.append(run.api.cuStreamSynchronize(stream))
+        else:
+            out.append(run.api.cuEventSynchronize(event))
+        # A, later: its own synchronisation.
+        out.append(run.api.cuCtxSetCurrent(a))
+        out.append(run.api.cuCtxSynchronize())
     elif name == "exec-reuse":
         # An instantiated graph destroyed after its launch (it may be destroyed while it runs), and
         # another instantiated at its handle (MOCK_EXEC_FIXED=1): the launch is of the first one.
@@ -344,6 +365,21 @@ def checks(name, log, summary, results):
         expect("no fault is said", not faults)
         expect("not waited for during a capture, waited for after", results == ["0", "0", "0", "0", "0", "1"])
         return found
+    if name in ("other-context-event", "no-context"):
+        # The context is not known at the wait: said so, with the launches of every context, and no
+        # context taken as reported; A's own synchronisation then names A's.
+        expect("two reports: the first of a context the layer cannot tell, the second A's",
+               len(faults) == 2 and "a CUDA context that the layer cannot tell" in lines[faults[0]]
+               and "cuCtxSynchronize returned 700" in lines[faults[1]] and "cannot tell" not in lines[faults[1]])
+        if len(faults) == 2:
+            first = [line.strip().split(" ")[0] for line in lines[faults[0] + 1:faults[1]] if line.startswith("  ")]
+            second = [line.strip().split(" ")[0] for line in lines[faults[1] + 1:] if line.startswith("  ")]
+            expect("the first names the launches of both contexts, each with its context",
+                   sorted(first) == ["add_one", "add_one", "write_null"] and
+                   len(re.findall(r", context 0x[0-9a-f]+\)", "\n".join(lines[faults[0]:faults[1]]))) == 3)
+            expect("the second names A's launch alone", second == ["write_null"])
+        expect("no claim of a context 0", "context 0)" not in log and "context 0x0" not in log)
+        return found
     expect("one fault is said, once", len(faults) == 1)
     if not faults:
         return found
@@ -401,6 +437,9 @@ def checks(name, log, summary, results):
         count = re.search(r"one of the (\d+) launched", head)
         expect("the report ended while contexts were destroyed, and named the launches of the 120 threads",
                results == ["0", "700"] and count is not None and int(count.group(1)) >= 120 * 255)
+    elif name == "other-context-stream":
+        expect("the fault is A's, which its stream's launch tells: write_null alone, not B's launches",
+               "cuStreamSynchronize returned 700" in head and names == ["write_null"])
     elif name == "exec-reuse":
         expect("the second graph was given the first one's handle", results[-1] == "same-handle")
         expect("the launch is named with the kernel nodes of the graph launched, not of the one at its handle since",
@@ -442,7 +481,8 @@ def main():
                        check=True)
         cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("nofault-graph", {}),
                  ("nofault-release", {}), ("nofault-capture-exit", {}), ("exact", {"VF_FAULT_TRACE": "1"}),
-                 ("streams", {}), ("contexts", {}), ("context-gone", {}), ("own-stream", {}),
+                 ("streams", {}), ("contexts", {}), ("context-gone", {}),
+                 ("other-context-stream", {}), ("other-context-event", {}), ("no-context", {}), ("own-stream", {}),
                  ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
