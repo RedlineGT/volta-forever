@@ -626,7 +626,7 @@ refuse refuse-link link "ALL CHECKS PASSED" \
 # the kernel's log, where it can be read). Until 2026-11-23 the first launch trapped (Xid 43).
 [ -x "$out/bin/test_guard" ] && [ "$out/bin/test_guard" -nt "$G/test_guard.c" ] || gcc -O2 -Wall -o "$out/bin/test_guard" "$G/test_guard.c" -ldl || exit 2
 xids() { dmesg 2>/dev/null | grep -c Xid; }
-xid_unchecked=  # a guard case whose check of the kernel's log could not be made: said at the end
+xid_unchecked=  # a guard or nocode case whose check of the kernel's log could not be made: said at the end
 guard() {  # guard NAME INTERFACE
     local name=$1 interface=$2 before after
     log=$out/logs/$name.log
@@ -670,6 +670,7 @@ nocode() {  # nocode NAME IMAGE INTERFACE
         [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
     else
         echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
+        xid_unchecked=1
     fi
     echo "lines that say no_code is not launched: $(grep -c 'kernel no_code has no code in its image' "$log")" >>"$log"
     check "$name" "ALL CHECKS PASSED" "no Xid line more" "lines that say no_code is not launched: 1$" \
@@ -747,7 +748,7 @@ else
 fi
 rm -rf "$cache_dir"
 
-# The guard cases above pass their check of the kernel's log where it cannot be read (dmesg needs
-# privileges that the user may not have): said once, at the end, so that it is seen.
+# The guard and nocode cases above pass their check of the kernel's log where it cannot be read
+# (dmesg needs privileges that the user may not have): said once, at the end, so that it is seen.
 [ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (dmesg not readable)"
 exit $failed
