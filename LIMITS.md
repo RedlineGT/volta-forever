@@ -507,17 +507,22 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.44 to 3.84 times
   (`docs/performance.md`, section 7).
 - **Narrow products of tall matrices go to cuBLAS 12.9**: TN with m >= 8192 is served only with n > 128, and TN with
-  m >= 6144 only with k <= 8192 (an output layer over a vocabulary, or a wide MLP's up projection, at a batch of up to
+  m >= 6144 only with k <= 9216 (an output layer over a vocabulary, or a wide MLP's up projection, at a batch of up to
   128 tokens; and long products of many rows). With so many rows 12.9 fills the GPU. Up to 64 columns, its tile's
   width, it computed such products about as fast as the path or faster from m = 8256 on (1.014 to 1.03 times as fast
   at m = 8256 to 8320, as fast or faster from 8384 on, down to 0.65 times its speed on output layers); from 65 to 128
   columns the path was up to 1.7 times as fast, but within 3 % or slower (down to 0.95 times) at 112 to 128 columns
   on output layers and at m = 10240; from 129 columns on it was at least 1.21 times as fast (1.37 to 1.59 at
-  129). With k beyond 8192,
-  12.9 was also as fast or faster at up to 256 columns from m = 6656 on (0.93 to 0.98 times at k = 13824 to 16384,
-  n = 128 to 192; at m = 6144, at least 1.03 times), and at more columns from m = 8192 on (0.95 to 0.97 times at
-  k = 16384, n = 192 to 384). The bounds take the measured points within 3 % of 12.9 or below on their side
-  (`docs/performance.md`, section 7, gives the sweeps and the points on both sides of each bound).
+  129). With k beyond 9216 and m from 6144 on, 12.9 was within 3 % of the path or faster in narrow bands of m and n
+  where its 64 x 64 tiles fill its waves: 48 of the 951 points measured there (k = 10240 to 16384, n = 48 to 256),
+  down to 0.94 times, at 128 columns for m = 6912 to 7680, at 192 columns for m = 6144 to 6656 and from m = 20480
+  on, at 64 and 96 columns for m = 7680 to 8064 and at 256 columns for m = 10240 to 20480 (at m = 6144 only at
+  k = 16384, 1.03 times). Between those bands, the other widths of the same shapes ran at up to 1.9 times 12.9's
+  speed (the median of the 951 points: 1.30): no bound of shape separates them, so the branch leaves the whole
+  region to 12.9, the faster widths with it; no layer of the eight models measured has such a shape. With k up to
+  9216 the path was at least 1.05 times as fast at every point measured. The bounds take the measured points within
+  3 % of 12.9 or below on their side (`docs/performance.md`, section 7, gives the sweeps and the points on both sides
+  of each bound).
 - **Wide down projections at many columns go to cuBLAS 12.9**: TN with k > 8192 is served only with n <= 256. Such
   products are the down projections of SiLU-gated MLPs, k their intermediate size: their input, the gated
   activation, holds values far below each column's largest, and on real text up to 75 % of a layer's columns fail
@@ -535,7 +540,7 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
   configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
   pedantic modes, k above 16384 or below 1024 on the tensor cores, products in another layout than TN on the
-  tensor cores, and TN with m >= 8192 and n <= 128, with m >= 6144 and k > 8192, or with k > 8192 and n > 256
+  tensor cores, and TN with m >= 8192 and n <= 128, with m >= 6144 and k > 9216, or with k > 8192 and n > 256
   there, cuBLASLt descriptors with any attribute outside
   the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no
   workspace, or with a workspace that is not 256-byte aligned (12.9 refuses that), a bias epilogue

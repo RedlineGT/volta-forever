@@ -430,7 +430,7 @@ static void stats_mode(void)
 #define RULE_TALL_M 8192
 #define RULE_TALL_MAX_N 128
 #define RULE_TALL_LONG_M 6144
-#define RULE_TALL_MAX_K 8192
+#define RULE_TALL_MAX_K 9216
 #define RULE_WIDE_K 8192
 #define RULE_WIDE_MAX_N 256
 
@@ -526,12 +526,19 @@ static void tc_rule(void)
         {1, 0, 151936, RULE_TALL_MAX_N, 896, R_TALL, "an output layer, n at the tall bound, k = 896: the tall reason, not the gate's"},
         {1, 0, RULE_TALL_M, RULE_TALL_MAX_N, 4096, R_TALL, "m at the tall bound, n at its bound"},
         {1, 0, RULE_TALL_M - 8, RULE_TALL_MAX_N, 4096, TC_K, "m one step under the tall bound, n at its bound"},
-        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K, TC_K, "m at the tall bound, n past it, k at its bound"},
-        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "m at the tall bound, n past it, k one step past"},
-        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, R_TALL, "m at the long-k bound, k one step past the tall k"},
-        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, TC_K, "m one step under the long-k bound, k past the tall k"},
-        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K, TC_K, "m at the long-k bound, k at the tall k"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K, TC_K, "m at the tall bound, n past it, k at the long-k bound"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "m at the tall bound, n past it, k one step past the long-k bound"},
+        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, R_TALL, "m at the long-k bound, k one step past its bound"},
+        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, TC_K, "m one step under the long-k bound, k past its bound"},
+        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K, TC_K, "m at the long-k bound, k at its bound"},
+        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, 16384, TC_K, "m one step under the long-k bound, k = 16384 (the longest the path takes)"},
         {1, 0, RULE_TALL_LONG_M, RULE_TALL_MAX_N, 4096, TC_K, "m at the long-k bound, n at the tall bound (below the tall m)"},
+        /* points of the sweeps behind the long-k bounds (docs/performance.md, section 7), on both sides */
+        {1, 0, 7680, 128, 9216, 7680 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 7680 x 128 x 9216"},
+        {1, 0, 7680, 128, 10240, 7680 >= RULE_TALL_LONG_M && 10240 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 7680 x 128 x 10240"},
+        {1, 0, 6144, 192, 9216, 6144 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 6144 x 192 x 9216"},
+        {1, 0, 6144, 192, 16384, 6144 >= RULE_TALL_LONG_M && 16384 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 6144 x 192 x 16384"},
+        {1, 0, 32768, 192, 9216, 32768 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 32768 x 192 x 9216"},
         {1, 0, 8960, RULE_TALL_MAX_N, 1536, 8960 >= RULE_TALL_M ? R_TALL : TC_K, "a gate or up projection of an MLP of 8960, n at the tall bound"},
         {1, 0, 8960, RULE_TALL_MAX_N + 1, 1536, TC_K, "a gate or up projection of an MLP of 8960, n past the tall bound"},
         {1, 0, 1536, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, R_WIDE, "k one step past the wide bound, n past it"},
@@ -541,7 +548,8 @@ static void tc_rule(void)
         {1, 0, 1536, 64, 8960, 8960 > RULE_WIDE_K && 64 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 8960, 64 tokens"},
         {1, 0, 4096, 2048, 12288, 12288 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 12288, 2048 tokens"},
         {1, 0, 896, 2048, 4864, 4864 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 4864, 2048 tokens"},
-        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, RULE_WIDE_K + 8 > RULE_TALL_MAX_K ? R_TALL : R_WIDE, "tall and wide: the tall reason first"},
+        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "tall (past the long-k bounds) and wide: the tall reason first"},
+        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, RULE_WIDE_K + 8 > RULE_TALL_MAX_K ? R_TALL : R_WIDE, "m at the tall bound, k one step past the wide bound, n past it"},
         {0, 1, 151936, 64, 4096, R_LAYOUT, "NT, m = 151936, n = 64: the layout first"},
     };
     int (*min_k)(void) = NULL;

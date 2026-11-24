@@ -572,7 +572,7 @@ control of the test builds removes it (`VF_BF16_CONTROL`), with which the rule's
 | Rule | Products left to 12.9 | Reason in the exit report | Measured on the side it leaves to 12.9 | Measured on the side it serves | Control |
 |---|---|---|---|---|---|
 | Layout | every layout but TN (op(A) = A^T, op(B) = B): a backward pass's input gradients (NN) and weight gradients (NT), TT | `not TN (the tensor-core path's layout)` | the NN and NT products of four fine-tuning steps, timed in place with the rule removed: 19 of the 22 that the path would serve at 0.24 to 0.90 (the output layer's weight gradient, NT 896 x 151,936 x 4,096, at 0.29), three of 16 rows at 1.02 to 1.34; the steps' products together at 0.62 to 0.84 | the same steps' TN products: 1.44 to 3.84; the steps' products together at 1.02 to 1.08 | `tc-layouts` |
-| Tall | TN with m >= 8,192 and n <= 128, or with m >= 6,144 and k > 8,192 | `m >= 8192 with n <= 128, or m >= 6144 with k > 8192 (12.9 as fast)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96, at n = 65 to 128: 1.01 to 1.56; at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; m = 6,656 to 8,320 with k = 12,288 to 16,384 at n <= 256: down to 0.93 | output layers at n >= 129: 1.21 and more (1.37 to 1.59 at 129); m = 6,144 with k > 8,192 at n <= 256: 1.03 and more | `tc-tall` |
+| Tall | TN with m >= 8,192 and n <= 128, or with m >= 6,144 and k > 9,216 | `m >= 8192 with n <= 128, or m >= 6144 with k > 9216 (12.9 as fast at some of these shapes)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96, at n = 65 to 128: 1.01 to 1.56; at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; with m >= 6,144, k > 9,216 and n <= 256: 48 of 951 points below 1.03, down to 0.94, in bands that follow 12.9's waves, and the other widths of the same shapes at up to 1.9 (sweeps below) | output layers at n >= 129: 1.21 and more (1.37 to 1.59 at 129); with k up to 9,216 at m >= 6,144 and n <= 256: 1.05 and more | `tc-tall` |
 | Wide | TN with k > 8,192 and n > 256 | `k > 8192 with n > 256 (the fallback's cost on real activations)` | a down projection (k = 8,960) with 53 to 70 % of its input's columns failing, in the runs before the rules: 0.85 and 1.08 at n = 320 (the two choices of columns), 0.62 to 0.98 at every n from 384 to 2,048 | the same layer at n = 256: 1.17, at n = 192: 1.18 | `tc-wide` |
 | None: the exception | nothing (no rule of shape tells these products from others of their shape) | none; from `VF_LOG_LEVEL=2` the exit report counts the calls with more than a quarter of their rows or columns failing | | served, and can run below 12.9's speed: a product whose input has a quarter or more of its columns failing the exact check, near the top of one of 12.9's waves; measured on one layer, TN 4,096 x n x 4,096 with 26 to 38 % failing: 0.86 to 0.97 at n = 128, 192 and 256 to 320 (below) | |
 
@@ -696,8 +696,22 @@ m = 10,240 and on output layers, where 12.9 was as fast or faster. Left for late
   n = 136 to 192.
 - output layers, m = 151,936 and 248,320, k = 1,024 to 4,096: 0.65 to 0.96 at n <= 64, 1.01 to 1.56 at n = 65 to
   128, 1.21 and more from 129.
-- the long-k corner, k = 12,288 to 16,384, m = 6,144 to 8,320, n = 48 to 384: at n <= 256, 19 points below 1.03,
-  at m = 6,656 to 8,320 (0.93 at m = 7,680, k = 16,384, n = 128); at m = 6,144, 1.03 and more.
+- the tall rule's long-k branch (TN with m >= 6,144 and k > 9,216): k = 8,448 to 13,824 at m = 6,144 to 8,192 in
+  steps of 128 to 256 and n = 48 to 256; k = 14,336 to 16,384 at m = 6,144 and 6,272; k = 12,288 to 16,384 at
+  m = 8,320 to 32,768 and n = 160 to 256; and k = 8,448 to 9,216 at m = 8,320 to 32,768 (3 passes each, the rule
+  removed by its control), with the earlier corner (k = 12,288 to 16,384, m = 6,144 to 8,320, n = 48 to 384). On the
+  side it serves, k up to 9,216, every point ran at 1.05 or more (214 points; the slowest, 7,680 x 128 x 9,216, at
+  1.05). Past its bounds, 48 of 951 points were below 1.03, down to 0.94: at 128 columns for m = 6,912 to 7,680 from
+  k = 10,240 on, at 192 columns for m = 6,144 to 6,656 from k = 12,288 on (at m = 6,144 only at k = 16,384, 1.03) and
+  for m = 20,480 to 32,768 from k = 13,824 on, at 64 and 96 columns for m = 7,680 to 8,064 from k = 12,800 on, and at
+  256 columns for m = 10,240 to 20,480 from k = 13,824 on; the other widths of the same shapes ran at up to 1.9 (160
+  and 224 columns at 1.07 and more everywhere; the median of the 951 points, 1.30). These bands follow 12.9's waves:
+  from 96 columns on, every point below 1.03 was one where 12.9's 64 x 64 output tiles, ceil(m / 64) ceil(n / 64) of
+  them dealt to the 80 SMs, fill at least 90 % of the places that the busiest SM's count gives all of them, so that
+  12.9 wastes almost nothing of its last wave; most such points were still faster (44 of 495 were not), and at 48 to
+  64 columns the four points below 1.03 do not follow it (a fill of 0.78 to 0.79). No
+  bound of shape follows the bands, so the branch takes the region, the faster widths with it; no layer of the eight
+  models measured has such a shape.
 - the wide rule's n bound on real operands: the down projection with the most failing columns (k = 8,960) at
   1.17 to 1.19 at n = 192 to 256 with the rules; before them, at 0.85 at n = 320 (the first
   tokens; 1.08 with the columns spread over the batch) and below 1.0 at every n from 384 on (down to 0.62); no
