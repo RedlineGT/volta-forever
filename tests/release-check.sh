@@ -75,7 +75,10 @@ if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step driver_capability python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1
     step link_refusals python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
     step nccl_remedy python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
+    step launch_guard python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1
+    step guard_stress tests/proxy/guard_stress.sh
     step jitlink_fork python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
+    step safe_mode python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
     step log_lines python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
     step summary_file python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
     step nvml_capability python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
