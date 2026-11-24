@@ -649,6 +649,38 @@ refuse refuse-link link "ALL CHECKS PASSED" \
     "kernel refused_by_layer cannot run on this GPU and is not given to the program: barrier.cluster.arrive: no Volta sequence" \
     "emulated in soft: 1 tanh" "1 kernel with emulated instructions was given to the program: 1 tanh"
 
+# A fat binary whose machine code for sm_80 has a kernel that its code for sm_75 has not
+# (tests/kernels/k_sections.cu; vLLM 0.34's library has its bf16 norm so). The layer gives it its
+# sm_75 code, whatever it is told. Told 8.0, a program asks for the kernel of the sm_80 code: the
+# lookup fails as the driver answers (500), and the layer says once, whatever the interface, that
+# only the code for sm_80 has it, which it did not give, and why (until 2026-11-24 it said
+# nothing). Told 7.5 (by default) it says nothing: a GPU of 7.5 has no such kernel either. With
+# VF_TRANSLATE=first the sm_80 code is translated, and has the kernel.
+[ -x "$out/bin/test_sections" ] && [ "$out/bin/test_sections" -nt "$G/test_sections.c" ] || gcc -O2 -Wall -o "$out/bin/test_sections" "$G/test_sections.c" -ldl || exit 2
+sections() {  # sections NAME INTERFACE EXPECTED...
+    local name=$1 interface=$2; shift 2
+    log=$out/logs/$name.log
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=1 "$out/bin/test_sections" "$G/k_sections.135.sm75-sm80.fatbin" \
+        "$interface" >"$log" 2>&1
+    echo "lines that say a kernel is not in the code given: $(grep -c 'is not in the code that the layer gives' "$log")" >>"$log"
+    echo "of them for k_from_80: $(grep -c 'kernel k_from_80 is not in the code' "$log")" >>"$log"
+    check "$name" "$@"
+}
+said=("kernel k_from_80 is not in the code that the layer gives for its image \("
+    "[0-9]+ bytes, XXH64 [0-9a-f]{16}\), its machine code for sm_75 translated: it is only in the image's machine code for sm_80, which a GPU of the capability told \(8\.0\) loads\. The lookup fails as the driver answers for a name that it does not have \(error 500\): the layer gives an image that has machine code for sm_75 and sm_80 its code for sm_75, whatever the capability told")
+given=("k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75" "k_from_80: lookup 500$" "k_nowhere: lookup 500$")
+once=("lines that say a kernel is not in the code given: 1$" "of them for k_from_80: 1$")
+VF_CAPABILITY=8.0 sections sections-told-8.0-module module "${given[@]}" "${said[0]}${said[1]}" "${once[@]}" "^8 lookups"
+VF_CAPABILITY=8.0 sections sections-told-8.0-file file "${given[@]}" \
+    "${said[0]}[^ ]*/k_sections\.135\.sm75-sm80\.fatbin: ${said[1]}" "${once[@]}" "^8 lookups"
+VF_CAPABILITY=8.0 sections sections-told-8.0-library library "${given[@]}" "${said[0]}${said[1]}" \
+    "k_from_80: lookup 500 \(in the library's module\)" "${once[@]}" "^12 lookups"
+by_default sections sections-told-7.5 library "${given[@]}" "lines that say a kernel is not in the code given: 0$" \
+    "^12 lookups"
+VF_CAPABILITY=8.0 VF_TRANSLATE=first sections sections-told-8.0-first library "k_both: ran the code for sm_80" \
+    "k_from_80: ran the code for sm_80" "k_before_80: lookup 500$" "lines that say a kernel is not in the code given: 0$" \
+    "^12 lookups"
+
 # A refused kernel of which the program holds a handle that the layer did not give (taken here from
 # NVIDIA's driver itself, as cuFFT takes the functions of its modules from a private table) is not
 # launched: every launch function, a kernel node of a graph and the questions about it return 218,

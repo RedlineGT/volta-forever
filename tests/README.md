@@ -104,9 +104,13 @@ Where the GPU scripts write:
   translated in pairs and each by itself, and with `VF_SAFE=1` (`pair-bits`), CUB's sort, sum and
   scan of a program whose code is PTX for sm_75 only, of its sm_75 machine code and of its sm_70
   build, and told 8.0 (`cub-*`: the PTX version of its kernels is that of its PTX, 7.5, where it was
-  7.0 and CUB answered "invalid device function" until 2026-11-24), and lookup tables
+  7.0 and CUB answered "invalid device function" until 2026-11-24), lookup tables
   asked for by name, answered as NVIDIA's driver answers them, except where the layer refuses one
-  (`tables.py`).
+  (`tables.py`), and a fat binary whose sm_80 machine code has a kernel that its sm_75 code has not
+  (`sections-*`, `tests/kernels/test_sections.c`): told 8.0, the lookup of that kernel fails with
+  500 as the driver answers, and the layer says once, through a module, a file and a library, that
+  only the code for sm_80 has it; told 7.5 it says nothing; with `VF_TRANSLATE=first` the kernel
+  runs from the sm_80 code.
 - `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
   `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary
   contexts, capture and launch per-GPU CUDA graphs simultaneously, and run a cross-device
@@ -173,7 +177,11 @@ Where the GPU scripts write:
   greedy), or the layer says which kernel it cannot give; in stage c2 of `vllm.sh`, every token
   sampled is among the top k and within the top p of the engine's own log-probabilities. A
   stage's verdict is the last `verdict:` line that its program prints, and counts only when the
-  program then ends by itself, with status 0, within its time (`tests/gpu/verdict.sh`).
+  program then ends by itself, with status 0, within its time (`tests/gpu/verdict.sh`). Stage e
+  of `vllm.sh` runs the model in its own bfloat16, told 8.0 with `VF_CAPABILITY_ALL=1`, without
+  compilation: vLLM 0.34 stops there at its first forward (`LIMITS.md`, "The capability told
+  with `VF_CAPABILITY`"), which the stage says as LIMIT, with the layer's line that names the
+  kernel, without changing the exit status; the same stop without that line is a FAIL.
 - `zml.sh`: the program answers with the right word and reports a speed.
 - `triton.sh`: each of the 180 cases of the quick subset of the Triton corpus gives on the V100
   what the same kernel gives on the CPU under Triton's interpreter (or the case's PyTorch
@@ -280,7 +288,9 @@ for a case, a verdict for a case that the worker did not start or did not name.
 the verdict lines of `vllm-engine.py` (stages c and c2 of `vllm.sh`): fewer results than prompts,
 or none, or a reference with fewer texts, do not pass, nor a sampled token whose log-probability is
 NaN or above 0; and the verdict of a stage of `vllm.sh` and `sglang.sh` (`tests/gpu/verdict.sh`): a
-program that prints its verdict and then fails, or does not end within its time, does not pass.
+program that prints its verdict and then fails, or does not end within its time, does not pass;
+the LIMIT of stage e is said only for a program that ended with an error after the layer's line of
+a kernel that only the code for the capability told has, and refused nothing.
 
 ### Launcher tests (`tests/launcher/`)
 

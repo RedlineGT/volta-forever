@@ -42,6 +42,11 @@ Steps, in this order:
      other GPUs only is emitted): launched, it would end the context on any GPU. The program
      chose a kernel that has no code for this GPU; look for a setting of the program that
      chooses another (the engine guides say which).
+   - `kernel NAME is not in the code that the layer gives for its image (...)` is said where a
+     lookup fails (error 500, "named symbol not found"): the program was told a capability whose
+     machine code in that image has the kernel, and the layer gave the image's sm_75 code, which
+     has not (`LIMITS.md`, "The capability told with `VF_CAPABILITY`"). The engine guides say
+     which settings avoid it.
    - `emulated in NAME: ...` is logged when VF gives the program a handle to a kernel with
      emulated instructions. Launch it and check its output to verify execution. Measure it
      before drawing conclusions about speed.

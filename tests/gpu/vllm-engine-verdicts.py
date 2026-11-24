@@ -78,8 +78,13 @@ CASES = [
 ]
 
 # What verdict.sh says of a stage: (what the program does, the verdict it waits for, the start of
-# the line expected). The program is run as vllm.sh runs one, here `timeout -k 1 3`, and its output
-# and status are given to `verdict`.
+# the line expected, and the function of verdict.sh that judges: `verdict` when not said). The
+# program is run as vllm.sh runs one, here `timeout -k 1 3`, and its output and status are given to
+# that function. `verdict_or_limit` (stage e of vllm.sh) says LIMIT, and leaves `failed` as it was,
+# for a program that ended with an error after the layer's line of a kernel that only the code for
+# the capability told has; through `verdict`, the same is a FAIL.
+NOT_GIVEN = ('echo "[volta-forever] kernel k is not in the code that the layer gives for its image (x), its machine '
+             'code for sm_75 translated: it is only in the image\'s machine code for sm_80"')
 FAKE = {
     'passes': 'echo "verdict: ALL_WITHIN"',
     'has near ties': 'echo "verdict: MATCH_BUT_NEAR_TIES 2"',
@@ -88,6 +93,11 @@ FAKE = {
     'fails after its verdict': 'echo "verdict: ALL_WITHIN"; exit 3',
     'is refused a kernel': 'echo "[volta-forever] kernel k cannot run on this GPU and is not given to the program: x"; exit 1',
     'gives another verdict': 'echo "verdict: SOME_OUTSIDE"',
+    'stops after a kernel of the code told': NOT_GIVEN + '; echo "FAIL: CUDA error: named symbol not found"; exit 1',
+    'hangs after a kernel of the code told': NOT_GIVEN + '; sleep 60',
+    'is told of a kernel of the code told, and passes': NOT_GIVEN + '; echo "verdict: ALL_MATCH"',
+    'stops after a kernel of the code told and a refusal': NOT_GIVEN + '; echo "[volta-forever] kernel r cannot run on '
+                                                           'this GPU and is not given to the program: x"; exit 1',
 }
 STAGES = [
     ('passes', 'ALL_WITHIN', 'PASS stage-x'),
@@ -97,16 +107,25 @@ STAGES = [
     ('fails after its verdict', 'ALL_WITHIN', 'FAIL stage-x: the program ended with status 3, after the verdict ALL_WITHIN'),
     ('is refused a kernel', 'ALL_WITHIN', 'REFUSED stage-x: [volta-forever] kernel k cannot run'),
     ('gives another verdict', 'ALL_WITHIN', 'FAIL stage-x'),
+    ('stops after a kernel of the code told', 'ALL_MATCH', 'FAIL stage-x: the program ended with status 1'),
+    ('stops after a kernel of the code told', 'ALL_MATCH', 'LIMIT stage-x: [volta-forever] kernel k is not in the code',
+     'verdict_or_limit'),
+    ('hangs after a kernel of the code told', 'ALL_MATCH', 'FAIL stage-x: ran out of time', 'verdict_or_limit'),
+    ('is told of a kernel of the code told, and passes', 'ALL_MATCH', 'PASS stage-x', 'verdict_or_limit'),
+    ('stops after a kernel of the code told and a refusal', 'ALL_MATCH', 'REFUSED stage-x: [volta-forever] kernel r',
+     'verdict_or_limit'),
+    ('passes', 'ALL_WITHIN', 'PASS stage-x', 'verdict_or_limit'),
+    ('fails after its verdict', 'ALL_WITHIN', 'FAIL stage-x: the program ended with status 3', 'verdict_or_limit'),
 ]
 
 
-def stage(command, word):
+def stage(command, word, judge='verdict'):
     """What verdict.sh prints, then `failed=N`, for `command` (a shell command, or an argv) run as
-    vllm.sh runs a stage's program."""
-    script = ('source "$1"; engine_wait=3; failed=0; shift 2; out=$(timeout -k 1 "$engine_wait" "$@" 2>&1); '
-              'status=$?; verdict x "$out" "$0" "$status"; echo "failed=$failed"')
+    vllm.sh runs a stage's program, judged by the function `judge` of verdict.sh."""
+    script = ('source "$1"; engine_wait=3; failed=0; judge=$2; shift 3; out=$(timeout -k 1 "$engine_wait" "$@" 2>&1); '
+              'status=$?; "$judge" x "$out" "$0" "$status"; echo "failed=$failed"')
     argv = ["sh", "-c", command] if isinstance(command, str) else command
-    return subprocess.run(["bash", "-c", script, word, str(VERDICT), "--", *argv], stdout=subprocess.PIPE,
+    return subprocess.run(["bash", "-c", script, word, str(VERDICT), judge, "--", *argv], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, timeout=60).stdout
 
 
@@ -140,19 +159,19 @@ def main():
         # The stand-in's program prints its verdict and does not end: through verdict.sh, no pass.
         env = {k: v for k, v in os.environ.items() if k not in ("REF_FILE", "TOP_K", "TOP_P", "TEMPERATURE")}
         env.update(PYTHONPATH=str(site), MODEL="stand-in", VF_TEST_SCENARIO="hang", TEMPERATURE="0.8", TOP_K="5")
-        checks = [(name, word, want, FAKE[name]) for name, word, want in STAGES] + [
+        checks = [(name, word, want, FAKE[name], (judge or ['verdict'])[0]) for name, word, want, *judge in STAGES] + [
             ('is vllm-engine.py and hangs after its verdict', 'ALL_WITHIN',
              'FAIL stage-x: ran out of time ($VF_ENGINE_WAIT is 3 s), after the verdict ALL_WITHIN',
-             ["env", "-i", *[f"{k}={v}" for k, v in env.items()], sys.executable, str(PROGRAM)])]
-        for name, word, want, command in checks:
-            said = stage(command, word)
+             ["env", "-i", *[f"{k}={v}" for k, v in env.items()], sys.executable, str(PROGRAM)], 'verdict')]
+        for name, word, want, command, judge in checks:
+            said = stage(command, word, judge)
             first = said.splitlines()[0] if said else ''
             failed = 'failed=0' not in said
-            if first.startswith(want) and failed == (not want.startswith('PASS')):
-                print(f"ok   the stage verdict of a program that {name}: {first}")
+            if first.startswith(want) and failed == (not want.startswith(('PASS', 'LIMIT'))):
+                print(f"ok   the stage verdict ({judge}) of a program that {name}: {first}")
             else:
                 wrong += 1
-                print(f"WRONG the stage verdict of a program that {name}: {said!r}, want {want!r}")
+                print(f"WRONG the stage verdict ({judge}) of a program that {name}: {said!r}, want {want!r}")
     total = len(CASES) + len(checks)
     print(f"{total - wrong} of {total} checks pass")
     return 1 if wrong else 0

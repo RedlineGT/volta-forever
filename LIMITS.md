@@ -796,6 +796,28 @@ What that does not cover:
   capability told does: PyTorch's attention kernels for sm_80), is refused, and the operation
   fails. It is only for a program that does not launch those kernels, as SGLang with the
   settings of its guide.
+- **A kernel that only the code for the capability told has.** The layer gives an image that has
+  machine code for sm_75 and for sm_80, and no PTX, its sm_75 code, translated, whatever the
+  capability told: its translation of sm_80 machine code covers fewer instructions and is not
+  independently validated (`docs/architecture.md`, "Fat binaries and what is chosen"). A library
+  compiled for several architectures can have a kernel in its code for sm_80 only, or under
+  another name in its code for sm_75 (a template whose `enable_if` takes another overload there).
+  Told 8.0 (with `VF_CAPABILITY_ALL=1` for a library that uses a CUDA runtime), its host code asks
+  for the kernel by its name in the sm_80 code, and the lookup fails as the driver answers for a
+  name that it does not have (500; the CUDA runtime says `named symbol not found`). The layer says
+  so at that lookup, once for each kernel: `kernel NAME is not in the code that the layer gives for
+  its image (FILE: SIZE bytes, XXH64 DIGEST), its machine code for sm_75 translated: it is only in
+  the image's machine code for sm_80, ...`. Told 7.5 it says nothing: a GPU of 7.5 has no such
+  kernel either. vLLM 0.34.0 stops so at its first forward with a bfloat16 model, told 8.0 with
+  `VF_CAPABILITY_ALL=1` and its compilation off (`--enforce-eager`, or `TORCH_COMPILE_DISABLE=1`):
+  its vectorized bf16 `fused_add_rms_norm` is only in the sm_80 code of its
+  `_C_stable_libtorch.abi3.so`. With its compilation on (its default), vLLM computes that norm
+  with PyTorch's operations and runs; at the default capability it makes the model float16 and
+  does not ask for that kernel ([the vLLM guide](docs/guides/vllm.md), 2026-11-24). The sm_80 code
+  of that image would not run here either: the layer's translator refuses 102 of its 103
+  functions, that kernel among them, and the image keeps no PTX. `VF_TRANSLATE=first` gives the
+  machine code for the capability told precedence in every image, PyTorch's too, whose sm_80 code
+  the layer translates less of. Not said: a kernel of an image linked from relocatable code.
 - NVML, answered by the audit library, reports the value asked for to every caller: told 8.0, a
   program that reads NVML (vLLM does) and a CUDA runtime that is told 7.5 give it two answers.
 - Triton compiles for the capability that PyTorch reports (`torch.cuda.get_device_capability`)

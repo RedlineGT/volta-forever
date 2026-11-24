@@ -102,3 +102,7 @@ An earlier comparison isolated the expert tile settings on another V100. With th
 VF 0.1.1 reports the capability 7.5 required by vLLM’s NVML check. The 35B run used all nine checkpoint shards, automatic quantization selection and CUDA 13.5 headers for FlashInfer RMSNorm. VF 0.1.0 reported 7.0 to this check. [VF 0.1.1 release](https://github.com/nbald/volta-forever/releases/tag/v0.1.1)
 
 For a smaller model, Qwen2.5-0.5B-Instruct with float16 weights also answered **Paris**. Three warm 32-token completions had a median end-to-end throughput of 33.4 tokens/s.
+
+### A model kept in bfloat16
+
+Below capability 8.0 vLLM makes a bfloat16 model float16; at the default capability that is what runs. To keep a model in bfloat16, vLLM must be told 8.0: `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`, through `vf` or the environment of `vf venv` (vLLM reads the capability from NVML, which the launcher answers). Keep vLLM's compilation on, its default. With `--enforce-eager`, or `TORCH_COMPILE_DISABLE=1`, vLLM 0.34.0 stops at its first forward with `CUDA error: named symbol not found`. The layer's line before it names the kernel, `fused_add_rms_norm_kernel<c10::BFloat16, 8, ...>`, and the image, in vLLM's `_C_stable_libtorch.abi3.so`: that kernel is only in the library's machine code for sm_80, and the layer gives that library its sm_75 code. With compilation on, vLLM computes that norm with PyTorch's operations and runs. [The limit](../../LIMITS.md#the-capability-told-with-vf_capability)

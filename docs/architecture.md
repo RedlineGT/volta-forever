@@ -147,6 +147,20 @@ sm_80, which the sm_75 code does not have. When only the stripped sm_80 image is
 VF translates its supported functions. `VF_TRANSLATE=first` gives machine code for the
 requested capability precedence.
 
+A program told 8.0 all the same (`VF_CAPABILITY_ALL=1`, or a caller without code of its own)
+can ask such an image for a kernel that only its code for sm_80 has: a kernel compiled for
+later architectures only, or under another name in the code for sm_75 (a template whose
+`enable_if` takes another overload there). The lookup fails as the driver answers for a name
+that the code it has does not have (`CUDA_ERROR_NOT_FOUND`, 500). At that answer the proxy
+looks in the image it gave the driver, which keeps the program's other entries, for the
+kernel in the machine code that a GPU of the capability told loads (`vf_adapt::Policy::
+told_machine_code`, `has_kernel`), and when it is there says so once for each kernel, with the
+file the image is in (`dladdr`), its size and digest, and why that code was not given
+(`kernels::not_given`). The lookup still fails: that one kernel, given from a translation of the
+sm_80 code, would be in another module than the program's, with its own copies of the image's
+variables, and from the translation that covers fewer instructions (LIMITS.md, "The capability
+told with `VF_CAPABILITY`").
+
 ### PTX retargeted and lowered
 
 PTX for sm_75 or later is rewritten for sm_70 in two steps

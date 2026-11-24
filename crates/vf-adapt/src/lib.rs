@@ -790,16 +790,7 @@ impl Policy {
     /// before; the code for the later architecture is only read, not translated.
     fn stubs_for_told(&self, fat: &FatBinary<'_>, source: u32, cubin: &[u8]) -> Vec<Refused> {
         use vf_sass::effects::{Effect, kernel_effects};
-        let Some(told) = self.told_sm.filter(|told| told / 10 > source / 10) else {
-            return Vec::new();
-        };
-        let later = fat
-            .entries
-            .iter()
-            .filter(|e| e.kind() == KIND_ELF && e.sm() > source && e.sm() <= told)
-            .map(Entry::sm)
-            .max();
-        let Some(later) = later else {
+        let (Some(later), Some(told)) = (self.told_machine_code(fat, source), self.told_sm) else {
             return Vec::new();
         };
         let with = |cubin: &[u8], wanted: Effect| -> Vec<String> {
@@ -834,6 +825,41 @@ impl Policy {
                 kernel,
             })
             .collect()
+    }
+
+    /// The architecture of the machine code of `fat` that a GPU of the capability told (`told_sm`)
+    /// loads, when the program is told a later generation than `given`, the architecture of the
+    /// machine code that `adapt_fatbin` translated for it: the latest of `fat` after `given` and up
+    /// to what is told. `None` when the program is told nothing later, or `fat` has nothing there.
+    /// A library compiled for several architectures chooses its kernels by the capability it is
+    /// told, and the code for `given` can have them as stubs (`stubs_for_told`) or not have them at
+    /// all: a kernel that is compiled for the later architectures only, or under another name in
+    /// the code for the earlier ones (a template whose `enable_if` takes another overload there).
+    /// The lookup of such a kernel fails (`has_kernel`).
+    pub fn told_machine_code(&self, fat: &FatBinary<'_>, given: u32) -> Option<u32> {
+        let told = self.told_sm.filter(|told| told / 10 > given / 10)?;
+        fat.entries
+            .iter()
+            .filter(|e| e.kind() == KIND_ELF && e.sm() > given && e.sm() <= told)
+            .map(Entry::sm)
+            .max()
+    }
+
+    /// Why a program told a later generation is given the machine code of an image for `given`, not
+    /// its code for `loads` that a GPU of the capability told loads (`told_machine_code`).
+    /// (`machine_source`: by default the earliest code that the layer translates; with
+    /// `VF_TRANSLATE=first` or `force`, the latest up to what is told, which is then `loads` when
+    /// it translates that.)
+    pub fn why_given(&self, given: u32, loads: u32) -> String {
+        if self.translatable(loads) {
+            format!(
+                "the layer gives an image that has machine code for sm_{given} and sm_{loads} its code for \
+                 sm_{given}, whatever the capability told, as its translation of machine code for sm_{loads} \
+                 covers fewer instructions and is not independently validated"
+            )
+        } else {
+            format!("the layer does not translate machine code for sm_{loads}")
+        }
     }
 
     /// Translate the machine code for one target, keeping entries for other GPUs. With the
@@ -1233,6 +1259,19 @@ impl Policy {
             kernels: removal.kernels,
         })
     }
+}
+
+/// Whether the machine code of `fat` for `sm` has a kernel `name`: an entry point of one of its
+/// cubins for that architecture (`Policy::told_machine_code`). A cubin that cannot be read has none.
+pub fn has_kernel(fat: &FatBinary<'_>, sm: u32, name: &str) -> bool {
+    fat.entries
+        .iter()
+        .filter(|e| e.kind() == KIND_ELF && e.sm() == sm)
+        .any(|entry| {
+            entry
+                .payload()
+                .is_ok_and(|cubin| fatbin::cubin_entries(&cubin).is_some_and(|names| names.contains(&name)))
+        })
 }
 
 /// Per-function register counts extracted from a cubin's ELF sections.
@@ -1977,6 +2016,61 @@ mod tests {
             policy.adapt_fatbin(&fatbin::parse(&alone).unwrap()).unwrap().outcome,
             Outcome::Translated { from_sm: 75, ref refused, .. } if refused.is_empty()
         ));
+    }
+
+    /// `tests/kernels/k_sections.cu`: machine code for sm_75 and sm_80, no PTX; `k_from_80` is in the
+    /// code for sm_80 only, `k_before_80` in the code for sm_75 only, `k_both` in both.
+    const SECTIONS: &[u8] = include_bytes!("../../../tests/kernels/k_sections.135.sm75-sm80.fatbin");
+
+    #[test]
+    fn the_code_that_a_gpu_of_the_capability_told_loads_is_found_beside_the_code_given() {
+        let fat = fatbin::parse(SECTIONS).unwrap();
+        for told_sm in [None, Some(75), Some(80), Some(86), Some(90)] {
+            for keep_sources in [false, true] {
+                let policy = Policy {
+                    told_sm,
+                    keep_sources,
+                    ..Policy::default()
+                };
+                // Given from its sm_75 code, whatever is told, and nothing refused.
+                let adapted = policy.adapt_fatbin(&fat).unwrap();
+                assert!(
+                    matches!(adapted.outcome, Outcome::Translated { from_sm: 75, ref refused, .. } if refused.is_empty()),
+                    "told {told_sm:?}: {:?}",
+                    adapted.outcome
+                );
+                // Told a later generation, a GPU of that capability loads the code for sm_80 (there is
+                // nothing later up to 9.0): in the program's image, and in the image given to the
+                // driver, which keeps that entry and where the proxy looks.
+                let loads = told_sm.filter(|&sm| sm >= 80).map(|_| 80);
+                assert_eq!(policy.told_machine_code(&fat, 75), loads, "told {told_sm:?}");
+                let given = adapted.image.unwrap();
+                assert_eq!(policy.told_machine_code(&fatbin::parse(&given).unwrap(), 75), loads);
+            }
+        }
+        // Told the generation of the code given: nothing later.
+        let told = Policy {
+            told_sm: Some(80),
+            ..Policy::default()
+        };
+        assert_eq!(told.told_machine_code(&fat, 80), None);
+        // Which code has which kernel.
+        assert!(has_kernel(&fat, 80, "k_from_80"));
+        assert!(has_kernel(&fat, 80, "k_both"));
+        assert!(!has_kernel(&fat, 80, "k_before_80"));
+        assert!(!has_kernel(&fat, 80, "k_nowhere"));
+        assert!(has_kernel(&fat, 75, "k_before_80"));
+        assert!(!has_kernel(&fat, 75, "k_from_80"));
+        assert!(!has_kernel(&fat, 86, "k_both"));
+        // Why the sm_75 code is given; and for code that the layer does not translate.
+        assert!(told.why_given(75, 80).ends_with(
+            "its code for sm_75, whatever the capability told, as its translation of machine code for sm_80 covers \
+             fewer instructions and is not independently validated"
+        ));
+        assert_eq!(
+            told.why_given(75, 86),
+            "the layer does not translate machine code for sm_86"
+        );
     }
 
     #[test]
