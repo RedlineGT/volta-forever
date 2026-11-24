@@ -504,21 +504,33 @@ unsafe fn is_capturing(stream: *mut c_void) -> bool {
 
 /// Synchronise the stream so that the kernel's GPU time is known. Skips synchronization when
 /// the stream is capturing a graph (CUDA graph capture mode does not allow it). Returns the
-/// driver's answer, or `None` when the stream was not synchronised.
-unsafe fn sync_stream(stream: *mut c_void) -> Option<c_int> {
+/// driver's answer, or `None` when the stream was not synchronised. The wait is one of the
+/// synchronisations that the report of a fault knows (`fault::synchronized`): when it succeeds it
+/// covers what was launched on the stream before, and when it meets a fault, it is reported.
+unsafe fn sync_stream(stream: *mut c_void, kept: crate::fault::Kept) -> Option<c_int> {
     if unsafe { is_capturing(stream) } {
         return None;
     }
     let sync: unsafe extern "C" fn(*mut c_void) -> c_int =
         unsafe { std::mem::transmute::<usize, _>(REALS[idx::cuStreamSynchronize].load(Relaxed)) };
-    Some(unsafe { sync(stream) })
+    let covers = crate::fault::begin();
+    let result = unsafe { sync(stream) };
+    crate::fault::synchronized_after(
+        result,
+        covers,
+        crate::fault::Scope::Stream(stream, false),
+        "the synchronisation of the stream after a launch (VF_PROFILE)",
+        kept,
+    );
+    Some(result)
 }
 
 /// Whether a failed synchronisation was already said: the first is the one that names the kernel
 /// that failed (a fault ends the context, and every later call fails with the same error).
 static FAILURE_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Profile a launch of `cuLaunchKernel`. Called from the hook.
+/// Profile a launch of `cuLaunchKernel`. Called from the hook, with what the report of a fault kept
+/// of the launch (`kept`).
 ///
 /// # Safety
 /// All arguments are those of the driver call.
@@ -528,10 +540,11 @@ pub unsafe fn profile_launch(
     block: [u32; 3],
     shared_memory_bytes: u32,
     stream: *mut c_void,
+    kept: crate::fault::Kept,
 ) {
     let t0 = Instant::now();
     // The launch has already happened (the real function was called). Now synchronise.
-    let synced = unsafe { sync_stream(stream) };
+    let synced = unsafe { sync_stream(stream, kept) };
     let elapsed_ns = if synced == Some(0) { t0.elapsed().as_nanos() } else { 0 };
 
     let name = unsafe { kernel_name(function) };
@@ -590,17 +603,6 @@ fn count_shape<K: std::hash::Hash + Eq>(seen: &mut HashMap<K, u64>, size: K) {
     } else if seen.len() < SHAPES_KEPT {
         seen.insert(size, 1);
     }
-}
-
-/// Profile a launch of `cuLaunchKernelEx`.
-pub unsafe fn profile_launch_ex(
-    function: *mut c_void,
-    grid: [u32; 3],
-    block: [u32; 3],
-    shared_memory_bytes: u32,
-    stream: *mut c_void,
-) {
-    unsafe { profile_launch(function, grid, block, shared_memory_bytes, stream) };
 }
 
 fn format_dynamic_smem(smem: &HashMap<u32, u64>) -> String {

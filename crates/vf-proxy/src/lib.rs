@@ -47,6 +47,13 @@
 //!   launch);
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
 //!   refuses (kernel name, grid, block, shared memory, launch attributes);
+//! - `VF_FAULT_TRACE=1` (exactly): synchronise the stream of every launch right after it, so that the
+//!   launch whose synchronisation meets a fault is named (`fault`; without it, the kernels that may
+//!   have faulted are named);
+//! - `VF_FAULT_REPORT=0` (exactly): no report of faults: nothing kept of launches and
+//!   synchronisations, nothing said, the functions hooked only for it forwarded as they are (a
+//!   lookup gives NVIDIA's, a call by the exported name passes through the entry here, which only
+//!   forwards and counts it, `FAULT_ONLY`), and `VF_FAULT_TRACE` without effect;
 //! - `VF_SAFE=1` (exactly): safe mode, the switches of the rewriting whose results are not
 //!   bit-identical to the default's are not used, nor the pairs of products of machine code
 //!   (`vf_adapt::Policy::make_safe`), said once at level 1;
@@ -65,6 +72,7 @@ mod generated {
 mod cache;
 mod callers;
 mod contexts;
+mod fault;
 pub mod fit;
 mod guard;
 mod hooks;
@@ -102,6 +110,11 @@ pub struct Config {
     pub capability_all: bool,
     pub stats: bool,
     pub trace_launch: bool,
+    /// `VF_FAULT_TRACE=1`: every launch is synchronised right after it (`fault`), unless the report
+    /// of faults is off.
+    pub fault_trace: bool,
+    /// The report of faults (`fault`), on unless `VF_FAULT_REPORT=0` (exactly).
+    pub fault_report: bool,
     pub policy: vf_adapt::Policy,
     /// Whether to retry a launch that fails with 701 using a second translation within the
     /// register budget (`VF_FIT`, default on).
@@ -139,6 +152,9 @@ pub fn config() -> &'static Config {
             capability_all: var("VF_CAPABILITY_ALL").as_deref() == Some("1"),
             stats: var("VF_STATS").is_some_and(|v| v != "0"),
             trace_launch: var("VF_TRACE_LAUNCH").is_some_and(|v| v != "0"),
+            fault_trace: var("VF_FAULT_TRACE").as_deref() == Some("1")
+                && var("VF_FAULT_REPORT").as_deref() != Some("0"),
+            fault_report: var("VF_FAULT_REPORT").as_deref() != Some("0"),
             fit: var("VF_FIT").is_none_or(|v| v != "0"),
             fit_shared: var("VF_FIT_SHARED").as_deref() == Some("1"),
             policy,
@@ -156,13 +172,48 @@ pub fn own_entry(real: usize) -> Option<usize> {
 }
 
 /// The launch entries: lookups lead to them when the layer adapts code (a launch of a kernel it
-/// refused is refused there, `guard`), or when the fit mechanism, `VF_TRACE_LAUNCH`, statistics or
-/// the profile ask for them.
+/// refused is refused there, `guard`; the launches are recorded there for the report of a fault,
+/// `fault`), or when the fit mechanism, `VF_TRACE_LAUNCH`, `VF_FAULT_TRACE`, statistics or the
+/// profile ask for them.
 const TRACE_ONLY: [usize; 4] = [
     idx::cuLaunchKernel,
     idx::cuLaunchKernelEx,
     idx::cuLaunchKernel_ptsz,
     idx::cuLaunchKernelEx_ptsz,
+];
+
+/// The functions hooked only for the report of faults (`fault`): with `VF_FAULT_REPORT=0`, lookups
+/// of them lead to NVIDIA's own, and a call by their exported name passes through their entry here,
+/// which calls NVIDIA's and returns its answer, having counted the call (`COUNTS`, for `VF_STATS`):
+/// every call of `fault` there returns at once (`fault::on`).
+pub(crate) const FAULT_ONLY: [usize; 27] = [
+    idx::cuCtxSynchronize,
+    idx::cuCtxSynchronize_v2,
+    idx::cuStreamSynchronize,
+    idx::cuStreamSynchronize_ptsz,
+    idx::cuStreamQuery,
+    idx::cuStreamQuery_ptsz,
+    idx::cuEventSynchronize,
+    idx::cuEventQuery,
+    idx::cuStreamBeginCapture,
+    idx::cuStreamBeginCapture_ptsz,
+    idx::cuStreamBeginCapture_v2,
+    idx::cuStreamBeginCapture_v2_ptsz,
+    idx::cuStreamBeginCaptureToGraph,
+    idx::cuStreamBeginCaptureToGraph_ptsz,
+    idx::cuStreamEndCapture,
+    idx::cuStreamEndCapture_ptsz,
+    idx::cuGraphInstantiate,
+    idx::cuGraphInstantiate_v2,
+    idx::cuGraphInstantiateWithFlags,
+    idx::cuGraphInstantiateWithParams,
+    idx::cuGraphInstantiateWithParams_ptsz,
+    idx::cuGraphLaunch,
+    idx::cuGraphLaunch_ptsz,
+    idx::cuGraphDestroy,
+    idx::cuGraphExecDestroy,
+    idx::cuStreamDestroy,
+    idx::cuStreamDestroy_v2,
 ];
 
 /// Stands in for every function when NVIDIA's library cannot be loaded.
@@ -278,7 +329,14 @@ extern "C" fn init() {
     for hooked in [false, true] {
         let wanted = |i: usize| {
             if TRACE_ONLY.contains(&i) {
-                config.adapt || config.trace_launch || config.stats || config.profile || config.fit
+                config.adapt
+                    || config.trace_launch
+                    || config.stats
+                    || config.profile
+                    || config.fit
+                    || config.fault_trace
+            } else if FAULT_ONLY.contains(&i) {
+                config.fault_report || config.stats
             } else {
                 hooked || config.stats
             }
@@ -324,11 +382,11 @@ fn report() -> Vec<String> {
     report_lines().into_iter().map(|(_, line)| line).collect()
 }
 
-/// The report at exit, line by line, with the level at which each is logged: the kernels with
-/// emulated instructions given to the program, the second translations, and with `VF_STATS` the
-/// calls and launches counted (asked for: logged at every level).
+/// The report at exit, line by line, with the level at which each is logged: the faults seen, the
+/// kernels with emulated instructions given to the program, the second translations, and with
+/// `VF_STATS` the calls and launches counted (asked for: logged at every level).
 fn report_lines() -> Vec<(u8, String)> {
-    let mut lines = Vec::new();
+    let mut lines: Vec<(u8, String)> = fault::summary_lines().into_iter().map(|line| (0, line)).collect();
     if let Some(line) = kernels::summary_line() {
         lines.push((1, line));
     }

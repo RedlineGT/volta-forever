@@ -54,7 +54,7 @@ use crate::{generated, log};
 /// Magic at the start of every cached file.
 const FILE_MAGIC: [u8; 4] = *b"S70C";
 /// Format version; bump to invalidate all entries when the on-disk layout changes.
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 /// File header: magic(4) + format_version(4) + key(16) + content_len(4) + checksum(8) = 36.
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
@@ -84,13 +84,21 @@ fn state() -> Option<&'static CacheState> {
             let uid = unsafe { libc::geteuid() };
             // Create the directory on first use, or verify it.
             if let Err(reason) = ensure_dir(&dir, uid) {
-                log::warn(format_args!("proxy cache disabled: {reason}"));
+                log::warn(format_args!("{}", disabled(&reason)));
                 return None;
             }
             remove_stale_temporaries(&dir, uid);
             Some(CacheState { dir, max_bytes, uid })
         })
         .as_ref()
+}
+
+/// The line said once, at the default level, when the cache is off for `reason`.
+fn disabled(reason: &str) -> String {
+    format!(
+        "proxy cache disabled: {reason}; every start adapts again (nothing that the layer works out is kept, \
+         `vf doctor` says what it found)"
+    )
 }
 
 /// Determine the cache directory from the environment.
@@ -140,9 +148,14 @@ fn verify_dir(dir: &Path, uid: u32) -> Result<(), String> {
     if meta.uid() != uid {
         return Err(format!("{dir:?} is not owned by uid {uid}"));
     }
-    let mode = meta.mode();
+    // (A umask of 002, the default of many distributions' accounts, makes directories that the
+    // group can write.)
+    let mode = meta.mode() & 0o7777;
     if mode & 0o022 != 0 {
-        return Err(format!("{dir:?} is writable by group or others (mode {mode:#o})"));
+        return Err(format!(
+            "{dir:?} is writable by its group or by others (mode {mode:o}): chmod 700 {dir:?} makes it the user's \
+             alone"
+        ));
     }
     Ok(())
 }
@@ -657,6 +670,7 @@ fn encode_translation(adapted: &vf_adapt::Adapted) -> Option<Vec<u8>> {
         emulated,
         over_budget,
         stubs,
+        paired,
     } = &adapted.outcome
     else {
         return None;
@@ -690,6 +704,10 @@ fn encode_translation(adapted: &vf_adapt::Adapted) -> Option<Vec<u8>> {
         for kernel in list {
             put_str(&mut buf, kernel);
         }
+    }
+    put(&mut buf, paired.len());
+    for name in paired {
+        put_str(&mut buf, name);
     }
     buf.extend_from_slice(image);
     Some(buf)
@@ -755,6 +773,10 @@ fn decode_translation(data: &[u8]) -> Option<vf_adapt::Adapted> {
             list.push(read_str(&mut pos)?);
         }
     }
+    let mut paired = Vec::new();
+    for _ in 0..read(&mut pos)? {
+        paired.push(read_str(&mut pos)?);
+    }
     Some(vf_adapt::Adapted {
         outcome: vf_adapt::Outcome::Translated {
             entries,
@@ -764,6 +786,7 @@ fn decode_translation(data: &[u8]) -> Option<vf_adapt::Adapted> {
             emulated,
             over_budget,
             stubs,
+            paired,
         },
         image: Some(data.get(pos..)?.to_vec()),
     })
@@ -904,6 +927,7 @@ mod tests {
                     trap_only: vec!["no_code".to_string()],
                     empty: vec!["noop".to_string(), "probe".to_string()],
                 },
+                paired: vec!["block_sum".to_string()],
             },
             image: Some(vec![0x7f, b'E', b'L', b'F', 1, 2, 3]),
         };
@@ -1128,13 +1152,26 @@ mod tests {
     fn dir_writable_by_others_refused() {
         let dir = test_dir("perms");
         let uid = unsafe { libc::geteuid() };
-        // Make world-writable.
+        // World-writable, and writable by the group (as a umask of 002 makes a directory): refused,
+        // with the fix, and the line says what it costs.
         #[cfg(unix)]
-        {
+        for mode in [0o777, 0o775, 0o770] {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            let reason = verify_dir(&dir, uid).unwrap_err();
+            assert!(
+                reason.contains(&format!(
+                    "is writable by its group or by others (mode {mode:o}): chmod 700 {dir:?}"
+                )),
+                "{reason}"
+            );
+            assert!(
+                disabled(&reason).starts_with("proxy cache disabled: ")
+                    && disabled(&reason).contains("; every start adapts again"),
+                "{}",
+                disabled(&reason)
+            );
         }
-        assert!(verify_dir(&dir, uid).is_err());
         // Restore and verify passes.
         #[cfg(unix)]
         {

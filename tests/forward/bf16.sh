@@ -13,7 +13,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:-${TMPDIR:-/tmp}/vf-fwd-bf16-test}
 src=$root/tests/forward/bf16
 rt=$root/crates/vf-fwdgen/bf16tc
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target}
+. "$root/scripts/target-dir.sh"
+CARGO_TARGET_DIR=$(vf_target_dir "$root")
+export CARGO_TARGET_DIR
 cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 rm -rf "$out"
 mkdir -p "$out/old/lib" "$out/old/include" "$out/new/lib" "$out/new/include" "$out/test" "$out/noruntime" "$out/abort"

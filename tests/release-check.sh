@@ -92,6 +92,8 @@ if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step link_refusals python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
     step nccl_remedy python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
     step launch_guard python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1
+    step fault python3 tests/proxy/fault.py dist/lib/libcuda.so.1
+    step driver_calls python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
     step guard_stress tests/proxy/guard_stress.sh
     step jitlink_fork python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
     step safe_mode python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
@@ -113,6 +115,7 @@ step install-syntax sh -c 'dash -n install.sh && bash --posix -n install.sh'
 step install-dash python3 tests/launcher/install.py
 step install-bash env VF_TEST_SHELL=bash python3 tests/launcher/install.py
 step fetch-redist python3 tests/launcher/fetch-redist.py
+step target-dir tests/scripts/target-dir.sh --build
 if [ -d "$W/toolkits/cuda-12.9.2" ]; then
     step jitlink_objects python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
     step bf16-kernels scripts/build-bf16-kernels.sh --check

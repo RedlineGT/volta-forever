@@ -12,7 +12,7 @@
 #   VF_TOOL  the tool. By default the one that `cargo build --release -p vf-cli` built, where
 #              cargo put it: release/vf-translate of $CARGO_TARGET_DIR when that is set, or else of this
 #              tree's target/ when it is there, or else of the directory scripts/build.sh builds
-#              in (~/.cache/volta-forever/target)
+#              this checkout in (~/.cache/volta-forever/target-HASH, scripts/target-dir.sh)
 #   JOBS       processes (default 48)
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -22,7 +22,7 @@ md=$root/reference
 if [ -z "${VF_TOOL:-}" ]; then
     if [ -n "${CARGO_TARGET_DIR:-}" ]; then VF_TOOL=$CARGO_TARGET_DIR/release/vf-translate
     elif [ -x "$root/target/release/vf-translate" ]; then VF_TOOL=$root/target/release/vf-translate
-    else VF_TOOL=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target/release/vf-translate
+    else VF_TOOL=$(. "$root/scripts/target-dir.sh" && vf_target_dir "$root")/release/vf-translate
     fi
 fi
 TORCH=${TORCH:-$VF_TEST_ROOT/torch-cubins}

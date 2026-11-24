@@ -15,7 +15,7 @@ W=$(cd "$(dirname "$0")/../.." && pwd)
 if [ -z "${VF_TOOL:-}" ]; then
     if [ -n "${CARGO_TARGET_DIR:-}" ]; then VF_TOOL=$CARGO_TARGET_DIR/release/vf-translate
     elif [ -x "$W/target/release/vf-translate" ]; then VF_TOOL=$W/target/release/vf-translate
-    else VF_TOOL=${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target/release/vf-translate
+    else VF_TOOL=$(. "$W/scripts/target-dir.sh" && vf_target_dir "$W")/release/vf-translate
     fi
 fi
 TORCH=${TORCH:-$VF_TEST_ROOT/torch-cubins}

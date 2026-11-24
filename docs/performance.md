@@ -402,6 +402,22 @@ The refused launch costs 1.0 microsecond before the second one is made (200,000 
 launches, 0.99 to 1.04 microseconds each, 2026-11-20). The second translation is slower code;
 how much slower than a native build was not measured.
 
+### What a launch keeps for the report of a fault
+
+Every launch that passes through the layer is kept for the report of a fault (`LIMITS.md`,
+"After a kernel faults"; `crates/vf-proxy/src/fault.rs`). An empty kernel launched 200,000 times
+in a loop (`tests/kernels/test_fault.c`, mode `rate`), the process pinned to one CPU of the GPU's
+socket, the build before this record and the build with it in turns in one job, 12 rounds of 5
+loops each, twice (2026-11-24): 1.873 against 1.890 µs a launch and 1.834 against 1.861 (medians;
+the difference of each round's medians, +24 and +28 ns), while the build before against a copy of
+itself gave 0 and +1 ns. The spread from round to round is larger (up to 100 ns), and a process
+left to the scheduler, not pinned, ran at about 1.92 or 2.24 µs a launch from one run to the next:
+compare pinned runs only. The first form of the record (one ring for the process: an atomic
+increment and a compare-and-swap after the driver's call) cost about 65 ns (unpinned, 8 rounds),
+reading the processor's time stamp counter about 15 more (unpinned), and the present record in a
+function apart from the launch entry about 40 (pinned, 16 rounds). With `VF_FAULT_TRACE=1` every
+launch waits for its kernel: 5.7 to 5.8 µs a launch in the same loop.
+
 ### The first use
 
 The first time a program runs through the layer, work is done that later runs do not repeat.

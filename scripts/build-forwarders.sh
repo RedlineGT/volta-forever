@@ -9,7 +9,9 @@
 # Same inputs, same bytes: running it twice gives identical files.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target}
+. "$root/scripts/target-dir.sh"
+CARGO_TARGET_DIR=$(vf_target_dir "$root")
+export CARGO_TARGET_DIR
 cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 out=${1:-$root/dist/forward}
 only=${2:+--only $2}

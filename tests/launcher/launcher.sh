@@ -8,7 +8,8 @@
 # --cuda12 and $VF_CUDA12, the warning when CUDA 12.9.2 is absent and its
 # silencing, what is done when only some of the CUDA 12.9.2 libraries are there,
 # arguments with spaces and empty arguments, the exit status, env applied
-# twice, a symlinked launcher, doctor exit status, fetch command line, help and unknown
+# twice, a symlinked launcher, doctor exit status and what it says of the layer's cache directory,
+# fetch command line, help and unknown
 # options, the bf16 cuBLAS variants that VF_CUBLAS_BF16_TC and VF_CUBLAS_BF16_SKINNY
 # select (what is mapped, what is refused, what doctor says), and safe mode (VF_SAFE: what env
 # prints, what doctor says, what reaches a command). Prints PASS/FAIL per case; exits 1 on a
@@ -826,6 +827,34 @@ if [ "$_dstat" = 0 ]; then
     pass "$name"
 else
     fail "$name" "doctor exited $_dstat"
+fi
+
+# 17b. doctor says whether the layer can use its cache (VF_PROXY_CACHE, else its default): a
+# directory that the group can write (as a umask of 002 makes one) turns it off, said with the fix;
+# one of mode 700 is ok, one not made yet the layer makes, and VF_PROXY_CACHE=0 is off. The status
+# stays 0.
+
+name="doctor-proxy-cache"
+mkdir -p "$tmp/pcache"
+chmod 775 "$tmp/pcache"
+_st1=0; _out1=$(VF_PROXY_CACHE="$tmp/pcache" "$arch_ok/bin/vf" doctor 2>&1) || _st1=$?
+chmod 700 "$tmp/pcache"
+_st2=0; _out2=$(VF_PROXY_CACHE="$tmp/pcache" "$arch_ok/bin/vf" doctor 2>&1) || _st2=$?
+_out3=$(env -u VF_PROXY_CACHE XDG_CACHE_HOME="$tmp/xdg-none" "$arch_ok/bin/vf" doctor 2>&1) || true
+_out4=$(VF_PROXY_CACHE=0 "$arch_ok/bin/vf" doctor 2>&1) || true
+_want1="NOTICE proxy cache $tmp/pcache is writable by its group or by others (mode 775): the layer turns its cache off, and every start adapts again; chmod 700 $tmp/pcache"
+if [ "$_st1$_st2" != 00 ]; then
+    fail "$name" "doctor exited $_st1 and $_st2"
+elif ! printf '%s\n' "$_out1" | grep -qxF "$_want1"; then
+    fail "$name" "group-writable, said: $(printf '%s\n' "$_out1" | grep "proxy cache")"
+elif ! printf '%s\n' "$_out2" | grep -qxF "ok    proxy cache $tmp/pcache (mode 700)"; then
+    fail "$name" "mode 700, said: $(printf '%s\n' "$_out2" | grep "proxy cache")"
+elif ! printf '%s\n' "$_out3" | grep -qF "ok    proxy cache $tmp/xdg-none/volta-forever/proxy (not there yet"; then
+    fail "$name" "the default not made yet, said: $(printf '%s\n' "$_out3" | grep "proxy cache")"
+elif ! printf '%s\n' "$_out4" | grep -qxF "NOTICE proxy cache off (VF_PROXY_CACHE='0'): every start adapts again"; then
+    fail "$name" "VF_PROXY_CACHE=0, said: $(printf '%s\n' "$_out4" | grep "proxy cache")"
+else
+    pass "$name"
 fi
 
 # 18. fetch: the command line passed to python3 (stub python3).

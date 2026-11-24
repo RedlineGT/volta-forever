@@ -452,6 +452,16 @@ or when statistics, the profile or the trace of launches are asked for; with `VF
 VF_FIT=0` and none of these, lookups of these functions return NVIDIA's own pointers. For a
 launch that the driver accepts, the proxy's entry calls the driver and returns its answer.
 
+Each launch that the driver accepts there is kept for the report of a fault
+(`crates/vf-proxy/src/fault.rs`): the function, grid, block and stream, with plain stores into a
+record of the last 256 launches of the thread that made it, and the number of synchronisations
+begun until then. A synchronisation that succeeds (of a context, of a stream, a query that finds
+a stream idle) is kept with the number it began at: it covers the launches kept before. When a
+call that the layer routes returns the error of a fault for the first time in a context, the
+launches of that context that nothing covers are named, with what the layer made of each image
+(`images::origin_text`); a launch's context is found then, from the module its function came
+from. `VF_FAULT_TRACE=1` waits for each launch's stream after it.
+
 ### A launch of a refused kernel
 
 A launch of a kernel that the layer refused, with a handle that the program holds all the same
@@ -841,6 +851,7 @@ asked the driver and refused), `VF_TIMING` (the time of each stage),
 `VF_PROFILE` (a profile of each kernel; every launch is synchronised on its stream, so a
 profile is not a benchmark, and the first synchronisation that returns an error is said at once
 with the kernel it followed: a kernel that faults is named), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
+`VF_FAULT_TRACE` (every launch waited for, to name a kernel that faults alone),
 `VF_TRANSLATE_DUMP` (every cubin given to the translator, for offline validation),
 `VF_BORROW_SAY` (what the translator borrowed), `VF_REAL_LIBCUDA` (where NVIDIA's library is).
 

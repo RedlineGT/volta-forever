@@ -221,6 +221,14 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 (NVIDIA's or the layer's), with and without a module with a refused kernel loaded; its header
 says how to build and run it.
 
+`run.sh` ends with what the layer says after a kernel faults (`tests/kernels/test_fault.c`). By
+default only the control runs: the same kernels without the one that faults, after which nothing
+is said (`fault-none`, `fault-none-silent`). The four cases in which a kernel writes through a null
+pointer on purpose (`fault-candidates`, `fault-exact` under `VF_FAULT_TRACE=1`, `fault-graph`,
+`fault-copy`) end their CUDA context and add one to three lines with "Xid" to the
+kernel's log each: they run only with `VF_TEST_FAULTS=1` (exactly), which no release check and no
+suite sets, and each log says how many such lines the kernel's log had before and after the case.
+
 The whole Triton corpus (3,516 cases; `triton_corpus.py` says how cases are made and checked) is
 run by hand, the reference on any machine and the GPU part on the V100, in as many processes as
 wanted (`--shard I/N`; a case that stops its process is counted as a CRASH and the next process
@@ -263,7 +271,8 @@ No GPU needed. Exercises the launcher (`vf`) on fake installations (both the arc
 source-tree layouts): environment variables, path order, map entries, user priority, options,
 what is done when only some of the CUDA 12.9.2 libraries are there (a forwarding library with
 nothing to forward to is not used), argument passing, exit status, symlinks, its long name,
-`doctor`, `fetch` command line, the
+`doctor` (and what it says of the layer's cache directory: one that its group can write is
+refused by the layer, said with `chmod 700`), `fetch` command line, the
 subcommands of the offline tool, help and error cases, the bf16 cuBLAS variants that
 `VF_CUBLAS_BF16_TC` and `VF_CUBLAS_BF16_SKINNY` select (both names mapped or none, what is
 refused, what `doctor` says); safe mode (`VF_SAFE`: what `env` prints, what `doctor` says, what
@@ -307,7 +316,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Thirteen more host regressions exercise the built libraries directly:
+Seventeen more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -325,6 +334,8 @@ python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
 python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
 python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
 python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
+python3 tests/proxy/fault.py dist/lib/libcuda.so.1
+python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -418,6 +429,48 @@ launched. Each case in a process of its own, with deferred libraries and without
 compiler. The fifteenth checks, with the same stand-in, whose synchronisation returns what the test
 sets, that with `VF_PROFILE` the first synchronisation after a launch that returns an error is said
 at once, with the kernel it followed and its sizes, and only that one; it needs a C compiler.
+The sixteenth checks, with a stand-in that shows a fault as NVIDIA's driver does (the launch of `write_null` returns 0, the next call that
+waits returns 700, and every call that takes the context after it), what the layer says after a
+fault: once, at the default level, the launches of the context that no synchronisation covers, the
+last first, with what the layer made of each image and its size and digest, and again in the report
+at exit (`VF_SUMMARY`); not those of another context, nor those made before a synchronisation of
+their stream (another stream's, the legacy stream's, the thread's own default stream's), and those
+of every thread, by thread; a CUDA graph's launch with the kernel nodes captured in it; a fault
+that only a copy met, found at the next routed call (a launch), and not said when the context is
+destroyed first or when the program exits without another routed call (the layer asks the driver
+nothing at exit); that a program whose signal handler calls `exit()` during a call of the driver
+that holds a lock of the driver's ends (with a stand-in that raises the signal while it holds one),
+and that the report at exit made then has the fault reported before; under `VF_FAULT_TRACE=1`
+(only that value) the launch whose synchronisation met the fault named, alone when nothing else
+is uncovered (with a launch made during a capture elsewhere, which was not waited for), with what
+is not ruled out, and its launch returning the error, and
+nothing waited for while a graph is being captured, nor after an end of a capture that failed on a
+stream that joined it, while another capture is under way; that the report ends while another thread
+destroys contexts that have modules (120 threads' launches looked up meanwhile); that the waits of
+`VF_PROFILE` are the program's synchronisations for the report; that a fault of a context met by
+a wait for its stream while another is current is said of the stream's context (and one met on a
+stream whose handle outlived its context, given to a stream of another context, of a stream of a
+context since destroyed), and one met by a wait for an event, or with no context current, of a context that the layer cannot tell, with the
+launches of every context, and again of its context later; that faults of six contexts, each met
+first by a wait for an event, are said once and then again for each one with launches made since,
+four times at most, and once more after a context is destroyed; that with `VF_FAULT_REPORT=0`
+(only that value) nothing is said or waited for and a lookup of a synchronisation leads to the
+driver; and nothing said when nothing faults; that an uncorrectable ECC error (214) is said to be the hardware's, with what ran then; that
+the report at exit keeps the caveats of its line (launches a thread's record no longer holds); that
+with no launch known nothing is said of where the kernel was launched; and that a capture during which the program retains and releases the primary context and
+destroys another context, or at whose end the program exits, is not invalidated. Each case in a
+process of its own; it needs a C compiler. The seventeenth records the calls that reach the driver
+(a recorder between the layer and the stand-ins of `lifecycle.c` and `fault.py`, which exports every
+function of NVIDIA's library and gives its own function for each pointer that a lookup gives) in the
+cases of those two in which nothing faults, and of `driver_calls.c`, which makes its calls through
+the pointers of `cuGetProcAddress_v2` as the CUDA runtime does, and by the exported names (the same
+calls, but for the lookups), with the report of
+faults and with `VF_FAULT_REPORT=0`, and checks that they are the same, thread by thread, but for
+the two getters that the report calls without a fault, which it names: `cuCtxGetCurrent` after a
+synchronisation that succeeded, `cuStreamGetCaptureInfo_v2` while a capture is under way (any
+other call fails the test, and so does one of these that no case shows); given a second
+`libcuda.so.1` (of 0.1.5), that the calls with `VF_FAULT_REPORT=0` are the very same as with it, on
+both paths. It needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -436,13 +489,14 @@ No GPU needed.
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
 | `nvcc-host.sh` | `scripts/nvcc-host.sh`, through which every script and test that runs nvcc goes: on the machine as it is, nothing added and nothing said where nvcc compiles a probe as it is, and on a newer system (Ubuntu 26.04 for CUDA 12.9.2), what it adds builds a program that calls `rsqrt`, `sinpi` and `cospi`, which prints the right values (said skipped, `newer-system`, on a machine where nvcc compiles the probe as it is); with a C library that declares them as glibc 2.43 does (a `bits/mathcalls.h` of the test's, on any machine), the program does not compile without `scripts/nvcc-host` and does with what the helper adds; with a default host compiler that says it is GCC 99, a `g++-N` of `PATH` is chosen (skipped without one) | seconds | `toolkits/cuda-12.9.2` (and `cuda-13.5.0` when it is there), gcc |
+| `target-dir.sh` | Where the build scripts have cargo build a checkout: two checkouts in two directories of their own (`scripts/target-dir.sh`), each naming its checkout in its `CHECKOUT` (`--list` says ORPHAN of one whose checkout is gone), each script of a checkout in the same one, `CARGO_TARGET_DIR` when it is set; with `--build` (as the CI and the release check run it), two copies of the tree, the second's `crates/vf-fwdgen/bf16tc/runtime.c` changed and all its files older than the first's outputs, each built by `scripts/build-forwarders.sh`: each generator embeds its own `runtime.c` (with one directory for every checkout, the second had the first's) | seconds | bash, git; cargo and gcc for `--build` |
 
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
-`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
+`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
 `log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
