@@ -981,15 +981,18 @@ pub fn forget_in(owner: usize, context: Option<usize>) {
 /// before it is of no launch kept.
 fn oldest_kept() -> Option<u64> {
     let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    oldest_of(&rings)
+}
+
+/// The epoch of the earliest launch that `rings` hold: the least of all the launches they hold now.
+/// (Not the launch of the slot that the count of a ring says is the earliest: its thread may have
+/// written its next launch there already, whose epoch is later, before it counts it. A slot being
+/// written is not read: the launch it held is being dropped, and the one written is the latest.)
+/// Asked only when many names were kept apart (`forget_in`): it reads every slot.
+fn oldest_of(rings: &[&Ring]) -> Option<u64> {
     rings
         .iter()
-        .filter_map(|ring| {
-            let next = ring.next.load(Acquire);
-            // The slot of the earliest launch kept, unless it is being written over now (then the
-            // next slot's is the earliest).
-            let earliest = next.saturating_sub(KEPT as u64);
-            (earliest..next.min(earliest + 2)).find_map(|number| ring.slots[number as usize % KEPT].read(ring.index))
-        })
+        .flat_map(|ring| ring.slots.iter().filter_map(|slot| slot.read(ring.index)))
         .map(|launch| launch.epoch)
         .min()
 }
@@ -1730,6 +1733,19 @@ mod tests {
         assert_eq!(read[0].number, 10);
         assert_eq!(read[KEPT - 1].what, KEPT as u64 + 9);
         assert!(ring.wrapped());
+    }
+
+    #[test]
+    fn the_oldest_launch_kept_is_not_one_written_over_it() {
+        let ring = Box::new(Ring::new(0));
+        for n in 0..KEPT as u64 {
+            ring.push(&mut launch(0, 0, LEGACY, n, n));
+        }
+        assert_eq!(oldest_of(&[&ring]), Some(0));
+        // The next launch written into the earliest's slot, its number not yet counted (as while
+        // its thread writes it, read from another thread): the earliest kept is now launch 1.
+        ring.slots[0].write(KEPT as u64, &launch(0, 0, LEGACY, 999, 1000));
+        assert_eq!(oldest_of(&[&ring]), Some(1));
     }
 
     #[test]
