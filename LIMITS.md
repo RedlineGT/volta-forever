@@ -578,14 +578,17 @@ off whatever it is set to. What changes for a program, by type:
   does not pass the helper's socket on: the helper ends at once (one that compiles, when that
   compilation ends) and stays a zombie of the new program, which does not know it, until that
   program waits for any child or ends.
-- **The places.** The user's helpers on one host are `VF_TRITON_TC_JOBS` at most, all programs
-  together, each holding one of that many lock files (`flock`) from its start to its end; PyTorch
+- **The places.** The user's helpers on one host are `VF_TRITON_TC_JOBS` at most, all programs that
+  share Triton's cache directory together, each holding one of that many lock files (`flock`)
+  from its start to its end; PyTorch
   Inductor's compile workers included, `torch.compile` with max-autotune and 32 workers then holds
   at most that many helpers (`docs/performance.md`). The lock files are in `volta-forever-EUID` of
   Triton's cache directory as Triton finds it when the process compiles its first kernel that may
   be compiled for sm_80: with PyTorch's Inductor and `TRITON_CACHE_DIR` unset, Inductor's own
-  cache's `triton/0`, which Inductor sets before it compiles anything (processes whose Triton
-  caches differ count their places apart). The cap is a best effort: where a lock file cannot be
+  cache's `triton/0`, which Inductor sets before it compiles anything. Processes whose Triton
+  caches differ count their places apart: vLLM, unless `TRITON_CACHE_DIR` is set, gives each model
+  and each rank of an engine a Triton cache of its own, so that an engine of four ranks may have
+  four times that many helpers. The cap is a best effort: where a lock file cannot be
   opened or locked for another reason than another holder (a file system whose locks do not work,
   as Lustre without its `flock` option or NFSv3 without a lock manager; a directory that cannot be
   written, that is not one, or a link), the process does not count places (said once, at
