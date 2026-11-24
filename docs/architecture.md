@@ -793,7 +793,8 @@ grow.
 `VF_STATS` (call counts, the kernels launched most, and what the refusal of a kernel at its use
 asked the driver and refused), `VF_TIMING` (the time of each stage),
 `VF_PROFILE` (a profile of each kernel; every launch is synchronised on its stream, so a
-profile is not a benchmark), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
+profile is not a benchmark, and the first synchronisation that returns an error is said at once
+with the kernel it followed: a kernel that faults is named), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
 `VF_TRANSLATE_DUMP` (every cubin given to the translator, for offline validation),
 `VF_BORROW_SAY` (what the translator borrowed), `VF_REAL_LIBCUDA` (where NVIDIA's library is).
 

@@ -21,6 +21,10 @@
 //!
 //! One file per process: the PID is appended to the path (`FILE.PID`). The file is written when
 //! the process ends (the `.fini_array` function).
+//!
+//! The first synchronisation that returns an error (a kernel that faulted ends the context, and
+//! every call after it returns the same error) is said at once, with the kernel it followed: the
+//! launches that the profile synchronised before ended without one.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -499,17 +503,20 @@ unsafe fn is_capturing(stream: *mut c_void) -> bool {
 }
 
 /// Synchronise the stream so that the kernel's GPU time is known. Skips synchronization when
-/// the stream is capturing a graph (CUDA graph capture mode does not allow it). Returns
-/// whether the synchronization was performed.
-unsafe fn sync_stream(stream: *mut c_void) -> bool {
+/// the stream is capturing a graph (CUDA graph capture mode does not allow it). Returns the
+/// driver's answer, or `None` when the stream was not synchronised.
+unsafe fn sync_stream(stream: *mut c_void) -> Option<c_int> {
     if unsafe { is_capturing(stream) } {
-        return false;
+        return None;
     }
     let sync: unsafe extern "C" fn(*mut c_void) -> c_int =
         unsafe { std::mem::transmute::<usize, _>(REALS[idx::cuStreamSynchronize].load(Relaxed)) };
-    let result = unsafe { sync(stream) };
-    result == 0
+    Some(unsafe { sync(stream) })
 }
+
+/// Whether a failed synchronisation was already said: the first is the one that names the kernel
+/// that failed (a fault ends the context, and every later call fails with the same error).
+static FAILURE_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Profile a launch of `cuLaunchKernel`. Called from the hook.
 ///
@@ -525,9 +532,22 @@ pub unsafe fn profile_launch(
     let t0 = Instant::now();
     // The launch has already happened (the real function was called). Now synchronise.
     let synced = unsafe { sync_stream(stream) };
-    let elapsed_ns = if synced { t0.elapsed().as_nanos() } else { 0 };
+    let elapsed_ns = if synced == Some(0) { t0.elapsed().as_nanos() } else { 0 };
 
     let name = unsafe { kernel_name(function) };
+    if let Some(code) = synced
+        && code != 0
+        && !FAILURE_SAID.swap(true, Relaxed)
+    {
+        // The launches before this one that the profile synchronised ended without an error: what
+        // failed is this kernel, unless it is work that was not synchronised (another stream, a
+        // graph, a launch made during a capture).
+        log::error(format_args!(
+            "profiling: the synchronisation after a launch of {name} (grid {}x{}x{}, block {}x{}x{}, \
+             {shared_memory_bytes} bytes of dynamic shared memory) returned error {code}, the first that one did",
+            grid[0], grid[1], grid[2], block[0], block[1], block[2]
+        ));
+    }
 
     // Query function attributes from the driver (cached per function handle).
     let func_attrs = unsafe { query_func_attrs(function) };
