@@ -253,6 +253,19 @@ def case(name, proxy):
         # A, later: its own synchronisation.
         out.append(run.api.cuCtxSetCurrent(a))
         out.append(run.api.cuCtxSynchronize())
+    elif name == "exact-done":
+        # Exact mode, the fault seen one wait late (MOCK_DELAY=1, as on a GPU where write_null still
+        # runs when the next wait returns): write_null is launched while another stream is captured
+        # (not waited for), then add_one twice on a third stream; the wait after the first succeeds,
+        # the wait after the second meets the fault.
+        captured, other, third = run.stream(), run.stream(), run.stream()
+        graph = c.c_void_p()
+        out.append(run.api.cuStreamBeginCapture_v2(captured, 2))
+        out.append(run.launch("write_null", other, grid=1))
+        out.append(run.launch("add_one", captured, grid=2))
+        out.append(run.api.cuStreamEndCapture(captured, c.byref(graph)))
+        out.append(run.launch("add_one", third, grid=3))
+        out.append(run.launch("add_one", third, grid=4))
     elif name == "exec-reuse":
         # An instantiated graph destroyed after its launch (it may be destroyed while it runs), and
         # another instantiated at its handle (MOCK_EXEC_FIXED=1): the launch is of the first one.
@@ -321,7 +334,7 @@ def case(name, proxy):
 
 def checks(name, log, summary, results):
     lines = [line.removeprefix("[volta-forever] ") for line in log.splitlines()]
-    faults = [i for i, line in enumerate(lines) if "faulted on the GPU" in line]
+    faults = [i for i, line in enumerate(lines) if "can run nothing more" in line]
     names = []
     if faults:
         for line in lines[faults[0] + 1:]:
@@ -401,11 +414,14 @@ def checks(name, log, summary, results):
         expect("the report at exit", "a kernel faulted: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); "
                "the candidates, the last launched first: add_one, write_null, add_one" in summary)
     elif name == "exact":
-        expect("named alone", head.startswith("kernel write_null faulted on the GPU: the synchronisation of the "
-                                              "stream after cuLaunchKernel (VF_FAULT_TRACE=1) returned 700"))
+        expect("named alone, with what is not ruled out",
+               head.startswith("the synchronisation right after the launch of write_null met the fault: the "
+                               "synchronisation of the stream after cuLaunchKernel (VF_FAULT_TRACE=1) returned 700")
+               and "(a copy, a memset, a host function) is not ruled out" in head and names == ["write_null"])
         expect("its launch returned the fault", results[5] == "700")
         expect("the report at exit", "a kernel faulted: the synchronisation of the stream after cuLaunchKernel "
-               "(VF_FAULT_TRACE=1) returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the kernel: write_null" in summary)
+               "(VF_FAULT_TRACE=1) returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the launch whose synchronisation met "
+               "it: write_null (work not seen on its stream before it not ruled out)" in summary)
     elif name == "streams":
         expect("the other stream's synchronisation does not cover it", names == ["write_null"])
     elif name == "contexts":
@@ -430,7 +446,8 @@ def checks(name, log, summary, results):
                          r"the layer; it was made of 2 kernel nodes, of 2 kernels:", log) is not None and
                "    add_one (grid 2x1x1, block 32x1x1)" in log and "    write_null (grid 3x1x1, block 32x1x1)" in log)
     elif name == "graph-exact":
-        expect("the graph named", head.startswith("a kernel of a CUDA graph faulted on the GPU") and
+        expect("the graph named", head.startswith("the synchronisation right after the launch of a CUDA graph met "
+                                                  "the fault") and
                "    write_null (grid 3x1x1" in log)
         expect("the graph's launch returned the fault", results[7] == "700")
     elif name == "deadlock":
@@ -440,6 +457,12 @@ def checks(name, log, summary, results):
     elif name == "other-context-stream":
         expect("the fault is A's, which its stream's launch tells: write_null alone, not B's launches",
                "cuStreamSynchronize returned 700" in head and names == ["write_null"])
+    elif name == "exact-done":
+        expect("the last launch's wait met the fault and it returned it", results == ["0"] * 5 + ["700"])
+        expect("not said to be the kernel: the launch not waited for is named with it",
+               "one of the 2" in head and names == ["add_one", "write_null"] and "grid 4x1x1" in log
+               and "grid 1x1x1" in log and "grid 3x1x1" not in log)
+        expect("the launch whose wait met it is said", "whose synchronisation right after it met the fault" in log)
     elif name == "exec-reuse":
         expect("the second graph was given the first one's handle", results[-1] == "same-handle")
         expect("the launch is named with the kernel nodes of the graph launched, not of the one at its handle since",
@@ -458,6 +481,8 @@ def checks(name, log, summary, results):
         expect("the profile's wait after write_null met it",
                "the synchronisation of the stream after a launch (VF_PROFILE) returned 700" in head)
         expect("write_null alone: the profile's wait after add_one covered it", names == ["write_null"])
+        expect("the launch whose wait met it, named as such", "the synchronisation right after the launch of "
+               "write_null met the fault" in head)
     elif name == "copy":
         expect("found at the next launch", "cuLaunchKernel returned 700" in head)
         expect("the copy met it first", results[2:] == ["700", "700"])
@@ -486,6 +511,7 @@ def main():
                  ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
+                 ("exact-done", {"VF_FAULT_TRACE": "1", "MOCK_DELAY": "1"}),
                  ("copy", {}), ("copy-destroyed", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"}),

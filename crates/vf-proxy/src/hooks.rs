@@ -2032,7 +2032,7 @@ unsafe fn launched(
     if let Some(shared_memory) = profiled
         && config().profile
     {
-        unsafe { profile::profile_launch(function, grid, block, shared_memory, stream) };
+        unsafe { profile::profile_launch(function, grid, block, shared_memory, stream, kept) };
     }
     if config().fault_trace {
         return unsafe { fault::settle(kept, stream, entry.per_thread(), entry.name()) };

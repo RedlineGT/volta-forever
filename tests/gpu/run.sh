@@ -784,9 +784,9 @@ if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
         "VF_FAULT_TRACE=1 synchronises every launch" \
         "^\[volta-forever\] a kernel faulted: .* returned 700 .*the candidates, the last launched first: (add_one, )?write_null, add_one$"
     VF_FAULT_TRACE=1 fault fault-exact fault \
-        "kernel write_null faulted on the GPU: the synchronisation of the stream after cuLaunchKernel \(VF_FAULT_TRACE=1\) returned 700" \
+        "the synchronisation right after the launch of write_null met the fault: the synchronisation of the stream after cuLaunchKernel \(VF_FAULT_TRACE=1\) returned 700" \
         "^launch write_null -> 700$" \
-        "^\[volta-forever\] a kernel faulted: .*; the kernel: write_null$"
+        "^\[volta-forever\] a kernel faulted: .*; the launch whose synchronisation met it: write_null \(work not seen on its stream before it not ruled out\)$"
     fault fault-graph fault-graph \
         "a kernel faulted on the GPU: cuStreamSynchronize returned 700" \
         "^after the fault: cuStreamGetCtx -> " \

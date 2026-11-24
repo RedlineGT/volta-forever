@@ -77,9 +77,15 @@
 //! the driver gives the handle to another kernel.
 //!
 //! `VF_FAULT_TRACE=1` (exact mode) synchronises the stream of every launch right after it
-//! (`settle`): the launch whose synchronisation meets the fault is the kernel that faulted, unless
-//! another thread was launching in the context at the same time (its launch, not yet synchronised,
-//! is then listed with it). The program waits for every kernel: it runs much slower, and kernels
+//! (`settle`), as a synchronisation of the program's: one that succeeds covers what was launched on
+//! that stream before, and no other launch. The launch whose synchronisation meets the fault is
+//! named alone only when it is the only launch of the context that nothing covers (`Found::met`):
+//! a launch that was not waited for (made while a capture was under way, a cooperative launch on
+//! several devices, one whose wait returned another error), and a launch of another thread not
+//! waited for yet, are named with it. Even alone, it is said to be the launch whose
+//! synchronisation met the fault, not the kernel that faulted: work that the layer does not see on
+//! that stream since the launch before (a copy, a memset, a host function) is not ruled out. The
+//! waits of `VF_PROFILE` are the same. The program waits for every kernel: it runs much slower, and kernels
 //! that wait for one another (a collective across GPUs, a kernel that waits for a flag that a later
 //! one sets) never end. A launch into a stream being captured is not synchronised (nothing runs),
 //! nor any launch while a capture is under way in the process (a synchronisation could end it).
@@ -377,8 +383,6 @@ struct Ring {
     index: usize,
     /// The number of the next launch. Written by the thread that holds the ring alone.
     next: AtomicU64,
-    /// Exact mode: the launches numbered below this were waited for and ended without a fault.
-    done: AtomicU64,
     /// The thread that holds it, as the lines number threads (from 1).
     thread: AtomicU64,
     /// Whether a thread holds it.
@@ -391,7 +395,6 @@ impl Ring {
             slots: [const { Slot::empty() }; KEPT],
             index,
             next: AtomicU64::new(0),
-            done: AtomicU64::new(0),
             thread: AtomicU64::new(0),
             held: AtomicBool::new(false),
         }
@@ -797,7 +800,7 @@ pub fn check(result: CUresult, call: &str) {
         return;
     }
     if is_fault(result) {
-        seen(result, call, current());
+        seen(result, call, current(), None);
     }
 }
 
@@ -810,7 +813,7 @@ pub fn check_module(result: CUresult, call: &str, module: usize) {
     }
     if is_fault(result) {
         let of = crate::contexts::context_of(module).map_or_else(current, |context| Of::Context(context as u64));
-        seen(result, call, of);
+        seen(result, call, of, None);
     }
 }
 
@@ -826,6 +829,7 @@ pub fn check_event(result: CUresult, call: &str) {
             result,
             call,
             Of::Unknown("a wait for an event, whose context the layer does not keep"),
+            None,
         );
     }
 }
@@ -843,6 +847,13 @@ pub enum Scope {
 /// A synchronisation of `scope` that began with `begin` (which gave `covers`) returned `result`.
 #[inline]
 pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
+    synchronized_after(result, covers, scope, call, Kept::Not);
+}
+
+/// As `synchronized`, for a synchronisation that the layer made right after the launch that `kept`
+/// says (exact mode, `VF_PROFILE`): when it meets a fault, the report says that this launch's
+/// synchronisation met it (`Found::met`).
+pub fn synchronized_after(result: CUresult, covers: u64, scope: Scope, call: &str, kept: Kept) {
     if !on() {
         return;
     }
@@ -853,7 +864,11 @@ pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
                 Scope::Stream(stream, per_thread) => of_stream(stream, per_thread),
                 _ => current(),
             };
-            seen(result, call, of);
+            let met = match (kept, mine()) {
+                (Kept::At(number), Some(ring)) => Some((ring.index, number)),
+                _ => None,
+            };
+            seen(result, call, of, met);
         }
         return;
     }
@@ -919,19 +934,19 @@ pub unsafe fn settle(kept: Kept, stream: *mut c_void, per_thread: bool, call: &s
     // SAFETY: NVIDIA's cuStreamSynchronize (or its form for the thread's stream), or a stub.
     let sync: unsafe extern "C" fn(*mut c_void) -> CUresult =
         unsafe { std::mem::transmute(REALS[index].load(Relaxed)) };
+    // (A synchronisation of the stream as the program's are: when it succeeds it covers what was
+    // launched on the stream before, this launch and no other; not the launches of other streams,
+    // nor those it skipped.)
+    let covers = begin();
     let result = unsafe { sync(stream) };
-    if result == CUDA_SUCCESS {
-        // (This thread waited for each of its launches in turn: every one before ended too.)
-        if let (Kept::At(number), Some(ring)) = (kept, mine()) {
-            ring.done.store(number + 1, Release);
-        }
-    } else if is_fault(result) {
-        // (Of the current context: the launch, just made, is of it.)
-        seen(
-            result,
-            &format!("the synchronisation of the stream after {call} (VF_FAULT_TRACE=1)"),
-            current(),
-        );
+    synchronized_after(
+        result,
+        covers,
+        Scope::Stream(stream, per_thread),
+        &format!("the synchronisation of the stream after {call} (VF_FAULT_TRACE=1)"),
+        kept,
+    );
+    if is_fault(result) {
         return result;
     }
     // (Another error is the synchronisation's, not the launch's: the program meets it later.)
@@ -1507,16 +1522,18 @@ struct Found {
     earlier: bool,
     /// Threads that launched kernels and kept none.
     unkept: u64,
+    /// The fault was met by the synchronisation that the layer made right after this launch (its
+    /// ring and number: exact mode, `VF_PROFILE`).
+    met: Option<(usize, u64)>,
 }
 
 /// The candidates among `launches` (of every ring, in any order) for a fault in `context`: those
-/// that no synchronisation covers and that are not known to be of another context (`context_of`)
-/// nor waited for in exact mode (`done`: by ring, the launches numbered below were). `wrapped`: the
-/// rings that no longer hold their earliest launches. `contexts`: the number of contexts known.
+/// that no synchronisation covers (a wait of exact mode is one) and that are not known to be of
+/// another context (`context_of`). `wrapped`: the rings that no longer hold their earliest launches.
+/// `contexts`: the number of contexts known.
 fn candidates(
     launches: &[Launch],
     covers: &Covers,
-    done: &[u64],
     wrapped: &[usize],
     context: u64,
     context_of: impl Fn(&Launch) -> Option<u64>,
@@ -1524,9 +1541,6 @@ fn candidates(
 ) -> Found {
     let mut found = Found::default();
     for launch in launches {
-        if done.get(launch.ring).is_some_and(|&done| launch.number < done) {
-            continue;
-        }
         let of = context_of(launch);
         if of.is_some_and(|of| of != context) || covers.covers(launch, context) {
             continue;
@@ -1546,7 +1560,6 @@ fn candidates(
 fn candidates_anywhere(
     launches: &[Launch],
     covers: &Covers,
-    done: &[u64],
     wrapped: &[usize],
     known: &[u64],
     context_of: impl Fn(&Launch) -> Option<u64>,
@@ -1557,9 +1570,6 @@ fn candidates_anywhere(
         ..Found::default()
     };
     for launch in launches {
-        if done.get(launch.ring).is_some_and(|&done| launch.number < done) {
-            continue;
-        }
         let covered = match context_of(launch) {
             Some(of) => covers.covers(launch, of),
             None => !known.is_empty() && known.iter().all(|&context| covers.covers(launch, context)),
@@ -1612,10 +1622,11 @@ fn reported() -> MutexGuard<'static, Vec<u64>> {
     REPORTED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A call returned `result`, an error of a fault, of the context `of`.
+/// A call returned `result`, an error of a fault, of the context `of`; `met`: it was the
+/// synchronisation that the layer made right after the launch of this ring and number.
 #[cold]
 #[inline(never)]
-fn seen(result: CUresult, call: &str, of: Of) {
+fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
     // Whatever goes wrong in making the report, the program gets what the driver answered.
     let context = match of {
         Of::Stream(stream) => match catch_unwind(|| stream_context(stream)) {
@@ -1643,7 +1654,7 @@ fn seen(result: CUresult, call: &str, of: Of) {
         Of::Unknown(why) => Err(why),
         Of::Stream(_) => Err("a stream on which the layer kept no launch of a context it knows"),
     };
-    let made = catch_unwind(AssertUnwindSafe(|| report(result, call, context)));
+    let made = catch_unwind(AssertUnwindSafe(|| report(result, call, context, met)));
     let Ok((lines, summary)) = made else {
         log::error(format_args!(
             "a kernel faulted ({call} returned {result}); the layer could not say which (internal error)"
@@ -1738,10 +1749,14 @@ fn stream_context(stream: u64) -> Option<u64> {
 
 /// The report of a fault of `context` (or of a context that the layer cannot tell, and why): its
 /// lines, and its line at exit.
-fn report(result: CUresult, call: &str, context: Result<u64, &'static str>) -> (Vec<String>, String) {
+fn report(
+    result: CUresult,
+    call: &str,
+    context: Result<u64, &'static str>,
+    met: Option<(usize, u64)>,
+) -> (Vec<String>, String) {
     let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let launches: Vec<Launch> = rings.iter().flat_map(|ring| ring.launches()).collect();
-    let done: Vec<u64> = rings.iter().map(|ring| ring.done.load(Acquire)).collect();
     let wrapped: Vec<usize> = rings
         .iter()
         .filter(|ring| ring.wrapped())
@@ -1751,17 +1766,24 @@ fn report(result: CUresult, call: &str, context: Result<u64, &'static str>) -> (
     let known: Vec<u64> = crate::contexts::known().into_iter().map(|c| c as u64).collect();
     let contexts = known.len();
     let mut found = match context {
-        Ok(context) => candidates(&launches, &covers, &done, &wrapped, context, launch_context, contexts),
-        Err(why) => candidates_anywhere(&launches, &covers, &done, &wrapped, &known, launch_context, why),
+        Ok(context) => candidates(&launches, &covers, &wrapped, context, launch_context, contexts),
+        Err(why) => candidates_anywhere(&launches, &covers, &wrapped, &known, launch_context, why),
     };
     found.unkept = UNKEPT.load(Relaxed);
+    found.met = met;
     compose(&found, config().fault_trace, contexts, result, call)
 }
 
 /// The report of a fault that `call` met, from what was `found`, in exact mode or not, in a process
 /// that the layer knows `contexts` contexts of.
 fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, call: &str) -> (Vec<String>, String) {
-    let exact = exact_mode && found.launches.len() == 1;
+    // The launch whose synchronisation, made right after it, met the fault, among the candidates.
+    let met = found
+        .met
+        .and_then(|met| found.launches.iter().position(|l| (l.ring, l.number) == met));
+    // Named alone only when it is the only launch that nothing covers: never a launch of which the
+    // layer knows that another, not waited for, may have faulted.
+    let exact = met == Some(0) && found.launches.len() == 1;
     let mut lines = Vec::new();
     let error = format!("{result} ({})", error_name(result));
     let mut names = Vec::new();
@@ -1823,6 +1845,9 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
             continue;
         }
         let (name, how) = kernel_text(launch.what, launch.fitted, launch.epoch);
+        if met == Some(i) && !exact {
+            thread += ", whose synchronisation right after it met the fault";
+        }
         details.push(format!(
             "  {name} ({}, grid {}, block {}, {}{thread}): {how}",
             launch.entry.name(),
@@ -1871,15 +1896,17 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
              a kernel, launches left to the driver by VF_ADAPT=0 with VF_FIT=0)"
         )),
         1 if exact && found.launches[0].kind == GRAPH => lines.push(format!(
-            "a kernel of a CUDA graph faulted on the GPU: {call} returned {error}, and this CUDA context can run \
-             nothing more (VF_FAULT_TRACE=1: every launch is synchronised right after it, and this graph's is the \
-             one whose synchronisation met the fault; its kernels are named only as a whole, run without graphs to \
-             name one):"
+            "the synchronisation right after the launch of a CUDA graph met the fault: {call} returned {error}, and \
+             this CUDA context can run nothing more. The layer knows no other launch in this context that no \
+             synchronisation covers{also}; work that it does not see on that stream since the launch before (a copy, \
+             a memset, a host function) is not ruled out. The graph's kernels are named only as a whole (run without \
+             graphs to name one):"
         )),
         1 if exact => lines.push(format!(
-            "kernel {} faulted on the GPU: {call} returned {error}, and this CUDA context can run nothing more \
-             (VF_FAULT_TRACE=1: every launch is synchronised right after it, and this is the one whose \
-             synchronisation met the fault):",
+            "the synchronisation right after the launch of {} met the fault: {call} returned {error}, and this CUDA \
+             context can run nothing more. The layer knows no other launch in this context that no synchronisation \
+             covers{also}; work that it does not see on that stream since the launch before (a copy, a memset, a \
+             host function) is not ruled out:",
             names[0]
         )),
         count => lines.push(format!(
@@ -1894,7 +1921,7 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
         )),
     }
     lines.extend(details);
-    if !exact {
+    if !exact_mode {
         lines.push(
             "to name the kernel alone: VF_FAULT_TRACE=1 synchronises every launch right after it (each launch \
              then waits for its kernel; a CUDA graph is named as a whole); VF_LOG_LEVEL=2 names each image when \
@@ -1905,11 +1932,11 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
         lines.push("VF_LOG_LEVEL=2 names each image when it is loaded (its size and XXH64)".to_string());
     }
     let summary = format!(
-        "a kernel faulted: {call} returned {error}; {}: {}",
-        match (exact, found.launches.first()) {
-            (true, Some(launch)) if launch.kind == GRAPH => "the graph",
-            (true, _) => "the kernel",
-            _ => "the candidates, the last launched first",
+        "a kernel faulted: {call} returned {error}; {}: {}{}",
+        if exact {
+            "the launch whose synchronisation met it"
+        } else {
+            "the candidates, the last launched first"
         },
         if names.is_empty() {
             "none known".to_string()
@@ -1917,6 +1944,11 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
             format!("{}, and {more} more", names.join(", "))
         } else {
             names.join(", ")
+        },
+        if exact {
+            " (work not seen on its stream before it not ruled out)"
+        } else {
+            ""
         }
     );
     (lines, summary)
@@ -1963,6 +1995,7 @@ fn probe_at_exit(context: u64) {
             result,
             "cuStreamQuery, asked by the layer at exit",
             Of::Context(context),
+            None,
         );
     }
 }
@@ -2051,7 +2084,7 @@ mod tests {
     }
 
     fn found_in(launches: &[Launch], covers: &Covers, context: u64) -> Found {
-        candidates(launches, covers, &[], &[], context, |_| None, 1)
+        candidates(launches, covers, &[], context, |_| None, 1)
     }
 
     #[test]
@@ -2150,11 +2183,11 @@ mod tests {
             2 => Some(8),
             _ => None,
         };
-        let found = candidates(&all, &covers, &[], &[], 7, context_of, 2);
+        let found = candidates(&all, &covers, &[], 7, context_of, 2);
         assert_eq!(whats(&found), vec![3, 1]);
         assert_eq!(found.elsewhere, 1);
         // In a process of one context, a launch of no known context is not said to be elsewhere.
-        let found = candidates(&all, &covers, &[], &[], 7, context_of, 1);
+        let found = candidates(&all, &covers, &[], 7, context_of, 1);
         assert_eq!(found.elsewhere, 0);
     }
 
@@ -2239,12 +2272,12 @@ mod tests {
             _ => None,
         };
         covers.legacy_synchronized(7, 0);
-        let found = candidates_anywhere(&all, &covers, &[], &[], &[7, 8], context_of, "why");
+        let found = candidates_anywhere(&all, &covers, &[], &[7, 8], context_of, "why");
         assert_eq!(whats(&found), vec![3, 2]);
         assert_eq!(found.of, vec![None, Some(8)]);
         // One of no known context is covered only when every context known covers it.
         covers.legacy_synchronized(8, 0);
-        let found = candidates_anywhere(&all, &covers, &[], &[], &[7, 8], context_of, "why");
+        let found = candidates_anywhere(&all, &covers, &[], &[7, 8], context_of, "why");
         assert!(found.launches.is_empty());
         let (lines, _) = compose(&found, false, 2, 700, "cuEventSynchronize");
         assert!(
@@ -2254,11 +2287,16 @@ mod tests {
     }
 
     #[test]
-    fn exact_mode_leaves_the_launch_not_done() {
-        let covers = Covers::default();
-        let all = launches(0, PER_THREAD, &[1, 2, 3], 0);
-        let found = candidates(&all, &covers, &[2], &[], 1, |_| None, 1);
-        assert_eq!(whats(&found), vec![3]);
+    fn exact_mode_covers_what_it_waited_for_alone() {
+        let mut covers = Covers::default();
+        // Launches 1 and 2 on stream 0x5000, each waited for (the wait after 2 began at epoch 1);
+        // launch 3 on another stream was not (made during a capture elsewhere).
+        let mut all = launches(0, 0x5000, &[1], 0);
+        all.push(launch(0, 1, 0x6000, 3, 0));
+        covers.stream_synchronized(0x5000, 0);
+        all.push(launch(0, 2, 0x5000, 2, 1));
+        covers.stream_synchronized(0x5000, 1);
+        assert_eq!(whats(&found_in(&all, &covers, 7)), vec![3]);
     }
 
     #[test]
@@ -2279,14 +2317,14 @@ mod tests {
     fn a_wrapped_ring_may_have_lost_candidates() {
         let mut covers = Covers::default();
         let all = launches(300, LEGACY, &[1, 2], 4);
-        assert!(candidates(&all, &covers, &[], &[0], 7, |_| None, 1).earlier);
+        assert!(candidates(&all, &covers, &[0], 7, |_| None, 1).earlier);
         // What it lost is older than what a synchronisation of the whole context covered.
         covers.context_synchronized(7, 3);
-        assert!(candidates(&all, &covers, &[], &[0], 7, |_| None, 1).earlier);
+        assert!(candidates(&all, &covers, &[0], 7, |_| None, 1).earlier);
         covers.context_synchronized(7, 4);
-        let found = candidates(&all, &covers, &[], &[0], 7, |_| None, 1);
+        let found = candidates(&all, &covers, &[0], 7, |_| None, 1);
         assert!(!found.earlier && found.launches.is_empty());
-        assert!(!candidates(&all, &Covers::default(), &[], &[], 7, |_| None, 1).earlier);
+        assert!(!candidates(&all, &Covers::default(), &[], 7, |_| None, 1).earlier);
     }
 
     #[test]
@@ -2360,14 +2398,39 @@ mod tests {
             "a kernel faulted: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the candidates, the last \
              launched first: add_one, write_null, add_one"
         );
-        // Exact mode: the launch not done is named alone.
-        let all = launches(0, LEGACY, &[0xa100, 0xa200], 0);
-        let found = candidates(&all, &Covers::default(), &[1], &[], 7, |_| None, 1);
+        // Exact mode: the launch whose wait met the fault, alone, is named with what is not ruled out.
+        let mut covers = Covers::default();
+        let mut all = launches(0, LEGACY, &[0xa100], 0);
+        covers.legacy_synchronized(7, 0);
+        all.extend(launches(1, LEGACY, &[0xa200], 1));
+        let mut found = found_in(&all, &covers, 7);
+        found.met = Some((0, 1));
         let (lines, summary) = compose(&found, true, 1, 719, "a synchronisation");
-        assert!(lines[0].starts_with(
-            "kernel write_null faulted on the GPU: a synchronisation returned 719 (CUDA_ERROR_LAUNCH_FAILED)"
-        ));
-        assert!(summary.ends_with("the kernel: write_null"), "{summary}");
+        assert!(
+            lines[0].starts_with(
+                "the synchronisation right after the launch of write_null met the fault: a synchronisation returned \
+                 719 (CUDA_ERROR_LAUNCH_FAILED)"
+            ),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("is not ruled out"), "{lines:?}");
+        assert!(
+            summary.contains("the launch whose synchronisation met it: write_null (work not seen"),
+            "{summary}"
+        );
+        // Another launch not covered with it: one of the two, the one whose wait met it said.
+        all.push(launch(1, 0, 0x7000, 0xa100, 0));
+        let mut found = found_in(&all, &covers, 7);
+        found.met = Some((0, 1));
+        let (lines, _) = compose(&found, true, 1, 719, "a synchronisation");
+        assert!(lines[0].contains("one of the 2"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("  write_null (")
+                    && l.contains("whose synchronisation right after it met the fault")),
+            "{lines:?}"
+        );
         // Nothing known.
         let (lines, _) = compose(&Found::default(), false, 1, 716, "cuStreamQuery");
         assert!(
@@ -2397,7 +2460,7 @@ mod tests {
         // Launches of two threads, in a process with two contexts: said.
         let first = launch(0, 0, LEGACY, 0xa100, 0);
         let second = launch(1, 0, 0x9000, 0xa200, 0);
-        let found = candidates(&[first, second], &Covers::default(), &[], &[], 7, |_| None, 2);
+        let found = candidates(&[first, second], &Covers::default(), &[], 7, |_| None, 2);
         let (lines, _) = compose(&found, false, 2, 700, "cuCtxSynchronize");
         assert!(
             lines[0].contains("(2 of them of a context that the layer does not know: they may be of another of the 2"),

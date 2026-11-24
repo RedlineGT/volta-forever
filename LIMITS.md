@@ -345,7 +345,10 @@ kernel that faulted alone, at a cost (`INSTALL.md`).
 
 What the layer cannot say:
 
-- which of the candidates faulted, without `VF_FAULT_TRACE=1`; nor why. A candidate is not a
+- which of the candidates faulted, without `VF_FAULT_TRACE=1`; nor why. With it, the launch whose
+  synchronisation met the fault is named, alone when no other launch of the context is uncovered;
+  a copy, a memset or a host function enqueued before it on its stream, which the layer does not
+  see, may have failed instead. A candidate is not a
   culprit: a program's own code faults through the layer as it does without it, and only a
   comparison with a native build or a newer GPU tells (`AGENTS.md`, step 8).
 - a kernel that the layer does not see launched: by another kernel, through a private interface of

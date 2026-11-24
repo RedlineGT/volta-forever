@@ -47,9 +47,9 @@
 //!   launch);
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
 //!   refuses (kernel name, grid, block, shared memory, launch attributes);
-//! - `VF_FAULT_TRACE=1` (exactly): synchronise the stream of every launch right after it, so that a
-//!   kernel that faults is named alone (`fault`; without it, the kernels that may have faulted are
-//!   named);
+//! - `VF_FAULT_TRACE=1` (exactly): synchronise the stream of every launch right after it, so that the
+//!   launch whose synchronisation meets a fault is named (`fault`; without it, the kernels that may
+//!   have faulted are named);
 //! - `VF_FAULT_REPORT=0` (exactly): no report of faults: nothing kept of launches and
 //!   synchronisations, nothing said, the functions hooked only for it forwarded as they are
 //!   (`FAULT_ONLY`), and `VF_FAULT_TRACE` without effect;
