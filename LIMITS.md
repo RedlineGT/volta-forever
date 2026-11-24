@@ -54,12 +54,15 @@ where it is not from the build of this release. `docs/` says how each figure was
   launched, it does nothing and returns no error, as without the layer; `VF_LOG_LEVEL=2` counts
   them in each image adapted ([Kernels refused](#kernels-refused)).
 - **The bf16 cuBLAS variants are opt-in.** `VF_CUBLAS_BF16_SKINNY=1` and `VF_CUBLAS_BF16_TC=1`
-  are off by default. The tensor-core path's results are not cuBLAS 12.9's bits, and it takes TN
-  products with k from 1024 to 16384 only, but for the classes of shapes that its rules of speed
-  leave to 12.9: a model whose layers have fewer than 1024 in-features gets it only on its wider
-  layers. A bf16 fine-tuning step ran at 1.02 to 1.07 times its speed without it, its backward
-  products going to 12.9 (0.1.5 served them too, and made such a step slower). `VF_SAFE=1` turns
-  it off ([The bf16 cuBLAS variants](#the-bf16-cublas-variants)).
+  are off by default. The tensor-core path's results are not cuBLAS 12.9's bits, it makes bf16
+  training slower, and it takes products with k from 1024 to 16384 only: a model whose layers
+  have fewer than 1024 in-features gets it only on its wider layers, and the gains measured on
+  real programs were measured before that gate. `VF_SAFE=1` turns it off ([The bf16 cuBLAS
+  variants](#the-bf16-cublas-variants)). (Since 0.1.5, on main: the tensor-core path takes TN
+  products only, but for the classes of shapes that its rules of speed leave to 12.9, so that the
+  products of a training step's backward pass go to 12.9, and a bf16 fine-tuning step ran at 1.02
+  to 1.07 times its speed without it; the gains on real programs were measured again with the
+  gate and the rules.)
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
   cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
   NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:
