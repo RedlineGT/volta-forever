@@ -665,7 +665,9 @@ What it does not cover:
   its Triton, after the standard library (a Triton of an editable installation whose import hook
   finds `triton` elsewhere is found there only when the package and its `_C` are below the
   directory that holds `triton/`; otherwise the helper's import fails, and the process compiles as
-  without the switch, said once); `-B` when the program writes no bytecode. The process checks that
+  without the switch, said once); `-B` when the program writes no bytecode, and the program's
+  `-X pycache_prefix` when it writes its bytecode under a prefix (`PYTHONPYCACHEPREFIX`): a helper
+  writes none into the program's Triton where the program writes none. The process checks that
   the Triton it imported is the program's (its directory and version, and the device, inode, size
   and time of its library, `libtriton`, and of its NVIDIA backend's module, as they were when the
   program imported Triton: a Triton reinstalled or edited in place under a running program, with

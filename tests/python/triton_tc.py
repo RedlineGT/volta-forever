@@ -1620,16 +1620,22 @@ class Decisions(Base):
     def test_the_helper_writes_no_bytecode_where_the_program_writes_none(self):
         # A program that writes no bytecode (PYTHONDONTWRITEBYTECODE, -B): its helper, which -I would
         # not tell, writes none into the program's Triton either (a directory whose contents change
-        # makes the program's import system read it again); one that writes it: as Python does.
-        for dont, want in (("1", False), (None, True)):
-            standin = self.root / ("standin-bytecode-%s" % dont)
+        # makes the program's import system read it again); one that writes it under a prefix
+        # (PYTHONPYCACHEPREFIX, given relative to the program's working directory): its helper, whose
+        # working directory is /, writes it under that prefix too; one that writes it beside the
+        # sources: as Python does.
+        prefix = self.root / "bytecode-prefix"
+        for dont, given, want in (("1", None, False), (None, os.path.relpath(prefix), False), (None, None, True)):
+            standin = self.root / ("standin-bytecode-%s-%s" % (dont, given is not None))
             if standin.exists():
                 shutil.rmtree(standin)
             shutil.copytree(self.standin, standin, ignore=shutil.ignore_patterns("__pycache__"))
             r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16")],
-                            self.env(PYTHONPATH=str(standin), PYTHONDONTWRITEBYTECODE=dont))
+                            self.env(PYTHONPATH=str(standin), PYTHONDONTWRITEBYTECODE=dont, PYTHONPYCACHEPREFIX=given))
             self.assertEqual(self.last(r), ["cubin sm_80"], r.stderr)
-            self.assertEqual(any(standin.rglob("__pycache__")), want, dont)
+            self.assertEqual(any(standin.rglob("__pycache__")), want, (dont, given))
+            if given is not None:   # (the program wrote its own there: the prefix was in force)
+                self.assertTrue(any(prefix.rglob("*.pyc")), given)
 
     def test_the_temporary_files(self):
         # Triton's PTX, and the cubin that ptxas writes, are in the helper's own directory (mode 0700)

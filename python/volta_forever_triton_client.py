@@ -14,7 +14,7 @@ time, started at the first kernel that needs one:
 
   - by the program's interpreter, with -I -S (nothing of the program's start, nothing of its
     sys.path but the directory that holds its Triton, after the standard library; -B when the
-    program writes no bytecode), an
+    program writes no bytecode, its prefix of bytecode when it writes it under one), an
     environment of its own (_helper_env: no secret of the program's, no LD_PRELOAD), the working
     directory /, its own session and process group (ptxas, which Triton runs, is in it), every
     other descriptor closed;
@@ -415,6 +415,18 @@ CRASH_SIGNALS = {4: "SIGILL", 6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE", 11: "SIGSE
 AGAIN_SIGNALS = (6, 7)
 
 
+def _bytecode_flags():
+    """How a helper writes bytecode, as the program does: -B when the program writes none, -X
+    pycache_prefix=PREFIX when it writes it under a prefix (PYTHONPYCACHEPREFIX; made absolute, as a
+    helper's working directory is /), else nothing (beside the sources, as Python does)."""
+    if sys.dont_write_bytecode:
+        return ["-B"]
+    prefix = getattr(sys, "pycache_prefix", None)
+    if prefix:
+        return ["-X", "pycache_prefix=" + os.path.abspath(prefix)]
+    return []
+
+
 def _inode(fd):
     """(device, inode) of what a descriptor is, or None when it is not open."""
     try:
@@ -654,9 +666,10 @@ class _Helper(object):
             fds = (theirs.fileno(), -1 if slot is None else slot, -1 if waiting is None else waiting)
             here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volta_forever_triton_helper.py")
             self.proc = subprocess.Popen(
-                # (-B when the program writes no bytecode, which -I would not tell the helper: it then
-                # writes none into the program's Triton either.)
-                [_state["python"], "-I", "-S"] + (["-B"] if sys.dont_write_bytecode else []) + [here, "--helper"]
+                # (-B when the program writes no bytecode, and the program's prefix of bytecode when it
+                # writes it under one, which -I would not tell the helper: it then writes none into the
+                # program's Triton either.)
+                [_state["python"], "-I", "-S"] + _bytecode_flags() + [here, "--helper"]
                 + [str(fd) for fd in fds] + [str(os.getpid()), root],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_helper_env(),
                 cwd="/", pass_fds=[fd for fd in fds if fd >= 0], start_new_session=True)
