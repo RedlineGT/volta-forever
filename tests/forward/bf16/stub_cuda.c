@@ -1,7 +1,9 @@
 /* A stand-in for libcuda.so.1 for the host tests of the bf16 runtime (tests/forward/bf16.sh): the
  * driver functions the runtime binds, which record what they are asked (an event log shared with the
  * cuBLAS stand-ins), keep the state the tests set (current context, capturing streams, device), run
- * user-object destructors when a test destroys a graph, and fail on demand. No GPU. */
+ * user-object destructors when a test destroys a graph, and fail on demand. No GPU. Built with
+ * -DSTUB_LAYER, it stands for the layer's libcuda.so.1 too: it has the layer's vf_summary_add and
+ * vf_summary_remove, and records what the runtime registers. */
 #include "stub.h"
 #include <pthread.h>
 #include <stdarg.h>
@@ -342,3 +344,57 @@ EXPORT CUresult cuGetErrorName(CUresult e, const char **s)
     *s = "CUDA_ERROR_STUB";
     return CUDA_SUCCESS;
 }
+
+#ifdef STUB_LAYER
+/* ---- the layer's summary (VF_SUMMARY, crates/vf-proxy/src/summary.rs): what the runtime registers; its fill called
+ * when the test asks, and once more at its removal, as the layer calls it then while its file is still to be written,
+ * each line of what it gives said on standard error ("stub layer: last report: LINE") ---- */
+typedef size_t (*summary_fill)(char *, size_t, void *);
+static int layer_adds, layer_removes;
+static unsigned layer_abi;
+static char layer_name[80];
+static summary_fill layer_fill;
+static void *layer_ctx;
+
+EXPORT int vf_summary_add(unsigned abi, const char *name, summary_fill fill, void *ctx)
+{
+    ++layer_adds;
+    layer_abi = abi;
+    snprintf(layer_name, sizeof layer_name, "%s", name ? name : "(null)");
+    layer_fill = fill;
+    layer_ctx = ctx;
+    return 0;
+}
+
+EXPORT int vf_summary_remove(summary_fill fill, void *ctx)
+{
+    ++layer_removes;
+    if (!fill || fill != layer_fill || ctx != layer_ctx) {
+        fprintf(stderr, "stub layer: the removal of a fill that is not registered\n");
+        return 2; /* ENOENT */
+    }
+    char buf[4096];
+    size_t n = fill(buf, sizeof buf, ctx);
+    if (n > sizeof buf) n = sizeof buf;
+    for (const char *p = buf; p < buf + n;) {
+        const char *e = memchr(p, '\n', (size_t)(buf + n - p));
+        if (!e) e = buf + n;
+        fprintf(stderr, "stub layer: last report: %.*s\n", (int)(e - p), p);
+        p = e + 1;
+    }
+    fprintf(stderr, "stub layer: %d registration, %d removal\n", layer_adds, layer_removes);
+    layer_fill = NULL;
+    return 0;
+}
+
+/* What was registered: the number of registrations, the interface number and the name of the last one. */
+EXPORT int stub_layer_state(unsigned *abi, char *name, size_t cap)
+{
+    *abi = layer_abi;
+    snprintf(name, cap, "%s", layer_name);
+    return layer_adds;
+}
+
+/* The registered fill's text now, as the layer's thread would get it. */
+EXPORT size_t stub_layer_fill(char *buf, size_t cap) { return layer_fill ? layer_fill(buf, cap, layer_ctx) : 0; }
+#endif

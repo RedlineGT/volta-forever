@@ -166,8 +166,12 @@ Where the GPU scripts write:
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
   the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k, with
   the products of a fine-tuning step, the tall rule's edges and the classes it serves (rows that hold
-  whatever the gate is),
-  each control making its test fail.
+  whatever the gate is), the runtime's lines in the layer's `VF_SUMMARY` file (mode `summary`: under a
+  stand-in that has the layer's `vf_summary_add`, `stub_cuda.c` built with `-DSTUB_LAYER`, the runtime
+  registers its fill once, at its first handle, which gives the exit report's lines with the counts as
+  they are, and at the runtime's end what the exit report printed; under the plain stand-in nothing is
+  registered, and the exit report prints the lines in the text of before, which a test build's control,
+  `report-format`, changes), each control making its test fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL

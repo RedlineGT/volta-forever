@@ -29,6 +29,9 @@
 // that it builds without NVIDIA's headers. It imports from the C library only: the CUDA driver and
 // the CUDA 12.9 libraries are opened with dlopen when they are first needed.
 //
+// Under the layer, the exit report's counts are also given to the layer's VF_SUMMARY file while the
+// process runs (summary_fill), so that a process killed without exiting keeps them there.
+//
 // Test builds (-DVF_BF16_TEST, tests/forward/bf16/) add two variables: VF_BF16_INJECT, a failure
 // to inject at one step, and VF_BF16_CONTROL, mechanisms to break on purpose, each to show that the
 // test of that mechanism can fail. A release build reads neither.
@@ -304,6 +307,8 @@ static int g_cuda_ok;
 static CUresult (*test_module_unload)(CUmodule); /* the control "unload-module" only */
 #endif
 
+static void summary_register(void *driver);
+
 /* The driver, once a handle exists (cuBLAS has loaded it). By name: under the launcher, the audit
  * library gives the layer's libcuda.so.1, which tells this file the real capability because the
  * file holds sm_70 machine code. */
@@ -334,6 +339,7 @@ static void bind_driver(void)
 #ifdef VF_BF16_TEST
     *(void **)&test_module_unload = dlsym(d, "cuModuleUnload");
 #endif
+    summary_register(d);
 }
 #undef BIND
 
@@ -397,45 +403,186 @@ static atomic_ullong st_tc_captured[API_N];
 static atomic_ullong st_tc_elems; /* the elements (m * n) of the calls the tensor-core path served, every entry point */
 static int read_stats(unsigned long long out[3], int *made);
 
+/* Text written into a buffer of cap bytes and cut there, as snprintf would cut it, with nothing of the C library
+ * but memcpy and strlen: no lock, no allocation (the summary's fill, below, runs where nothing else may be called). */
+typedef struct {
+    char *p;
+    size_t n, cap;
+} Text;
+static void text_put(Text *t, const char *s, size_t len)
+{
+    if (len > t->cap - t->n) len = t->cap - t->n;
+    memcpy(t->p + t->n, s, len);
+    t->n += len;
+}
+static void text_str(Text *t, const char *s) { text_put(t, s, strlen(s)); }
+static void text_u64(Text *t, unsigned long long v)
+{
+    char d[20];
+    size_t i = sizeof d;
+    do d[--i] = (char)('0' + v % 10);
+    while (v /= 10);
+    text_put(t, d + i, sizeof d - i);
+}
+
+#define VF_SAY_MAX 511 /* the most of a message that say() prints */
+
+/* The exit report's line of each entry point that was called, each ended by a newline and cut at VF_SAY_MAX bytes as
+ * say() cuts it: one text for what report() prints and for what the summary's fill gives. */
+static void host_lines(Text *out)
+{
+    for (int a = 0; a < API_N; ++a) {
+        const unsigned long long calls = atomic_load(&st_calls[a]);
+        if (!calls) continue;
+        char buf[VF_SAY_MAX];
+        Text l = {buf, 0, sizeof buf};
+        text_str(&l, api_name[a]);
+        text_str(&l, ": ");
+        text_u64(&l, calls);
+        text_str(&l, CONTROL("report-format") ? " call, " : " calls, "); /* control: another text than before */
+        text_u64(&l, atomic_load(&st_bf16[a]));
+        text_str(&l, " with bf16 operands; skinny path ");
+        text_u64(&l, atomic_load(&st_skinny[a]));
+        text_str(&l, ", tensor-core path ");
+        text_u64(&l, atomic_load(&st_tc[a]));
+        text_str(&l, " (");
+        text_u64(&l, atomic_load(&st_tc_captured[a]));
+        text_str(&l, " in graph captures), failed after writing ");
+        text_u64(&l, atomic_load(&st_failed[a]));
+        text_str(&l, "; forwarded:");
+        for (int r = 0; r < R_N; ++r) {
+            const unsigned long long f = atomic_load(&st_fwd[a][r]);
+            if (!f) continue;
+            text_str(&l, " ");
+            text_str(&l, reason_name[r]);
+            text_str(&l, " ");
+            text_u64(&l, f);
+            text_str(&l, ",");
+        }
+        text_put(out, buf, l.n);
+        text_put(out, "\n", 1);
+    }
+}
+
+static unsigned long long tc_calls(void)
+{
+    unsigned long long tc = 0;
+    for (int a = 0; a < API_N; ++a) tc += atomic_load(&st_tc[a]);
+    return tc;
+}
+
+/* What report() said at exit of the fallback's counters, which are on the GPU, for the summary's fill: report_read is
+ * 1 once report() has read them (report_line its line, empty when it printed none), and stays 0 when it does not read
+ * them (below VF_LOG_LEVEL=2). report_line is written once, before report_read is set. */
+static char report_line[VF_SAY_MAX + 1];
+static atomic_int report_read;
+
 static void report_verify(void);
 static void report(void)
 {
     if (cfg.verify) report_verify();
     if (cfg.level < 2) return;
-    for (int a = 0; a < API_N; ++a) {
-        const unsigned long long calls = atomic_load(&st_calls[a]);
-        if (!calls) continue;
-        char line[1024];
-        int n = snprintf(line, sizeof line, "%s: %llu calls, %llu with bf16 operands; skinny path %llu, tensor-core path %llu"
-                         " (%llu in graph captures), failed after writing %llu; forwarded:",
-                         api_name[a], calls, (unsigned long long)atomic_load(&st_bf16[a]),
-                         (unsigned long long)atomic_load(&st_skinny[a]), (unsigned long long)atomic_load(&st_tc[a]),
-                         (unsigned long long)atomic_load(&st_tc_captured[a]),
-                         (unsigned long long)atomic_load(&st_failed[a]));
-        for (int r = 0; r < R_N && n > 0 && n < (int)sizeof line; ++r) {
-            const unsigned long long f = atomic_load(&st_fwd[a][r]);
-            if (f) n += snprintf(line + n, sizeof line - (size_t)n, " %s %llu,", reason_name[r], f);
-        }
-        say("%s", line);
+    char text[API_N * (VF_SAY_MAX + 1)];
+    Text t = {text, 0, sizeof text};
+    host_lines(&t);
+    for (size_t i = 0; i < t.n;) {
+        const char *e = memchr(text + i, '\n', t.n - i);
+        const size_t len = e ? (size_t)(e - (text + i)) : t.n - i;
+        say("%.*s", (int)len, text + i);
+        i += len + 1;
     }
     /* The fallback's counters (abi.h, VfFbArgs.stats): how many of the tensor-core path's calls had rows or
      * columns failing the exact check, how many more than a quarter (LIMITS.md: such a product can run below
      * cuBLAS 12.9's speed), and the share of elements the fallback computed. */
-    unsigned long long tc = 0;
-    for (int a = 0; a < API_N; ++a) tc += atomic_load(&st_tc[a]);
+    const unsigned long long tc = tc_calls();
     if (!tc) return;
     unsigned long long v[3];
     int made = 0;
     if (!read_stats(v, &made)) {
-        say("tensor-core path: the fallback's counters could not be read at exit");
-        return;
+        snprintf(report_line, sizeof report_line, "tensor-core path: the fallback's counters could not be read at exit");
+    } else if (made) {
+        const unsigned long long elems = atomic_load(&st_tc_elems);
+        snprintf(report_line, sizeof report_line,
+                 "tensor-core path: of its %llu calls, %llu had rows or columns that failed the exact check, %llu of "
+                 "them more than a quarter of their rows or of their columns (such products can run below cuBLAS "
+                 "12.9's speed: LIMITS.md); the fallback computed %llu of their %llu elements (%.2f %%)",
+                 tc, v[0], v[1], v[2], elems, elems ? 100.0 * (double)v[2] / (double)elems : 0.0);
     }
-    if (!made) return;
-    const unsigned long long elems = atomic_load(&st_tc_elems);
-    say("tensor-core path: of its %llu calls, %llu had rows or columns that failed the exact check, %llu of them more "
-        "than a quarter of their rows or of their columns (such products can run below cuBLAS 12.9's speed: "
-        "LIMITS.md); the fallback computed %llu of their %llu elements (%.2f %%)",
-        tc, v[0], v[1], v[2], elems, elems ? 100.0 * (double)v[2] / (double)elems : 0.0);
+    if (report_line[0]) say("%s", report_line);
+    atomic_store_explicit(&report_read, 1, memory_order_release);
+}
+
+#ifdef VF_BF16_TEST
+static atomic_ullong test_fills; /* the summary's fill called (vf_bf16_test_summary) */
+#endif
+
+/* The lines that the layer's VF_SUMMARY file holds for this runtime (vf_summary_add, the layer's own function, not
+ * NVIDIA's; docs/architecture.md): the exit report's line of each entry point, at every log level, as report()
+ * prints it at VF_LOG_LEVEL=2; then where the counts kept on the GPU are, read at exit only: the fallback's (once
+ * report() has read them, its line about them instead) and, in verify mode, its own. It reads the host counters as
+ * they are, and calls nothing that locks, allocates or reaches the driver: the layer calls it with its lock held,
+ * from its own thread, at exit, and once more when this file removes it. */
+static size_t summary_fill(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+#ifdef VF_BF16_TEST
+    atomic_fetch_add(&test_fills, 1);
+#endif
+    Text t = {buf, 0, cap};
+    host_lines(&t);
+    if (atomic_load_explicit(&report_read, memory_order_acquire)) {
+        if (report_line[0]) {
+            text_str(&t, report_line);
+            text_put(&t, "\n", 1);
+        }
+    } else if (tc_calls()) {
+        text_str(&t, "tensor-core path: the fallback's counters are on the GPU, read at exit only (and said then from "
+                     "VF_LOG_LEVEL=2)\n");
+    }
+    if (cfg.verify) text_str(&t, "verify: its counts are on the GPU, read at exit only (and said then)\n");
+    return t.n;
+}
+
+/* Registers summary_fill with the layer when the driver that bind_driver opened is the layer's: it has
+ * vf_summary_add and vf_summary_remove, NVIDIA's has neither, and the exit report is then all there is, as before.
+ * Looked up on that handle: a program may load the layer with RTLD_LOCAL, and RTLD_DEFAULT would miss it. Here and
+ * not in a constructor: this file can be loaded before the driver (a program whose first CUDA call is cuBLAS's).
+ * The layer may call summary_fill until vf_summary_remove returns, so this file is pinned first (RTLD_NODELETE: a
+ * dlclose does not unload it), and its destructor removes it all the same (summary_unregister, which also runs at
+ * an unloading, if the pin did not take). The layer itself stays loaded for that call: this file never closes its
+ * handle. */
+typedef size_t (*summary_fill_fn)(char *, size_t, void *);
+typedef int (*summary_remove_fn)(summary_fill_fn, void *);
+static _Atomic(summary_remove_fn) summary_remove; /* once registered (the destructor may run in another thread) */
+static void summary_register(void *driver)
+{
+    int (*add)(unsigned, const char *, summary_fill_fn, void *) = NULL;
+    summary_remove_fn remove = NULL;
+    *(void **)&add = dlsym(driver, "vf_summary_add");
+    *(void **)&remove = dlsym(driver, "vf_summary_remove");
+    if (!add || !remove || CONTROL("summary-off")) return;
+    Dl_info info;
+    if (!CONTROL("no-pin") && dladdr((void *)summary_fill, &info) && info.dli_fname)
+        dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE);
+    if (add(1, "libvf_cublas_bf16.so", summary_fill, NULL) == 0)
+        atomic_store_explicit(&summary_remove, remove, memory_order_release);
+}
+
+/* (Test builds: VF_BF16_SUMMARY_SAY=1 says what the removal returned, and whether it called the fill.) */
+__attribute__((destructor)) static void summary_unregister(void)
+{
+    const summary_remove_fn remove = atomic_load_explicit(&summary_remove, memory_order_acquire);
+    if (!remove || CONTROL("no-remove")) return;
+#ifdef VF_BF16_TEST
+    const unsigned long long before = atomic_load(&test_fills);
+    const int r = remove(summary_fill, NULL);
+    const char *v = getenv("VF_BF16_SUMMARY_SAY");
+    if (v && !strcmp(v, "1"))
+        say("test build: vf_summary_remove returned %d; the summary's fill called %llu times before it, %llu after", r,
+            before, (unsigned long long)atomic_load(&test_fills));
+#else
+    remove(summary_fill, NULL);
+#endif
 }
 
 /* ---- switches and libraries, once ------------------------------------------------------- */
@@ -2665,8 +2812,22 @@ EXPORT int vf_bf16_test_verify(unsigned long long *out, int n)
  * control verify-text-each). */
 EXPORT unsigned long long vf_bf16_test_verify_texts(void) { return atomic_load(&st_ver_texts); }
 
+/* Test builds: the summary (summary_register): out[0] 1 when the runtime registered with the layer, out[1] how many
+ * times its fill was called. Returns 2. */
+EXPORT int vf_bf16_test_summary(unsigned long long *out, int n)
+{
+    if (n < 2) return 0;
+    out[0] = atomic_load(&summary_remove) != NULL;
+    out[1] = atomic_load(&test_fills);
+    return 2;
+}
+
+/* Test builds: what the summary's fill gives now (counted as a call), with its length. */
+EXPORT size_t vf_bf16_test_summary_text(char *buf, size_t cap) { return summary_fill(buf, cap, NULL); }
+
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded
- * by reason). Returns the number of values written. */
+ * by reason; with room for two more, the calls with bf16 operands and the tensor-core calls in graph
+ * captures). Returns the number of values written. */
 EXPORT int vf_bf16_test_counters(int api, unsigned long long *out, int n)
 {
     if (api < 0 || api >= API_N || n < 4 + R_N) return 0;
@@ -2675,6 +2836,9 @@ EXPORT int vf_bf16_test_counters(int api, unsigned long long *out, int n)
     out[2] = atomic_load(&st_tc[api]);
     out[3] = atomic_load(&st_failed[api]);
     for (int r = 0; r < R_N; ++r) out[4 + r] = atomic_load(&st_fwd[api][r]);
-    return 4 + R_N;
+    if (n < 6 + R_N) return 4 + R_N;
+    out[4 + R_N] = atomic_load(&st_bf16[api]);
+    out[5 + R_N] = atomic_load(&st_tc_captured[api]);
+    return 6 + R_N;
 }
 #endif
