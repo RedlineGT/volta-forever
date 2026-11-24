@@ -301,7 +301,7 @@ static void signed_zeros(void)
         {1.0f, 1.0f, -0.0f, 0, "alpha 1, beta 1, C = -0"},
     };
     for (int tc = 0; tc < 2; ++tc) {
-        const int m = tc ? 512 : 256, n = tc ? 64 : 4, k = tc ? 512 : 64;
+        const int m = tc ? 512 : 256, n = tc ? 64 : 4, k = tc ? 2048 : 64;
         for (int ct = 0; ct < 2; ++ct) {
             const cudaDataType t = ct ? CUDA_R_16BF : CUDA_R_32F;
             uint16_t *A = bf16_random((size_t)m * k, 0.05), *B = bf16_random((size_t)n * k, 1.0);

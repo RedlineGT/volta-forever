@@ -32,10 +32,11 @@ gcc -shared -fPIC -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Werror -fv
     { echo "FAIL  build of the test runtime"; exit 1; }
 
 failed=0
-build() {  # build NAME : compile tests/gpu/forward/NAME.c against the CUDA 13.5 headers and libraries
-    gcc -O2 -Wall -Wno-deprecated-declarations -I"$T13/include" -o "$out/bin/$1" "$src/$1.c" \
+build() {  # build NAME [FLAGS...] : compile tests/gpu/forward/NAME.c against the CUDA 13.5 headers and libraries
+    local name=$1; shift
+    gcc -O2 "$@" -Wall -Wno-deprecated-declarations -I"$T13/include" -o "$out/bin/$name" "$src/$name.c" \
         -L"$T13/lib" -Wl,-rpath-link,"$T13/lib" -L"$proxy" -lcublas -lcublasLt -lcudart -l:libcuda.so.1 -ldl -lm -lpthread ||
-        { echo "FAIL  build of $1"; failed=1; return 1; }
+        { echo "FAIL  build of $name"; failed=1; return 1; }
 }
 run() {  # run NAME DIR [ENV...] : run with the variants of DIR first in the library path; output in $log
     local name=$1 dir=$2; shift 2
@@ -63,17 +64,54 @@ cases=("$@")
 # the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them.
 controls=()
 if [ -x "$T12/bin/nvcc" ]; then
-    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK; do
+    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS; do
         (cd "$rt" && "$T12/bin/nvcc" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
             -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
     done
 fi
 
-for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve bf16-lt bf16-fallback; do
+for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve bf16-lt bf16-fallback bf16-s1; do
     if want $t; then
         build $t && { run $t "$test_dir"; verdict $t; }
     fi
 done
+# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 1024
+# against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), and
+# no call below the gate served, every call from the gate on served. Controls, each of which must fail: the gate
+# moved to 512 and 256 (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the same), at a call of
+# that k; VF_ACCEPT_STRICT=1 (the bias of the two slice-aligned constructions judged from the gate too); the
+# tensor-core path off, as not serving. VF_SAFE=1: no call served by the tensor-core path, every result 12.9's.
+# -fopenmp shortens its host side only.
+if want bf16-accept; then
+    if build bf16-accept -fopenmp; then
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
+        cp "$log" "$out/logs/forward-bf16-accept-main.log"
+        for g in 512 256; do
+            run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_BF16_TC_MIN_K=$g VF_ACCEPT_GATE=$g >/dev/null
+            cp "$log" "$out/logs/forward-bf16-accept-gate$g.log"
+            if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* [NT][NT] [0-9]*x[0-9]*x$g " "$log"; then
+                echo "PASS  bf16-accept control: the gate at $g fails at k = $g"
+            else echo "FAIL  bf16-accept control: the gate at $g did not fail at k = $g ($out/logs/forward-bf16-accept-gate$g.log)"; failed=1; fi
+        done
+        # Control: the two documented exceptions removed (VF_ACCEPT_STRICT=1): a bias from the gate on must fail.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_STRICT=1 >/dev/null
+        cp "$log" "$out/logs/forward-bf16-accept-strict.log"
+        if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* TN 1024x128x[0-9]* fp32" "$log"; then
+            echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate)"
+        else echo "FAIL  bf16-accept control: VF_ACCEPT_STRICT=1 did not fail ($out/logs/forward-bf16-accept-strict.log)"; failed=1; fi
+        # Control: the tensor-core path off (the skinny path on, so that the variants load the test runtime and its
+        # counters), the gate expected: every call from the gate on must then fail as not served.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
+        cp "$log" "$out/logs/forward-bf16-accept-tc-off.log"
+        if [ "$status" != 0 ] && grep -q "^FAIL  .*: not served by the tensor-core path at k >= the gate" "$log"; then
+            echo "PASS  bf16-accept control: with the tensor-core path off, the calls from the gate on are not served and it fails"
+        else echo "FAIL  bf16-accept control: the tensor-core path off did not fail as not served ($out/logs/forward-bf16-accept-tc-off.log)"; failed=1; fi
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=1 VF_SAFE=1 VF_ACCEPT_MODE=safe
+        cp "$log" "$out/logs/forward-bf16-accept-safe.log"
+        if [ "$status" = 0 ] && grep -qx "ok bf16-accept safe" "$log"; then echo "PASS  bf16-accept safe (VF_SAFE=1)"
+        else echo "FAIL  bf16-accept safe: under VF_SAFE=1 a call was served by the tensor-core path or lost 12.9's bits ($log)"; failed=1; fi
+    fi
+fi
 # Lazy setup: one process per case, the first served call of the process's context in each.
 if want bf16-lazy; then
     if build bf16-lazy; then
@@ -83,6 +121,10 @@ if want bf16-lazy; then
             else echo "FAIL  bf16-lazy $m (exit status $status; $log)"; failed=1; fi
         done
     fi
+fi
+# VF_SAFE=1 with the tensor-core switch: the tensor-core path serves nothing, the skinny path serves.
+if want bf16-safe; then
+    build bf16-safe && { run bf16-safe "$test_dir" VF_SAFE=1; verdict bf16-safe; }
 fi
 # A language model's output layer (m = 151936): the skinny path alone forwards it; the tensor-core path
 # serves it outside a capture, chunked, and forwards it captured.

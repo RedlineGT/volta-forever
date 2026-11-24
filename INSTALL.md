@@ -246,20 +246,30 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
 - `VF_CUBLAS_BF16_SKINNY=1`: products of 2 to 16 columns (fewer than 32 when small) where cuBLAS
   12.9 runs its sequential kernel are computed by one kernel of the layer, with 12.9's bits
   (`docs/emulations.md`, section 11, says where exactly, and how that was established).
-- `VF_CUBLAS_BF16_TC=1`: larger products run on the tensor cores, with exact scaling to fp16 and
-  fixed slices of k, and differ from 12.9's in the last bits (within 25 units of 2^-24 sum |a b|
-  measured; sums of products of one sign come out low, by about 13 units on average when the data
-  spans many binades), except when they are captured in a CUDA graph; the skinny
-  path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. It is for inference: it makes
+- `VF_SAFE=1` (safe mode: the proxy's table of "Environment variables", below, says what it is and
+  how it is read): the variants' tensor-core path serves nothing, whatever `VF_CUBLAS_BF16_TC` says;
+  the skinny path, whose results are 12.9's bits, is not affected. Every result is then cuBLAS 12.9's
+  bits, eager or captured, at any batch size (12.9's own results depend on n at n = 1 and, on some
+  shapes, up to n = 16: `LIMITS.md`). The variants read it at their first intercepted call (a
+  handle's creation or a product): set before a program's first cuBLAS call, it is honoured; set
+  after, it is not.
+- `VF_CUBLAS_BF16_TC=1`: larger products with k from 1024 to 16384 run on the tensor cores, with
+  exact scaling to fp16 and fixed slices of k, and differ from 12.9's in the last bits (within 25
+  units of 2^-24 sum |a b| measured; sums of products of one sign come out low, by about 13 units on
+  average when the data spans many binades), except when they are captured in a CUDA graph; the
+  skinny path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. One element's bits then
+  depend on the batch size and on capture (`LIMITS.md`), and a model whose layers have fewer than
+  1024 in-features gets the tensor cores only on its wider layers. It is for inference: it makes
   bf16 training slower (`LIMITS.md`, "The bf16 cuBLAS variants"; `docs/performance.md`, "bf16
   products through cuBLAS: the opt-in variants on real programs").
 
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
-explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 for the tensor cores,
+explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 or below 1024 for the tensor cores,
 tensor-core calls captured in a CUDA graph (`LIMITS.md`, "The bf16 cuBLAS variants", says why), and
 calls whose workspace cannot be allocated. An eager tensor-core call (TN 1536 x 480 x 1536) cost
-16.5 microseconds of host time against 6.5 for 12.9's, a skinny call (TN 1536 x 8 x 1536) 2.4 against
-5.8 (`tests/gpu/forward/bf16-cost.c`, mean over 100 calls).
+16.5 microseconds of host time against
+6.5 for 12.9's, a skinny call (TN 1536 x 8 x 1536) 2.4 against 5.8 (`tests/gpu/forward/bf16-cost.c`,
+mean over 100 calls).
 The layer's workspace is not the program's: a framework's allocator does not see it. The variables do nothing without the
 launcher: by hand, put `forward/bf16tc` before `forward` and set the variable.
 
@@ -500,6 +510,7 @@ that loaded it, not by a child made with `fork()`.
 |---|---|---|
 | `VF_FWD_<KEY>` | the CUDA 12.9.2 library's name | The library that one forwarding library opens instead, by path or name. KEY is its short name in capitals, `-` written `_`: `VF_FWD_CUBLAS`, `VF_FWD_CUBLASLT`, `VF_FWD_CUFFT`, `VF_FWD_NVRTC_BUILTINS`, `VF_FWD_NPPIF`, ... (`crates/vf-fwdgen/src/libs.rs`) |
 | `VF_FWD_VERBOSE` | off | Set: each forwarding library says which library it opened and each function that it binds |
+| `VF_SAFE` | unset | Safe mode (the proxy's table, above, is its description): in the bf16 cuBLAS variants (`forward/bf16tc`) the tensor-core path serves nothing, whatever `VF_CUBLAS_BF16_TC` says, and the skinny path keeps cuBLAS 12.9's bits ("The bf16 cuBLAS variants", above). Read at the variants' first intercepted call |
 
 **Launcher (`vf`) and `vf ptxas`:**
 

@@ -65,7 +65,8 @@ run() {  # run NAME DIR ENV... -- ARGS... : the test program with LD_LIBRARY_PAT
     while [ "$1" != -- ]; do envs+=("$1"); shift; done
     shift
     log=$out/$name.log
-    env -u VF_CUBLAS_BF16_TC -u VF_CUBLAS_BF16_SKINNY -u VF_BF16_CONTROL -u VF_BF16_INJECT -u STUB_CUBLAS_VERSION \
+    env -u VF_CUBLAS_BF16_TC -u VF_CUBLAS_BF16_SKINNY -u VF_SAFE -u VF_BF16_CONTROL -u VF_BF16_INJECT -u STUB_CUBLAS_VERSION \
+        -u VF_BF16_TC_MIN_K \
         LD_LIBRARY_PATH="$out/old/lib" "${envs[@]}" "$out/host_test" "$dir" "$@" >"$log" 2>&1
     status=$?
 }
@@ -85,12 +86,42 @@ fails() {  # fails NAME WHAT CHECK : PASS when the program failed (a control) at
 
 run all "$out/test" VF_CUBLAS_BF16_TC=1 -- all
 pass all "H1-H7: forwarding with the same arguments, call sequences and chunks, explicit algorithms, bounds, one runtime, the internal GEMM, captured calls, the cuBLASLt allowlist"
+run rule "$out/test" VF_CUBLAS_BF16_TC=1 -- rule
+pass rule "the paths' rule: the path or the reason of each class of (n, m k, k), the tensor-core path from k = 1024"
+# VF_BF16_TC_MIN_K exists in test builds only (the controls that move the gate): the release runtime, as the
+# generator builds it, does not read it, and its file does not hold the name.
+run release-gate "$out/forward/bf16tc" VF_CUBLAS_BF16_TC=1 VF_BF16_TC_MIN_K=512 -- release-gate
+rel=$(grep -c VF_BF16_TC_MIN_K "$out/forward/bf16tc/libvf_cublas_bf16.so")
+tst=$(grep -c VF_BF16_TC_MIN_K "$out/test/libvf_cublas_bf16.so")
+if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$rel" = 0 ] && [ "$tst" -ge 1 ]; then
+    echo "PASS  the release runtime does not read VF_BF16_TC_MIN_K (k = 768 forwarded with it set to 512; the name only in the test build)"
+else
+    echo "FAIL  the release runtime and VF_BF16_TC_MIN_K: status $status, the name in the release file $rel times, in the test file $tst ($log)"; failed=1
+fi
 run skinny "$out/test" VF_CUBLAS_BF16_SKINNY=1 -- skinny
 pass skinny "H3: the skinny path's bounds and its rule for 12.9's sequential kernel"
 run otherbuild "$out/test" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901 -- otherbuild
 pass otherbuild "the skinny path with another cuBLAS than the 12.9.2 its rule was measured on: everything forwarded"
 run off "$out/test" -- off
 pass off "H1: no switch, everything forwarded and the runtime not loaded"
+run safe "$out/test" VF_SAFE=1 VF_CUBLAS_BF16_TC=1 -- safe
+said=$(grep -c "VF_SAFE=1: the tensor-core path serves nothing" "$log")
+if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 1 ]; then
+    echo "PASS  VF_SAFE=1: tensor-core calls forwarded whatever VF_CUBLAS_BF16_TC says (counted for safe mode), skinny calls served, said once"
+else
+    echo "FAIL  VF_SAFE=1: status $status, said $said times ($log)"; failed=1
+fi
+# Only the exact value 1 turns safe mode on: with any other value the tensor-core path serves (mode
+# notsafe), and the runtime says once that safe mode stays off.
+for value in true yes "" " 1"; do
+    run notsafe-"${value// /_}" "$out/test" "VF_SAFE=$value" VF_CUBLAS_BF16_TC=1 -- notsafe
+    said=$(grep -c "VF_SAFE=$value is not 1: safe mode stays off" "$log")
+    if [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$said" = 1 ]; then
+        echo "PASS  VF_SAFE='$value': not safe mode, the tensor-core path serves, said once"
+    else
+        echo "FAIL  VF_SAFE='$value': status $status, said $said times ($log)"; failed=1
+    fi
+done
 run lazy "$out/test" VF_CUBLAS_BF16_TC=1 -- lazy
 pass lazy "lazy setup: nothing made with a handle; the module at the first served call, the tensor-core path's pool and cuBLASLt handle at its first call, in relaxed capture mode"
 for step in module alloc scale gemm16 epilogue fallback; do
@@ -125,7 +156,16 @@ control ws-align skinny "TN with a 4 MiB workspace 16 bytes past an aligned addr
 control bias-alias skinny "cuBLASLt, a bias that overlaps D (its fourth column): not left to 12.9" VF_CUBLAS_BF16_SKINNY=1
 control any-build otherbuild "skinny alone, another cuBLAS build: not one call" VF_CUBLAS_BF16_SKINNY=1 STUB_CUBLAS_VERSION=120901
 control eager-setup lazy "lazy: the runtime made something with the handle" VF_CUBLAS_BF16_TC=1
+control safe-ignored safe "safe: a tensor-core call: not one call" VF_SAFE=1 VF_CUBLAS_BF16_TC=1
+control safe-domain safe "safe: a tensor-core call: not counted as reason" VF_SAFE=1 VF_CUBLAS_BF16_TC=1
+control safe-lenient notsafe "not safe: a tensor-core call was not served" VF_SAFE=yes VF_CUBLAS_BF16_TC=1
 control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1
+# The tensor-core path's gate moved to 512 (test builds): the rule's table must fail at its k boundary; and the
+# test runtime given to the release-gate mode, where the variable is read, must make it fail.
+run control-tc-min-k "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_TC_MIN_K=512 -- rule
+fails control-tc-min-k "control VF_BF16_TC_MIN_K=512" "rule: TN 1536 x 64 x 1016 (k one step under the gate): tc"
+run control-release-gate "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_TC_MIN_K=512 -- release-gate
+fails control-release-gate "control: the release-gate mode on the test runtime" "release gate: TN 1536 x 128 x 768 (k under the gate) not forwarded"
 # The variant built with VF_BF16_CONTROL_ABORT aborts where it should say that the runtime is missing:
 # the process must end by SIGABRT (status 134) without "ok".
 run control-abort "$out/abort" VF_CUBLAS_BF16_TC=1 -- noruntime

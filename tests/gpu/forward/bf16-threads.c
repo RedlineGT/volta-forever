@@ -14,7 +14,7 @@
 #include <pthread.h>
 
 static cublasHandle_t hv, h12;
-static const int M = 1536, N = 256, K = 1536, NS = 8; /* NS: the skinny call's columns */
+static const int M = 1536, N = 256, K = 2048, NS = 8; /* NS: the skinny call's columns */
 static void *dA, *dB;
 static float *ref, *ref12, *sk12; /* tensor-core eager; 12.9's for that shape; 12.9's skinny-shape */
 

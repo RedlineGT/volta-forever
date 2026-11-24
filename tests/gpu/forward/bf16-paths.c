@@ -133,7 +133,7 @@ static void tc_cases(void)
     const int layouts[][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
     for (int L = 0; L < 4; ++L)
         for (int ct = 0; ct < 2; ++ct) {
-            Shape s = shape(layouts[L][0], layouts[L][1], 520, 72, 1531, ct ? CUDA_R_16BF : CUDA_R_32F);
+            Shape s = shape(layouts[L][0], layouts[L][1], 520, 72, 2051, ct ? CUDA_R_16BF : CUDA_R_32F);
             Data d = make_data(&s, 0.05, 1.0);
             void *ov, *o12, *ov2, *o122;
             cublasStatus_t a, b;
@@ -207,7 +207,9 @@ static void forwarded_cases(void)
                    CUBLAS_GEMM_DEFAULT, R_K);
     forwarded_case("n = 1", shape(1, 0, 512, 1, 512, CUDA_R_32F), 1.0f, CUBLAS_GEMM_DEFAULT, R_SHAPE);
     forwarded_case("k = 8", shape(1, 0, 512, 64, 8, CUDA_R_32F), 1.0f, CUBLAS_GEMM_DEFAULT, R_SHAPE);
-    forwarded_case("alpha = 0", shape(1, 0, 512, 64, 512, CUDA_R_32F), 0.0f, CUBLAS_GEMM_DEFAULT, R_ALPHA0);
+    forwarded_case("alpha = 0", shape(1, 0, 512, 64, 2048, CUDA_R_32F), 0.0f, CUBLAS_GEMM_DEFAULT, R_ALPHA0);
+    forwarded_case("k = 1016, under the tensor-core path's gate", shape(1, 0, 512, 64, 1016, CUDA_R_32F), 1.0f,
+                   CUBLAS_GEMM_DEFAULT, R_SHORT_K);
     forwarded_case("small product (m k < 2^20, n < 32, outside the skinny domain)", shape(0, 1, 16384, 20, 16, CUDA_R_32F),
                    1.0f, CUBLAS_GEMM_DEFAULT, R_DOMAIN);
 }
@@ -247,7 +249,7 @@ static void sequential_rule_cases(void)
 /* beta = 0 never reads C: NaN in C does not reach the output (both paths). */
 static void beta_zero_case(int n)
 {
-    Shape s = shape(1, 0, 768, n, 1024, CUDA_R_32F);
+    Shape s = shape(1, 0, 768, n, 2048, CUDA_R_32F);
     Data d = make_data(&s, 0.05, 1.0);
     for (size_t i = 0; i < (size_t)s.ldc * s.n; ++i) ((float *)d.hCraw)[i] = NAN;
     void *ov, *o12;
@@ -266,7 +268,7 @@ static void beta_zero_case(int n)
  * kernel (NT); the others stay within the bound. */
 static void failing_case(void)
 {
-    Shape s = shape(0, 1, 640, 96, 1536, CUDA_R_32F);
+    Shape s = shape(0, 1, 640, 96, 2048, CUDA_R_32F);
     Data d = make_data(&s, 0.05, 1.0);
     const int bad_rows[] = {3, 77, 500};
     for (int r = 0; r < 3; ++r) d.hA[bad_rows[r] + (size_t)200 * s.lda] = f2bf(r == 0 ? INFINITY : r == 1 ? 3e38f : 1e-30f);
@@ -299,7 +301,7 @@ static void failing_case(void)
  * of that moment. */
 static void device_scalars_case(void)
 {
-    Shape s = shape(1, 0, 512, 64, 768, CUDA_R_32F);
+    Shape s = shape(1, 0, 512, 64, 2048, CUDA_R_32F);
     Data d = make_data(&s, 0.05, 1.0);
     float *dab;
     CU(cudaMalloc((void **)&dab, 8));

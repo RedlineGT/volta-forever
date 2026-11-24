@@ -19,7 +19,7 @@
 #include <pthread.h>
 
 static int (*rt_state)(int *, int);
-static const int M = 1536, K = 1536;
+static const int M = 1536, K = 2048;
 
 static void state(int *s)
 {

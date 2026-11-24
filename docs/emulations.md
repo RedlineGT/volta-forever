@@ -845,8 +845,8 @@ times for TN).
 
 ### The tensor-core path (`VF_CUBLAS_BF16_TC=1`)
 
-For the other products (m k >= 2^20 or n >= 32, k <= 16384), when the call is not captured in a
-graph, each row of op(A) and each column of
+For the other products (m k >= 2^20 or n >= 32, with 1024 <= k <= 16384: the gate below), when the
+call is not captured in a graph, each row of op(A) and each column of
 op(B) is scaled by a power of two, 2^(15 - e) for e the exponent of its largest magnitude, and
 converted to fp16; a row or column is kept only when every element converts exactly (the exponent of
 its maximum in [-24, 31], no infinity, NaN or subnormal maximum, no element that would round or become
@@ -879,3 +879,53 @@ A tensor-core call captured in a graph goes to cuBLAS 12.9 (its workspace would 
 program's graph: `LIMITS.md`, "The bf16 cuBLAS variants"), so a replay has 12.9's bits, not those of
 the same call made outside a capture; so does a call whose workspace cannot be allocated. The variants do not change cuBLAS's workspace contract: a forwarded call uses the
 handle's workspace as 12.9 does, with the same rules for threads and streams.
+
+### The tensor-core path's gate
+
+The tensor-core path takes a product with n >= 2 and k from 1024 (`VF_TC_MIN_K`) to 16384 when m k >=
+2^20 or n >= 32, after the skinny path has declined it; a product it does not take goes to cuBLAS 12.9.
+The gate depends on n, so one element's bits depend on the batch: the same row of op(A) times the same
+column of op(B) has 12.9's bits in a narrow product (n = 1, or within the skinny path's rule) and the
+tensor-core path's in a wide one (`LIMITS.md`). n = 1 is never taken: 12.9 computes it faster. Were
+it taken, its internal fp16 GEMM would give column 0 other bits than at n >= 2 (measured on 15
+shapes, where n = 2 to 512 agreed); a zero second column given to that GEMM is the expected remedy
+(not run on a GPU).
+
+The shortest k is 1024. Real layers pass from the lowest k measured, with wide margins: on 1,728
+operand pairs taken from the linear layers of four language models (k = 896 to 12288), against the exact
+product, every element's error was at most 0.045 times the bound A below and every matrix's bias at most
+0.22 units (B below), and at the level of the models no gate from 4096 down to none could be told apart
+from cuBLAS 12.9 beyond a noise control of one unit in the last place. 1024 keeps the margin that the
+natural synthetic families of the acceptance test need: below it, families of positive data exceed its
+bias bound. A model gains on its layers with 1024 in-features or more.
+
+The acceptance test (`tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh`) uses 10
+families of data (normal, squared ReLU, outliers, cancelling pairs, spreads over about 30 binades, one
+sign, log-normal, an adversarial positive construction, and two built against the path's 256-element
+slices, with large values at the start of every slice) and the configurations of an adversarial search,
+at k = 256 to 16384 (1024 x 128, TN, both output types; NN, NT and TT at 2048; alpha and beta with a
+general C, the cuBLASLt bias epilogue). A call is accepted when every element's class and NaN bits are
+12.9's, two runs, a handle without workspace and a call of half the columns give the same bits (S1, S2),
+each element's error is at most the larger of 12.9's own error and (k - 1) u sum |a b| + h (A; u = 2^-24,
+h half an ulp of the output at the exact value; with alpha, beta or a bias, (k + 2) u S' + h, S' adding
+|beta c| and |bias|), and, per matrix with fp32 output, the mean error towards zero in units of u sum |a b|
+is at most the larger of 12.9's and 0.8 times that of an RTX 5090's own accumulation on the same data (B;
+its native bias slope per family, measured once at k = 1024 to 2048, where that card does not split its
+sums; the constants are in the test). The error bound held from k = 384 on (at k = 256 one family reached
+1.54 times it, the search 1.29).
+
+Two synthetic constructions exceed the bias bound above the gate, and the test judges their bias from a
+larger k (documented exceptions; `VF_ACCEPT_STRICT=1` removes both, and the test then fails):
+
+- **craftsub**, built against the path's 256-element slices: a product of 2^20 at the start of every slice,
+  then products of half to one ulp of it. Its bias is judged from k = 4096, where it is 0.85 times its bound;
+  it is 1.50 times its bound at 1024, 1.29 at 1536 and 1.20 at 2048 (-382.32 units against 318.32, there
+  12.9's own bias).
+- **The search's configuration 1653006390**: non-negative operands with a 2^21 activation at the start of
+  every slice. Its bias is judged from k = 2048, where it is 0.95 times its bound (-183.65 units against
+  192.7); it is 1.27 times its bound at 1536 and 1.90 times at 1024.
+
+Every call from the gate on must be served by the path (a call left to 12.9 there would not be judged), and
+the test fails with the path off; it fails when the gate is moved to 512 or 256 (a test build's
+`VF_BF16_TC_MIN_K`), and with `VF_SAFE=1` it requires that no call be served by the tensor-core path and
+every result be 12.9's.

@@ -52,6 +52,18 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_TC_MAX_K 16384            /* the tensor-core path forwards a longer k (review 3.8) */
 #define VF_TC_GATE_MK (1LL << 20)    /* tensor-core path: m * k at least this, or n >= VF_TC_GATE_N */
 #define VF_TC_GATE_N 32
+/* The tensor-core path's shortest k. On real operands (1,728 pairs of the linear layers of four models, k = 896
+ * to 12288, against the exact product) every element's error was within 0.045 times the bound of the acceptance
+ * test (the larger of 12.9's own error and the classical fp32 bound (k - 1) u sum |a b|) and every matrix's mean
+ * error towards zero within 0.22 u, from the lowest k measured; at the level of models, no gate from 4096 down to
+ * none could be told apart from cuBLAS 12.9. 1024 keeps the margin that the natural synthetic families of
+ * tests/gpu/forward/bf16-accept.c need: below it they exceed its bias bound (0.8 times an RTX 5090's own mean
+ * error on the same data). Two constructions aligned with the 256-element k-slices exceed that bound above the
+ * gate, and the test judges their bias from k = 2048 and 4096 (docs/emulations.md, "The tensor-core path's gate").
+ * A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
+#define VF_TC_MIN_K 1024
+#define VF_STR_(x) #x
+#define VF_STR(x) VF_STR_(x)
 #define VF_MIN_K 16                  /* shorter products are forwarded */
 #define VF_CHUNK_BYTES (32u << 20)   /* the workspace of one call, chunked statically to fit */
 #define VF_POOL_KEEP (64ull << 20)   /* memory kept by the pool of a context between eager calls */
@@ -78,7 +90,10 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 
 static struct {
     int tc, skinny, level;
+    int safe;           /* VF_SAFE=1: the layer's conservative setting; the tensor-core path serves nothing */
+    int tc_safe;        /* VF_CUBLAS_BF16_TC=1 turned off by VF_SAFE=1: its calls are counted for safe mode */
     int measured_build; /* the cuBLAS the skinny path's rule was measured on */
+    int tc_min_k;       /* VF_TC_MIN_K (test builds: VF_BF16_TC_MIN_K, for the controls that move it) */
 } cfg;
 static int g_on; /* a switch is set and the CUDA 12.9 libraries are there */
 
@@ -293,6 +308,8 @@ enum {
     R_SEQ,     /* in the skinny path's bounds, but 12.9 would not run its sequential kernel there */
     R_BUILD,   /* in the skinny path's bounds, with another cuBLAS than the one its rule was measured on */
     R_K,       /* k beyond the tensor-core path's limit */
+    R_SHORT_K, /* in the tensor-core path's gate but for k, shorter than VF_TC_MIN_K */
+    R_SAFE,    /* a call the tensor-core path would serve, with VF_SAFE=1 */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
     R_MATH,    /* pedantic or unknown math mode */
@@ -310,7 +327,7 @@ static const char *const reason_name[R_N] = {
     "not bf16 with fp32 accumulation", "explicit algorithm", "batch", "64-bit size", "shape",
     "arguments left to cuBLAS", "outside the paths' domains", "12.9 would not run its sequential kernel",
     "another cuBLAS build",
-    "k > 16384", "unknown handle",
+    "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1", "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
     "no chunking", "tensor-core call in a graph capture", "allocation failed", "launch failed"};
 static atomic_ullong st_calls[API_N], st_bf16[API_N], st_skinny[API_N], st_tc[API_N], st_failed[API_N];
@@ -346,8 +363,26 @@ static void init(void)
 {
     const char *lv = getenv("VF_LOG_LEVEL");
     cfg.level = lv && *lv >= '0' && *lv <= '9' ? *lv - '0' : 1;
+    cfg.tc_min_k = VF_TC_MIN_K;
+#ifdef VF_BF16_TEST
+    const char *mk = getenv("VF_BF16_TC_MIN_K"); /* the controls: the tensor-core path's gate moved */
+    if (mk && *mk) cfg.tc_min_k = atoi(mk);
+#endif
     cfg.tc = switch_value("VF_CUBLAS_BF16_TC", 0);
     cfg.skinny = switch_value("VF_CUBLAS_BF16_SKINNY", cfg.tc);
+    /* VF_SAFE=1 keeps the conservative paths: the tensor-core path, whose results differ from 12.9's,
+     * serves nothing whatever VF_CUBLAS_BF16_TC says; the skinny path, which gives 12.9's bits, stays. Only
+     * the exact value 1 turns safe mode on; any other value (empty, 0, true, yes, " 1", ...) leaves it off. */
+    const char *safe = getenv("VF_SAFE");
+    cfg.safe = safe && (!strcmp(safe, "1") || (CONTROL("safe-lenient") && *safe && strcmp(safe, "0") != 0)) &&
+               !CONTROL("safe-ignored");
+    if (safe && strcmp(safe, "1") != 0 && strcmp(safe, "0") != 0 && !cfg.safe)
+        say("VF_SAFE=%s is not 1: safe mode stays off", safe);
+    if (cfg.safe && cfg.tc) {
+        say("VF_SAFE=1: the tensor-core path serves nothing, whatever VF_CUBLAS_BF16_TC says");
+        cfg.tc = 0;
+        cfg.tc_safe = !CONTROL("safe-domain"); /* control: counted as outside the paths' domains, as before */
+    }
     if (!cfg.tc && !cfg.skinny) return;
     if (!bind_libraries()) {
         say("every call is forwarded");
@@ -853,13 +888,26 @@ static int choose_path(const Shape *s, int *reason)
         if (cfg.measured_build && sequential_kernel_129(s)) return PATH_SKINNY;
         not_sequential = cfg.measured_build ? 1 : 2;
     }
+    /* The tensor-core path (n >= 2, checked before): a large product, or a wide one, with k from
+     * VF_TC_MIN_K to VF_TC_MAX_K. Its gate depends on n, so one element's bits can depend on the batch:
+     * 12.9's (forwarded, or the skinny path) for a narrow product, the tensor-core path's for a wide one
+     * (LIMITS.md). n = 1 is never served: 12.9 computes it faster. Were the tensor-core path to take it,
+     * its internal fp16 GEMM would give column 0 other bits than at n >= 2 (measured on 15 shapes, where
+     * n = 2 to 512 agreed): giving that GEMM a zero second column is the expected remedy (not run on a
+     * GPU). */
     const long long m = s->m, n = s->n, k = s->k;
-    if (cfg.tc && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
+    if ((cfg.tc || cfg.tc_safe) && (m * k >= VF_TC_GATE_MK || n >= VF_TC_GATE_N)) {
         if (k > VF_TC_MAX_K && !CONTROL("tc-k")) {
             *reason = R_K;
             return PATH_NONE;
         }
-        return PATH_TC;
+        if (k >= cfg.tc_min_k) {
+            if (cfg.tc) return PATH_TC;
+            *reason = R_SAFE; /* VF_SAFE=1 turned the path off: the call it would serve goes to 12.9 */
+            return PATH_NONE;
+        }
+        *reason = R_SHORT_K;
+        return PATH_NONE;
     }
     *reason = not_sequential == 2 ? R_BUILD : not_sequential ? R_SEQ : R_DOMAIN;
     return PATH_NONE;
@@ -1808,6 +1856,13 @@ forward:
 }
 
 #ifdef VF_BF16_TEST
+/* Test builds: the tensor-core path's shortest k in effect (VF_TC_MIN_K, or VF_BF16_TC_MIN_K). */
+EXPORT int vf_bf16_test_tc_min_k(void)
+{
+    pthread_once(&g_init_once, init);
+    return cfg.tc_min_k;
+}
+
 /* Test builds: what the runtime has made. out[0] and out[1]: the current context's kernels and its
  * tensor-core pool and handle (0 not tried yet, 1 there, -1 not; 0 too for a context it has no state
  * of); out[2], out[3], out[4]: the modules, memory pools and cuBLASLt handles it has made in the

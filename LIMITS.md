@@ -37,11 +37,14 @@ where it is not from the build of this release. `docs/` says how each figure was
   ([Kernels refused](#kernels-refused)), and has no guard at its launch in this release. Told
   8.0, cuFFT obtained kernels that exist only as sm_80 machine code, refused, through its own
   runtime, and launched them: the GPU stopped. At the settings measured it no longer does, since
-  cuFFT is now told 7.5.
+  cuFFT is now told 7.5. (Since 0.1.4, on main: such a handle is refused where it is used, at a
+  launch, in a kernel node of a graph and in a question about it; what still traps is in
+  [Kernels refused](#kernels-refused).)
 - **The bf16 cuBLAS variants are opt-in, and not finished.** `VF_CUBLAS_BF16_SKINNY=1` and
   `VF_CUBLAS_BF16_TC=1` are off by default. The tensor-core path's results are not cuBLAS 12.9's
   bits, and it makes bf16 training slower; there is no safe mode and no gate on k yet ([The bf16
-  cuBLAS variants](#the-bf16-cublas-variants)).
+  cuBLAS variants](#the-bf16-cublas-variants)). (Since 0.1.4, on main: the tensor-core path takes
+  products with k from 1024 to 16384 only, and `VF_SAFE=1` turns it off.)
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
   cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
   NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:
@@ -422,9 +425,10 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   fast with it (prompts, generation at batch 8 and 32, an embedding encoder; Whisper 1.24 to 1.30,
   generation at batch 1 unchanged), and up to 1.9 times under `torch.compile`
   (`docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs":
-  one model of each kind, on one V100). Not in this release: a gate on k (the path takes every
-  product of its shapes up to k = 16384), and a safe mode that keeps every call at 12.9's bits
-  whatever `VF_CUBLAS_BF16_TC` says (`VF_SAFE`, which this release does not read).
+  one model of each kind, on one V100, measured before the gate on k: with it, these models'
+  products with 768 or 896 in-features, all but the second product of each MLP, go to the skinny
+  path or to 12.9). `VF_SAFE=1` keeps every call at 12.9's bits whatever `VF_CUBLAS_BF16_TC` says
+  ([Safe mode](#safe-mode-vf_safe1)).
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
   580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
@@ -435,15 +439,33 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   tell any of these apart when it is called. A program that replays its steps from graphs gains from
   the tensor-core path only in what runs outside them: vLLM replays its decode steps and its prefill
   chunks up to the largest captured size (512 and 2048 tokens for the two models measured), and with
-  `VF_CUBLAS_BF16_TC=1` its prefill was 6 % faster on one model and unchanged on the other. The skinny
+  `VF_CUBLAS_BF16_TC=1` its prefill was 6 % faster on one model and unchanged on the other (measured
+  before the gate on k). The skinny
   path serves captured calls (one kernel node, nothing allocated). A replayed tensor-core call has
   12.9's bits, which differ in their last bits from the same call made outside a capture: a program
   that compares a graph's replay with an eager run of the same step sees it.
+- **One element's bits depend on the batch size, and on capture.** With the tensor-core path on, the
+  same row of op(A) times the same column of op(B) has cuBLAS 12.9's bits when the product is narrow
+  (n = 1, or within the skinny path's rule: n <= 16, or n < 32 when m k < 2^20) and the tensor-core
+  path's when it is wide (m k >= 2^20 or n >= 32, outside the skinny path's rule, with k from 1024 to
+  16384) and made outside a graph capture; captured, the same call has 12.9's bits again. `VF_SAFE=1`
+  removes what the variants add: it gives cuBLAS 12.9's bits for that call, whatever n and whatever the
+  capture ([Safe mode](#safe-mode-vf_safe1)). 12.9's own results depend on n at n = 1 and, on some
+  shapes, up to n = 16. Measured with
+  12.9 alone on 18 TN shapes of linear layers (each column against the same column at n = 64): every
+  shape gave other bits at n = 1 (in 77 to 95 % of the elements); TN 384 x 1536 and 256 x 2048, where
+  12.9 runs another kernel up to n = 16, gave other bits in about 90 % of the elements at every n from
+  2 to 16 and the same bits from n = 17; the 16 others gave the same bits at every n from 2 to 63.
+- **The tensor-core path takes k >= 1024 only** (`docs/emulations.md`, "The tensor-core path's gate"):
+  a model gains on its layers with 1024 in-features or more. One whose hidden size is smaller (896, as
+  Qwen2.5's 0.5B) gets it only on its wider layers, such as the MLP's down-projection (k = 4864); its
+  other products go to the skinny path (n <= 16, within its rule) or to cuBLAS 12.9. The skinny path is
+  unaffected.
 - **Calls not served**: one column (n = 1), batches of more than one matrix, the other entry points,
   explicit algorithms of `cublasGemmEx` and `cublasGemmStridedBatchedEx`, a `cublasLtMatmul`
   algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
   configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
-  pedantic modes, k above 16384 on the tensor cores, cuBLASLt descriptors with any attribute outside
+  pedantic modes, k above 16384 or below 1024 on the tensor cores, cuBLASLt descriptors with any attribute outside
   the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no
   workspace, or with a workspace that is not 256-byte aligned (12.9 refuses that), a bias epilogue
   whose bias overlaps D, and every call of a context that is not a V100's. A legacy workspace set at
@@ -454,7 +476,8 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   exactly to fp16 is computed by the fallback, which is slower: with every column failing at
   n = 480, a tensor-core call took 32 to 71 % longer than cuBLAS 12.9's on six shapes of linear
   layers, TN m x k = 1536 x 1536, 4608 x 1536, 1536 x 4608, 7344 x 1536, 9728 x 896 and 896 x 4864
-  (`tests/gpu/forward/bf16-cost.c`), against 1.7 to 2.8 times as fast when nothing fails.
+  (`tests/gpu/forward/bf16-cost.c`), against 1.7 to 2.8 times as fast when nothing fails (measured
+  before the gate on k, which sends 9728 x 896 to 12.9).
 - **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
   layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
   the pool of the context keeps up to 64 MiB between eager calls.
@@ -538,7 +561,9 @@ gives the bits of the conservative reference for what the layer chooses, not res
 same everywhere:
 
 - **The reference has dependences of its own.** cuBLAS 12.9 chooses its kernel by the shape of a
-  product, so the bits of one column can change with the number of columns (the batch); the
+  product, so the bits of one column can change with the number of columns (the batch: at n = 1,
+  and on some shapes up to n = 16, measured in [The bf16 cuBLAS
+  variants](#the-bf16-cublas-variants)); the
   layer's emulated products round otherwise than a later GPU's ([Numerical
   accuracy](#numerical-accuracy)). Safe mode keeps these: a model's outputs can still depend on
   its batch size, and differ from another GPU's.

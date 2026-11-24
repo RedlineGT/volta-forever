@@ -8,7 +8,7 @@
  * of the skinny call's graph then dies in cuGraphLaunch (SIGSEGV), after the line that announces it. */
 #include "bf16-common.h"
 
-static const int M = 1536, N = 256, K = 1536;
+static const int M = 1536, N = 256, K = 2048;
 static uint16_t *hA, *hB;
 
 static float *run_once(cublasHandle_t h, cudaStream_t s, int *served)

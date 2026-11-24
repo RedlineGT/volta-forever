@@ -481,7 +481,11 @@ go through any of this: it uses Volta's instructions, and the layer leaves its c
 Measured on 2026-11-23 on one Tesla V100-SXM2-32GB, driver 580.178.04, with the layer built from
 the series of the bf16 cuBLAS variants before its last four fixes (the signed zero with a bias, the
 attributes of an explicit cuBLASLt algorithm, workspaces not at 256-byte addresses, the lazy setup;
-none changes the speed of a product that a path serves). PyTorch 2.14.0+cu130 and transformers
+none changes the speed of a product that a path serves), and before the tensor-core path's gate on k
+(`VF_TC_MIN_K`, 1024): with the gate, every product of these three models with 768 or 896
+in-features, all but the second product of each MLP (3,072 or 4,864 in-features), goes to the
+skinny path or to cuBLAS 12.9, so the column of the tensor cores below was measured with the path
+serving products that it no longer takes. PyTorch 2.14.0+cu130 and transformers
 5.22.2, eager, in bf16: Qwen2.5-0.5B-Instruct (hidden size 896, MLP 4,864, vocabulary 151,936) for
 generation and training, BAAI/bge-base-en-v1.5 for embeddings, openai/whisper-small for speech.
 Each comparison is one GPU job in which the three settings (both switches off,

@@ -3,8 +3,12 @@
  * names; the stand-ins for libcuda.so.1, libcublas.so.12 and libcublasLt.so.12 record what reaches
  * them (stub_*.c). tests/forward/bf16.sh builds everything and runs each mode in its own process:
  *   host_test all          H1 (forwarding and call sequences), H2, H3, H4, H5, H6, H7
+ *   host_test rule         the paths' rule, a table of (n, m k, k) classes and the path or reason of each
+ *   host_test release-gate the release runtime with VF_BF16_TC_MIN_K=512: the variable is not read there
  *   host_test skinny       the skinny path alone (VF_CUBLAS_BF16_SKINNY=1): its bounds
  *   host_test off          no switch: every call forwarded, nothing of the runtime loaded
+ *   host_test safe         VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: tensor-core calls forwarded, skinny calls served
+ *   host_test notsafe      VF_SAFE set to anything but 1, with VF_CUBLAS_BF16_TC=1: tensor-core calls served
  *   host_test lazy         nothing made with a handle; the module at the first call a path serves, the
  *                          tensor-core path's pool and cuBLASLt handle at its first call, in relaxed mode
  *   host_test inject STEP  a failure injected at STEP (VF_BF16_INJECT): forwarded, or status 13
@@ -147,8 +151,8 @@ static void launch_args(const char *l, void *out, size_t size)
 }
 
 /* ---- counters ---- */
-enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_HANDLE, R_CONTEXT, R_MATH,
-       R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
+enum { R_TYPES, R_ALGO, R_BATCH, R_RANGE, R_SHAPE, R_ARGS, R_DOMAIN, R_SEQ, R_BUILD, R_K, R_SHORT_K, R_SAFE, R_HANDLE,
+       R_CONTEXT, R_MATH, R_POINTER, R_ALPHA0, R_ALIAS, R_LTATTR, R_PLAN, R_CAPTURED, R_ALLOC, R_LAUNCH, R_N };
 enum { API_GEMMEX, API_GEMMEX64, API_SB, API_SB64, API_LT };
 typedef struct {
     unsigned long long v[4 + R_N];
@@ -228,20 +232,20 @@ static void expect_skinny(const char *what, const G *g, const char *kernel)
 static void h1_forwarded(void)
 {
     G g;
-    g = gemm(1, 0, 1536, 512, 1536); g.compute = CUBLAS_COMPUTE_32F_PEDANTIC; expect_forwarded("pedantic compute", &g, R_TYPES);
-    g = gemm(1, 0, 1536, 512, 1536); g.at = CUDA_R_16F; expect_forwarded("fp16 A", &g, R_TYPES);
-    g = gemm(1, 0, 1536, 512, 1536); g.ct = CUDA_R_16F; expect_forwarded("fp16 C", &g, R_TYPES);
+    g = gemm(1, 0, 1536, 128, 4096); g.compute = CUBLAS_COMPUTE_32F_PEDANTIC; expect_forwarded("pedantic compute", &g, R_TYPES);
+    g = gemm(1, 0, 1536, 128, 4096); g.at = CUDA_R_16F; expect_forwarded("fp16 A", &g, R_TYPES);
+    g = gemm(1, 0, 1536, 128, 4096); g.ct = CUDA_R_16F; expect_forwarded("fp16 C", &g, R_TYPES);
     g = gemm(1, 0, 1536, 1, 1536); expect_forwarded("n = 1", &g, R_SHAPE);
     g = gemm(1, 0, 1536, 512, 8); expect_forwarded("k = 8", &g, R_SHAPE);
     g = gemm(1, 0, 0, 512, 1536); g.ldc = 1; expect_forwarded("m = 0", &g, R_SHAPE);
     g = gemm(0, 0, 1536, 512, 1536); g.lda = 1000; expect_forwarded("lda < m", &g, R_ARGS);
-    g = gemm(1, 0, 1536, 512, 1536); g.C = NULL; expect_forwarded("C NULL", &g, R_ARGS);
-    g = gemm(1, 0, 1536, 512, 1536); g.ta = 7; expect_forwarded("unknown operation", &g, R_ARGS);
-    g = gemm(1, 0, 1536, 512, 1536); g.algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP + 3; expect_forwarded("ALGO3_TENSOR_OP", &g, R_ALGO); /* H2 */
-    g = gemm(1, 0, 1536, 512, 1536); g.algo = (cublasGemmAlgo_t)0; expect_forwarded("ALGO0", &g, R_ALGO);       /* H2 */
-    g = gemm(1, 0, 1536, 512, 1536); g.algo = (cublasGemmAlgo_t)23; expect_forwarded("ALGO23", &g, R_ALGO);     /* H2 */
-    g = gemm(1, 0, 1536, 512, 1536); g.alpha = 0.0f; expect_forwarded("alpha = 0", &g, R_ALPHA0);
-    g = gemm(1, 0, 1536, 512, 1536); g.C = (void *)((const char *)g.A + 64); expect_forwarded("C overlaps A", &g, R_ALIAS);
+    g = gemm(1, 0, 1536, 128, 4096); g.C = NULL; expect_forwarded("C NULL", &g, R_ARGS);
+    g = gemm(1, 0, 1536, 128, 4096); g.ta = 7; expect_forwarded("unknown operation", &g, R_ARGS);
+    g = gemm(1, 0, 1536, 128, 4096); g.algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP + 3; expect_forwarded("ALGO3_TENSOR_OP", &g, R_ALGO); /* H2 */
+    g = gemm(1, 0, 1536, 128, 4096); g.algo = (cublasGemmAlgo_t)0; expect_forwarded("ALGO0", &g, R_ALGO);       /* H2 */
+    g = gemm(1, 0, 1536, 128, 4096); g.algo = (cublasGemmAlgo_t)23; expect_forwarded("ALGO23", &g, R_ALGO);     /* H2 */
+    g = gemm(1, 0, 1536, 128, 4096); g.alpha = 0.0f; expect_forwarded("alpha = 0", &g, R_ALPHA0);
+    g = gemm(1, 0, 1536, 128, 4096); g.C = (void *)((const char *)g.A + 64); expect_forwarded("C overlaps A", &g, R_ALIAS);
     g = gemm(1, 0, 64, 40, 16392); expect_forwarded("k = 16392 on the tensor-core path", &g, R_K);            /* H3 */
     g = gemm(1, 0, 64, 20, 512); expect_forwarded("TN m k < 2^20, n = 20, m < 448", &g, R_SEQ);                /* H3 */
     /* (m k < 2^20 and n < 32: the tensor-core path's gate does not take them) */
@@ -249,16 +253,16 @@ static void h1_forwarded(void)
     g = gemm(1, 0, 512, 8, 1536); g.A = (const char *)g.A + 2; expect_forwarded("TN misaligned A", &g, R_SEQ);
     g = gemm(1, 0, 512, 8, 1536); g.ldc = 516; expect_forwarded("TN ldc not a multiple of 8", &g, R_SEQ);
     v.SetMathMode(H, CUBLAS_PEDANTIC_MATH);
-    g = gemm(1, 0, 1536, 512, 1536); expect_forwarded("pedantic math mode", &g, R_MATH);
+    g = gemm(1, 0, 1536, 128, 4096); expect_forwarded("pedantic math mode", &g, R_MATH);
     v.SetMathMode(H, CUBLAS_DEFAULT_MATH);
     /* the stream of another context */
     stub_set_stream(S2, 2, 0, NULL);
     v.SetStream(H, S2);
-    g = gemm(1, 0, 1536, 512, 1536); expect_forwarded("a stream of another context", &g, R_CONTEXT);
+    g = gemm(1, 0, 1536, 128, 4096); expect_forwarded("a stream of another context", &g, R_CONTEXT);
     v.SetStream(H, S1);
     /* another context current */
     stub_set_context(3);
-    g = gemm(1, 0, 1536, 512, 1536); expect_forwarded("another context current", &g, R_CONTEXT);
+    g = gemm(1, 0, 1536, 128, 4096); expect_forwarded("another context current", &g, R_CONTEXT);
     stub_set_context(0);
     /* 64-bit sizes beyond 32 bits, batches */
     take();
@@ -295,12 +299,12 @@ static void h1_served(void)
     g = gemm(1, 0, 1536, 16, 1536);
     expect_skinny("skinny TN 1536 x 16 x 1536", &g, "vf_bf16_skinny_16_8 grid=192,1,1 block=128");
     /* the tensor-core path: one chunk */
-    g = gemm(1, 0, 1536, 512, 1536);
+    g = gemm(1, 0, 1536, 128, 4096);
     take();
     cublasStatus_t st = call(&g);
     take();
     char buf[128];
-    CHECK(st == 0 && count("gemmex ") == 0, "tc 1536 x 512 x 1536: forwarded (status %d)", st);
+    CHECK(st == 0 && count("gemmex ") == 0, "tc 1536 x 128 x 4096: forwarded (status %d)", st);
     const char *al = line("alloc ", 0);
     const long long bytes = atoll(field(al, "bytes=", buf, sizeof buf));
     CHECK(count("alloc ") == 1 && bytes > 0 && bytes <= (32ll << 20), "tc: one allocation of at most 32 MiB (%lld)", bytes);
@@ -310,9 +314,9 @@ static void h1_served(void)
           "tc: not scale, epilogue, fallback, free:\n%s", ev);
     const char *lm = line("ltmatmul ", 0);
     CHECK(count("ltmatmul ") == 1 && strstr(lm, "compute=68 transa=1 transb=0 pmode=0 epilogue=1 alpha=1 beta=0") &&
-              strstr(lm, "a=2:256x1536:ld1536:b6:s256") && strstr(lm, "b=2:256x512:ld1536:b6:s256") &&
-              strstr(lm, "c=0:1536x512:ld1536:b6:s786432") && strstr(lm, "ws=0 "),
-          "tc: the internal GEMM is not fp16, TN, k-slices of 256 in a batch of 6, host scalars, no workspace:\n      %s",
+              strstr(lm, "a=2:256x1536:ld4096:b16:s256") && strstr(lm, "b=2:256x128:ld4096:b16:s256") &&
+              strstr(lm, "c=0:1536x128:ld1536:b16:s196608") && strstr(lm, "ws=0 "),
+          "tc: the internal GEMM is not fp16, TN, k-slices of 256 in a batch of 16, host scalars, no workspace:\n      %s",
           lm ? lm : "(none)");
     /* order: alloc, memset, scale, ltmatmul, epilogue, fallback, free */
     const char *pa = strstr(ev, "alloc "), *pm = strstr(ev, "memset "), *ps = strstr(ev, "launch vf_bf16_scale"),
@@ -339,6 +343,76 @@ static void h1_served(void)
     take();
     CHECK(count("launch vf_bf16_epilogue") == chunks, "tc 16384 x 1024 x 4096: chunks differ between two calls");
     free(first);
+}
+
+/* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
+ * path on. n = 1 goes to 12.9; the skinny path first (n <= 16, or n < 32 with m k < 2^20, where 12.9 runs its
+ * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384; the rest
+ * to 12.9, with its reason. Checked through the runtime's counters. The rows at the gate are written from RULE_GATE
+ * (VF_TC_MIN_K, which the runtime must report): moving the gate means changing both, and a gate moved in the
+ * runtime alone (VF_BF16_TC_MIN_K=512, a test build's way) makes the table fail. ---- */
+#define RULE_GATE 1024
+
+static void tc_rule(void)
+{
+    enum { SK = -1, TC = -2 };
+    const int G1 = RULE_GATE - 8; /* one step of k under the gate (k a multiple of 8) */
+    const struct {
+        int ta, tb, m, n, k, want; /* SK, TC, or the reason it is forwarded for */
+        const char *why;
+    } rows[] = {
+        {1, 0, 1536, 1, 4096, R_SHAPE, "n = 1"},
+        {1, 0, 1536, 2, 1536, SK, "n = 2"},
+        {1, 0, 1536, 16, 4096, SK, "n = 16, k above the gate: the skinny path first"},
+        {1, 0, 1536, 17, 4096, TC, "n = 17, m k >= 2^20"},
+        {1, 0, 1536, 17, G1, R_SHORT_K, "n = 17, m k >= 2^20, k one step under the gate"},
+        {1, 0, 504, 17, 2048, SK, "n = 17, m k < 2^20: the skinny path"},
+        {1, 0, 504, 31, 2048, SK, "n = 31, m k < 2^20: the skinny path"},
+        {1, 0, 504, 32, 2048, TC, "n = 32, m k < 2^20: wide"},
+        {1, 0, 504, 32, G1, R_SHORT_K, "n = 32, m k < 2^20, k one step under the gate"},
+        {1, 0, 512, 20, 2048, TC, "n = 20, m k = 2^20 (TN m = 512 is in the skinny path's rule only below n = 17)"},
+        {1, 0, 384, 20, 2048, R_SEQ, "n = 20, m k < 2^20, TN m = 384 (12.9 runs gemmSN)"},
+        {1, 0, 1536, 64, G1, R_SHORT_K, "k one step under the gate"},
+        {1, 0, 1536, 64, RULE_GATE, TC, "k at the gate"},
+        {1, 0, 1536, 64, 16384, TC, "k = 16384"},
+        {1, 0, 64, 40, 16392, R_K, "k = 16392"},
+        {1, 0, 1536, 8, 4104, TC, "TN n = 8, k = 4104 (beyond the skinny path's TN rule), m k >= 2^20"},
+        {1, 0, 384, 8, 4096, TC, "TN n = 8, m = 384 (12.9 runs gemmSN), m k >= 2^20"},
+        {1, 0, 1545, 8, G1, R_SHORT_K, "TN n = 8, m = 1545 (not in the skinny path's TN rule), m k >= 2^20, k under the gate"},
+        {1, 0, 384, 8, 1536, R_SEQ, "TN n = 8, m = 384, m k < 2^20"},
+        {0, 1, 1536, 8, 1920, SK, "NT n = 8"},
+        {0, 1, 1536, 64, G1, R_SHORT_K, "NT n = 64, k one step under the gate"},
+        {0, 1, 1536, 64, 2048, TC, "NT n = 64, k = 2048"},
+        {0, 0, 2048, 128, 2048, TC, "NN n = 128"},
+        {0, 0, 2048, 8, 2048, SK, "NN n = 8"},
+        {0, 0, 64, 8, 1920, R_DOMAIN, "NN m = 64 n = 8 (outside the skinny path's NN bounds), m k < 2^20"},
+        {1, 1, 1536, 48, 4096, TC, "TT n = 48"},
+    };
+    int (*min_k)(void) = NULL;
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    if (rt) *(void **)&min_k = dlsym(rt, "vf_bf16_test_tc_min_k");
+    CHECK(min_k && min_k() == RULE_GATE, "rule: the runtime's shortest k for the tensor-core path is %d, not this table's %d",
+          min_k ? min_k() : -1, RULE_GATE);
+    for (size_t r = 0; r < sizeof rows / sizeof *rows; ++r) {
+        G g = gemm(rows[r].ta, rows[r].tb, rows[r].m, rows[r].n, rows[r].k);
+        const Counts c0 = counts(API_GEMMEX);
+        take();
+        const cublasStatus_t st = call(&g);
+        take();
+        const Counts c1 = counts(API_GEMMEX);
+        const int sk = c1.v[1] - c0.v[1] == 1, tc = c1.v[2] - c0.v[2] == 1;
+        int why = -1;
+        for (int q = 0; q < R_N; ++q)
+            if (c1.v[4 + q] - c0.v[4 + q] == 1) why = q;
+        const int got = sk ? SK : tc ? TC : why;
+        char want[32], seen[32];
+        snprintf(want, sizeof want, rows[r].want == SK ? "skinny" : rows[r].want == TC ? "tc" : "forwarded (reason %d)",
+                 rows[r].want);
+        snprintf(seen, sizeof seen, got == SK ? "skinny" : got == TC ? "tc" : "forwarded (reason %d)", got);
+        CHECK(st == 0 && got == rows[r].want && (got != SK && got != TC ? count("gemmex ") == 1 : count("gemmex ") == 0),
+              "rule: %s %d x %d x %d (%s): %s, not %s", rows[r].ta ? (rows[r].tb ? "TT" : "TN") : (rows[r].tb ? "NT" : "NN"),
+              rows[r].m, rows[r].n, rows[r].k, rows[r].why, seen, want);
+    }
 }
 
 /* ---- H4: one runtime for both APIs ---- */
@@ -594,7 +668,7 @@ static void h5_internal_gemm(void)
     /* the runtime's cuBLASLt handle was made with the context's state (at the first handle) */
     stub_chaos(H, (cudaStream_t)S2);
     v.SetStream(H, S1);
-    G g = gemm(1, 0, 1536, 512, 1536);
+    G g = gemm(1, 0, 1536, 128, 4096);
     take();
     call(&g);
     take();
@@ -618,7 +692,7 @@ static void h6_captured(void)
     CUstream s = (CUstream)0x6101;
     stub_set_stream(s, 0, 77, (CUgraph)0x6001);
     v.SetStream(H, s);
-    G g = gemm(1, 0, 1536, 512, 1536);
+    G g = gemm(1, 0, 1536, 128, 4096);
     const Counts c0 = counts(API_GEMMEX);
     take();
     call(&g);
@@ -748,6 +822,23 @@ int main(int argc, char **argv)
         h6_captured();
         h7_lt_allowlist();
         h5_internal_gemm();
+    } else if (!strcmp(mode, "rule")) {
+        if (!rt_counters) printf("FAIL  not the test build of the runtime\n"), ++failures;
+        tc_rule();
+    } else if (!strcmp(mode, "release-gate")) { /* the release runtime, VF_CUBLAS_BF16_TC=1, VF_BF16_TC_MIN_K=512 */
+        G g = gemm(1, 0, 1536, 128, RULE_GATE - 256);
+        take();
+        cublasStatus_t st = call(&g);
+        take();
+        CHECK(st == 0 && count("gemmex ") == 1 && count("launch") == 0,
+              "release gate: TN 1536 x 128 x %d (k under the gate) not forwarded with VF_BF16_TC_MIN_K=512 set",
+              RULE_GATE - 256);
+        g = gemm(1, 0, 1536, 128, RULE_GATE);
+        take();
+        st = call(&g);
+        take();
+        CHECK(st == 0 && count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1,
+              "release gate: TN 1536 x 128 x %d (k at the gate) not served by the tensor-core path", RULE_GATE);
     } else if (!strcmp(mode, "skinny")) {
         G g = gemm(0, 1, 1536, 8, 16392);
         expect_forwarded("skinny alone, k = 16392", &g, R_DOMAIN);
@@ -772,7 +863,7 @@ int main(int argc, char **argv)
         CUstream cs = (CUstream)0x6101;
         stub_set_stream(cs, 0, 77, (CUgraph)0x6001);
         v.SetStream(H, cs);
-        G g = gemm(1, 0, 1536, 512, 1536);
+        G g = gemm(1, 0, 1536, 128, 4096);
         take();
         call(&g);
         take();
@@ -811,6 +902,21 @@ int main(int argc, char **argv)
         take();
         CHECK(count("module load") == 0 && count("pool create") == 0 && count("ltcreate") == 0,
               "lazy: later calls made something again:\n%s", ev);
+    } else if (!strcmp(mode, "safe")) { /* VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: the tensor-core path serves nothing */
+        G g = gemm(1, 0, 1536, 128, 4096);
+        expect_forwarded("safe: a tensor-core call", &g, R_SAFE);
+        g = gemm(1, 0, 16384, 1024, 4096);
+        g.ldc = 16384;
+        expect_forwarded("safe: a large tensor-core call", &g, R_SAFE);
+        g = gemm(0, 1, 1536, 8, 1920);
+        expect_skinny("safe: a skinny call", &g, "vf_bf16_skinny_g_8_16");
+    } else if (!strcmp(mode, "notsafe")) { /* VF_SAFE set to another value than 1, VF_CUBLAS_BF16_TC=1 */
+        G g = gemm(1, 0, 1536, 128, 4096);
+        take();
+        const cublasStatus_t st = call(&g);
+        take();
+        CHECK(st == 0 && count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1,
+              "not safe: a tensor-core call was not served (VF_SAFE=%s)", getenv("VF_SAFE") ? getenv("VF_SAFE") : "(unset)");
     } else if (!strcmp(mode, "otherbuild")) { /* STUB_CUBLAS_VERSION set: not the cuBLAS of the rule */
         G g = gemm(0, 1, 1536, 8, 1920);
         expect_forwarded("skinny alone, another cuBLAS build", &g, R_BUILD);
@@ -824,7 +930,7 @@ int main(int argc, char **argv)
               "no switch: the runtime was loaded");
     } else if (!strcmp(mode, "inject") && argc > 3) {
         const char *step = argv[3];
-        G g = gemm(1, 0, 1536, 512, 1536);
+        G g = gemm(1, 0, 1536, 128, 4096);
         if (!strcmp(step, "module")) {
             take();
             const cublasStatus_t st = call(&g);
