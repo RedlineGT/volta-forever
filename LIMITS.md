@@ -456,11 +456,12 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   variants on real programs"): eager generation at batch 8 and 32 ran 1.40 to 1.43 and 1.49 to 1.52 times as fast
   with it, prompts and scoring 1.33 to 1.74 times, an embedding encoder 1.53 to 1.77 times, Whisper's encoder 1.31
   times and its transcription at batch 16 1.26 to 1.29 times, the generation model under `torch.compile` 1.46 to
-  1.92 times, and generation at batch 1 (the steps' one column never served, the prompt's products served) at 1.00
-  to 1.04 times its speed without the switch. A bf16 fine-tuning step (LoRA and full fine-tuning of the same 0.5B
-  model) ran at 1.12 to 1.24 times its speed without the switch: its forward products are served, those of its
-  backward pass go to 12.9 (below, the TN layout). `VF_SAFE=1` keeps every call at 12.9's bits whatever
-  `VF_CUBLAS_BF16_TC` says ([Safe mode](#safe-mode-vf_safe1)).
+  1.92 times, and generation at batch 1 at 1.00 to 1.04 times its speed without the switch, unchanged within the
+  noise of a case bound by the host (its steps' one column is never served; the prompt's products, served, take
+  under 1 % of its time). A bf16 fine-tuning step (LoRA and full fine-tuning of the same 0.5B model) ran at 1.12
+  to 1.24 times its speed without the switch: its forward products are served, those of its backward pass go to
+  12.9 (below, the TN layout). `VF_SAFE=1` keeps every call at 12.9's bits whatever `VF_CUBLAS_BF16_TC` says
+  ([Safe mode](#safe-mode-vf_safe1)).
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
   580.178.04 (`tests/gpu/forward/bf16-graphs.c` with the test build's control
@@ -492,16 +493,26 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   gains on its layers with 768 in-features or more; a shorter product goes to the skinny path (n <= 16, within its
   rule) or to cuBLAS 12.9. On real operands at k = 768 and 896 (the layers of k = 768 and 896 of five models:
   Qwen2.5-0.5B, T5-base, OPT-125m, bge-base-en-v1.5 and whisper-small's encoder, 990 pairs against the exact
-  product) every element's error was within 0.040 times the acceptance test's bound in fp32 output, and every
-  matrix's mean error towards zero within 0.046 times its bias bound (0.82 units at most). Data whose products all
-  have one sign and spread over many binades fare worse below k = 1024: two such families of the acceptance test,
-  log-normal magnitudes and an adversarial positive construction, ran at 1.16 and 1.25 times the bias bound at
-  k = 768 (0.91 and 1.003 at 896): what a program whose operands are all positive over a wide range should expect
-  at k = 768 to 1023, a mean error towards zero above that bound (the bound being 0.8 times an RTX 5090's own on
-  the same data), each element still within the error bound. The test judges these two families' bias from
-  k = 1024 (documented exceptions, as the two constructions aligned with the path's k-slices are from 2048 and
-  4096). `VF_SAFE=1` keeps every call at 12.9's bits ([Safe mode](#safe-mode-vf_safe1)). The skinny path is
-  unaffected.
+  product) every element's error was within 0.040 times the acceptance test's bound in fp32 output (35.8 units of
+  2^-24 sum |a b| at most, 12.9's own up to 36.0), and every matrix's mean error towards zero was 0.82 units at
+  most (0.046 times the test's bias bound read with the slope of its family of one sign, samesign: no newer GPU's
+  product was measured on these operands). None of these layers had non-negative inputs (42 to 59 % of each
+  input's values were positive) and at most 51 % of a layer's products a b were positive (measured in review).
+  Products of two operands of one sign spread over many binades fare worse: the acceptance test's two such
+  families, log-normal magnitudes and an adversarial positive construction, come out low by 36 to 40 and 49 to 70
+  units on average at every k from 768 to 16384, about 2.2e-6 to 4.2e-6 of their value (in fp32 output; far below
+  bf16's own rounding), with single elements up to 90 and 216 units, each element still within the error bound;
+  the same at k >= 1024, which the gate of 1024 served. That bias does not grow with k; the test's bias bound, 0.8
+  times an RTX 5090's own on the same data, grows with it, and is exceeded below k = 1024: 1.16 and 1.25 times at
+  k = 768 (where the path's bias is 0.93 and 1.00 times the RTX 5090's, from its slope on that data), 0.91 and
+  1.003 at 896. The test judges these two families' bias from k = 1024 (documented exceptions, as the two
+  constructions aligned with the path's k-slices are from 2048 and 4096). The data concerned are products of two
+  non-negative (or sign-correlated) operands spread over many binades, with 768 to 1023 terms: for example Gram or
+  similarity matrices of counts or of post-ReLU features, probabilities or attention weights times non-negative
+  values, non-negative filterbanks applied to power spectra, NMF or Markov-chain products; a linear layer with
+  zero-mean weights is not among them, whatever its inputs. There a mean error towards zero above the test's bound
+  is to be expected at k = 768 to 1023. `VF_SAFE=1` keeps every call at 12.9's bits
+  ([Safe mode](#safe-mode-vf_safe1)). The skinny path is unaffected.
 - **The tensor-core path serves the TN layout only** (op(A) = A^T, op(B) = B: a framework's linear layer,
   y = x W^T, as cuBLAS gets it), a rule of speed. Inference keeps the path on the linear layers it gates in,
   and training on its forward products; the products of a backward pass, input gradients (NN) and weight

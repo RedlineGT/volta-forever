@@ -867,7 +867,10 @@ about 13 units, the truncation's bias (cuBLAS 12.9 on the same data: largest 96.
 units, mean -1.2, -1.9 and 0.1). With both operands in one binade, uniform in [0.5, 1), a slice's
 256-term sum of products is exact (16-bit products and 8 bits of growth fit in fp32's 24) and the
 truncation does not act: largest 5.8, 3.2 and 1.8 units, mean 0.3, -0.1 and 0.0
-(`tests/gpu/forward/bf16-cost.c`). The GPU tests hold every tensor-core result to 32 units.
+(`tests/gpu/forward/bf16-cost.c`). Sums of products of one sign spread over many binades come out lower: by
+36 to 40 units on average (log-normal magnitudes) and 49 to 70 units (an adversarial positive construction) at
+every k from 768 to 16384, single elements up to 90 and 216 units (the acceptance test's lognpos and advpos,
+"The tensor-core path's gate"). The GPU tests hold every tensor-core result to 32 units.
 
 The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
 tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue, in one launch
@@ -912,11 +915,12 @@ every element's error was at most 0.045 times the bound A below and every matrix
 (B below); on the layers of k = 768 and 896 of five models (Qwen2.5-0.5B, T5-base, OPT-125m,
 bge-base-en-v1.5 and whisper-small's encoder: 990 operand pairs of up to 512 tokens), every element's
 error at most 0.040 times A in fp32 output (in bf16 output, within the rounding of the output itself: 0.98
-at most) and every matrix's bias at most 0.046 times B (0.82 units); and at the level of the models no
-gate from 4096 down to none could be told apart from cuBLAS 12.9 beyond a noise control of one unit in the
-last place. Two of the acceptance test's natural synthetic families, of positive data spread over many
-binades, exceed its bias bound below 1024 (below). A model gains on its layers with 768 in-features or
-more.
+at most) and every matrix's bias at most 0.82 units (0.046 times B read with the slope of samesign, the
+smallest of the test's families of one sign: no newer GPU's product was measured on these operands); and
+at the level of the models no gate from 4096 down to none could be told apart from cuBLAS 12.9 beyond a
+noise control of one unit in the last place. Two of the acceptance test's synthetic families, of positive
+data spread over many binades, exceed its bias bound below 1024 (below). A model gains on its layers with
+768 in-features or more.
 
 The acceptance test (`tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh`) uses 10
 families of data (normal, squared ReLU, outliers, cancelling pairs, spreads over about 30 binades, one
@@ -935,7 +939,8 @@ sums; the constants are in the test). The error bound held from k = 384 on (at k
 
 Four of the test's data sets exceed the bias bound from the gate on, and the test judges their bias from a
 larger k (documented exceptions; `VF_ACCEPT_STRICT=1` removes them, and the test then fails): two
-constructions against the path's slices, and two natural families of positive data below k = 1024:
+constructions against the path's slices, and two families of positive data spread over many binades, below
+k = 1024:
 
 - **craftsub**, built against the path's 256-element slices: a product of 2^20 at the start of every slice,
   then products of half to one ulp of it. Its bias is judged from k = 4096, where it is 0.85 times its bound;
@@ -954,9 +959,13 @@ constructions against the path's slices, and two natural families of positive da
   56.4).
 
 lognpos has nothing aligned with the path's slices, advpos only the larger first element of each slice of
-op(B): both are positive data over many binades, what a program whose operands are all positive over a wide
-range should expect at k = 768 to 1023 (`LIMITS.md`). Their error stays within the bound A at every k the path
-serves (at most 0.25 times it in fp32 output).
+op(B), and that element is not what makes it exceed: moved to position 128 or 37 of each slice, or removed,
+its bias at k = 768 stays at -51.8 to -52.5 units (measured in review). Both exceed for their data, products
+of one sign spread over many binades: what a program whose operands are all positive over a wide range should
+expect at k = 768 to 1023 (`LIMITS.md`). Their bias does not grow with k, the bound does: lognpos's is -36.1
+to -39.6 units and advpos's -49.5 to -70.0 at every k from 768 to 16384, against bounds of 34.0 and 42.3 at
+768 that double by 1536. Their error stays within the bound A at every k the path serves (at most 0.25 times
+it in fp32 output).
 
 Every call from the gate on must be served by the path (a call left to 12.9 there would not be judged), and
 the test fails with the path off; it fails when the gate is moved to 512 or 256 (a test build's

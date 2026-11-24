@@ -61,13 +61,13 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
  * 0.045 times the bound of the acceptance test (the larger of 12.9's own error and the classical fp32 bound
  * (k - 1) u sum |a b|) and every matrix's mean error towards zero within 0.22 u (1,728 pairs of the linear layers of
  * four models, k = 896 to 12288), and at k = 768 and 896 (the layers of five models) within 0.040 times that bound
- * and 0.046 times the bias bound (0.8 times an RTX 5090's own mean error on the same data, or 12.9's); at the level of
- * models, no gate from 4096 down to none could be told apart from cuBLAS 12.9. Of the synthetic families of
- * tests/gpu/forward/bf16-accept.c, two of positive data spread over many binades (log-normal, and an adversarial
- * positive construction) exceed that bias bound below k = 1024 (at 768: 1.16 and 1.25 times it), and two
- * constructions aligned with the 256-element k-slices above it: the test judges their bias from k = 1024, 1024, 2048
- * and 4096 (docs/emulations.md, "The tensor-core path's gate"). A shorter product goes to the skinny path (within its
- * rule) or to cuBLAS 12.9. */
+ * and 0.82 u (0.046 times the test's bias bound read with the slope of its samesign family); at the level of models,
+ * no gate from 4096 down to none could be told apart from cuBLAS 12.9. The test's bias bound is 0.8 times an RTX
+ * 5090's own mean error on its synthetic data; two families of positive data spread over many binades (log-normal,
+ * and an adversarial positive construction) come out low by 36 to 70 u at every k, and exceed that bound, which
+ * grows with k, below k = 1024 (at 768: 1.16 and 1.25 times it), and two constructions aligned with the 256-element
+ * k-slices above it: the test judges their bias from k = 1024, 1024, 2048 and 4096 (docs/emulations.md, "The
+ * tensor-core path's gate"). A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
 #define VF_TC_MIN_K 768
 /* The tensor-core path's layout: op(A) = A^T and op(B) = B (TN, how cuBLAS sees a framework's linear layer
  * y = x W^T, in inference and in the forward pass of training). A rule of speed (the class of the other layouts

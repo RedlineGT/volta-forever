@@ -259,15 +259,19 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   n <= 64, with m >= 6144 and k > 9216, and with k > 8192 and n > 256: classes whose median speed was below 1.10
   times 12.9's or whose slowest product ran below 0.90 times on real operands, or with no layer of a real model
   measured, the path faster at some of their shapes), with
-  exact scaling to fp16 and fixed slices of k, and differ from 12.9's in the last bits (within 25
-  units of 2^-24 sum |a b| measured; sums of products of one sign come out low, by about 13 units on
-  average when the data spans many binades), except when they are captured in a CUDA graph; the
-  skinny path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. One element's bits then
-  depend on the batch size and on capture (`LIMITS.md`), and a model whose layers have fewer than
-  768 in-features gets the tensor cores only on its wider layers. A training step's forward products
-  are served too, its backward pass's go to 12.9; a product whose input has many columns failing the
-  exact conversion can still run below 12.9's speed (`LIMITS.md`, "The bf16 cuBLAS variants";
-  `docs/performance.md`, "bf16 products through cuBLAS: the opt-in variants on real programs").
+  exact scaling to fp16 and fixed slices of k, and differ from 12.9's in the last bits (against the exact product,
+  in units of 2^-24 sum |a b|: on real operands, the linear layers of k = 768 and 896 of five models, single
+  elements within 36 units, as are 12.9's own, and a mean error towards zero of 0.82 units at most; sums of
+  products of one sign come out low, on synthetic data by about 13 units on average with operands uniform in
+  (0, 1], and with operands spread over many binades by 36 to 40 units (the acceptance test's log-normal
+  magnitudes) and 49 to 70 units (its adversarial positive construction) at every k from 768 to 16384, single
+  elements reaching 90 and 216 units: `LIMITS.md`, "The tensor-core path takes k >= 768 only"), except when they
+  are captured in a CUDA graph; the skinny path also serves its products, unless `VF_CUBLAS_BF16_SKINNY=0`. One
+  element's bits then depend on the batch size and on capture (`LIMITS.md`), and a model whose layers have fewer
+  than 768 in-features gets the tensor cores only on its wider layers. A training step's forward products are
+  served too, its backward pass's go to 12.9; a product whose input has many columns failing the exact conversion
+  can still run below 12.9's speed (`LIMITS.md`, "The bf16 cuBLAS variants"; `docs/performance.md`, "bf16 products
+  through cuBLAS: the opt-in variants on real programs").
 
 Every other call goes to cuBLAS 12.9 as it is: one column, batches, the other entry points,
 explicit algorithms (`CUBLAS_GEMM_ALGO*`), pedantic modes, k above 16384 or below 768 for the tensor cores,
