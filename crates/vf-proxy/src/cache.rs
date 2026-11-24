@@ -84,13 +84,21 @@ fn state() -> Option<&'static CacheState> {
             let uid = unsafe { libc::geteuid() };
             // Create the directory on first use, or verify it.
             if let Err(reason) = ensure_dir(&dir, uid) {
-                log::warn(format_args!("proxy cache disabled: {reason}"));
+                log::warn(format_args!("{}", disabled(&reason)));
                 return None;
             }
             remove_stale_temporaries(&dir, uid);
             Some(CacheState { dir, max_bytes, uid })
         })
         .as_ref()
+}
+
+/// The line said once, at the default level, when the cache is off for `reason`.
+fn disabled(reason: &str) -> String {
+    format!(
+        "proxy cache disabled: {reason}; every start adapts again (nothing that the layer works out is kept, \
+         `vf doctor` says what it found)"
+    )
 }
 
 /// Determine the cache directory from the environment.
@@ -140,9 +148,14 @@ fn verify_dir(dir: &Path, uid: u32) -> Result<(), String> {
     if meta.uid() != uid {
         return Err(format!("{dir:?} is not owned by uid {uid}"));
     }
-    let mode = meta.mode();
+    // (A umask of 002, the default of many distributions' accounts, makes directories that the
+    // group can write.)
+    let mode = meta.mode() & 0o7777;
     if mode & 0o022 != 0 {
-        return Err(format!("{dir:?} is writable by group or others (mode {mode:#o})"));
+        return Err(format!(
+            "{dir:?} is writable by its group or by others (mode {mode:o}): chmod 700 {dir:?} makes it the user's \
+             alone"
+        ));
     }
     Ok(())
 }
@@ -1139,13 +1152,26 @@ mod tests {
     fn dir_writable_by_others_refused() {
         let dir = test_dir("perms");
         let uid = unsafe { libc::geteuid() };
-        // Make world-writable.
+        // World-writable, and writable by the group (as a umask of 002 makes a directory): refused,
+        // with the fix, and the line says what it costs.
         #[cfg(unix)]
-        {
+        for mode in [0o777, 0o775, 0o770] {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            let reason = verify_dir(&dir, uid).unwrap_err();
+            assert!(
+                reason.contains(&format!(
+                    "is writable by its group or by others (mode {mode:o}): chmod 700 {dir:?}"
+                )),
+                "{reason}"
+            );
+            assert!(
+                disabled(&reason).starts_with("proxy cache disabled: ")
+                    && disabled(&reason).contains("; every start adapts again"),
+                "{}",
+                disabled(&reason)
+            );
         }
-        assert!(verify_dir(&dir, uid).is_err());
         // Restore and verify passes.
         #[cfg(unix)]
         {

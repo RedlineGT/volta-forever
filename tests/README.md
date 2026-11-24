@@ -253,7 +253,8 @@ No GPU needed. Exercises the launcher (`vf`) on fake installations (both the arc
 source-tree layouts): environment variables, path order, map entries, user priority, options,
 what is done when only some of the CUDA 12.9.2 libraries are there (a forwarding library with
 nothing to forward to is not used), argument passing, exit status, symlinks, its long name,
-`doctor`, `fetch` command line, the
+`doctor` (and what it says of the layer's cache directory: one that its group can write is
+refused by the layer, said with `chmod 700`), `fetch` command line, the
 subcommands of the offline tool, help and error cases, the bf16 cuBLAS variants that
 `VF_CUBLAS_BF16_TC` and `VF_CUBLAS_BF16_SKINNY` select (both names mapped or none, what is
 refused, what `doctor` says); safe mode (`VF_SAFE`: what `env` prints, what `doctor` says, what

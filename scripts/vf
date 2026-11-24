@@ -948,6 +948,45 @@ cmd_doctor() {
         echo "ok    $_bf16_said: $_used"
     fi
 
+    # The layer's cache: VF_PROXY_CACHE, else its default. The layer turns it off, and says so once
+    # in a line of its log, when the directory is not a directory of the user's that only the user
+    # can write: then every start adapts again. (A umask of 002, the default of many distributions'
+    # accounts, makes directories that the group can write.)
+    _pc=
+    if [ -n "${VF_PROXY_CACHE+set}" ]; then
+        [ "$VF_PROXY_CACHE" = 0 ] || _pc=$VF_PROXY_CACHE
+    elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+        _pc=$XDG_CACHE_HOME/volta-forever/proxy
+    elif [ -n "${HOME:-}" ]; then
+        _pc=$HOME/.cache/volta-forever/proxy
+    fi
+    _pc_off="the layer turns its cache off, and every start adapts again"
+    if [ -z "$_pc" ]; then
+        if [ -n "${VF_PROXY_CACHE+set}" ]; then
+            echo "NOTICE proxy cache off (VF_PROXY_CACHE='$VF_PROXY_CACHE'): every start adapts again"
+        else
+            echo "NOTICE proxy cache off: neither VF_PROXY_CACHE, XDG_CACHE_HOME nor HOME is set; every start adapts again"
+        fi
+    elif [ -L "$_pc" ]; then
+        echo "NOTICE proxy cache $_pc is a symbolic link: $_pc_off; make it a directory, or set VF_PROXY_CACHE to one"
+    elif [ ! -e "$_pc" ]; then
+        echo "ok    proxy cache $_pc (not there yet: the layer makes it, mode 700, at its first use)"
+    elif [ ! -d "$_pc" ]; then
+        echo "NOTICE proxy cache $_pc is not a directory: $_pc_off; remove it, or set VF_PROXY_CACHE to a directory"
+    else
+        _pc_owner=$(stat -c %u "$_pc" 2>/dev/null) || _pc_owner=
+        _pc_mode=$(stat -c %a "$_pc" 2>/dev/null) || _pc_mode=
+        if [ -z "$_pc_owner" ] || [ -z "$_pc_mode" ]; then
+            echo "NOTICE proxy cache $_pc: its owner and mode could not be read"
+        elif [ "$_pc_owner" != "$(id -u)" ]; then
+            echo "NOTICE proxy cache $_pc is not yours (its owner is uid $_pc_owner): $_pc_off; set VF_PROXY_CACHE to a directory of yours"
+        elif [ $((0$_pc_mode & 022)) != 0 ]; then
+            echo "NOTICE proxy cache $_pc is writable by its group or by others (mode $_pc_mode): $_pc_off; chmod 700 $_pc"
+        else
+            echo "ok    proxy cache $_pc (mode $_pc_mode)"
+        fi
+    fi
+
     # Environment that run would set.
     echo "ok    LD_LIBRARY_PATH would be: $_ldpath"
     if [ -f "$_audit" ]; then
