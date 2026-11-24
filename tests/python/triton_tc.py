@@ -1649,10 +1649,11 @@ class Decisions(Base):
             return b""
 
     def test_no_free_slot(self):
-        # The slots all taken (here by another process's helpers, which compile kernels that do not
-        # end): a kernel waits VF_TRITON_TC_WAIT seconds at most, then is compiled by Triton's own
-        # stages, said once, and not kept in Triton's cache (it is not slower: a later run compiles it
-        # for sm_80); its key keeps the mark.
+        # The places all taken without end (here by another process's helpers, which compile kernels
+        # that do not end, as stopped helpers or helpers stuck after their program died would hold
+        # them): a process waits VF_TRITON_TC_WAIT seconds for a place once in its life, said once;
+        # that kernel and every later one are then compiled for sm_80 by ALONE helper of its own
+        # without a place, which two threads share, and no kernel waits for a place again.
         holder = textwrap.dedent("""
             import sys, threading, time
             from triton.backends.nvidia import compiler as c
@@ -1661,7 +1662,7 @@ class Decisions(Base):
             time.sleep(60)
             """)
         e = self.env(PYTHONPATH=str(self.standin), VF_TRITON_TC_JOBS="2", VF_TRITON_TC_WAIT="2",
-                     VF_TRITON_TC_TIMEOUT="60")
+                     VF_TRITON_TC_TIMEOUT="60", TRITON_STANDIN_SLEEP="0.5")
         p = subprocess.Popen([str(self.vf), sys.executable, "-c", holder, dot("f16", "HANG80\n"),
                               dot("bf16", "HANG80\n")], env=e, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -1669,25 +1670,80 @@ class Decisions(Base):
             while time.monotonic() < end and len([h for h in helpers() if self.environ(h).count(str(self.root).encode())]) < 2:
                 time.sleep(0.05)
             code = textwrap.dedent("""
-                import json, sys, time
+                import json, sys, threading, time
                 from triton.backends.nvidia import compiler as c
                 t = time.monotonic()
-                out = [c.compile(x) for x in sys.argv[1:]]
+                out = [c.compile(x)[0].decode()[:11] for x in sys.argv[1:4]]
+                first = round(time.monotonic() - t, 1)
+                t = time.monotonic()
+                ts = [threading.Thread(target=lambda x=x: out.append(c.compile(x)[0].decode()[:11])) for x in sys.argv[4:]]
+                [x.start() for x in ts]; [x.join() for x in ts]
                 v = sys.modules["volta_forever_triton"]
-                print(json.dumps([[o[0].decode()[:11] for o in out], [o[2] for o in out],
-                                  len(v._state.get("not_kept", ())) // 2, round(time.monotonic() - t)]))
+                print(json.dumps([out, first, round(time.monotonic() - t, 1), len(v.client()._the_pool().helpers),
+                                  len(v._state.get("not_kept", ()))]))
                 """)
-            r = self.run_vf([sys.executable, "-c", code, dot("f16"), dot("i8")], e)
-            out, keys, not_kept, took = self.last(r)
-            self.assertEqual((out, not_kept), (["cubin sm_75"] * 2, 2), r.stderr)
-            self.assertTrue(all("-vf-tc" in k for k in keys), keys)
-            self.assertTrue(3 <= took <= 8, took)
-            self.assertEqual(r.stderr.count("no compile slot of this host was free in 2 s"), 1, r.stderr)
+            r = self.run_vf([sys.executable, "-c", code, dot("f16"), dot("i8"), dot("bf16"), dot("bf16", "SLEEP80\n"),
+                             dot("f16", "SLEEP80 // 2\n")], e)
+            out, first, threads, n, not_kept = self.last(r)
+            self.assertEqual((out, n, not_kept), (["cubin sm_80"] * 5, 1, 0), r.stderr)
+            self.assertTrue(2 <= first < 4.5, first)
+            self.assertLess(threads, 1.9)   # (0.5 s each, one after the other in one helper: no wait for a place)
+            self.assertEqual(r.stderr.count("no place for a helper of this host was free in 2 s"), 1, r.stderr)
+            self.assertNotIn("not kept", r.stderr)
         finally:
             p.kill()
             p.wait()
         r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16"), dot("i8")], e)
         self.assertEqual(self.last(r), ["cubin sm_80"] * 2, r.stderr)
+
+    def test_places_that_cannot_be_counted(self):
+        # A lock file of the places that cannot be opened or locked for another reason than another
+        # holder (flock failing with ENOSYS, as on Lustre without its flock option, or ENOLCK, as on
+        # NFSv3 without a lock manager; the directory not writable; a directory at each lock file's
+        # path) is not taken for a place that is taken: the places are not counted in that process
+        # (said once, at VF_LOG_LEVEL=2), its helpers start without one, and no kernel waits.
+        import socket
+        host = __import__("re").sub(r"[^A-Za-z0-9_.]", "_", socket.gethostname())[:64]
+        code = textwrap.dedent("""
+            import errno, fcntl, json, os, sys, time
+            how = sys.argv[1]
+            if how in ("ENOSYS", "ENOLCK"):
+                real = fcntl.flock
+                def flock(fd, op):
+                    if op & fcntl.LOCK_UN:
+                        return real(fd, op)
+                    raise OSError(getattr(errno, how), os.strerror(getattr(errno, how)))
+                fcntl.flock = flock
+            from triton.backends.nvidia import compiler as c
+            t = time.monotonic()
+            out = [c.compile(k)[0].decode()[:11] for k in sys.argv[2:]]
+            print(json.dumps([out, round(time.monotonic() - t, 1)]))
+            """)
+        for how, why in (("ENOSYS", "Function not implemented"), ("ENOLCK", "No locks available"),
+                         ("EACCES", "Permission denied"), ("EISDIR", "Is a directory")):
+            cache = self.root / ("cache-places-" + how)
+            own = self.own(cache)
+            if how in ("EACCES", "EISDIR"):
+                own.mkdir(parents=True, mode=0o700, exist_ok=True)
+                if how == "EISDIR":
+                    for name in ["slot-%s-%d" % (host, i) for i in range(2)] + ["waiting-" + host]:
+                        (own / name).mkdir(exist_ok=True)
+                os.chmod(own, 0o500 if how == "EACCES" else 0o700)
+            try:
+                for level in ("1", "2"):
+                    r = self.run_vf([sys.executable, "-c", code, how, dot("f16"), dot("bf16"), dot("i8")],
+                                    self.env(PYTHONPATH=str(self.standin), TRITON_CACHE_DIR=str(cache), VF_LOG_LEVEL=level,
+                                             VF_TRITON_TC_JOBS="2", VF_TRITON_TC_WAIT="5"))
+                    out, took = self.last(r)
+                    self.assertEqual(out, ["cubin sm_80"] * 3, (how, r.stderr))
+                    self.assertLess(took, 4.5, how)
+                    lines = [x for x in r.stderr.splitlines() if "are not counted in this process" in x]
+                    self.assertEqual(len(lines), 1 if level == "2" else 0, (how, r.stderr))
+                    self.assertTrue(all(why in x for x in lines), (how, lines))
+                    self.assertNotIn("no place", r.stderr)
+            finally:
+                if own.exists():
+                    os.chmod(own, 0o700)
 
     def test_idle_helpers_give_their_slot_up(self):
         # A process whose helper is idle (its idle time not up) while another waits for the only slot:

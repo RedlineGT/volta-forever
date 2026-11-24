@@ -23,11 +23,15 @@ time, started at the first kernel that needs one:
     do for VF_TRITON_TC_IDLE seconds, or for half a second when a process of the user waits for a
     slot; waited for by a thread of its own (the wait of its pid alone: no other child of the
     program is taken), so that none is left as a zombie;
-  - holding a slot while it lives: one of VF_TRITON_TC_JOBS lock files of this host in the
-    directory of the user's helpers in Triton's cache directory (_core._own_dir), locked with
+  - holding a slot (a place) while it lives: one of VF_TRITON_TC_JOBS lock files of this host in
+    the directory of the user's helpers in Triton's cache directory (_core._own_dir), locked with
     flock; so that the user's helpers on a host are that many at most, and their memory with
-    them. A kernel that finds no slot in VF_TRITON_TC_WAIT seconds is compiled by Triton's own
-    stages, and not kept in Triton's cache;
+    them. That cap is a best effort: where a lock file cannot be opened or locked for another
+    reason than another holder (a file system without working locks, a directory that cannot be
+    written), the process does not count places (said once, at VF_LOG_LEVEL=2) and its helpers
+    start without one; and a process waits VF_TRITON_TC_WAIT seconds for a place once in its
+    life: when none came, it waits for none again, and starts ALONE helper without a place when
+    none is free (said once);
   - writing its temporary files (Triton's PTX, the cubin that ptxas writes, the tool's) in a
     directory of its own (mode 0700) in the temporary directory, where Triton's own compilation
     writes them (the directory of the user's helpers holds the lock files alone).
@@ -125,7 +129,20 @@ class HelperFailed(Exception):
 
 
 class _NoSlot(Exception):
-    """No slot of this host was free in VF_TRITON_TC_WAIT seconds."""
+    """No helper of this process was free in VF_TRITON_TC_WAIT seconds."""
+
+
+class _NoCap(Exception):
+    """A lock file of the places cannot be opened or locked for another reason than another holder
+    (a file system whose locks do not work, a directory that cannot be written, what is not a
+    regular file at a lock file's path): the places are not counted in this process."""
+
+
+# The helpers that a process has at most without a place once it has waited VF_TRITON_TC_WAIT
+# seconds for one in vain: from then on it waits for a place no more (places held by helpers that
+# do not give them up, stopped or stuck in a compilation after their program died, cost a process
+# one wait, not one a kernel).
+ALONE = 1
 
 
 # --- the cubin as the layer will take it -----------------------------------------------------
@@ -374,16 +391,26 @@ def _open_lock(name):
                  0o600)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise OSError(errno.EINVAL, "%s is not a regular file" % name)
+        raise OSError(errno.EINVAL, "not a regular file")
     return fd
 
 
-def _slot(pool):
-    """A free slot of this host: a descriptor of its lock file, locked; None when all are taken
-    (OSError when this process can open no descriptor). The files of the slots that were taken are
-    kept open by the pool for the next try (a lock tried on a network file system is one request,
-    an open another)."""
+# The errors of an open() that are this process's limits, not a property of the directory: that
+# kernel is compiled by Triton's own stages, and not kept.
+_LIMITS = ("EMFILE", "ENFILE", "ENOMEM")
+
+
+def _limit(e):
     import errno
+    return e.errno in [getattr(errno, name) for name in _LIMITS]
+
+
+def _slot(pool):
+    """A free slot of this host: a descriptor of its lock file, locked; None when another holder
+    has each; _NoCap when a lock file cannot be opened or locked for another reason; OSError when
+    this process can open no descriptor. The files of the slots that were taken are kept open by
+    the pool for the next try (a lock tried on a network file system is one request, an open
+    another)."""
     import fcntl
     import random
     order = list(range(_jobs()))
@@ -401,16 +428,31 @@ def _slot(pool):
             try:
                 fd = _open_lock(name)
             except OSError as e:
-                if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+                if _limit(e):
                     raise
-                continue
+                raise _NoCap("%s: %s" % (name, e.strerror or e))
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return fd
-        except OSError:
+        except BlockingIOError:
             st = os.fstat(fd)
             pool.files[name] = (fd, (st.st_dev, st.st_ino))
+        except OSError as e:
+            os.close(fd)
+            raise _NoCap("flock of %s: %s" % (name, e.strerror or e))
     return None
+
+
+def _no_cap(why):
+    """The places of this host are not counted in this process from now on: its helpers start
+    without one, VF_TRITON_TC_JOBS of its own at most, and no kernel waits for a place; said once,
+    at VF_LOG_LEVEL=2."""
+    with _lock:
+        first = "nocap" not in _state
+        _state.setdefault("nocap", why)
+    if first:
+        say("VF_TRITON_TC: the places of the user's helpers on this host are not counted in this process (%s): "
+            "its helpers start without one, %d at most" % (why, _jobs()), level=2)
 
 
 def _stopped(pgid):
@@ -440,6 +482,8 @@ class _Helper(object):
     again), dead (its waiter reaped it)."""
 
     def __init__(self, pool, slot):
+        """A helper started on a slot (the descriptor of its lock file, locked), or without one
+        (None: the places are not counted, or this process waits for one no more)."""
         import socket
         import subprocess
         import threading
@@ -453,21 +497,29 @@ class _Helper(object):
             import triton
             root = os.path.dirname(os.path.dirname(os.path.abspath(triton.__file__)))
             mine, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-            waiting = _open_lock("waiting-" + _host())
-            pool.held.add(waiting)
-            fds = (theirs.fileno(), slot, waiting)
+            if slot is not None:
+                # (What tells it to give its slot up when a process waits for one.)
+                try:
+                    waiting = _open_lock("waiting-" + _host())
+                    pool.held.add(waiting)
+                except OSError as e:
+                    if _limit(e):
+                        raise
+                    _no_cap("waiting-%s: %s" % (_host(), e.strerror or e))
+            fds = (theirs.fileno(), -1 if slot is None else slot, -1 if waiting is None else waiting)
             here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volta_forever_triton_helper.py")
             self.proc = subprocess.Popen(
                 [_state["python"], "-I", "-S", here, "--helper"] + [str(fd) for fd in fds] + [str(os.getpid()), root],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_helper_env(),
-                cwd="/", pass_fds=fds, start_new_session=True)
+                cwd="/", pass_fds=[fd for fd in fds if fd >= 0], start_new_session=True)
         except BaseException:
             if mine is not None:
                 mine.close()
             raise
         finally:
-            pool.held.discard(slot)
-            os.close(slot)   # (the helper holds it: the slot is free when the helper ends, however)
+            if slot is not None:
+                pool.held.discard(slot)
+                os.close(slot)   # (the helper holds it: the slot is free when the helper ends, however)
             if theirs is not None:
                 theirs.close()
             if waiting is not None:
@@ -726,9 +778,12 @@ def _the_pool():
 
 def _take():
     """A helper of this process for one compilation, made busy: an idle one, or one started on a
-    free slot of this host, waited for VF_TRITON_TC_WAIT seconds at most while the slots are taken
-    (_NoSlot after; meanwhile this process holds the lock "waiting" shared, which tells the idle
-    helpers of the user's other processes to give theirs up). It may still be starting."""
+    free slot of this host. While the slots are taken, this process holds the lock "waiting"
+    shared, which tells the idle helpers of the user's other processes to give theirs up, for
+    VF_TRITON_TC_WAIT seconds once in its life: when no slot came, it waits for none again, and
+    starts ALONE helper without a slot when none is free (said once). Where the slots are not
+    counted (_no_cap), its helpers start without one. _NoSlot when the helpers of this process are
+    all busy for VF_TRITON_TC_WAIT seconds. It may still be starting."""
     import fcntl
     import time
     pool = _the_pool()
@@ -750,28 +805,47 @@ def _take():
                     free.sort(key=lambda h: not h.ready)
                     free[0].busy = True
                     return free[0]
-                if len(pool.helpers) + pool.starting < _jobs():
-                    slot = _slot(pool)
+                alive = len(pool.helpers) + pool.starting
+                if alive < _jobs():
+                    if not _state.get("nocap"):
+                        try:
+                            slot = _slot(pool)
+                        except _NoCap as e:
+                            _no_cap(str(e))
                     if slot is not None:
-                        pool.starting += 1
                         pool.held.add(slot)
                         break
-                    if waiting is None:
+                    if _state.get("nocap") or (_state.get("alone") and alive < ALONE):
+                        break   # (a helper without a slot)
+                    if waiting is None and not _state.get("alone"):
                         try:
                             waiting = _open_lock("waiting-" + _host())
                             pool.held.add(waiting)
                             fcntl.flock(waiting, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                        except OSError:
+                        except OSError as e:
                             if waiting is not None:
                                 pool.held.discard(waiting)
                                 os.close(waiting)
-                            waiting = None
+                                waiting = None
+                            if _limit(e):
+                                raise
+                            if not isinstance(e, BlockingIOError):   # (not a helper that looks at it alone)
+                                _no_cap("waiting-%s: %s" % (_host(), e.strerror or e))
+                                break
                 left = end - time.monotonic()
                 if left <= 0:
-                    raise _NoSlot("no compile slot of this host was free in %g s (VF_TRITON_TC_JOBS: %d)"
-                                  % (wait, _jobs()))
+                    if alive < _jobs() and not _state.get("alone"):
+                        with _lock:
+                            _state["alone"] = True
+                        say("VF_TRITON_TC: no place for a helper of this host was free in %g s (VF_TRITON_TC_JOBS: %d): "
+                            "this process waits for one no more, and compiles with %d helper of its own without a "
+                            "place when none is free" % (wait, _jobs(), ALONE), once="alone")
+                        if alive < ALONE:
+                            break
+                    raise _NoSlot("no helper of this process was free in %g s (VF_TRITON_TC_JOBS: %d)" % (wait, _jobs()))
                 pool.cond.wait(min(left, pause))
                 pause = min(pause * 1.5, 0.2)
+            pool.starting += 1
     finally:
         if waiting is not None:
             pool.held.discard(waiting)
@@ -894,7 +968,7 @@ def compile80_isolated(backend, ttir, metadata, options):
             helper = _take()
         except _NoSlot as e:
             _quiet("VF_TRITON_TC: %s: kernels are compiled by Triton's own stages, and not kept in Triton's cache, "
-                   "while the slots are taken" % e, "slots")
+                   "while its helpers are busy" % e, "slots")
             return None, str(e), True
         except HelperFailed:
             raise

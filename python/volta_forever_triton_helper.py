@@ -2,9 +2,10 @@
 
 Started by that process (volta_forever_triton_client says what a helper is, how long it lives and
 where it writes) as `PYTHON -I -S .../volta_forever_triton_helper.py --helper SOCKET SLOT WAITING
-PARENT ROOT`: the descriptors of its socket, of the lock of its slot and of the lock "waiting",
-the pid of that process and the directory that holds the program's Triton. The rules of what is
-compiled for sm_80 are in volta_forever_triton. No program reads this file.
+PARENT ROOT`: the descriptors of its socket, of the lock of its slot and of the lock "waiting"
+(-1 for a helper without a slot), the pid of that process and the directory that holds the
+program's Triton. The rules of what is compiled for sm_80 are in volta_forever_triton. No program
+reads this file.
 """
 
 import os
@@ -352,7 +353,7 @@ def _serve(sock, waiting, err):
     last = time.monotonic()
     while True:
         quiet = time.monotonic() - last
-        if quiet >= idle or (quiet >= GRACE and _others_wait(waiting)):
+        if quiet >= idle or (quiet >= GRACE and waiting >= 0 and _others_wait(waiting)):
             return
         if not poll.poll(min(idle - quiet, POLL) * 1000.0):
             continue
@@ -379,7 +380,8 @@ def _main(sock_fd, slot_fd, waiting_fd, parent, root):
     import socket
     import tempfile
     for fd in (sock_fd, slot_fd, waiting_fd):
-        os.set_inheritable(fd, False)   # (not to ptxas, which Triton runs with close_fds=False)
+        if fd >= 0:
+            os.set_inheritable(fd, False)   # (not to ptxas, which Triton runs with close_fds=False)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     def parent_gone(*_):
