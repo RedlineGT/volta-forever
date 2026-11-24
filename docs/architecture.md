@@ -161,6 +161,10 @@ PTX for sm_75 or later is rewritten for sm_70 in two steps
 2. **Retargeting.** The header is rewritten: `.version` lowered to 9.0 (the driver's
    limit), `.target` to `sm_70`. The driver's JIT then compiles the text natively.
 
+For large modules, the layer runs PTX lowering and dependency analysis in the program
+across bounded worker threads (`vf-ptx-*`, by default the CPUs the process may run on,
+at most 8; `VF_THREADS`), falling back to the calling thread if thread creation fails.
+
 A function that uses an instruction without a Volta sequence (clusters of blocks,
 Hopper's barriers, tensor maps) is made to trap. The kernels that need it are listed
 and refused when the program asks for them (error 218; the reason is printed), while
