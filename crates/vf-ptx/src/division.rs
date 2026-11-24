@@ -171,6 +171,26 @@ shr.s32 {dest},%__vf_pow2div_adj,%__vf_pow2div_shift;"
     result
 }
 
+fn has_at_least_n(mut haystack: &[u8], needle: &[u8], min: usize) -> bool {
+    let Some((&first, tail)) = needle.split_first() else {
+        return true;
+    };
+    let mut found = 0;
+    while let Some(pos) = haystack.iter().position(|&b| b == first) {
+        let after = &haystack[pos + 1..];
+        if after.starts_with(tail) {
+            found += 1;
+            if found >= min {
+                return true;
+            }
+            haystack = &after[tail.len()..];
+        } else {
+            haystack = after;
+        }
+    }
+    false
+}
+
 fn specialized(source: &str, text: &str, f: &crate::Function) -> Option<(Range<usize>, String)> {
     let body = &text[f.body.clone()];
     if body.match_indices("div.s32").take(MIN_DIVISIONS).count() < MIN_DIVISIONS {
@@ -223,7 +243,7 @@ fn specialized(source: &str, text: &str, f: &crate::Function) -> Option<(Range<u
 /// Specialize one eligible loop per entry. Never rewrite a native image or device
 /// function, or shadow an identifier supplied by the program.
 pub fn specialize(ptx: &mut Vec<u8>) {
-    if !ptx.windows(7).any(|w| w == b"div.s32") {
+    if !has_at_least_n(ptx, b"div.s32", MIN_DIVISIONS) {
         return;
     }
     let Ok(source) = std::str::from_utf8(ptx) else { return };
@@ -293,8 +313,44 @@ ret;
                 .replace("L:", "L__:")
                 .replace("bra L;", "bra L__; // __vf_pow2div_p"),
             FIXTURE.replace(".entry", ".func"),
+            FIXTURE.replace("div.s32 %r4,%r1,%r0;", "// div.s32 %r4,%r1,%r0;"),
+            FIXTURE.replace("div.s32 %r3,%r4,%r0; div.s32 %r4,%r1,%r0;", "add.s32 %r3,%r4,%r0;"),
         ] {
             assert_eq!(adapt(&text), text, "{text}");
         }
+    }
+
+    #[test]
+    fn threshold_and_preceding_comments_match_whole_module_behavior() {
+        // Two kernels each with two divisions reach MIN_DIVISIONS only across functions,
+        // so neither entry qualifies.
+        let split_two = format!(
+            ".version 8.0\n.target sm_80\n.address_size 64\n{k1}\n{k2}",
+            k1 = FIXTURE
+                .split(".address_size 64\n")
+                .nth(1)
+                .unwrap()
+                .replace("div.s32 %r3,%r4,%r0; div.s32 %r4,%r1,%r0;", ""),
+            k2 = FIXTURE
+                .split(".address_size 64\n")
+                .nth(1)
+                .unwrap()
+                .replace(" q(", " q2(")
+                .replace("div.s32 %r3,%r4,%r0; div.s32 %r4,%r1,%r0;", ""),
+        );
+        assert_eq!(adapt(&split_two), split_two);
+
+        // Preceding comments with unbalanced braces and commented-out div.s32 must not
+        // break specialization of a later eligible entry.
+        let with_comments = format!(
+            ".version 8.0\n.target sm_80\n.address_size 64\n// {{ div.s32 a,b,c;\n/* }} */\n{body}",
+            body = FIXTURE.split(".address_size 64\n").nth(1).unwrap(),
+        );
+        let adapted = adapt(&with_comments);
+        assert!(adapted.contains("@%p bra $__vf_pow2div_fast;"));
+        assert!(adapted.starts_with(".version 8.0\n.target sm_80\n.address_size 64\n// { div.s32 a,b,c;\n/* } */\n"));
+
+        let entry_comment = FIXTURE.replace(".entry q(", ".entry/*c*/q(");
+        assert!(adapt(&entry_comment).contains("@%p bra $__vf_pow2div_fast;"));
     }
 }

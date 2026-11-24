@@ -312,9 +312,10 @@ pub struct Options {
 /// the bodies of its functions, what `body_in` takes as `outside`. (A compiler's module has none
 /// there: its parameters and variables have the names of the program's source.)
 pub fn outside_names(text: &str) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
     let mut found: Vec<String> = Vec::new();
     for name in scan::names(text) {
-        if name.starts_with('%') && !found.iter().any(|known| known == name) {
+        if name.starts_with('%') && seen.insert(name) {
             found.push(name.to_string());
         }
     }
@@ -355,19 +356,21 @@ pub fn body_in(
     // there for no one. (A body that is rewritten loses them; one in which nothing is
     // rewritten is given back as it came.)
     let source = text;
-    let blanked = scan::blank_comments(source);
-    let text = blanked.as_str();
+    let blanked = source.as_bytes().contains(&b'/').then(|| scan::blank_comments(source));
+    let text = blanked.as_deref().unwrap_or(source);
     let items = scan::items(text.as_bytes(), 0..text.len())
         .ok_or_else(|| Unsupported("statements not recognised".to_string()))?;
     // The registers and labels that the rewriting adds have names of its own (`GENERATED`): a
     // body that has such a name already would get two things under one name.
-    let code = scan::without_comments(text.as_bytes());
-    if let Some(name) = scan::names(&String::from_utf8_lossy(&code))
-        .find(|name| GENERATED.iter().any(|prefix| name.starts_with(prefix)))
-    {
-        return Err(Unsupported(format!(
-            "{name}: a name of the kind that the rewriting gives to what it adds"
-        )));
+    if GENERATED.iter().any(|prefix| text.contains(prefix)) {
+        let code = scan::without_comments(text.as_bytes());
+        if let Some(name) = scan::names(&String::from_utf8_lossy(&code))
+            .find(|name| GENERATED.iter().any(|prefix| name.starts_with(prefix)))
+        {
+            return Err(Unsupported(format!(
+                "{name}: a name of the kind that the rewriting gives to what it adds"
+            )));
+        }
     }
     // One spelling for each register first (`names`): everything below follows registers by name.
     let renamed = names::canonical(text, &items, outside)?;
@@ -526,7 +529,7 @@ pub fn body_in(
     body.counts.other -= extra.other;
     let prologue = body.prologue();
     let lowered = format!("{{{prologue}{}", body.out);
-    if lowered == blanked {
+    if lowered == blanked.as_deref().unwrap_or(source) {
         return Ok((source.to_string(), body.counts));
     }
     Ok((lowered, body.counts))

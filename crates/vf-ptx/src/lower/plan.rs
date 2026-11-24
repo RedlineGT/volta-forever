@@ -76,6 +76,25 @@ pub(super) struct Plan<'a> {
     pub(super) pairs: super::pairs::Pairs<'a>,
 }
 
+/// Collect labels that appear in statement operands or line directives, avoiding allocation when
+/// the body contains no labels.
+fn branch_targets<'a>(text: &'a str, items: &[scan::Item]) -> HashSet<&'a str> {
+    if !items.iter().any(|item| item.kind == Kind::Label) {
+        return HashSet::new();
+    }
+    let mut named: HashSet<&str> = HashSet::new();
+    let mut labels: Vec<&str> = Vec::new();
+    for item in items {
+        match &item.kind {
+            Kind::Label => labels.extend(scan::names(&text[item.range.clone()]).next()),
+            Kind::Statement { operands, .. } => named.extend(scan::names(&text[operands.clone()])),
+            Kind::Line => named.extend(scan::names(&text[item.range.clone()])),
+            Kind::Open | Kind::Close => {}
+        }
+    }
+    labels.into_iter().filter(|label| named.contains(label)).collect()
+}
+
 impl<'a> Plan<'a> {
     /// The FP16 `m16n8k8` product of A (two registers) and B is split in the halves of k: both
     /// registers of A come from one plain `ldmatrix` and B from a plain `ldmatrix`.
@@ -93,6 +112,21 @@ impl<'a> Plan<'a> {
     }
 
     pub(super) fn new(text: &'a str, items: &[scan::Item], options: Options) -> Plan<'a> {
+        const TRIGGERS: [&str; 7] = [
+            "mma.",
+            "ldmatrix.",
+            "movmatrix.",
+            "stmatrix.",
+            "cp.async.",
+            "redux.sync",
+            "fma.rn.bf16x2",
+        ];
+        if !TRIGGERS.iter().any(|needle| text.contains(needle)) {
+            return Plan {
+                targets: branch_targets(text, items),
+                ..Plan::default()
+            };
+        }
         let statements = || {
             items.iter().enumerate().filter_map(|(index, item)| match &item.kind {
                 Kind::Statement {
@@ -143,39 +177,55 @@ impl<'a> Plan<'a> {
             for name in scan::names(first_operand(operands)) {
                 *writes.entry(name).or_default() += 1;
             }
-            if let ("mov.b32" | "mov.u32" | "mov.s32", false, [register, value]) =
-                (opcode, guarded, &scan::split_operands(operands)[..])
-                && let Some(name) = scan::register(register)
+            if !guarded
+                && matches!(
+                    opcode,
+                    "mov.b32"
+                        | "mov.u32"
+                        | "mov.s32"
+                        | "mov.f32"
+                        | "mov.b16"
+                        | "mov.u16"
+                        | "mov.s16"
+                        | "selp.b32"
+                        | "selp.u32"
+                        | "selp.s32"
+                )
             {
-                if all_ones(value) {
-                    set_to_ones.push(name);
+                let parts = scan::split_operands(operands);
+                match (opcode, parts.as_slice()) {
+                    ("mov.b32" | "mov.u32" | "mov.s32" | "mov.f32", [register, value]) => {
+                        if let Some(name) = scan::register(register) {
+                            if opcode != "mov.f32" {
+                                if all_ones(value) {
+                                    set_to_ones.push(name);
+                                }
+                                if packed_fma && let Some(bits) = super::known_bits::word_literal(value) {
+                                    constants32.push((name, bits));
+                                }
+                            }
+                            if super::pairs::literal(value) {
+                                literals.push(name);
+                            }
+                        }
+                    }
+                    ("mov.b16" | "mov.u16" | "mov.s16", [register, literal]) => {
+                        if let Some(name) = scan::register(register)
+                            && let Some(value) = integer(literal)
+                            && u16::try_from(value).is_ok()
+                        {
+                            constants16.push((name, value));
+                        }
+                    }
+                    ("selp.b32" | "selp.u32" | "selp.s32", [register, first, second, _]) => {
+                        if let Some(name) = scan::register(register)
+                            && let (Some(first), Some(second)) = (integer(first), integer(second))
+                        {
+                            choices.push((name, [first, second]));
+                        }
+                    }
+                    _ => {}
                 }
-                if packed_fma && let Some(bits) = super::known_bits::word_literal(value) {
-                    constants32.push((name, bits));
-                }
-            }
-            if let ("mov.b32" | "mov.u32" | "mov.s32" | "mov.f32", false, [register, value]) =
-                (opcode, guarded, &scan::split_operands(operands)[..])
-                && let Some(name) = scan::register(register)
-                && super::pairs::literal(value)
-            {
-                literals.push(name);
-            }
-            if matches!(opcode, "mov.b16" | "mov.u16" | "mov.s16")
-                && !guarded
-                && let [register, literal] = scan::split_operands(operands)[..]
-                && let Some(name) = scan::register(register)
-                && let Some(value) = integer(literal)
-                && u16::try_from(value).is_ok()
-            {
-                constants16.push((name, value));
-            }
-            if let ("selp.b32" | "selp.u32" | "selp.s32", false, [register, first, second, _]) =
-                (opcode, guarded, &scan::split_operands(operands)[..])
-                && let Some(name) = scan::register(register)
-                && let (Some(first), Some(second)) = (integer(first), integer(second))
-            {
-                choices.push((name, [first, second]));
             }
             if guarded || !is_tensor(opcode) {
                 continue;
@@ -223,17 +273,7 @@ impl<'a> Plan<'a> {
             }
         }
         plan.ones = set_to_ones.into_iter().filter(|name| written_once(name)).collect();
-        let mut named: HashSet<&str> = HashSet::new();
-        let mut labels: Vec<&str> = Vec::new();
-        for item in items {
-            match &item.kind {
-                Kind::Label => labels.extend(scan::names(&text[item.range.clone()]).next()),
-                Kind::Statement { operands, .. } => named.extend(scan::names(&text[operands.clone()])),
-                Kind::Line => named.extend(scan::names(&text[item.range.clone()])),
-                Kind::Open | Kind::Close => {}
-            }
-        }
-        plan.targets = labels.into_iter().filter(|label| named.contains(label)).collect();
+        plan.targets = branch_targets(text, items);
         plan.constants16 = constants16
             .into_iter()
             .filter(|(name, _)| written_once(name) && declarations.width(name) == Some(16))

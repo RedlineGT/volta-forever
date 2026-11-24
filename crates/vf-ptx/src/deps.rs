@@ -35,7 +35,7 @@ enum Linkage {
 }
 
 /// A module-level variable declaration or definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct VarDecl {
     /// Byte range in the module text (the complete declaration, including the trailing newline).
     range: Range<usize>,
@@ -54,14 +54,14 @@ struct VarDecl {
 }
 
 /// A module-level function declaration (no body).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FuncDecl {
     range: Range<usize>,
     name: String,
 }
 
 /// An entry-point or device-function definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FuncDef {
     /// Range of the entire definition (from the keyword to the closing `}`).
     range: Range<usize>,
@@ -76,7 +76,7 @@ struct FuncDef {
 }
 
 /// The dependency structure of a PTX module.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ModuleInfo {
     /// The full PTX text.
     text: Vec<u8>,
@@ -133,7 +133,7 @@ pub enum Splittable {
 
 /// Find references to declared names, skipping numbers, comments and strings. A name beginning
 /// with % may denote a user-defined symbol as well as a register.
-fn find_referenced_names(text: &str, declared: impl Fn(&str) -> bool) -> HashSet<String> {
+fn find_referenced_names(text: &str, declared: impl Fn(&str) -> bool) -> HashSet<&str> {
     let bytes = text.as_bytes();
     let mut names = HashSet::new();
     let mut i = 0;
@@ -170,7 +170,7 @@ fn find_referenced_names(text: &str, declared: impl Fn(&str) -> bool) -> HashSet
             // nvcc often uses $L for labels, but a declared symbol can have that prefix too.
             let name = &text[start..i];
             if declared(name) {
-                names.insert(name.to_string());
+                names.insert(name);
             }
             continue;
         }
@@ -249,11 +249,11 @@ fn split_statement(statement: &str) -> (&str, &str) {
 /// `signature_names` are the names in the function's signature (its parameters, and its return
 /// value when it is a register): a value made from a variable's address that one of them is given
 /// leaves the function, so the variable is not only read.
-fn find_writes_to_globals(
-    code: &str,
+fn find_writes_to_globals<'a>(
+    code: &'a str,
     signature_names: &[&str],
-    global_names: &HashSet<String>,
-    safe_callees: &HashSet<String>,
+    global_names: &HashSet<&'a str>,
+    safe_callees: &HashSet<&str>,
 ) -> Accesses {
     let items = match scan::items(code.as_bytes(), 0..code.len()) {
         Some(items) => items,
@@ -262,7 +262,7 @@ fn find_writes_to_globals(
             return Accesses {
                 written: HashSet::new(),
                 loaded: HashSet::new(),
-                not_only_read: global_names.clone(),
+                not_only_read: global_names.iter().map(|&n| n.to_string()).collect(),
             };
         }
     };
@@ -273,14 +273,14 @@ fn find_writes_to_globals(
         #[allow(dead_code)]
         operands: &'a str,
         /// All names (including registers) in the operands.
-        names: Vec<String>,
+        names: Vec<&'a str>,
         /// The names in the first (destination) operand.
-        dest_names: Vec<String>,
+        dest_names: Vec<&'a str>,
         /// The names after the first comma (source operands, including the address of a load).
-        source_names: Vec<String>,
+        source_names: Vec<&'a str>,
     }
 
-    let mut stmts: Vec<Stmt<'_>> = Vec::new();
+    let mut stmts: Vec<Stmt<'a>> = Vec::new();
 
     for item in &items {
         let scan::Kind::Statement { operands, .. } = &item.kind else {
@@ -295,7 +295,7 @@ fn find_writes_to_globals(
         if op.starts_with('.') && !ops.contains('=') {
             continue;
         }
-        let names: Vec<String> = scan::names(ops).map(|s| s.to_string()).collect();
+        let names: Vec<&'a str> = scan::names(ops).collect();
         // First operand (destination): up to the first comma outside braces/brackets.
         let first_comma = {
             let mut depth = 0usize;
@@ -317,12 +317,12 @@ fn find_writes_to_globals(
             Some(p) => &ops[..p],
             None => ops,
         };
-        let dest_names: Vec<String> = scan::names(dest_str).map(|s| s.to_string()).collect();
+        let dest_names: Vec<&'a str> = scan::names(dest_str).collect();
         let source_str = match first_comma {
             Some(p) => &ops[p + 1..],
             None => "",
         };
-        let source_names: Vec<String> = scan::names(source_str).map(|s| s.to_string()).collect();
+        let source_names: Vec<&'a str> = scan::names(source_str).collect();
         stmts.push(Stmt {
             opcode: op,
             operands: ops,
@@ -334,9 +334,9 @@ fn find_writes_to_globals(
 
     // Build a map from each name (register or global) to the set of global variables it could be
     // tainted by. Initially, each global variable name maps to itself.
-    let mut name_to_vars: HashMap<String, HashSet<String>> = HashMap::new();
-    for var in global_names {
-        name_to_vars.entry(var.clone()).or_default().insert(var.clone());
+    let mut name_to_vars: HashMap<&'a str, HashSet<&'a str>> = HashMap::new();
+    for &var in global_names {
+        name_to_vars.entry(var).or_default().insert(var);
     }
 
     // Iterate to fixed point.
@@ -358,10 +358,10 @@ fn find_writes_to_globals(
             }
 
             // Collect all variables that any source operand is tainted by.
-            let mut tainted_by: HashSet<String> = HashSet::new();
-            for name in &stmt.names {
+            let mut tainted_by: HashSet<&'a str> = HashSet::new();
+            for &name in &stmt.names {
                 if let Some(vars) = name_to_vars.get(name) {
-                    tainted_by.extend(vars.iter().cloned());
+                    tainted_by.extend(vars.iter().copied());
                 }
             }
             if tainted_by.is_empty() {
@@ -370,10 +370,10 @@ fn find_writes_to_globals(
 
             // Taint each destination with those variables, whatever its name: a register needs no
             // `%` (`.reg .b64 p; mov.u64 p, t;`).
-            for dest in &stmt.dest_names {
-                let entry = name_to_vars.entry(dest.clone()).or_default();
-                for var in &tainted_by {
-                    if entry.insert(var.clone()) {
+            for &dest in &stmt.dest_names {
+                let entry = name_to_vars.entry(dest).or_default();
+                for &var in &tainted_by {
+                    if entry.insert(var) {
                         changed = true;
                     }
                 }
@@ -386,7 +386,7 @@ fn find_writes_to_globals(
 
     // Determine which variables are written: a store to addressable memory (not st.param, st.local),
     // atomic, reduction, or call where any operand is tainted.
-    let mut written = HashSet::new();
+    let mut written: HashSet<String> = HashSet::new();
     for stmt in &stmts {
         let is_store =
             (stmt.opcode.starts_with("st.") && !stmt.opcode.contains(".param") && !stmt.opcode.contains(".local"))
@@ -400,29 +400,29 @@ fn find_writes_to_globals(
             let target_is_safe = stmt
                 .names
                 .iter()
-                .any(|n| !n.starts_with('%') && safe_callees.contains(n));
+                .any(|n| !n.starts_with('%') && safe_callees.contains(*n));
             if target_is_safe {
                 continue;
             }
         }
-        for name in &stmt.names {
+        for &name in &stmt.names {
             if let Some(vars) = name_to_vars.get(name) {
-                written.extend(vars.iter().cloned());
+                written.extend(vars.iter().map(|&v| v.to_string()));
             }
         }
     }
 
     // Determine which variables are loaded from: a load where the address operand (a source
     // name after the first comma) is tainted by the variable.
-    let mut loaded_from = HashSet::new();
+    let mut loaded_from: HashSet<String> = HashSet::new();
     for stmt in &stmts {
         let is_load = stmt.opcode.starts_with("ld.") || stmt.opcode.starts_with("ldu.");
         if !is_load {
             continue;
         }
-        for name in &stmt.source_names {
+        for &name in &stmt.source_names {
             if let Some(vars) = name_to_vars.get(name) {
-                loaded_from.extend(vars.iter().cloned());
+                loaded_from.extend(vars.iter().map(|&v| v.to_string()));
             }
         }
     }
@@ -432,23 +432,23 @@ fn find_writes_to_globals(
     // (A tainted name can be in a load only in its address: the load reads. A store of the address
     // to local or parameter space is a store like any other here, so what is loaded back from there
     // is never needed to be followed.)
-    let mut not_only_read = HashSet::new();
+    let mut not_only_read: HashSet<String> = HashSet::new();
     for stmt in &stmts {
         let is_load = stmt.opcode.starts_with("ld.") || stmt.opcode.starts_with("ldu.");
         if is_load || is_address_arithmetic(stmt.opcode) {
             continue;
         }
-        for name in &stmt.names {
+        for &name in &stmt.names {
             if let Some(vars) = name_to_vars.get(name) {
-                not_only_read.extend(vars.iter().cloned());
+                not_only_read.extend(vars.iter().map(|&v| v.to_string()));
             }
         }
     }
     // A register of the signature that holds a value made from the address: the function gives it
     // back to its caller (whose `call` does not taint what it receives) or keeps it in a parameter.
-    for name in signature_names {
-        if let Some(vars) = name_to_vars.get(*name) {
-            not_only_read.extend(vars.iter().cloned());
+    for &name in signature_names {
+        if let Some(vars) = name_to_vars.get(name) {
+            not_only_read.extend(vars.iter().map(|&v| v.to_string()));
         }
     }
 
@@ -1128,24 +1128,25 @@ impl ModuleInfo {
 
         // Collect all known module-level names for reference checking. Only persistent variables
         // (.global, .const) need write analysis; .shared is per-launch and safe to duplicate.
-        let all_var_names: HashSet<String> = variables.iter().map(|v| v.name.clone()).collect();
+        let all_var_names: HashSet<&str> = variables.iter().map(|v| v.name.as_str()).collect();
         let persistent_names: HashSet<String> = variables
             .iter()
             .filter(|v| v.persistent)
             .map(|v| v.name.clone())
             .collect();
-        let all_func_names: HashSet<String> = func_defs
+        let persistent_names_ref: HashSet<&str> = persistent_names.iter().map(String::as_str).collect();
+        let all_func_names: HashSet<&str> = func_defs
             .iter()
-            .map(|f| f.name.clone())
-            .chain(func_decls.iter().map(|d| d.name.clone()))
+            .map(|f| f.name.as_str())
+            .chain(func_decls.iter().map(|d| d.name.as_str()))
             .collect();
 
         let defined_funcs: HashSet<&str> = func_defs.iter().map(|f| f.name.as_str()).collect();
-        let safe_callees: HashSet<String> = func_decls
+        let safe_callees: HashSet<&str> = func_decls
             .iter()
             .filter(|d| READONLY_EXTERN_CALLEES.contains(&d.name.as_str()))
             .filter(|d| !defined_funcs.contains(d.name.as_str()))
-            .map(|d| d.name.clone())
+            .map(|d| d.name.as_str())
             .collect();
 
         let mut unbounded_calls = HashSet::new();
@@ -1171,16 +1172,20 @@ impl ModuleInfo {
         // A referenced variable brings every symbol used to initialize it. A persistent
         // address in an initializer can also be loaded and written through.
         let declared = |name: &str| all_var_names.contains(name) || all_func_names.contains(name);
-        let mut initializer_refs: HashMap<&str, HashSet<String>> = HashMap::new();
+        let mut initializer_refs: HashMap<&str, HashSet<&str>> = HashMap::new();
         let mut escaped_vars = HashSet::new();
         for var in &variables {
             let Some((_, initializer)) = text_str[var.range.clone()].split_once('=') else {
                 continue;
             };
             let refs = find_referenced_names(initializer, declared);
-            escaped_vars.extend(refs.intersection(&persistent_names).cloned());
+            for &name in &refs {
+                if persistent_names_ref.contains(name) {
+                    escaped_vars.insert(name.to_string());
+                }
+            }
             if !refs.is_empty() {
-                initializer_refs.entry(&var.name).or_default().extend(refs);
+                initializer_refs.entry(var.name.as_str()).or_default().extend(refs);
             }
         }
         written_vars.extend(escaped_vars.iter().cloned());
@@ -1188,27 +1193,38 @@ impl ModuleInfo {
         // The write/load taint analysis is only needed when the module has persistent variables.
         // Modules without persistent variables have no coherence concern, and the taint analysis
         // over an empty set of globals is a no-op anyway.
-        let need_taint = !persistent_names.is_empty();
+        let need_taint = !persistent_names_ref.is_empty();
 
-        for func in &func_defs {
+        struct FuncResult {
+            name: String,
+            fn_refs: HashSet<String>,
+            var_refs: HashSet<String>,
+            unbounded: bool,
+            accesses: Option<Accesses>,
+            unscanned: bool,
+        }
+
+        let analyse_func = |func: &FuncDef| -> FuncResult {
             let body_text = &text_str[func.body.clone()];
             let mut all_names = find_referenced_names(body_text, declared);
             if !initializer_refs.is_empty() {
-                let mut pending: Vec<_> = all_names
-                    .iter()
-                    .filter_map(|n| initializer_refs.get(n.as_str()))
-                    .collect();
+                let mut pending: Vec<_> = all_names.iter().filter_map(|&n| initializer_refs.get(n)).collect();
                 while let Some(refs) = pending.pop() {
-                    for name in refs {
-                        if all_names.insert(name.clone())
-                            && let Some(next) = initializer_refs.get(name.as_str())
+                    for &name in refs {
+                        if all_names.insert(name)
+                            && let Some(next) = initializer_refs.get(name)
                         {
                             pending.push(next);
                         }
                     }
                 }
             }
-            let mut fn_refs: HashSet<String> = all_names.intersection(&all_func_names).cloned().collect();
+            let mut fn_refs: HashSet<String> = all_names
+                .iter()
+                .filter(|n| all_func_names.contains(**n))
+                .map(|&n| n.to_string())
+                .collect();
+            let mut unbounded = false;
             if body_text.contains(".callprototype") {
                 let possible = scan::items(text_str.as_bytes(), func.body.clone())
                     .map(|items| calls::used(text_str, &items))
@@ -1216,7 +1232,7 @@ impl ModuleInfo {
                 if !possible.is_empty() {
                     // Keep runtime pointers in one loaded module. The ordinary call graph
                     // then propagates through each compatible target and its own callees.
-                    unbounded_calls.insert(func.name.clone());
+                    unbounded = true;
                     for (name, target) in &targets {
                         if possible
                             .iter()
@@ -1227,16 +1243,53 @@ impl ModuleInfo {
                     }
                 }
             }
-            let vr: HashSet<String> = all_names.intersection(&all_var_names).cloned().collect();
+            let vr: HashSet<String> = all_names
+                .iter()
+                .filter(|n| all_var_names.contains(**n))
+                .map(|&n| n.to_string())
+                .collect();
+            let mut accesses = None;
+            let mut unscanned = false;
             if need_taint {
                 let signature: Vec<&str> = scan::names(&text_str[func.signature.clone()]).collect();
-                let accesses = find_writes_to_globals(body_text, &signature, &persistent_names, &safe_callees);
+                let touches_persistent = vr.iter().any(|n| persistent_names.contains(n))
+                    || signature.iter().any(|&n| persistent_names_ref.contains(n));
+                if touches_persistent {
+                    accesses = Some(find_writes_to_globals(
+                        body_text,
+                        &signature,
+                        &persistent_names_ref,
+                        &safe_callees,
+                    ));
+                } else if scan::items(body_text.as_bytes(), 0..body_text.len()).is_none() {
+                    unscanned = true;
+                }
+            }
+            FuncResult {
+                name: func.name.clone(),
+                fn_refs,
+                var_refs: vr,
+                unbounded,
+                accesses,
+                unscanned,
+            }
+        };
+
+        for func in &func_defs {
+            let res = analyse_func(func);
+            if res.unbounded {
+                unbounded_calls.insert(res.name.clone());
+            }
+            if let Some(accesses) = res.accesses {
                 written_vars.extend(accesses.written);
                 loaded_vars.extend(accesses.loaded);
                 not_only_read.extend(accesses.not_only_read);
             }
-            func_refs_map.insert(func.name.clone(), fn_refs);
-            var_refs_map.insert(func.name.clone(), vr);
+            if res.unscanned {
+                not_only_read.extend(persistent_names.iter().cloned());
+            }
+            func_refs_map.insert(res.name.clone(), res.fn_refs);
+            var_refs_map.insert(res.name, res.var_refs);
         }
 
         // The variables of which every copy keeps the bytes the module gives it: plain data with an
@@ -1719,7 +1772,7 @@ impl LinkedDependencies {
             if let Some((_, value)) = source[var.range.clone()].split_once('=') {
                 let table = symbols[var.name.as_str()];
                 for target in find_referenced_names(value, |name| symbols.contains_key(name)) {
-                    self.callers[symbols[target.as_str()]].push(table);
+                    self.callers[symbols[target]].push(table);
                 }
             }
         }
