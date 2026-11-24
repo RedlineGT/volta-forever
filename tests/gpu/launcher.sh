@@ -10,6 +10,9 @@
 #       PyTorch on the GPU; the layer says that it is there (the variable and the functions
 #       of libcuda.so.1); and what PyTorch's builder of extensions would have nvcc compile
 #       for is an architecture that CUDA 13 has.
+#   (d) VF_SAFE=1 with VF_CUBLAS_BF16_TC=1: what vf doctor says (the switch not used) holds: the bf16
+#       cuBLAS variants give cuBLAS 12.9's bits and count no call on their tensor-core path; without
+#       VF_SAFE, other bits (the control).
 # Both read gigabytes from the file server: use gpu-run-heavy.sh to run this script.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -203,6 +206,52 @@ print("without the layer: capability", torch.cuda.get_device_capability(), "and 
     fi
 else
     echo "SKIP  venv-launcher (no python3 of 3.10 or later with the venv module)"
+fi
+
+echo "=== (d) VF_SAFE=1 with VF_CUBLAS_BF16_TC=1 through the launcher ==="
+# What vf doctor says ("not used: VF_CUBLAS_BF16_TC=1") must be what happens: tests/gpu/forward/bf16-safe.c,
+# products that the variants' tensor-core path takes (legacy TN, NN, NT and cuBLASLt with a bias) and one
+# that the skinny path takes, run through the launcher with the release runtime of forward/bf16tc, must
+# give cuBLAS 12.9's bits, and the runtime's report must count no call on the tensor-core path. The
+# same without VF_SAFE (the control) must give other bits and count calls there.
+T13=$W/toolkits/cuda-13.5.0
+safe_bin=$out/bin/launcher-bf16-safe
+mkdir -p "$out/bin"
+if [ ! -f "$W/dist/forward/bf16tc/libvf_cublas_bf16.so" ]; then
+    echo "SKIP  safe-bf16-tc (the bf16 cuBLAS variants are not built: scripts/build-forwarders.sh)"
+elif ! gcc -O2 -Wall -Wno-deprecated-declarations -I"$T13/include" -o "$safe_bin" "$W/tests/gpu/forward/bf16-safe.c" \
+    -L"$T13/lib" -Wl,-rpath-link,"$T13/lib" -L"$W/dist/lib" -lcublas -lcublasLt -lcudart -l:libcuda.so.1 -ldl -lm -lpthread; then
+    echo "FAIL  safe-bf16-tc (build of bf16-safe.c)"
+    failed=1
+else
+    safe_run() {  # safe_run NAME [VAR=VALUE...]: bf16-safe through the launcher, the switch on
+        local name=$1
+        shift
+        env -i PATH=/usr/bin:/bin HOME="$out/launcher-caches" CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
+          VF_PROXY_CACHE="$out/launcher-caches/proxy" CUDA_CACHE_PATH="$out/launcher-caches/nv" \
+          LD_LIBRARY_PATH="$T13/lib" VF_LOG_LEVEL=2 VF_CUBLAS_BF16_TC=1 "$@" \
+          "$vf" --cuda12 "$T" "$safe_bin" >"$out/launcher-caches/$name.log" 2>&1
+    }
+    doctor=$(env -i PATH=/usr/bin:/bin HOME="$out/launcher-caches" VF_SAFE=1 VF_CUBLAS_BF16_TC=1 \
+        "$vf" --cuda12 "$T" doctor 2>&1)
+    safe_run safe-bf16-tc VF_SAFE=1
+    safe_status=$?
+    safe_run safe-bf16-tc-control
+    tc_counted() { grep -E "libvf_cublas_bf16.so: (cublasGemmEx|cublasLtMatmul): .*tensor-core path [1-9]" "$1"; }
+    log=$out/launcher-caches/safe-bf16-tc.log
+    control=$out/launcher-caches/safe-bf16-tc-control.log
+    echo "$doctor" | grep -i "VF_SAFE" | sed 's/^/  doctor: /'
+    grep -E "VF_SAFE=1:|tensor-core path [0-9]|differ from 12.9's|^ok " "$log" | sed 's/^/  /'
+    if ! echo "$doctor" | grep -q "not used: VF_CUBLAS_BF16_TC=1"; then
+        echo "FAIL  safe-bf16-tc (vf doctor does not say that VF_CUBLAS_BF16_TC=1 is not used)"
+        failed=1
+    elif [ $safe_status -eq 0 ] && grep -qx "ok bf16-safe" "$log" && grep -q "tensor-core path 0" "$log" &&
+        ! tc_counted "$log" >/dev/null && ! grep -qx "ok bf16-safe" "$control" && tc_counted "$control" >/dev/null; then
+        echo "PASS  safe-bf16-tc: what vf doctor says holds (12.9's bits, no call on the tensor-core path; without VF_SAFE, other bits)"
+    else
+        echo "FAIL  safe-bf16-tc (exit $safe_status; $log, control $control)"
+        failed=1
+    fi
 fi
 
 exit $failed
