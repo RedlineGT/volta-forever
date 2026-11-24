@@ -178,6 +178,24 @@ def case(name, proxy):
         out.append(run.api.cuCtxSynchronize())
         stop.set()
         other.join()
+    elif name == "exec-reuse":
+        # An instantiated graph destroyed after its launch (it may be destroyed while it runs), and
+        # another instantiated at its handle (MOCK_EXEC_FIXED=1): the launch is of the first one.
+        stream = run.stream()
+        graphs, execs = [c.c_void_p(), c.c_void_p()], [c.c_void_p(), c.c_void_p()]
+        out.append(run.api.cuStreamBeginCapture_v2(stream, 2))
+        out.append(run.launch("add_one", stream, grid=1))
+        out.append(run.launch("write_null", stream, grid=2))
+        out.append(run.api.cuStreamEndCapture(stream, c.byref(graphs[0])))
+        out.append(run.api.cuGraphInstantiateWithFlags(c.byref(execs[0]), graphs[0], c.c_ulonglong(0)))
+        out.append(run.api.cuGraphLaunch(execs[0], stream))
+        out.append(run.api.cuGraphExecDestroy(execs[0]))
+        out.append(run.api.cuStreamBeginCapture_v2(stream, 2))
+        out.append(run.launch("add_one", stream, grid=3))
+        out.append(run.api.cuStreamEndCapture(stream, c.byref(graphs[1])))
+        out.append(run.api.cuGraphInstantiateWithFlags(c.byref(execs[1]), graphs[1], c.c_ulonglong(0)))
+        out.append(run.api.cuStreamSynchronize(stream))
+        out.append("same-handle" if execs[0].value == execs[1].value else "other-handle")
     elif name == "own-stream-threads":
         # A thread's own default stream is not the next thread's, even when that thread is given the
         # ended one's record of launches: its synchronisation covers its own launches only. (The fault
@@ -300,6 +318,10 @@ def checks(name, log, summary, results):
         count = re.search(r"one of the (\d+) launched", head)
         expect("the report ended while contexts were destroyed, and named the launches of the 120 threads",
                results == ["0", "700"] and count is not None and int(count.group(1)) >= 120 * 255)
+    elif name == "exec-reuse":
+        expect("the second graph was given the first one's handle", results[-1] == "same-handle")
+        expect("the launch is named with the kernel nodes of the graph launched, not of the one at its handle since",
+               "    add_one (grid 1x1x1" in log and "    write_null (grid 2x1x1" in log and "grid 3x1x1" not in log)
     elif name == "own-stream-threads":
         expect("the second thread's synchronisation succeeded, the main thread's met the fault",
                results == ["0", "0", "0", "0", "0", "700"])
@@ -338,7 +360,8 @@ def main():
                        check=True)
         cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
                  ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
-                 ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
+                 ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
+                 ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("copy", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"})]

@@ -1146,13 +1146,49 @@ const GRAPH_KERNELS: usize = 64;
 const GRAPHS_KEPT: usize = 4096;
 
 static GRAPHS: LazyLock<Mutex<HashMap<usize, GraphKernels>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static EXECS: LazyLock<Mutex<HashMap<usize, Arc<GraphKernels>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static EXECS: LazyLock<Mutex<Execs>> = LazyLock::new(|| Mutex::new(Execs::default()));
+
+/// What an instantiated graph has, from when: the epoch at its instantiation, and at its
+/// destruction once it is destroyed. A graph may be destroyed while its launch runs, and the driver
+/// may give its handle to the next graph instantiated: a launch kept is of the graph that had the
+/// handle at the launch's epoch.
+#[derive(Clone, Debug)]
+struct Exec {
+    kernels: Arc<GraphKernels>,
+    from: u64,
+    to: Option<u64>,
+}
+
+/// The instantiated graphs, by handle: the one there now, and those destroyed before at the same
+/// handle (the last `EXECS_ENDED` of each).
+#[derive(Default)]
+struct Execs {
+    live: HashMap<usize, Exec>,
+    ended: HashMap<usize, Vec<Exec>>,
+}
+
+const EXECS_ENDED: usize = 4;
+
+impl Execs {
+    /// The graph at `exec` when the epoch was `epoch`.
+    fn at(&self, exec: usize, epoch: u64) -> Option<Arc<GraphKernels>> {
+        let live = self.live.get(&exec).filter(|e| e.from <= epoch);
+        let ended = || {
+            self.ended
+                .get(&exec)?
+                .iter()
+                .rev()
+                .find(|e| e.from <= epoch && e.to.is_none_or(|to| epoch <= to))
+        };
+        live.or_else(ended).map(|e| e.kernels.clone())
+    }
+}
 
 fn graphs() -> MutexGuard<'static, HashMap<usize, GraphKernels>> {
     GRAPHS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn execs() -> MutexGuard<'static, HashMap<usize, Arc<GraphKernels>>> {
+fn execs() -> MutexGuard<'static, Execs> {
     EXECS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -1245,13 +1281,23 @@ pub fn instantiated(result: CUresult, exec: *mut *mut c_void, graph: *mut c_void
     }
     let exec = unsafe { *exec } as usize;
     let kernels = graphs().get(&(graph as usize)).cloned();
+    // (The launches of this graph find a later epoch; those of one at its handle before, at most
+    // the epoch of its destruction, which came first.)
+    let from = begin() + 1;
     let mut execs = execs();
     match kernels {
-        Some(kernels) if execs.len() < GRAPHS_KEPT || execs.contains_key(&exec) => {
-            execs.insert(exec, Arc::new(kernels));
+        Some(kernels) if execs.live.len() < GRAPHS_KEPT || execs.live.contains_key(&exec) => {
+            execs.live.insert(
+                exec,
+                Exec {
+                    kernels: Arc::new(kernels),
+                    from,
+                    to: None,
+                },
+            );
         }
         _ => {
-            execs.remove(&exec);
+            execs.live.remove(&exec);
         }
     }
 }
@@ -1263,7 +1309,22 @@ pub fn graph_destroyed(graph: *mut c_void) {
 
 /// `exec` is destroyed (`cuGraphExecDestroy`).
 pub fn exec_destroyed(exec: *mut c_void) {
-    execs().remove(&(exec as usize));
+    let exec = exec as usize;
+    let to = begin();
+    let mut execs = execs();
+    let Some(mut ended) = execs.live.remove(&exec) else {
+        return;
+    };
+    // (Kept for the launches made before, which may still run.)
+    ended.to = Some(to);
+    if !execs.ended.contains_key(&exec) && execs.ended.len() >= GRAPHS_KEPT {
+        execs.ended.clear();
+    }
+    let at = execs.ended.entry(exec).or_default();
+    if at.len() >= EXECS_ENDED {
+        at.remove(0);
+    }
+    at.push(ended);
 }
 
 /// The driver answered `result` to the launch of the instantiated graph `exec` on `stream`: what
@@ -1451,7 +1512,7 @@ fn kernel_text(function: u64, fitted: bool, epoch: u64) -> (String, String) {
 /// the first of its kernels whose context is known.
 fn launch_context(launch: &Launch) -> Option<u64> {
     if launch.kind == GRAPH {
-        let kernels = execs().get(&(launch.what as usize)).cloned()?;
+        let kernels = execs().at(launch.what as usize, launch.epoch)?;
         return kernels
             .kernels
             .iter()
@@ -1496,7 +1557,7 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
             String::new()
         };
         if launch.kind == GRAPH {
-            let kernels = execs().get(&(launch.what as usize)).cloned();
+            let kernels = execs().at(launch.what as usize, launch.epoch);
             let Some(kernels) = kernels else {
                 names.push("a CUDA graph".to_string());
                 details.push(format!(
@@ -1991,9 +2052,13 @@ mod tests {
         let mut exec = std::ptr::without_provenance_mut::<c_void>(0x6160_0000);
         instantiated(CUDA_SUCCESS, &mut exec, graph as *mut c_void);
         graph_destroyed(graph as *mut c_void);
-        assert_eq!(execs().get(&0x6160_0000).unwrap().nodes, GRAPH_KERNELS + 20);
+        let now = EPOCH.load(SeqCst);
+        assert_eq!(execs().at(0x6160_0000, now).unwrap().nodes, GRAPH_KERNELS + 20);
         exec_destroyed(exec);
-        assert!(execs().get(&0x6160_0000).is_none());
+        assert!(!execs().live.contains_key(&0x6160_0000));
+        // Kept for a launch made before, not for one made after.
+        assert_eq!(execs().at(0x6160_0000, now).unwrap().nodes, GRAPH_KERNELS + 20);
+        assert!(execs().at(0x6160_0000, EPOCH.load(SeqCst)).is_none());
     }
 
     #[test]
@@ -2043,7 +2108,8 @@ mod tests {
         node_added(graph, 0xa200, [2, 1, 1], [64, 1, 1]);
         let mut exec = std::ptr::without_provenance_mut::<c_void>(0xb100_0000);
         instantiated(CUDA_SUCCESS, &mut exec, std::ptr::without_provenance_mut(graph));
-        let mut event = launch(0, 0, 0x5000, 0xb100_0000, 0);
+        // (Launched after it was instantiated.)
+        let mut event = launch(0, 0, 0x5000, 0xb100_0000, EPOCH.load(SeqCst));
         event.kind = GRAPH;
         event.entry = Entry::GraphLaunch;
         let found = found_in(&[event], &Covers::default(), 7);
