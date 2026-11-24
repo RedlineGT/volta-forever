@@ -401,7 +401,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version; and that the library names no path of the crates as the build host keeps them (`/.cargo/registry/`, `CARGO_HOME`'s when it is set) | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Nineteen more host regressions exercise the built libraries directly:
+Twenty more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -423,6 +423,7 @@ python3 tests/proxy/fault.py dist/lib/libcuda.so.1
 python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
 python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
 python3 tests/proxy/parallel_threads.py dist/lib/libcuda.so.1
+python3 tests/proxy/summary_fill.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -581,6 +582,26 @@ with `VF_THREADS=4` under `RLIMIT_NPROC=1` (this part is skipped, without a line
 retarget it and give its kernel, with no internal error and nothing loaded as is (what the driver is
 given is not compared). It needs a C compiler; run as root, `RLIMIT_NPROC` refuses no thread, and
 the fallback is not reached.
+The twentieth checks the lines that another library puts in
+`VF_SUMMARY`'s file through the layer's `vf_summary_add` and `vf_summary_remove`, with the stand-in of
+the thirteenth and a library of the test's (`summary_fill.c`) whose functions give its lines: the
+return codes, the four slots and a name that takes its slot back, the functions found on the layer's
+handle and not on the driver's; a library's lines after the layer's, with its name in front, written
+again when they change and kept after SIGKILL; functions that fill their whole buffer with control
+bytes, bytes that are not UTF-8 and valid UTF-8 between them, and return more than its size, leave
+the file valid UTF-8 without control characters, each line with a known prefix, the text read up to
+the buffer's end and no further; a removal that waits for the call under way (of 300 ms), calls the
+function once more, keeps its lines marked as its last report, and calls nothing after; a function
+that calls the layer back, refused, not left waiting; children made by `fork()` while the thread
+writes and holds the lock, in which both functions do nothing, nothing is called, and which end and
+write nothing; without `VF_SUMMARY` no thread and no call, and without the thread (it cannot be
+started under `RLIMIT_NPROC`) the lines at exit; at exit, the library loaded after the layer called
+by the layer's last write and its removal after it calling nothing, loaded before it removed first
+with its last report written; a library unloaded by `dlclose` while the thread runs, which removes
+itself in its destructor (its last report stays, the process lives on), and one pinned, which stays,
+its lines written as they change; and, the control, one unloaded without removing itself, into which
+the thread calls (the process ends by SIGSEGV). Each case in a process of its own; it needs a C
+compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -606,11 +627,11 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 513, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 518, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
-`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py`,
+`log_lines.py`, `summary_file.py`, `summary_fill.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py`,
 `parallel_threads.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `tests/scripts/kernel-log.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/python/triton_tc.py` (without a Triton);
