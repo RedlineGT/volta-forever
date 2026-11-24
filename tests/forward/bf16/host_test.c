@@ -420,17 +420,14 @@ static void stats_mode(void)
 /* ---- the paths' rule, pinned: which path serves each class of (n, m k, k), VF_CUBLAS_BF16_TC=1 with the skinny
  * path on. n = 1 goes to 12.9; the skinny path first (n <= 16, or n < 32 with m k < 2^20, where 12.9 runs its
  * sequential kernel); then the tensor-core path for m k >= 2^20 or n >= 32 with RULE_GATE <= k <= 16384, in the TN
- * layout only, for m >= RULE_TALL_M only with n > RULE_TALL_MAX_N, for m >= RULE_TALL_LONG_M only with
- * k <= RULE_TALL_MAX_K, and for k > RULE_WIDE_K
- * only with n <= RULE_WIDE_MAX_N; the rest to 12.9, with its reason. Checked through the runtime's counters. The rows
+ * layout only, for m >= RULE_TALL_M only with n > RULE_TALL_MAX_N, and for k > RULE_WIDE_K only with
+ * n <= RULE_WIDE_MAX_N; the rest to 12.9, with its reason. Checked through the runtime's counters. The rows
  * at the gate and at the bounds of the tall and wide rules are written from these constants, which the runtime must
  * report (VF_TC_MIN_K and the others): moving a bound means changing both, and a gate moved in the runtime alone
  * (VF_BF16_TC_MIN_K=512, a test build's way) makes the first table fail; the second holds whatever the gate is. ---- */
 #define RULE_GATE 1024
 #define RULE_TALL_M 8192
-#define RULE_TALL_MAX_N 128
-#define RULE_TALL_LONG_M 6144
-#define RULE_TALL_MAX_K 9216
+#define RULE_TALL_MAX_N 64
 #define RULE_WIDE_K 8192
 #define RULE_WIDE_MAX_N 256
 
@@ -526,19 +523,19 @@ static void tc_rule(void)
         {1, 0, 151936, RULE_TALL_MAX_N, 896, R_TALL, "an output layer, n at the tall bound, k = 896: the tall reason, not the gate's"},
         {1, 0, RULE_TALL_M, RULE_TALL_MAX_N, 4096, R_TALL, "m at the tall bound, n at its bound"},
         {1, 0, RULE_TALL_M - 8, RULE_TALL_MAX_N, 4096, TC_K, "m one step under the tall bound, n at its bound"},
-        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K, TC_K, "m at the tall bound, n past it, k at the long-k bound"},
-        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "m at the tall bound, n past it, k one step past the long-k bound"},
-        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, R_TALL, "m at the long-k bound, k one step past its bound"},
-        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, RULE_TALL_MAX_K + 8, TC_K, "m one step under the long-k bound, k past its bound"},
-        {1, 0, RULE_TALL_LONG_M, RULE_WIDE_MAX_N, RULE_TALL_MAX_K, TC_K, "m at the long-k bound, k at its bound"},
-        {1, 0, RULE_TALL_LONG_M - 8, RULE_WIDE_MAX_N, 16384, TC_K, "m one step under the long-k bound, k = 16384 (the longest the path takes)"},
-        {1, 0, RULE_TALL_LONG_M, RULE_TALL_MAX_N, 4096, TC_K, "m at the long-k bound, n at the tall bound (below the tall m)"},
-        /* points of the sweeps behind the long-k bounds (docs/performance.md, section 7), on both sides */
-        {1, 0, 7680, 128, 9216, 7680 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 7680 x 128 x 9216"},
-        {1, 0, 7680, 128, 10240, 7680 >= RULE_TALL_LONG_M && 10240 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 7680 x 128 x 10240"},
-        {1, 0, 6144, 192, 9216, 6144 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 6144 x 192 x 9216"},
-        {1, 0, 6144, 192, 16384, 6144 >= RULE_TALL_LONG_M && 16384 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 6144 x 192 x 16384"},
-        {1, 0, 32768, 192, 9216, 32768 >= RULE_TALL_LONG_M && 9216 > RULE_TALL_MAX_K ? R_TALL : TC_K, "the long-k sweep: TN 32768 x 192 x 9216"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N + 1, 16384, TC_K, "m at the tall bound, n past it, k = 16384 (the longest the path takes)"},
+        /* the tier from 65 to 128 columns, which the n bound of 128 left to 12.9: served */
+        {1, 0, 151936, 128, 4096, 128 > RULE_TALL_MAX_N ? TC_K : R_TALL, "an output layer over a vocabulary of 151936, n = 128"},
+        {1, 0, RULE_TALL_M, 96, 4096, 96 > RULE_TALL_MAX_N ? TC_K : R_TALL, "m at the tall bound, n = 96"},
+        /* long products of many rows, the class of the tall rule's former long-k branch (m >= 6144 with k > 9216):
+         * served, on both sides of its former bounds and at the slowest points of its sweeps */
+        {1, 0, 6144, 256, 9224, TC_K, "a long product of many rows, m = 6144, k one step past 9216"},
+        {1, 0, 6136, 256, 9224, TC_K, "a long product of many rows, m one step under 6144, k one step past 9216"},
+        {1, 0, 6144, 256, 9216, TC_K, "a long product of many rows, m = 6144, k = 9216"},
+        {1, 0, 7680, 128, 12800, TC_K, "the long-k sweep's slowest points: TN 7680 x 128 x 12800"},
+        {1, 0, 6656, 192, 13824, TC_K, "the long-k sweep's slowest points: TN 6656 x 192 x 13824"},
+        {1, 0, 6144, 192, 16384, TC_K, "the long-k sweep: TN 6144 x 192 x 16384"},
+        {1, 0, 32768, 192, 16384, TC_K, "the long-k sweep: TN 32768 x 192 x 16384"},
         {1, 0, 8960, RULE_TALL_MAX_N, 1536, 8960 >= RULE_TALL_M ? R_TALL : TC_K, "a gate or up projection of an MLP of 8960, n at the tall bound"},
         {1, 0, 8960, RULE_TALL_MAX_N + 1, 1536, TC_K, "a gate or up projection of an MLP of 8960, n past the tall bound"},
         {1, 0, 1536, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, R_WIDE, "k one step past the wide bound, n past it"},
@@ -548,8 +545,8 @@ static void tc_rule(void)
         {1, 0, 1536, 64, 8960, 8960 > RULE_WIDE_K && 64 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 8960, 64 tokens"},
         {1, 0, 4096, 2048, 12288, 12288 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 12288, 2048 tokens"},
         {1, 0, 896, 2048, 4864, 4864 > RULE_WIDE_K && 2048 > RULE_WIDE_MAX_N ? R_WIDE : TC_K, "the down projection of an MLP of 4864, 2048 tokens"},
-        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_TALL_MAX_K + 8, R_TALL, "tall (past the long-k bounds) and wide: the tall reason first"},
-        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, RULE_WIDE_K + 8 > RULE_TALL_MAX_K ? R_TALL : R_WIDE, "m at the tall bound, k one step past the wide bound, n past it"},
+        {1, 0, RULE_TALL_M, RULE_WIDE_MAX_N + 1, RULE_WIDE_K + 8, R_WIDE, "m at the tall bound, k one step past the wide bound, n past it: wide"},
+        {1, 0, RULE_TALL_M, RULE_TALL_MAX_N, RULE_WIDE_K + 8, R_TALL, "m at the tall bound, n at its bound, k past the wide bound: tall (no product is both)"},
         {0, 1, 151936, 64, 4096, R_LAYOUT, "NT, m = 151936, n = 64: the layout first"},
     };
     int (*min_k)(void) = NULL;
@@ -560,8 +557,8 @@ static void tc_rule(void)
           RULE_GATE);
     int (*bound)(int) = NULL;
     if (rt) *(void **)&bound = dlsym(rt, "vf_bf16_test_rule_bound");
-    static const int want_bounds[] = {RULE_TALL_M, RULE_TALL_MAX_N, RULE_TALL_MAX_K, RULE_WIDE_K, RULE_WIDE_MAX_N,
-                                      RULE_TALL_LONG_M};
+    /* 2 and 5: the bounds of the tall rule's long-k branch, dropped (-1) */
+    static const int want_bounds[] = {RULE_TALL_M, RULE_TALL_MAX_N, -1, RULE_WIDE_K, RULE_WIDE_MAX_N, -1};
     static const char *const bound_names[] = {"VF_TC_TALL_M", "VF_TC_TALL_MAX_N", "VF_TC_TALL_MAX_K",
                                               "VF_TC_WIDE_K", "VF_TC_WIDE_MAX_N", "VF_TC_TALL_LONG_M"};
     for (int b = 0; b < 6; ++b)

@@ -561,26 +561,76 @@ x 4,096) at 0.24; the other two, of 16 rows, at 1.01 and 1.35. The TN products t
 3.88 times 12.9's speed: the down projections (896 x n x 4,864) at 1.45 to 1.53, the adapters' 16 x n x 4,864 at
 2.12 and 3.88. In each setting every step's loss and the trained weights' checksum were the same bits from run to
 run; with the path they differ from those with the switches off (the losses by 0.0042 at most), since its products
-differ from 12.9's in their last bits.
+differ from 12.9's in their last bits. With the rules by class (no product of these steps is in a class they
+changed), the same steps measured again in a job of their own, through the release runtime, three runs of each
+setting alternated: steps per second at 1.07 to 1.08 and 1.07 times those with the switches off for LoRA (8 x 256
+and 32 x 128 tokens), 1.02 and 1.02 for full fine-tuning (the range over the three pairs of runs); every product of
+the steps timed in place, summed per step, at 1.02 to 1.08 times.
 
 ### The rules of speed
 
-The tensor-core path serves only shapes where it was not measured slower than cuBLAS 12.9 on operands that convert
-exactly; a product whose input has many failing columns can still be slower (the exception, below). Three static
-rules of shape, decided before the gate on k, leave the other shapes to 12.9, and with them some at which the path
-was faster, since no bound of shape follows 12.9's waves (what each rule costs per model: below): each gives its
-reason in the exit report, and a control of the test builds removes it (`VF_BF16_CONTROL`), with which the rule's
-tests fail (`bf16-rules`, `tests/forward/bf16.sh`). Speeds are 12.9's time over the path's:
+The tensor-core path serves a class of shapes when, over every layer and n measured in it, its median speed is 1.10
+times cuBLAS 12.9's or more and its slowest 0.90 or more, and no model measured has its products' summed time above
+12.9's at any n, in inference or in training. The classes are regions of shape, the same for every model, those
+that a rule carves or could carve: the tiers of the tall rule (m >= 8,192 with up to 64 columns, and with 65 to
+128), the long products of many rows (m >= 6,144 with k > 9,216 and up to 256 columns), the tiers of the wide rule
+(k > 8,192 with 257 to 320 columns, and with more), the layouts other than TN, and the products that no rule covers,
+of which the one product measured below the floor owes it to its data, not to its shape (the exception, below).
+Three static rules of shape, decided before the gate on k, leave the classes that fail to 12.9, and with them the
+products of those classes at which the path was faster: each gives its reason in the exit report, and a control of
+the test builds removes it (`VF_BF16_CONTROL`), with which the rule's tests fail (`bf16-rules`,
+`tests/forward/bf16.sh`). Speeds are 12.9's time over the path's. The classes, on the real operands of eight models
+(below: every linear layer of the gate, n = 32 to 2,048, two choices of columns, the path measured on every TN
+product, 3 rounds), on the products of four fine-tuning steps timed in place ("Training", above, with the layout
+rule removed) and on the sweeps of the long products of many rows and of the tall rule's n bound of 64 (B15), below
+(operands that convert exactly; the earlier sweeps below are not in the table):
+
+| Class | Products of the models | Median | The slowest (its input's columns failing) | Points of the sweeps | Median | The slowest | Criterion | Rule |
+|---|---:|---:|---|---:|---:|---|---|---|
+| Served remainder: every other TN product of the gate | 18,636 | 2.22 | 1.09: the MLP's down projection of the 0.5B model, 896 x 1,024 x 4,864 (the first n tokens; 12 % failing) | 214 | 1.44 | 1.05: 7,680 x 128 x 9,216 | passes | served |
+| Tall, n <= 64: TN, m >= 8,192 | 1,506 | 1.07 | 0.66: the output layer of the 4B hybrid, 248,320 x 64 x 2,560 (n spread over the batch; none failing) | 64 | 1.02 | 0.70: 248,320 x 64 x 4,096 | fails: median 1.07 < 1.10, slowest 0.66 < 0.90 | to 12.9 |
+| Tall, 65 to 128 columns: TN, m >= 8,192 | 1,004 | 1.24 | 1.04: the output layer of the 1.5B model, 151,936 x 128 x 1,536 (the first n tokens; none failing) | 148 | 1.37 | 1.05: 10,240 x 112 x 4,096 | passes | served |
+| Long products of many rows: TN, m >= 6,144, k > 9,216, n <= 256 | none |  |  | 951 | 1.30 | 0.94: 6,656 x 192 x 13,824 | passes | served |
+| Wide, 257 to 320 columns: TN, k > 8,192 | 184 | 1.60 | 0.85: the MLP's down projection of the 1.5B model, 1,536 x 320 x 8,960 (the first n tokens; 64 % failing) |  |  |  | fails: slowest 0.85 < 0.90 | to 12.9 |
+| Wide, more than 320 columns: TN, k > 8,192 | 1,196 | 1.39 | 0.62: the MLP's down projection of the 1.5B model, 1,536 x 768 x 8,960 (n spread over the batch; 55 % failing) |  |  |  | fails: slowest 0.62 < 0.90 | to 12.9 |
+| The exception, in the served remainder: one layer, the 9B hybrid's first linear-attention output projection (TN 4,096 x n x 4,096, 20 to 38 % of its input's columns failing) | 29 | 1.19 | 0.88 at n = 320 (30 %; across processes; 0.857 in one process, at n = 320) | | | | below the floor; no rule of shape tells it from its shape's other products | served |
+| Layouts other than TN: NN, NT, TT (a fine-tuning step's backward products, timed in place) | 22 | 0.51 | 0.24: NT 16 x 4,864 x 4,096 | | | | fails: median 0.51 < 1.10, slowest 0.24 < 0.90 | to 12.9 |
+
+The wide rule's class of 257 to 320 columns fails on its slowest product alone (its median: 1.60): the 1.5B
+model's MLP down projection with the most failing columns, TN 1,536 x 320 x 8,960 at n = 320 (the first 320
+tokens of the prefill), 64 % of its input's columns failing, at 0.85; with the 320 columns spread over the batch
+the same layer ran at 1.08, and the class's 182 other products (the down projections of the 1.5B model, the 9B
+hybrid and the 4B hybrid at n = 320) at 1.05 to 2.15. How many of a layer's columns fail depends on its data,
+which no rule of shape sees: the class goes to 12.9 whole, and those gains with it.
+
+With these rules, each model's summed step (the sum of its products' times over the layers measured, as a speed
+against 12.9) at its lowest over every n and both choices of columns, the exception's layer served, against the
+rules before the classes (the tall rule then took 65 to 128 columns and the long products of many rows too) and
+every product served; the fine-tuning steps' products together ran at 1.02 to 1.08 times 12.9's speed, and at 1.02
+to 1.08 times in the check under these rules ("Training", above):
+
+| Model | Lowest summed step with these rules (n, choice of columns) | With the rules before | Every product served |
+|---|---|---|---|
+| 0.5B model | 1.495 (n = 2,048, the first n tokens) | 1.495 | 1.495 |
+| 1.5B model | 1.521 (n = 320, the first n tokens) | 1.521 | 1.760 |
+| 9B hybrid | 1.488 (n = 320, n spread over the batch) | 1.308 | 1.543 |
+| 4B hybrid | 1.577 (n = 320, n spread over the batch) | 1.549 | 1.693 |
+| T5-base | 1.730 (n = 1,536, n spread over the batch) | 1.730 | 1.730 |
+| OPT-125m | 1.732 (n = 1,536, the first n tokens) | 1.732 | 1.732 |
+| bge-base-en-v1.5 | 1.716 (n = 1,536, the first n tokens) | 1.716 | 1.716 |
+| whisper-small's encoder | 2.137 (n = 1,024, the first n tokens) | 2.137 | 2.137 |
+
+The rules:
 
 | Rule | Products left to 12.9 | Reason in the exit report | Measured on the side it leaves to 12.9 | Measured on the side it serves | Control |
 |---|---|---|---|---|---|
 | Layout | every layout but TN (op(A) = A^T, op(B) = B): a backward pass's input gradients (NN) and weight gradients (NT), TT | `not TN (the tensor-core path's layout)` | the NN and NT products of four fine-tuning steps, timed in place with the rule removed: 20 of the 22 that the path would serve at 0.24 to 0.92 (the output layer's weight gradient, NT 896 x 151,936 x 4,096, at 0.29), the two others, of 16 rows, at 1.01 and 1.35; the steps' products together at 0.61 to 0.84 | the same steps' TN products: 1.45 to 3.88; the steps' products together at 1.02 to 1.08 | `tc-layouts` |
-| Tall | TN with m >= 8,192 and n <= 128, or with m >= 6,144 and k > 9,216 | `m >= 8192 with n <= 128, or m >= 6144 with k > 9216 (12.9 as fast at some of these shapes)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96, at n = 65 to 128: 1.01 to 1.56; at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; with m >= 6,144, k > 9,216 and n <= 256: 48 of 951 points below 1.03, down to 0.94, in bands that follow 12.9's waves, and the other widths of the same shapes at up to 1.9 (sweeps below) | output layers at n >= 129: 1.21 and more (1.37 to 1.59 at 129); with k up to 9,216 at m >= 6,144 and n <= 256: 1.05 and more | `tc-tall` |
+| Tall | TN with m >= 8,192 and n <= 64 | `m >= 8192 with n <= 64 (12.9 as fast or faster)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96; at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; the sweep B15 (m = 8,192 to 248,320, k = 1,024 to 4,096) at n = 56 and 64: a median of 0.92, 28 of 42 points below 1.0, down to 0.70 (248,320 x 64 x 4,096) | output layers at n = 65 to 128: 1.01 to 1.56, from 129: 1.21 and more; B15 at 65 to 128 columns: 126 points, a median of 1.40, the slowest 1.05 (10,240 x 112 x 4,096); the long products of many rows (m >= 6,144, k > 9,216, n <= 256): 951 points, median 1.30, 48 below 1.03 down to 0.94 in bands that follow 12.9's waves (sweeps below) | `tc-tall` |
 | Wide | TN with k > 8,192 and n > 256 | `k > 8192 with n > 256 (the fallback's cost on real activations)` | a down projection (k = 8,960) with 53 to 70 % of its input's columns failing, the rule removed by its control: 0.85 and 1.08 at n = 320 (the two choices of columns), 0.62 to 0.98 at every n from 384 to 2,048 | the same layer at n = 256: 1.15 to 1.17, at n = 192: 1.17 to 1.23 | `tc-wide` |
 | None: the exception | nothing (no rule of shape tells these products from others of their shape) | none; from `VF_LOG_LEVEL=2` the exit report counts the calls with more than a quarter of their rows or columns failing | | served, and can run below 12.9's speed: a product whose input has a quarter or more of its columns failing the exact check, near the top of one of 12.9's waves; measured on one layer, TN 4,096 x n x 4,096 with 26 to 38 % failing: 0.86 to 0.97 at n = 128, 192 and 256 to 320 (below) | |
 
-The tall and wide bounds come from the sweeps below and from the real operands of four language models (a 0.5B model
-of hidden size 896, a 1.5B model of hidden size 1,536, and two hybrid models of linear-attention and attention
+The classes and the bounds come from the sweeps below and from the real operands of four language models (a 0.5B
+model of hidden size 896, a 1.5B model of hidden size 1,536, and two hybrid models of linear-attention and attention
 layers, 9B of hidden size 4,096 and 4B of hidden size 2,560): every linear layer with k >= 1,024 of one prefill of 8
 x 256 tokens of text, at n = 32 to 2,048 in 15 steps, two choices of n of those columns (the first n tokens; n
 spread over the batch), 3 rounds, the settings alternated in separate processes, the path measured on every TN
@@ -590,9 +640,9 @@ serve:
 | Model | Layers | Products served | Median speed | The slowest served | Below 1.05 | Below 1.0 | Products left to 12.9 |
 |---|---:|---:|---:|---|---:|---:|---:|
 | 0.5B, hidden 896 | 24 | 696 | 3.28 | 1.09: the MLP's down projection, 896 x 4,864, n = 1,024 (12 % of its columns failing) | 0 | 0 | 0 |
-| 1.5B, hidden 1,536 | 197 | 4,723 | 2.59 | 1.15: the MLP's down projection, 1,536 x 8,960, n = 256 (52 % of its columns failing) | 0 | 0 | 990 |
-| 9B hybrid, hidden 4,096 | 249 | 5,771 | 2.02 | 0.88: a linear-attention output projection, 4,096 x 4,096, n = 320 (30 % of its columns failing) | 9 | 6 | 1,450 |
-| 4B hybrid, hidden 2,560 | 249 | 5,771 | 2.07 | 1.28: the output layer, 248,320 x 2,560, n = 192 (none of its columns failing) | 0 | 0 | 1,450 |
+| 1.5B, hidden 1,536 | 197 | 4,951 | 2.56 | 1.04: the output layer, 151,936 x 1,536, n = 128 (none of its columns failing) | 2 | 0 | 762 |
+| 9B hybrid, hidden 4,096 | 249 | 6,159 | 1.95 | 0.88: a linear-attention output projection, 4,096 x 4,096, n = 320 (30 % of its columns failing) | 9 | 6 | 1,062 |
+| 4B hybrid, hidden 2,560 | 249 | 6,159 | 2.06 | 1.04: the output layer, 248,320 x 2,560, n = 128 (none of its columns failing) | 2 | 0 | 1,062 |
 
 and four models with ReLU and GELU activations (their MLPs' second products, k = 3,072, are their only layers of
 k >= 1,024; no column of their inputs failed the check):
@@ -604,7 +654,7 @@ k >= 1,024; no column of their inputs failed the check):
 | bge-base-en-v1.5 (GELU, BERT encoder) | 12 | 348 | 3.90 | 1.67: 768 x 3,072, n = 1,536 | 0 |
 | whisper-small's encoder (GELU, 1,500 frames of audio) | 12 | 312 | 4.58 | 2.11: 768 x 3,072, n = 1,024 | 0 |
 
-Every product the rules serve in these eight models ran at 1.03 times 12.9's speed or more, but in one layer: the
+Every product the rules serve in these eight models ran at 1.04 times 12.9's speed or more, but in one layer: the
 exception below.
 
 **The exception: a product whose input has many failing columns.** 12.9 computes a bf16 product in tiles of 64 x 64,
@@ -658,7 +708,7 @@ bits depend on the other columns' data. A rule of shape would take the layer's a
 shape, no failing column: 1.33 to 2.46). From `VF_LOG_LEVEL=2` the exit report counts the calls with more than a
 quarter of their rows or columns failing.
 
-What each rule costs and keeps, per model and per shape class, from the same runs: the path measured on every TN
+What each rule costs and keeps, per model, from the same runs: the path measured on every TN
 product of its gate (a test build with the tall and wide rules removed by their controls, which leave the path's
 computation as it is) against 12.9 in separate processes, 3 rounds, and a product that a rule leaves to 12.9 counted
 at 12.9's time. The summed step is the sum of the products' times over the layers measured (the first n tokens), as
@@ -672,43 +722,40 @@ evidence:
 | 0.5B | 512 | 24 | 18.97 | 2.51 | 2.51 | 2.51 | 2.51 | 0 / 0 |
 | 0.5B | 2,048 | 24 | 45.60 | 1.49 | 1.49 | 1.49 | 1.49 | 0 / 0 |
 | 1.5B | 64 | 197 | 86.36 | 2.28 | 2.36 | 2.28 | 2.36 | 57 / 0 |
-| 1.5B | 128 | 197 | 92.88 | 2.11 | 1.98 | 2.11 | 1.98 | 57 / 0 |
+| 1.5B | 128 | 197 | 92.88 | 2.11 | 2.11 | 2.11 | 2.11 | 0 / 0 |
 | 1.5B | 512 | 197 | 183.31 | 1.89 | 1.59 | 1.59 | 1.89 | 0 / 28 |
 | 1.5B | 2,048 | 197 | 604.50 | 1.76 | 1.55 | 1.55 | 1.76 | 0 / 28 |
 | 9B hybrid | 64 | 249 | 227.95 | 1.54 | 1.56 | 1.54 | 1.56 | 97 / 0 |
-| 9B hybrid | 128 | 249 | 307.18 | 1.66 | 1.31 | 1.66 | 1.31 | 97 / 0 |
+| 9B hybrid | 128 | 249 | 307.18 | 1.66 | 1.66 | 1.66 | 1.66 | 0 / 0 |
 | 9B hybrid | 512 | 249 | 845.92 | 1.84 | 1.66 | 1.66 | 1.84 | 0 / 32 |
 | 9B hybrid | 2,048 | 249 | 3,018.98 | 1.71 | 1.61 | 1.61 | 1.71 | 0 / 32 |
 | 4B hybrid | 64 | 249 | 155.87 | 1.78 | 1.82 | 1.78 | 1.82 | 97 / 0 |
-| 4B hybrid | 128 | 249 | 179.45 | 1.71 | 1.56 | 1.71 | 1.56 | 97 / 0 |
+| 4B hybrid | 128 | 249 | 179.45 | 1.71 | 1.71 | 1.71 | 1.71 | 0 / 0 |
 | 4B hybrid | 512 | 249 | 438.09 | 1.85 | 1.74 | 1.74 | 1.85 | 0 / 32 |
 | 4B hybrid | 2,048 | 249 | 1,579.80 | 1.81 | 1.69 | 1.69 | 1.81 | 0 / 32 |
 
 The four ReLU and GELU models have no product that a rule leaves to 12.9: their summed step is the same with and
-without the rules. The tall rule costs the three larger models most at n = 128, where it gives 12.9 their MLPs' up
-projections and output layers (with every product served and with the rules: 1.66 and 1.31 on the 9B hybrid, 1.71
-and 1.56 on the 4B hybrid, 2.11 and 1.98 on the 1.5B model), and the wide rule from n = 320 on, where it gives 12.9
-their MLPs' down projections (1.89 and 1.59 on the 1.5B model, 1.84 and 1.66 on the 9B hybrid, 1.85 and 1.74 on the
-4B hybrid at n = 512); the tall rule's long-k branch costs these models nothing, as none of them has a product
-there. Per shape class, over every layer, n and choice of columns measured in the class:
+without the rules. The tall rule, at n <= 64, gives 12.9 the MLPs' up projections and the output layers of the three
+larger models, where 12.9 was as fast or faster at many shapes: with it their summed step is a little faster than
+with every product served (at n = 64: 2.36 against 2.28 on the 1.5B model, 1.56 against 1.54 on the 9B hybrid, 1.82
+against 1.78 on the 4B hybrid); from 65 columns on it gives 12.9 nothing (at n = 128 the rules before the classes,
+which gave it that tier too, ran the 9B hybrid at 1.31 against 1.66 now, the 4B hybrid at 1.56 against 1.71 and the
+1.5B model at 1.98 against 2.11). The wide rule, from n = 320 on, gives 12.9 their MLPs' down projections (1.89
+against 1.59 on the 1.5B model, 1.84 against 1.66 on the 9B hybrid, 1.85 against 1.74 on the 4B hybrid at n = 512,
+every product served against the rules): its class's slowest products, 0.62 times 12.9's speed on real text, fail
+the criterion, and its faster ones go to 12.9 with them. The long products of many rows are served, and no layer of
+these models has one.
 
-| Class | Products | Median | The slowest (its input's columns failing) | Below 1.0 | Below 0.9 |
-|---|---:|---:|---|---:|---:|
-| Served remainder: every other TN product of the gate | 18,665 | 2.22 | 0.88: a linear-attention output projection, 4,096 x 320 x 4,096 (30 %) | 6 | 2 |
-| Tall, n <= 64: TN, m >= 8,192 | 1,506 | 1.07 | 0.66: the output layer, 248,320 x 64 x 2,560 (none) | 264 | 18 |
-| Tall, 65 to 128 columns: TN, m >= 8,192 | 1,004 | 1.24 | 1.04: the output layer, 151,936 x 128 x 1,536 (none) | 0 | 0 |
-| Wide, 257 to 320 columns: TN, k > 8,192 | 184 | 1.60 | 0.85: the MLP's down projection, 1,536 x 320 x 8,960 (64 %) | 1 | 1 |
-| Wide, more than 320 columns: TN, k > 8,192 | 1,196 | 1.39 | 0.62: the MLP's down projection, 1,536 x 768 x 8,960 (55 %) | 13 | 9 |
-
-The long products of many rows (TN with m >= 6,144, k > 9,216 and n <= 256), which no layer of these models has, are
-in the sweeps below: 951 points, median 1.30, the slowest 0.94. The layout rule's class is a training step's
-backward products (above, "Training": with the rule removed, 20 of its 22 NN and NT products within the path's gate
-ran at 0.24 to 0.92, and the steps' products together at 0.61 to 0.84).
-
-At n <= 128 the tall rule gives 12.9 the MLPs' up projections and the output layers of the three larger models. On
-these models their tier from 65 to 128 columns ran at 1.24 (median) and 1.04 at worst, but the sweeps found points
-at 112 to 128 columns, at m = 10,240 and on output layers, where 12.9 was within 3 % of the path or faster (down to
-0.95): the rule, which serves no shape where a product was measured within 3 % of 12.9, takes the whole tier.
+The tier from 65 to 128 columns of the tall rule (the MLPs' up projections and the output layers of the three larger
+models at a batch of 65 to 128 tokens) passes the criterion: on these models it ran at 1.24 (median) and 1.04 at
+worst; the earlier sweep of the n bound (k = 1,536 to 7,168, below) found points at 112 to 128 columns, at m =
+10,240 and on output layers, where 12.9 was within 3 % of the path or faster (down to 0.95), above the floor, and
+B15 (k = 1,024 to 4,096) none below 1.05. Through the release runtime of these rules, on the same models' layers of
+m >= 8,192 (n = 32 to 192, the first n tokens and n spread over the batch, against 12.9 in separate processes, 3
+rounds): at n = 96 and 128, the tier these rules serve, 1,004 products at a median of 1.24, the slowest 1.04 (the
+output layer of the 1.5B model, 151,936 x 128 x 1,536, the first n tokens), up to 1.76; at n = 192, served before
+too, 502 products at a median of 1.63, the slowest 1.25; at n <= 64, which the rule leaves to 12.9, 1,506 products at
+1.00 (12.9 against itself: 0.97 to 1.04).
 
 **The sweeps** (synthetic operands, every row and column converting, TN; the medians of 2 or 3 passes):
 
@@ -721,22 +768,26 @@ at 112 to 128 columns, at m = 10,240 and on output layers, where 12.9 was within
   n = 136 to 192.
 - output layers, m = 151,936 and 248,320, k = 1,024 to 4,096: 0.65 to 0.96 at n <= 64, 1.01 to 1.56 at n = 65 to
   128, 1.21 and more from 129.
-- the tall rule's long-k branch (TN with m >= 6,144 and k > 9,216): k = 8,448 to 13,824 at m = 6,144 to 8,192 in
-  steps of 128 to 256 and n = 48 to 256; k = 14,336 to 16,384 at m = 6,144 and 6,272; k = 12,288 to 16,384 at
-  m = 8,320 to 32,768 and n = 160 to 256; and k = 8,448 to 9,216 at m = 8,320 to 32,768 (3 passes each, the rule
-  removed by its control), with the earlier corner (k = 12,288 to 16,384, m = 6,144 to 8,320, n = 48 to 384). On the
-  side it serves, k up to 9,216, every point ran at 1.05 or more (214 points; the slowest, 7,680 x 128 x 9,216, at
-  1.05). Past its bounds, 48 of 951 points were below 1.03, down to 0.94: at 128 columns for m = 6,912 to 7,680 from
-  k = 10,240 on, at 192 columns for m = 6,144 to 6,656 from k = 12,288 on (at m = 6,144 only at k = 16,384, 1.03) and
-  for m = 20,480 to 32,768 from k = 13,824 on, at 64 and 96 columns for m = 7,680 to 8,064 from k = 12,800 on, and at
-  256 columns for m = 10,240 to 20,480 from k = 13,824 on; the other widths of the same shapes ran at up to 1.9 (160
-  and 224 columns at 1.07 and more everywhere; the median of the 951 points, 1.30). These bands follow 12.9's waves:
-  from 96 columns on, every point below 1.03 was one where 12.9's 64 x 64 output tiles, ceil(m / 64) ceil(n / 64) of
-  them dealt to the 80 SMs, fill at least 90 % of the places that the busiest SM's count gives all of them, so that
-  12.9 wastes almost nothing of its last wave; most such points were still faster (44 of 495 were not), and at 48 to
-  64 columns the four points below 1.03 do not follow it (a fill of 0.78 to 0.79). No
-  bound of shape follows the bands, so the branch takes the region, the faster widths with it; no layer of the eight
-  models measured has such a shape.
+- the tall rule's n bound of 64 (sweep B15; 3 passes, the tall and wide rules removed by their controls): m = 8,192
+  to 248,320, k = 1,024 to 4,096, n = 56 to 128 (168 points): at n = 56 and 64 a median of 0.92, 28 of 42 points
+  below 1.0, down to 0.70 (248,320 x 64 x 4,096); at 65 to 128 columns a median of 1.40, none of 126 below 1.0, the
+  slowest 1.05 (10,240 x 112 x 4,096), up to 1.93.
+- the long products of many rows (TN with m >= 6,144 and k > 9,216; the tall rule left them to 12.9 before the
+  classes): k = 8,448 to 13,824 at m = 6,144 to 8,192 in steps of 128 to 256 and n = 48 to 256; k = 14,336 to 16,384
+  at m = 6,144 and 6,272; k = 12,288 to 16,384 at m = 8,320 to 32,768 and n = 160 to 256; and k = 8,448 to 9,216 at
+  m = 8,320 to 32,768 (3 passes each, the rule removed by its control), with the earlier corner (k = 12,288 to
+  16,384, m = 6,144 to 8,320, n = 48 to 384). With k up to 9,216, every point ran at 1.05 or more (214 points; the
+  slowest, 7,680 x 128 x 9,216, at 1.05). Past k = 9,216, 48 of 951 points were below 1.03, down to 0.94: at 128
+  columns for m = 6,912 to 7,680 from k = 10,240 on, at 192 columns for m = 6,144 to 6,656 from k = 12,288 on (at m
+  = 6,144 only at k = 16,384, 1.03) and for m = 20,480 to 32,768 from k = 13,824 on, at 64 and 96 columns for m =
+  7,680 to 8,064 from k = 12,800 on, and at 256 columns for m = 10,240 to 20,480 from k = 13,824 on; the other
+  widths of the same shapes ran at up to 1.9 (160 and 224 columns at 1.07 and more everywhere; the median of the 951
+  points, 1.30). These bands follow 12.9's waves: from 96 columns on, every point below 1.03 was one where 12.9's 64
+  x 64 output tiles, ceil(m / 64) ceil(n / 64) of them dealt to the 80 SMs, fill at least 90 % of the places that
+  the busiest SM's count gives all of them, so that 12.9 wastes almost nothing of its last wave; most such points
+  were still faster (44 of 495 were not), and at 48 to 64 columns the four points below 1.03 do not follow it (a
+  fill of 0.78 to 0.79). No bound of shape follows the bands; the class passes the criterion (median 1.30, slowest
+  0.94) and is served, the bands with it; no layer of the eight models measured has such a shape.
 - the wide rule's n bound on real operands (the runs above, the rule removed by its control): the down projection
   with the most failing columns (k = 8,960) at 1.15 to 1.23 at n = 192 to 256, at 0.85 at n = 320 (the first
   tokens; 1.08 with the columns spread over the batch) and below 1.0 at every n from 384 on (down to 0.62); no

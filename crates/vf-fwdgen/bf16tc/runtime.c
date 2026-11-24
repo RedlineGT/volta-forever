@@ -12,8 +12,10 @@
 // - The skinny path (VF_CUBLAS_BF16_SKINNY=1, or with VF_CUBLAS_BF16_TC=1 unless SKINNY=0): one
 //   kernel, one fp32 fused multiply-add chain per element in increasing k from +0, no workspace.
 // - The tensor-core path (VF_CUBLAS_BF16_TC=1), for TN products (op(A) = A^T, op(B) = B: the layout of
-//   linear layers) that are not captured in a graph, but for the shapes that its rules of speed leave to cuBLAS
-//   12.9 (below; they serve no shape that was measured slower than 12.9 on operands that convert exactly): rows of
+//   linear layers) that are not captured in a graph, but for the classes of shapes that its rules of speed leave to
+//   cuBLAS 12.9 (below: a class is served when, over every layer and n measured in it, its median speed is 1.10
+//   times 12.9's or more and its slowest 0.90 or more, and no model measured has its products' summed time above
+//   12.9's at any n; a product of a served class can still run below 12.9's speed, LIMITS.md): rows of
 //   op(A) and columns of op(B) scaled by exact powers of two and converted to fp16 when every element
 //   converts exactly; CUDA 12.9's fp16 GEMM over fixed k-slices of 256, on a cuBLASLt handle of this
 //   runtime's own; an exact rescale; the rows and columns that do not convert by a fused multiply-add
@@ -65,9 +67,10 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
  * A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
 #define VF_TC_MIN_K 1024
 /* The tensor-core path's layout: op(A) = A^T and op(B) = B (TN, how cuBLAS sees a framework's linear layer
- * y = x W^T, in inference and in the forward pass of training). A performance rule: in the other layouts the
- * path reads strided vectors, 64 to a block of its scale kernel and again for every chunk of columns, and its
- * fallback is the generic tiled kernel, so it was slow at long k even when every row and column converted; and
+ * y = x W^T, in inference and in the forward pass of training). A rule of speed (the class of the other layouts
+ * fails the class criterion above: down to 0.24 times 12.9's speed on a fine-tuning step's products): in the other
+ * layouts the path reads strided vectors, 64 to a block of its scale kernel and again for every chunk of columns, and
+ * its fallback is the generic tiled kernel, so it was slow at long k even when every row and column converted; and
  * the products of a backward pass are in those layouts (input gradients NN, weight gradients NT with k the
  * batch's tokens), whose gradients' rows and columns fail the exact check. On fine-tuning steps' own operands
  * most of the NN and NT products the path would serve ran below 12.9's speed, several at under half of it, where
@@ -75,19 +78,18 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
  * 12.9. */
 #define VF_TC_TRANS_A 1
 #define VF_TC_TRANS_B 0
-/* The tall rule, a rule of speed: TN with m >= VF_TC_TALL_M is served only with n > VF_TC_TALL_MAX_N, and TN with
- * m >= VF_TC_TALL_LONG_M only with k <= VF_TC_TALL_MAX_K. With so many rows cuBLAS 12.9 fills the GPU: up to 64
- * columns (its tile's width) it computed such products about as fast as the path from m = 8256 on, and from 112 to
- * 128 columns (two of its tiles) as fast or faster at some m from 10240 on. With k beyond 9216 and m from 6144 on,
- * it was within 3 % of the path or faster in narrow bands of m and n, where its tiles fill its waves, between widths
- * at which the path was faster: no bound of shape separates them, so this branch takes them all (the wide rule takes
- * more than 256 columns); with k up to 9216 the path was faster at every point measured (docs/performance.md,
- * section 7, gives the sweeps and the points on both sides of each bound). */
+/* The tall rule, a rule of speed: TN with m >= VF_TC_TALL_M is served only with n > VF_TC_TALL_MAX_N. With so many
+ * rows cuBLAS 12.9 fills the GPU: up to 64 columns (its tile's width) it computed such products about as fast as the
+ * path from m = 8256 on, and output layers over a vocabulary up to 1.5 times as fast: that class fails the class
+ * criterion above. The class from 65 to 128 columns passes it, and so do the long products of many rows (m from 6144
+ * on with k beyond 9216, where 12.9 was within 3 % of the path or faster in narrow bands of m and n that follow its
+ * waves): both are served (docs/performance.md, section 7, gives each class, and the sweeps on both sides of the
+ * bound). */
 #define VF_TC_TALL_M 8192
-#define VF_TC_TALL_MAX_N 128
-#define VF_TC_TALL_LONG_M 6144
-#define VF_TC_TALL_MAX_K 9216
-/* The wide rule, a rule of speed: TN with k > VF_TC_WIDE_K is served only with n <= VF_TC_WIDE_MAX_N. Such products
+#define VF_TC_TALL_MAX_N 64
+/* The wide rule, a rule of speed (its two classes fail the class criterion above on their slowest products: from 257
+ * to 320 columns 0.85 times 12.9's speed, beyond 0.62, on real text): TN with k > VF_TC_WIDE_K is served only with
+ * n <= VF_TC_WIDE_MAX_N. Such products
  * are the down projections of SiLU-gated MLPs, whose inputs (the gated activations) hold values far below their
  * columns' largest: on real text, up to 75 % of a layer's columns fail the exact check, and the fallback computes
  * them, one fused multiply-add chain over the whole k each, which costs more than the path saves over 12.9 from
@@ -350,8 +352,7 @@ enum {
     R_SHORT_K, /* in the tensor-core path's gate but for k, shorter than VF_TC_MIN_K */
     R_SAFE,    /* a call the tensor-core path would serve, with VF_SAFE=1 */
     R_LAYOUT,  /* in the tensor-core path's gate, in another layout than TN */
-    R_TALL,    /* TN in the tensor-core path's gate with m >= VF_TC_TALL_M and n <= VF_TC_TALL_MAX_N, or with
-                * m >= VF_TC_TALL_LONG_M and k > VF_TC_TALL_MAX_K */
+    R_TALL,    /* TN in the tensor-core path's gate with m >= VF_TC_TALL_M and n <= VF_TC_TALL_MAX_N */
     R_WIDE,    /* TN in the tensor-core path's gate with k > VF_TC_WIDE_K and n > VF_TC_WIDE_MAX_N */
     R_HANDLE,  /* a handle not created through the variants */
     R_CONTEXT, /* its context has no kernels, or another context is current or owns the stream */
@@ -372,8 +373,7 @@ static const char *const reason_name[R_N] = {
     "another cuBLAS build",
     "k > 16384", "k < " VF_STR(VF_TC_MIN_K) " (the tensor-core path's gate)", "VF_SAFE=1",
     "not TN (the tensor-core path's layout)",
-    "m >= " VF_STR(VF_TC_TALL_M) " with n <= " VF_STR(VF_TC_TALL_MAX_N) ", or m >= " VF_STR(VF_TC_TALL_LONG_M)
-    " with k > " VF_STR(VF_TC_TALL_MAX_K) " (12.9 as fast at some of these shapes)",
+    "m >= " VF_STR(VF_TC_TALL_M) " with n <= " VF_STR(VF_TC_TALL_MAX_N) " (12.9 as fast or faster)",
     "k > " VF_STR(VF_TC_WIDE_K) " with n > " VF_STR(VF_TC_WIDE_MAX_N) " (the fallback's cost on real activations)",
     "unknown handle",
     "context", "math mode", "pointer mode", "alpha = 0", "aliasing", "cuBLASLt attribute",
@@ -977,8 +977,7 @@ static int choose_path(const Shape *s, int *reason)
             *reason = R_LAYOUT;
             return PATH_NONE;
         }
-        if (((m >= VF_TC_TALL_M && n <= VF_TC_TALL_MAX_N) || (m >= VF_TC_TALL_LONG_M && k > VF_TC_TALL_MAX_K)) &&
-            !CONTROL("tc-tall")) {
+        if (m >= VF_TC_TALL_M && n <= VF_TC_TALL_MAX_N && !CONTROL("tc-tall")) {
             *reason = R_TALL;
             return PATH_NONE;
         }
@@ -2022,11 +2021,12 @@ EXPORT int vf_bf16_test_tc_min_k(void)
     return cfg.tc_min_k;
 }
 
-/* Test builds: the bounds of the tall and wide rules (0: VF_TC_TALL_M, 1: VF_TC_TALL_MAX_N, 2: VF_TC_TALL_MAX_K,
- * 3: VF_TC_WIDE_K, 4: VF_TC_WIDE_MAX_N, 5: VF_TC_TALL_LONG_M), so that the tests write their rows from them. */
+/* Test builds: the bounds of the tall and wide rules (0: VF_TC_TALL_M, 1: VF_TC_TALL_MAX_N, 3: VF_TC_WIDE_K,
+ * 4: VF_TC_WIDE_MAX_N; 2 and 5, the bounds of the tall rule's long-k branch before it was dropped: -1), so that the
+ * tests write their rows from them. */
 EXPORT int vf_bf16_test_rule_bound(int i)
 {
-    static const int b[] = {VF_TC_TALL_M, VF_TC_TALL_MAX_N, VF_TC_TALL_MAX_K, VF_TC_WIDE_K, VF_TC_WIDE_MAX_N, VF_TC_TALL_LONG_M};
+    static const int b[] = {VF_TC_TALL_M, VF_TC_TALL_MAX_N, -1, VF_TC_WIDE_K, VF_TC_WIDE_MAX_N, -1};
     return i >= 0 && i < (int)(sizeof b / sizeof *b) ? b[i] : -1;
 }
 

@@ -506,23 +506,20 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   12.9's speed (the other two, of 16 rows, at 1.01 and 1.35), and the steps' products together at 0.61 to
   0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.45 to 3.88 times
   (`docs/performance.md`, section 7).
-- **Narrow products of tall matrices go to cuBLAS 12.9**: TN with m >= 8192 is served only with n > 128, and TN with
-  m >= 6144 only with k <= 9216 (an output layer over a vocabulary, or a wide MLP's up projection, at a batch of up to
-  128 tokens; and long products of many rows). With so many rows 12.9 fills the GPU. Up to 64 columns, its tile's
-  width, it computed such products about as fast as the path or faster from m = 8256 on (1.014 to 1.03 times as fast
-  at m = 8256 to 8320, as fast or faster from 8384 on, down to 0.65 times its speed on output layers); from 65 to 128
-  columns the path was up to 1.7 times as fast, but within 3 % or slower (down to 0.95 times) at 112 to 128 columns
-  on output layers and at m = 10240; from 129 columns on it was at least 1.21 times as fast (1.37 to 1.59 at
-  129). With k beyond 9216 and m from 6144 on, 12.9 was within 3 % of the path or faster in narrow bands of m and n
-  where its 64 x 64 tiles fill its waves: 48 of the 951 points measured there (k = 10240 to 16384, n = 48 to 256),
-  down to 0.94 times, at 128 columns for m = 6912 to 7680, at 192 columns for m = 6144 to 6656 and from m = 20480
-  on, at 64 and 96 columns for m = 7680 to 8064 and at 256 columns for m = 10240 to 20480 (at m = 6144 only at
-  k = 16384, 1.03 times). Between those bands, the other widths of the same shapes ran at up to 1.9 times 12.9's
-  speed (the median of the 951 points: 1.30): no bound of shape separates them, so the branch leaves the whole
-  region to 12.9, the faster widths with it; no layer of the eight models measured has such a shape. With k up to
-  9216 the path was at least 1.05 times as fast at every point measured. The bounds take the measured points within
-  3 % of 12.9 or below on their side (`docs/performance.md`, section 7, gives the sweeps and the points on both sides
-  of each bound).
+- **Narrow products of tall matrices go to cuBLAS 12.9**: TN with m >= 8192 is served only with n > 64 (an output
+  layer over a vocabulary, or a wide MLP's up projection, at a batch of up to 64 tokens). With so many rows 12.9
+  fills the GPU. Up to 64 columns, its tile's width, it computed such products about as fast as the path or faster
+  from m = 8256 on (1.014 to 1.03 times as fast at m = 8256 to 8320, as fast or faster from 8384 on, down to 0.65
+  times its speed on output layers): on the layers of the models measured that class ran at a median of 1.07 times
+  12.9's speed and at 0.66 at worst, below the class criterion of the rules of speed (`docs/performance.md`,
+  section 7, "The rules of speed"). From 65 to 128 columns the path was faster at most points measured (up to 1.9
+  times), and within 3 % of 12.9 or slower at some in an earlier sweep (down to 0.95 times, at 112 to 128 columns
+  on output layers and at m = 10240): that class passes the criterion (a median of 1.24 and 1.04 at worst on the
+  layers measured; on a sweep of that tier at m = 8192 to 248320 and k = 1024 to 4096, a median of 1.40 and 1.05
+  at worst) and is served. So are the long products of many rows (m from 6144 on with k beyond 9216), where 12.9
+  was within 3 % of the path or faster in narrow bands of m and n in which its 64 x 64 tiles fill its waves (48 of
+  the 951 points measured, down to 0.94 times) and the path faster at the other widths of the same shapes (up to
+  1.9 times; the median of the 951 points, 1.30); no layer of the eight models measured has such a shape.
 - **Wide down projections at many columns go to cuBLAS 12.9**: TN with k > 8192 is served only with n <= 256. Such
   products are the down projections of SiLU-gated MLPs, k their intermediate size: their input, the gated
   activation, holds values far below each column's largest, and on real text up to 75 % of a layer's columns fail
@@ -540,7 +537,7 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
   configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
   pedantic modes, k above 16384 or below 1024 on the tensor cores, products in another layout than TN on the
-  tensor cores, and TN with m >= 8192 and n <= 128, with m >= 6144 and k > 9216, or with k > 8192 and n > 256
+  tensor cores, and TN with m >= 8192 and n <= 64, or with k > 8192 and n > 256
   there, cuBLASLt descriptors with any attribute outside
   the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no
   workspace, or with a workspace that is not 256-byte aligned (12.9 refuses that), a bias epilogue
@@ -557,8 +554,17 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   how many tensor-core calls had rows or columns failing the check, how many of them more than a quarter
   of their rows or of their columns, and the share of the calls' elements that the fallback computed;
   `VF_PROFILE` gives the fallback kernel's own time (`vf_bf16_fallback_tn`).
-- **A product whose input has many failing columns can run below cuBLAS 12.9's speed**, whatever the rules
-  of speed above. 12.9 computes a bf16 product in tiles of 64 x 64, four per SM, 320 at a time on a V100:
+- **A served product can run below cuBLAS 12.9's speed**, whatever the rules of speed above. They serve a class of
+  shapes when, over every layer and n measured in it, its median speed was 1.10 times 12.9's or more and its
+  slowest 0.90 or more, and no model measured had its products' summed time above 12.9's at any n
+  (`docs/performance.md`, section 7, "The rules of speed", gives each class): a product of a served class can be
+  slower than 12.9, down to the criterion's floor of 0.90 times its speed (the slowest measured in the served
+  classes: 0.94 times, in a sweep of long products of many rows). On the real operands of the eight models
+  measured, every product the rules serve ran at 1.04 times 12.9's speed or more but in one layer, the one case
+  measured below the floor, which depends on the data, not on the shape (its own row in the class table; its
+  model's summed step stays at 1.49 times 12.9's speed or more at every n measured with it served): a product
+  whose input has a quarter or more of its columns failing the exact check, near the top of one of 12.9's waves.
+  12.9 computes a bf16 product in tiles of 64 x 64, four per SM, 320 at a time on a V100:
   its time is flat over ranges of n and jumps where one more of its tiles lands on the busiest SM (at m =
   4096: at n = 129, 193, and 321, where its second wave begins). The tensor-core path's own time grows
   evenly with n, and the fallback adds one fused multiply-add chain over the whole k for every element of

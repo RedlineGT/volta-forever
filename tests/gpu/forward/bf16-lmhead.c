@@ -5,7 +5,7 @@
  *   VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1   the skinny path alone forwards every such call (its rule:
  *                                                 TN up to m = 16384, NN 9728, NT and TT 4608), and each has
  *                                                 12.9's bits: TN at n = 2, 8, 16, NN, NT and TT at n = 8
- *   VF_CUBLAS_BF16_TC=1                           TN at n = 8, 64 and the tall rule's bound (128) goes to 12.9,
+ *   VF_CUBLAS_BF16_TC=1                           TN at n = 8, 32 and the tall rule's bound (64) goes to 12.9,
  *                                                 with its bits, for the tall rule (12.9 is as fast there); the
  *                                                 tensor-core path serves TN at one and 64 columns more outside a
  *                                                 capture, in chunks of at most 32 MiB of workspace: error
@@ -68,7 +68,7 @@ int main(void)
     }
     cublasSetStream(hv, st);
     c129.SetStream(h12, st);
-    int tall_n = 128; /* the tall rule's n (a test build reports it) */
+    int tall_n = 64; /* the tall rule's n (a test build reports it) */
     {
         int (*bound)(int) = NULL;
         void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
@@ -107,7 +107,7 @@ int main(void)
         }
     } else {
         /* tall and narrow: 12.9's, with its bits */
-        const int nt[] = {8, 64, tall_n};
+        const int nt[] = {8, 32, tall_n};
         for (int c = 0; c < 3; ++c) {
             const int n = nt[c];
             const size_t cb = (size_t)M * n * 4;

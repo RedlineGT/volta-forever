@@ -255,9 +255,9 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
   after, it is not.
 - `VF_CUBLAS_BF16_TC=1`: larger products in the TN layout (a linear layer's, in inference and in a training
   step's forward pass; the backward pass's products go to 12.9) with k from 1024 to 16384 run on the tensor
-  cores, but for the shapes that the rules of speed leave to 12.9 (`LIMITS.md`: TN with m >= 8192 and n <= 128, with
-  m >= 6144 and k > 9216, and with k > 8192 and n > 256: regions where 12.9 was within 3 % of the path or faster at
-  some shapes, on real operands or in sweeps, and the path faster at others of them), with
+  cores, but for the classes of shapes that the rules of speed leave to 12.9 (`LIMITS.md`: TN with m >= 8192 and
+  n <= 64, and with k > 8192 and n > 256: classes whose median speed was below 1.10 times 12.9's or whose slowest
+  product ran below 0.90 times, on real operands or in sweeps, the path faster at some of their shapes), with
   exact scaling to fp16 and fixed slices of k, and differ from 12.9's in the last bits (within 25
   units of 2^-24 sum |a b| measured; sums of products of one sign come out low, by about 13 units on
   average when the data spans many binades), except when they are captured in a CUDA graph; the
