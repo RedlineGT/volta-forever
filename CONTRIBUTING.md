@@ -1,99 +1,137 @@
 # Contributing
 
-## Build and test
+The project takes fixes and new translations that make a class of programs run right on a V100,
+tests, corrections to the documentation, engine guides (`docs/guides/`, measured), bug reports, and
+test reports from machines, drivers and hypervisors not tried yet. It does not take what makes one
+program start at the cost of a guess: a weakened refusal, a decision keyed on an engine's or a
+kernel's name, a figure without its protocol, anything of NVIDIA's (`AGENTS.md`, section 2).
+
+## Build
+
+Rust stable (the CI takes the current one; the code needs 1.88 at the least, nothing older is
+tested), gcc, python3 3.10 or later, dash. From the checkout:
 
 ```sh
-scripts/build.sh                 # dist/lib, dist/bin
+scripts/build.sh                 # dist/lib, dist/bin (cargo: ~/.cache/volta-forever/target)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-`tests/README.md` says what the other suites need. Without a GPU, the one to run after any
-change to the machine-code translator, and the one after a change to how the proxy takes and
-launches kernels:
+The GPU suites also need `scripts/fetch-all.sh redist` (CUDA 12.9.2 and 13.5.0 from NVIDIA's
+servers, about 20 GB) and `scripts/build-forwarders.sh`.
+
+## Checks without a GPU
 
 ```sh
-cargo build --release -p vf-cli
-scripts/fetch-all.sh denvdis     # the instruction descriptions that reference/ reads
-tests/sass/compare.sh            # the Rust translator against the Python reference
-tests/proxy/fit_api.sh           # the second translation at launch, by every way to it
-tests/proxy/lifecycle.sh         # what the proxy keeps of modules and contexts, fork, the cache
-python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1   # a refused kernel launched anyway
-dash tests/launcher/launcher.sh  # the launcher (and under bash --posix)
+scripts/fetch-all.sh denvdis     # once: the instruction descriptions that reference/ reads
+tests/release-check.sh           # the CI's host steps, then those the CI cannot run
 ```
 
-`tests/README.md`, "What the CI runs", lists what every push runs; the host tests of
-`tests/proxy/` that it does not run are listed there too. Before a release, `tests/release-check.sh`
-runs all of the host part in order and prints the commands of the GPU part (`tests/README.md`,
-"Checking a release").
+It ends with a table (PASS, FAIL or SKIP, the time, the log of a failure) and the status 1 on a
+failure, 2 when a step could not run here (what it needs is missing). Two and a half minutes on
+128 threads; about ten with PyTorch's cubins for `compare.sh` (`TORCH`, `tests/README.md`).
 
-## What a change must keep
+## GPU suites (a Tesla V100)
 
-**Refuse rather than guess.** A kernel that the layer cannot run right is refused when the
-program asks for it, with a reason that names what is missing, and a refused kernel that is
-launched anyway (with a handle that the program took elsewhere, as cuFFT takes its functions
-from a private table of the driver) returns an error instead of trapping: every launch function
-of the driver's interface refuses it, so does a kernel node of a graph when it is made or given
-the kernel, and so do the questions and settings that take a function or a kernel, except the
-names (`cuFuncGetName`, `cuKernelGetName`), the owners (`cuFuncGetModule`,
-`cuKernelGetLibrary`), the number of parameters (`cuFuncGetParamCount`, `cuKernelGetParamCount`),
-`cuFuncIsLoaded`, and the settings of the old `cuLaunch` (`cuFuncSetBlockShape`,
-`cuFuncSetSharedSize`, `cuParamSet*`), which launch nothing. Still trapping: a kernel launched or
-called from another kernel (`LIMITS.md`, "Kernels refused"). A translation or an emulation that may
-be wrong is not offered.
+`tests/release-check.sh` prints them with the settings of a release. After a change to the proxy
+or to a lowering, run at least:
 
-**Two translators, one result.** `reference/translate.py` (with `reference/ampere.py` for
-sm_80 code) is the reference of the machine-code translator and `crates/vf-sass` its
-implementation in the layer: for every input they give the same bytes, the same map, the same
-`MAP.lives` and the same refusals (`tests/sass/compare.sh` on real code, `tests/sass/fuzz.py`
-on damaged code). A change to what is translated is a change to both.
+```sh
+tests/gpu/run.sh 0                       # 0: the GPU's index in PCI order; 165 cases at 0.1.4
+VF_CAPABILITY=8.0 tests/gpu/run.sh 0
+```
 
-**The validator is another program.** `reference/validate.py` checks a translation without
-sharing the translator's decisions. A new kind of rewriting needs its rule there and, in
-`reference/controls.py`, a translation that is wrong on purpose and that the rule finds: a
-check that was never seen to fail has not been shown to check (`docs/validation.md`).
-`tests/sass/controls.sh` runs every control, each in a process of its own, and says which
-change nothing: a control must be seen to change the translation and to be objected to for its
-own reason. The translation of sm_80 code has no rule there yet: it is not independently
-validated (`docs/validation.md`, section 8), and a change to it rests on `compare.sh`, unit
-tests and the GPU cases.
+A minute or two each once compiled; the first run of a suite compiles its kernels (minutes), and
+`tests/README.md` gives each suite's time (1 to 20 minutes). The suites write their builds and logs
+under `VF_OUT` (default `VF_TEST_ROOT`, default `~/.cache/volta-forever/tests`; `tests/site.env`
+can set them), and the layer's cache in a new directory under `TMPDIR`, removed at the end.
 
-**A test must be able to fail.** A new mechanism comes with a test that fails when the mechanism
-is turned off, and the commit says that it was seen to. A test that computes on constants, or
-that compares a result with itself, is not a test.
+## What a change must show
 
-**The instruction tables are generated.** `crates/vf-tables` is written by
-`reference/generate.py` (then `cargo fmt -p vf-tables`) from the descriptions that
-`scripts/fetch-all.sh denvdis` fetches, and is never edited by hand. It is under the LGPL 2.1
-(`crates/vf-tables/README.md`); everything else is under the Apache License 2.0, and
-contributions are taken under the licence of the files they change.
+**A translator or lowering change.** The two translators give one result: change
+`reference/translate.py` (`reference/ampere.py` for sm_80) and `crates/vf-sass` together;
+`tests/sass/compare.sh` passes, on PyTorch's 475 cubins too if you can. Over the same inputs, the
+old and the new `dist/bin/vf-translate` (`translate` for machine code, `adapt` for PTX) give the
+same bytes, or the pull request lists each difference and why. The fix comes with a test that
+fails before it, and the commit says it was seen to fail. A new kind of sm_75 rewriting has its
+rule in `reference/validate.py` and, in `reference/controls.py`, a translation wrong on purpose
+that the rule objects to (`tests/sass/controls.sh`): a check never seen to fail has not been shown
+to check. The sm_80 translation has no such validator yet (`docs/validation.md`, section 8). An
+emulation states its arithmetic in `docs/emulations.md`, checked against the hardware that has the
+instruction, or the PTX manual with that said. `crates/vf-tables` is generated by
+`reference/generate.py`, never edited by hand.
 
-**An emulation states its arithmetic.** What is exact, what is rounded and how, what becomes of
-NaN, infinities and overflow, and against what it was compared (a host model in
-`tests/kernels/tcrun.c`, a native build, results from the hardware that has the instruction):
-`docs/emulations.md` is kept true.
+**A performance change.** Before and after on one GPU in one job: warm up, then alternate the two
+builds (A, B, A, B, three rounds each at least) and give medians (`docs/performance.md`, "Measuring
+on a V100"). One thread and several threads are separate figures, with the CPU and the number of
+threads. The output is shown not to change, as above.
 
-**A figure says what was measured.** On what, against what, how many runs, in one session or
-not, and when. Two figures that are compared come from one session on one GPU.
+**A new test.** It is seen to fail when the mechanism it checks is turned off, and the commit says
+so. Without what it needs (a V100, a second GPU, a toolkit) it prints `SKIP` or `missing: WHAT` and
+ends with status 2, never PASS. A host test writes only in a directory it makes under `TMPDIR` and
+removes; a GPU test only under `VF_OUT` and `TMPDIR`. It is wired where its kind is: a host test in
+`.github/workflows/ci.yml` and `tests/release-check.sh`, a GPU suite in the list of
+`tests/release-check.sh`, both in `tests/README.md`.
 
-**Nothing of NVIDIA's in the repository.** No library, header, documentation or tool. The test
-kernels are this project's sources and what NVIDIA's compilers made of them; the forwarding
-libraries are generated on the user's machine from the toolkits that the user fetched. One piece of
-compiler output goes into the release archive: `crates/vf-fwdgen/bf16tc/kernels.fatbin`, the sm_70
-machine code of the bf16 cuBLAS runtime, made by `scripts/build-bf16-kernels.sh` from
-`crates/vf-fwdgen/bf16tc/kernels.cu`. That source calls no routine of NVIDIA's libraries or headers
-(only the one-instruction intrinsics of the language), writes its own conversions, and rounds only
-through explicitly rounded operations; the script refuses PTX in the result and external functions
-in the intermediate PTX, and `--check` rebuilds it to the same bytes. Change the source, rebuild,
-and commit the source, `kernels.fatbin` and `kernels.manifest` together.
+**A change users can see.** A new or changed variable has its row in `INSTALL.md`, "Environment
+variables"; a known limit goes to `LIMITS.md`; each such change has a line in `CHANGELOG.md`,
+"Unreleased". Version numbers are left as they are.
 
-## Reporting a wrong result
+A pull request says what was run, on what GPU and driver, and what could not be run.
 
-A program that computes something else through the layer than on the CPU or on a newer GPU is
-the report that matters most. Useful with it: the program and its version, the driver, the
-`VF_*` variables that were set (`VF_CAPABILITY` above all), what `VF_LOG_LEVEL=2` prints
-(which images were adapted or translated, which kernels have emulated instructions, what each
-caller is told), and, for machine code, the directory that `VF_TRANSLATE_DUMP=DIR` fills with
-every unit of machine code given to the translator: `reference/validate.py` can then be run on
-its sm_75 units.
+## Reporting a bug
+
+What made issue #3 quick to act on:
+
+- VF: `vf version` (a release prints its version and commit) or `git rev-parse HEAD` of a build
+  from source.
+- The GPU (model, memory, how many, `nvidia-smi topo -m`), the driver, the OS, kernel and glibc
+  (`ldd --version`), the CPU; bare metal, or the hypervisor and how the GPU is passed through.
+- The program and its exact version or build; the exact command, with every `VF_*` and program
+  variable set; the output of `vf doctor`.
+- What happened, and what the same program does without the layer (a CUDA 12 build, the CPU).
+- The `[volta-forever]` lines at the default level (`VF_LOG_LEVEL=1`; `VF_LOG=FILE` keeps them
+  apart), and the Xid lines of the kernel's log from that time (`sudo dmesg | grep Xid`).
+- The caches: a first start (`VF_PROXY_CACHE` and `CUDA_CACHE_PATH` set to new empty directories)
+  or a later one.
+- The logs, with user names, paths and GPU UUIDs taken out.
+
+### Reporting a wrong result
+
+A program that computes something else through the layer than on the CPU or on a newer GPU is the
+report that matters most. Add what `VF_LOG_LEVEL=2` prints (which images were adapted or
+translated, which kernels have emulated instructions, what each caller is told), and, for machine
+code, the directory that `VF_TRANSLATE_DUMP=DIR` fills with every unit given to the translator:
+`reference/validate.py` can then be run on its sm_75 units. A run with `VF_SAFE=1` tells whether an
+opt-in of the layer makes the difference.
+
+## Test reports from other machines
+
+Open an issue titled "Test report: ..." with the facts above and the summary of what was run (the
+PASS and FAIL counts of `tests/gpu/run.sh` and its FAIL lines; for an engine, its version, the
+model file and revision, greedy tokens against a reference, speeds by the [benchmark
+protocol](docs/guides/benchmarks/README.md)). Once read, it becomes a row of
+[docs/reports/](docs/reports/README.md), which `LIMITS.md` can point to: a row in the tree is
+reviewed and names the commit it tested; a discussion thread does neither (and discussions are off
+here).
+
+## Faults and Xid lines
+
+Read the last Xid line of the kernel's log before and after GPU work (`sudo dmesg | grep Xid |
+tail -1`), and report every new one with what was running: a fault is a result. Do not run a case
+that faulted again on a GPU that others share. No test here faults the GPU on purpose, and a new
+one must not: a test of a path that once faulted checks that no Xid line was added, as the
+`guard-*` cases of `tests/gpu/run.sh` do (for a user who cannot read the kernel's log, they pass
+and their log says it was not read: read it as root then).
+
+## Licence
+
+Everything is under the Apache License 2.0 but `crates/vf-tables`, under the LGPL 2.1
+(`crates/vf-tables/README.md`, `NOTICE`). By section 5 of the Apache License, what you submit for
+inclusion is under that licence unless you say otherwise; the tables change only through
+`reference/generate.py` and stay under the LGPL 2.1. There is nothing else to sign. Send only what
+you have the right to give, and nothing of NVIDIA's (library, header, documentation, tool). The one
+piece of compiler output in the release archive, `crates/vf-fwdgen/bf16tc/kernels.fatbin`, is made
+by `scripts/build-bf16-kernels.sh` (`--check` rebuilds the same bytes) and committed with its source
+and `kernels.manifest`.
