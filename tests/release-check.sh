@@ -107,6 +107,7 @@ if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step nocode_launch python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
     step profile_failure python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
     step ptx_version python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
+    step parallel_threads python3 tests/proxy/parallel_threads.py dist/lib/libcuda.so.1
     step nvml_capability python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
 else
     skip proxy-suites "no dist/lib/libcuda.so.1: the build failed"

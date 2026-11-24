@@ -1115,6 +1115,17 @@ impl ModuleInfo {
     /// Analyse a PTX module. The text should be the full module content (already lowered for Volta
     /// if needed).
     pub fn analyse(source: &[u8]) -> ModuleInfo {
+        Self::analyse_inner(source, None)
+    }
+
+    #[cfg(test)]
+    fn analyse_with_threads(source: &[u8], max_threads: usize) -> ModuleInfo {
+        Self::analyse_inner(source, Some(max_threads))
+    }
+
+    fn analyse_inner(source: &[u8], max_threads: Option<usize>) -> ModuleInfo {
+        const PARALLEL_ANALYSE_MIN_FUNCS: usize = 16;
+        const PARALLEL_ANALYSE_MIN_BYTES: usize = 131_072;
         // The declaration scanner, statement scanner and operand analysis must see the same
         // tokens. Keep byte offsets and newlines so extraction can copy the original source.
         let source_text = std::str::from_utf8(source).unwrap_or("");
@@ -1275,8 +1286,16 @@ impl ModuleInfo {
             }
         };
 
-        for func in &func_defs {
-            let res = analyse_func(func);
+        let threads = if func_defs.len() >= PARALLEL_ANALYSE_MIN_FUNCS && text_str.len() >= PARALLEL_ANALYSE_MIN_BYTES {
+            max_threads
+                .unwrap_or_else(crate::parallel::configured_threads)
+                .min(func_defs.len())
+                .max(1)
+        } else {
+            1
+        };
+        let results = crate::parallel::par_map(&func_defs, threads, &analyse_func);
+        for res in results {
             if res.unbounded {
                 unbounded_calls.insert(res.name.clone());
             }
@@ -3417,5 +3436,33 @@ $str:
             !info.is_entry_independent("caller"),
             "caller passes tbl address to a non-safe call, should be dependent"
         );
+    }
+
+    #[test]
+    fn parallel_analyse_matches_sequential_on_large_module() {
+        use std::fmt::Write as _;
+        let mut ptx = String::from(
+            ".version 9.0\n.target sm_75\n.address_size 64\n             .global .align 4 .u32 g_ro[4] = {1, 2, 3, 4};\n             .global .align 4 .u32 g_rw = 0;\n             .global .align 8 .u64 g_esc = g_ro;\n             .func helper(.param .u32 x) {\n             \t.reg .u64 %rd<2>;\n             \tmov.u64 %rd0, g_rw;\n             \tst.global.u32 [%rd0], 7;\n             \tret;\n             }\n",
+        );
+        let pad = "\tadd.u32 %r1, %r1, 1;\n".repeat(350);
+        for i in 0..20 {
+            let _ = write!(
+                ptx,
+                ".visible .entry k_{i}() {{\n                 \t.reg .u32 %r<4>;\n                 \t.reg .u64 %rd<4>;\n                 \t.param .u32 p0;\n                 {pad}                 \t{extra}                 \tret;\n                 }}\n",
+                extra = match i % 4 {
+                    0 => "\tmov.u64 %rd0, g_ro;\n\tld.global.u32 %r0, [%rd0];\n",
+                    1 => "\tmov.u64 %rd1, g_esc;\n\tld.global.u64 %rd2, [%rd1];\n",
+                    2 => "\tP: .callprototype _ (.param .u32 _);\n\tcall %rd0, (p0), P;\n",
+                    _ => "\tcall.uni helper, (p0);\n",
+                }
+            );
+        }
+        assert!(ptx.len() > 131_072);
+        let seq = ModuleInfo::analyse_with_threads(ptx.as_bytes(), 1);
+        let par = ModuleInfo::analyse_with_threads(ptx.as_bytes(), 4);
+        assert_eq!(par, seq);
+        assert!(par.written_vars.contains("g_rw"));
+        assert!(par.escaped_vars.contains("g_ro"));
+        assert!(par.unbounded_calls.contains("k_2"));
     }
 }
