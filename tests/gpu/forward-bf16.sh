@@ -237,4 +237,42 @@ fi
 if want bf16-paths-skinny; then
     build bf16-paths && { run bf16-paths "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1; verdict bf16-paths; }
 fi
+# The runtime's counts in the layer's VF_SUMMARY file (bf16-summary.c, built without CUDA's libraries: its child opens
+# them, in the order of its case): a process killed with SIGKILL; at exit, the layer loaded first and the runtime
+# loaded first; children made by fork(); the variant, then every reference to the runtime, given back by dlclose
+# while the layer's thread writes. Each control must make its case fail there: the registration off (summary-off),
+# no VF_SUMMARY, the runtime not pinned (no-pin: unloaded, its removal keeps its last report and the process lives),
+# neither pinned nor removed (no-pin,no-remove: the layer's thread calls into the unloaded runtime).
+if want bf16-summary; then
+    if gcc -O2 -Wall -Wno-deprecated-declarations -I"$T13/include" -o "$out/bin/bf16-summary" "$src/bf16-summary.c" -ldl; then
+        for c in killed order-layer order-runtime fork dlclose; do
+            run bf16-summary "$test_dir" VF_BF16_SUMMARY_CASE=$c
+            cp "$log" "$out/logs/forward-bf16-summary-$c.log"
+            if [ "$status" = 0 ] && grep -qx "ok bf16-summary $c" "$log"; then echo "PASS  bf16-summary $c"
+            else echo "FAIL  bf16-summary $c (exit status $status; $out/logs/forward-bf16-summary-$c.log)"; failed=1; fi
+        done
+        # The two load orders must have shown both orders of the destructors at exit.
+        first=$(grep -h "^at exit, the .* destructor came first" "$out"/logs/forward-bf16-summary-order-{layer,runtime}.log | sort -u | wc -l)
+        if [ "$first" = 2 ]; then echo "PASS  bf16-summary: both orders of the destructors at exit, the layer's first and the runtime's first"
+        else echo "FAIL  bf16-summary: the two load orders did not show both orders of the destructors at exit"; failed=1; fi
+        # CASE SETTING CHECK: the case with SETTING must fail at CHECK (the beginning of a FAIL line's message).
+        for c in "killed|VF_BF16_CONTROL=summary-off|the file's lines of the runtime are" \
+                 "killed|VF_BF16_SUMMARY_NO_FILE=1|no file " \
+                 "order-runtime|VF_BF16_CONTROL=summary-off|order-runtime: the file's lines of the runtime" \
+                 "dlclose|VF_BF16_CONTROL=no-pin|the runtime was unloaded (not pinned)" \
+                 "dlclose|VF_BF16_CONTROL=no-pin,no-remove|the child ended by signal 11"; do
+            IFS='|' read -r case setting check <<< "$c"
+            run bf16-summary "$test_dir" VF_BF16_SUMMARY_CASE="$case" "$setting" >/dev/null
+            name=forward-bf16-summary-$case-${setting#VF_BF16_}
+            name=${name//=/-}
+            cp "$log" "$out/logs/$name.log"
+            if [ "$status" != 0 ] && grep "^FAIL " "$log" | grep -qF -- "$check" &&
+                { [ "$setting" != VF_BF16_CONTROL=no-pin ] || ! grep -q "ended by signal" "$log"; }; then
+                echo "PASS  bf16-summary control $case $setting (failed at: $check)"
+            else echo "FAIL  bf16-summary control $case $setting: not failed at \"$check\" ($out/logs/$name.log)"; failed=1; fi
+        done
+    else
+        echo "FAIL  build of bf16-summary"; failed=1
+    fi
+fi
 exit $failed

@@ -155,7 +155,16 @@ Where the GPU scripts write:
   bits, the step's TN products, the output layer one column more and at 128 columns, the wide down
   projection at the wide rule's n and the long product at the long-k bound or one step of m under it
   served; with each rule removed by a control, it fails, and a bound that the runtime does not report
-  is a failed check, not a crash: `VF_RULES_NO_BOUND=5`, a control); with
+  is a failed check, not a crash: `VF_RULES_NO_BOUND=5`, a control); the runtime's counts in the
+  layer's `VF_SUMMARY` file (`bf16-summary.c`, whose child process opens the layer and the variant
+  with `dlopen` in the order of its case: killed with SIGKILL after its calls, its file holds the lines
+  that the runtime's fill gives, with the counts of the calls made; at exit with the layer loaded first,
+  the lines given live to the layer's last write, and with the runtime loaded first, its last report
+  kept, both the lines of the exit report; children made by `fork()` that do nothing with the layer and
+  write nothing; the variant and every reference to the runtime given back by `dlclose` while the layer's
+  thread writes, the runtime staying, pinned; and its controls: no registration, no `VF_SUMMARY`, the
+  runtime not pinned, unloaded with its last report kept, and neither pinned nor removed, the child
+  ending by SIGSEGV); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the
