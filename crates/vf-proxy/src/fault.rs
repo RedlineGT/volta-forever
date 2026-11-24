@@ -893,8 +893,10 @@ pub fn synchronized_after(result: CUresult, covers: u64, scope: Scope, call: &st
                 Scope::Stream(stream, per_thread) => of_stream(stream, per_thread),
                 _ => current(),
             };
-            let met = match (kept, mine()) {
-                (Kept::At(number), Some(ring)) => Some((ring.index, number)),
+            // (The ring of the launch just kept by this thread: `mine` takes none for a thread that
+            // has not launched.)
+            let met = match kept {
+                Kept::At(number) => mine().map(|ring| (ring.index, number)),
                 _ => None,
             };
             seen(result, call, of, met);
