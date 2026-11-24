@@ -276,14 +276,14 @@ def _decide():
         return False, "the layer's tool vf-translate was not found"
     # (What does not depend on a kernel is decided here, before any key has the mark: a process
     # that cannot start a helper compiles as without the switch, and Triton's cache keeps its
-    # kernels so.)
+    # kernels so. The directory of the places is not: the client finds it at the first kernel
+    # that may be compiled for sm_80, and does without it.)
     try:
         exe = _interpreter()
-        own = _own_dir()
     except OSError as e:
         return False, str(e)
     with _lock:
-        _state.update(tool=tool, types=asked, python=exe, own=own)
+        _state.update(tool=tool, types=asked, python=exe)
     return True, "vf-tc%s-%s-%s-%s" % (RULES, "+".join(asked), version, _settings_mark())
 
 
@@ -310,9 +310,9 @@ def _interpreter():
 
 
 def _cache_dir():
-    """Triton's cache directory, as Triton finds it: TRITON_CACHE_DIR, else .triton/cache in
-    TRITON_HOME or the home directory (knobs.cache.dir in Triton 3.4 to 3.9, default_cache_dir()
-    in 3.3)."""
+    """Triton's cache directory, as Triton finds it now: TRITON_CACHE_DIR, else .triton/cache in
+    TRITON_HOME or the home directory (knobs.cache.dir in Triton 3.4 to 3.9, which reads the
+    environment each time, default_cache_dir() in 3.3)."""
     try:
         from triton import knobs
         return os.path.abspath(knobs.cache.dir)
@@ -326,29 +326,6 @@ def _cache_dir():
         return os.path.abspath(default_cache_dir())
     except (ImportError, AttributeError):
         return os.path.join(os.environ.get("TRITON_HOME") or os.path.expanduser("~"), ".triton", "cache")
-
-
-def _own_dir():
-    """The directory of this user's helpers in Triton's cache directory: volta-forever-EUID, made
-    with mode 0700 (and Triton's directory as Triton makes it). Its path, or OSError when it cannot
-    be used or is not a directory (a link). Whoever may write Triton's cache directory can already
-    give the program kernels of their own through it: nothing more is asked of it than Triton asks
-    (not its owner: a network file system may give root's files to another uid)."""
-    import stat
-    base = _cache_dir()
-    path = os.path.join(base, "volta-forever-%d" % os.geteuid())
-    try:
-        os.makedirs(base, exist_ok=True)
-        try:
-            os.mkdir(path, 0o700)
-        except FileExistsError:
-            pass
-        st = os.lstat(path)
-    except OSError as e:
-        raise OSError("Triton's cache directory cannot be used (%s: %s)" % (path, e.strerror or e))
-    if not stat.S_ISDIR(st.st_mode):
-        raise OSError("%s is not a directory" % path)
-    return path
 
 
 def _settings_mark():

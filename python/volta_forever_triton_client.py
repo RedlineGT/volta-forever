@@ -24,9 +24,9 @@ time, started at the first kernel that needs one:
     slot; waited for by a thread of its own (the wait of its pid alone: no other child of the
     program is taken), so that none is left as a zombie;
   - holding a slot (a place) while it lives: one of VF_TRITON_TC_JOBS lock files of this host in
-    the directory of the user's helpers in Triton's cache directory (_core._own_dir), locked with
-    flock; so that the user's helpers on a host are that many at most, and their memory with
-    them. That cap is a best effort: where a lock file cannot be opened or locked for another
+    the directory of the user's helpers in Triton's cache directory (_places), locked with flock;
+    so that the user's helpers on a host are that many at most, and their memory with them.
+    That cap is a best effort: where a lock file cannot be opened or locked for another
     reason than another holder (a file system without working locks, a directory that cannot be
     written), the process does not count places (said once, at VF_LOG_LEVEL=2) and its helpers
     start without one; and a process waits VF_TRITON_TC_WAIT seconds for a place once in its
@@ -44,6 +44,7 @@ answer (_checked).
 
 import os
 import sys
+import threading
 
 
 def _load(name, filename):
@@ -382,13 +383,92 @@ def _helper_env():
 CRASH_SIGNALS = {4: "SIGILL", 6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE", 11: "SIGSEGV"}
 
 
-def _open_lock(name):
-    """A lock file of the directory of the user's helpers, opened (made with mode 0600) without
-    following a link or waiting on a FIFO; OSError when it is not a regular file."""
+def _inode(fd):
+    """(device, inode) of what a descriptor is, or None when it is not open."""
+    try:
+        st = os.fstat(fd)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _open_dir(path):
+    """(descriptor, (device, inode)) of a directory, opened without following a link at its last
+    name."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_CLOEXEC)
+    return fd, _inode(fd)
+
+
+def _find_places():
+    import errno
+    try:
+        base = _core._cache_dir()
+    except Exception as e:  # noqa: BLE001 (Triton's knobs: the places are not counted)
+        return {"fd": None, "why": "Triton's cache directory is not known (%s: %s)" % (type(e).__name__, e)}
+    path = os.path.join(base, "volta-forever-%d" % os.geteuid())
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError as e:
+        return {"fd": None, "why": "%s: %s" % (base, "not a directory" if isinstance(e, FileExistsError) else
+                                                 e.strerror or str(e))}
+    try:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        fd, inode = _open_dir(path)
+    except OSError as e:
+        why = "it is a symbolic link" if e.errno in (errno.ELOOP, errno.ENOTDIR) and os.path.islink(path) else \
+            e.strerror or str(e)
+        return {"fd": None, "why": "%s: %s" % (path, why)}
+    return {"fd": fd, "inode": inode, "path": path}
+
+
+_places_lock = threading.Lock()
+
+
+def _places():
+    """The descriptor of the directory of the user's places on this host, or None when the places
+    are not counted in this process (_no_cap: said once).
+
+    It is volta-forever-EUID (made with mode 0700, and Triton's directory as Triton makes it) in
+    Triton's cache directory as Triton finds it when this is first asked: at the first kernel of
+    the process that may be compiled for sm_80, not at the decision of the process (PyTorch's
+    Inductor sets TRITON_CACHE_DIR to its own cache's triton/N between the two). It is opened once
+    without following a link (O_DIRECTORY | O_NOFOLLOW) and then used by that descriptor alone (its
+    lock files opened relative to it), so that a link or another directory put at its path
+    afterwards is not followed. Whoever may write Triton's cache directory can already give the
+    program kernels through Triton's cache: nothing more is asked of it than Triton asks of its
+    own (not its owner: a network file system may give root's files to another uid). A descriptor
+    that the program closed (and whose number may be the program's now) is opened again only when
+    the path still names that same directory."""
+    with _places_lock:
+        known = _state.get("places")
+        if known is None:
+            known = _state["places"] = _find_places()
+        elif known["fd"] is not None and _inode(known["fd"]) != known["inode"]:
+            try:
+                fd, inode = _open_dir(known["path"])
+            except OSError as e:
+                known.update(fd=None, why="%s: %s" % (known["path"], e.strerror or e))
+            else:
+                if inode == known["inode"]:
+                    known["fd"] = fd
+                else:
+                    os.close(fd)
+                    known.update(fd=None, why="%s is not the directory it was" % known["path"])
+        fd, why = known["fd"], known.get("why")
+    if fd is None:
+        _no_cap(why)
+    return fd
+
+
+def _open_lock(name, places):
+    """A lock file of the directory of the places (its descriptor), opened (made with mode 0600)
+    without following a link or waiting on a FIFO; OSError when it is not a regular file."""
     import errno
     import stat
-    fd = os.open(os.path.join(_state["own"], name), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC,
-                 0o600)
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC, 0o600, dir_fd=places)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise OSError(errno.EINVAL, "not a regular file")
@@ -405,7 +485,7 @@ def _limit(e):
     return e.errno in [getattr(errno, name) for name in _LIMITS]
 
 
-def _slot(pool):
+def _slot(pool, places):
     """A free slot of this host: a descriptor of its lock file, locked; None when another holder
     has each; _NoCap when a lock file cannot be opened or locked for another reason; OSError when
     this process can open no descriptor. The files of the slots that were taken are kept open by
@@ -426,7 +506,7 @@ def _slot(pool):
                 fd = None   # (closed by the program, or another file now: the program's)
         if fd is None:
             try:
-                fd = _open_lock(name)
+                fd = _open_lock(name, places)
             except OSError as e:
                 if _limit(e):
                     raise
@@ -497,10 +577,11 @@ class _Helper(object):
             import triton
             root = os.path.dirname(os.path.dirname(os.path.abspath(triton.__file__)))
             mine, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-            if slot is not None:
+            places = _places() if slot is not None else None
+            if places is not None:
                 # (What tells it to give its slot up when a process waits for one.)
                 try:
-                    waiting = _open_lock("waiting-" + _host())
+                    waiting = _open_lock("waiting-" + _host(), places)
                     pool.held.add(waiting)
                 except OSError as e:
                     if _limit(e):
@@ -751,7 +832,8 @@ def _forget(pool):
 
 
 def _in_child():
-    global _pool
+    global _pool, _places_lock
+    _places_lock = threading.Lock()   # (free, whatever another thread of the parent did at the fork)
     old, _pool = _pool, None
     if old is not None and old.pid != os.getpid():
         for fd in list(old.held) + [fd for fd, _ in old.files.values()]:
@@ -807,9 +889,10 @@ def _take():
                     return free[0]
                 alive = len(pool.helpers) + pool.starting
                 if alive < _jobs():
-                    if not _state.get("nocap"):
+                    places = None if _state.get("nocap") else _places()
+                    if places is not None:
                         try:
-                            slot = _slot(pool)
+                            slot = _slot(pool, places)
                         except _NoCap as e:
                             _no_cap(str(e))
                     if slot is not None:
@@ -819,7 +902,7 @@ def _take():
                         break   # (a helper without a slot)
                     if waiting is None and not _state.get("alone"):
                         try:
-                            waiting = _open_lock("waiting-" + _host())
+                            waiting = _open_lock("waiting-" + _host(), places)
                             pool.held.add(waiting)
                             fcntl.flock(waiting, fcntl.LOCK_SH | fcntl.LOCK_NB)
                         except OSError as e:

@@ -1552,9 +1552,9 @@ class Decisions(Base):
         return not os.path.exists(path)
 
     def test_a_cache_directory_that_cannot_be_used(self):
-        # Triton's cache directory where the directory of the user's helpers cannot be made, or that
-        # directory a link: the switch is not used in that process, said once, decided before any
-        # kernel's key has the mark.
+        # Triton's cache directory where the directory of the user's helpers cannot be made (a file),
+        # or that directory a link (not followed): the places are not counted in that process (said
+        # once, at VF_LOG_LEVEL=2), and its kernels are compiled for sm_80 by helpers without one.
         afile = self.root / "a-file"
         afile.write_text("")
         linked = self.root / "cache-with-link"
@@ -1563,12 +1563,73 @@ class Decisions(Base):
             (linked / ("volta-forever-%d" % os.geteuid())).symlink_to(self.root)
         code = "import sys\nfrom triton.backends.nvidia import compiler as c\nr = c.compile(sys.argv[1])\n" \
                "print(r[0].decode()[:11], r[2])\n"
-        for cache, why in ((afile, "Triton's cache directory cannot be used"), (linked, "is not a directory")):
+        for cache, why in ((afile, "a-file: not a directory"),
+                           (linked, "volta-forever-%d: it is a symbolic link" % os.geteuid())):
             r = self.run_vf([sys.executable, "-c", code, dot("f16")], self.env(PYTHONPATH=str(self.standin),
-                                                                                TRITON_CACHE_DIR=str(cache)))
-            self.assertEqual(r.stdout.strip(), "cubin sm_75 ptxas-75", r.stderr)
-            self.assertEqual(r.stderr.count("VF_TRITON_TC is not used: "), 1, r.stderr)
+                                                                                TRITON_CACHE_DIR=str(cache),
+                                                                                VF_LOG_LEVEL="2"))
+            self.assertRegex(r.stdout.strip(), r"^cubin sm_80 ptxas-75-vf-tc", r.stderr)
+            self.assertNotIn("VF_TRITON_TC is not used", r.stderr)
+            self.assertEqual(r.stderr.count("are not counted in this process"), 1, r.stderr)
             self.assertIn(why, r.stderr)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name.startswith(("slot-", "waiting-"))), [])
+
+    def test_the_places_follow_tritons_cache_directory(self):
+        # The directory of the places is that of Triton's cache when the process compiles its first
+        # kernel that may be compiled for sm_80, not when it decides (at its first key): PyTorch's
+        # Inductor, with TRITON_CACHE_DIR unset, sets it to its own cache's triton/0 between the two.
+        home = self.root / "home-places"
+        home.mkdir(exist_ok=True)
+        later = self.root / "inductor-cache/triton/0"
+        code = textwrap.dedent("""
+            import json, os, sys
+            from triton.runtime.cache import triton_key
+            from triton.backends.nvidia import compiler as c
+            key = triton_key()   # (the decision of the process, as Inductor's first graph key makes it)
+            os.environ["TRITON_CACHE_DIR"] = sys.argv[2]
+            print(json.dumps([key, c.compile(sys.argv[1])[0].decode()[:11]]))
+            """)
+        r = self.run_vf([sys.executable, "-c", code, dot("f16"), str(later)],
+                        self.env(PYTHONPATH=str(self.standin), TRITON_CACHE_DIR=None, HOME=str(home)))
+        key, target = self.last(r)
+        self.assertEqual(target, "cubin sm_80", r.stderr)
+        self.assertIn("-vf-tc", key)
+        self.assertTrue(any(p.name.startswith("slot-") for p in self.own(later).iterdir()), r.stderr)
+        self.assertFalse((home / ".triton").exists())
+
+    def test_the_places_directory_replaced_by_a_link(self):
+        # The directory of the places is opened once, without following a link, and used by its
+        # descriptor: replaced by a link after that (by whoever may rename what is in Triton's cache
+        # directory), the lock files are not made where the link points.
+        cache = self.root / "cache-relinked"
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir(exist_ok=True)
+        (elsewhere / "kept").write_text("not the layer's\n")
+        own = self.own(cache)
+        code = textwrap.dedent("""
+            import json, sys
+            from triton.backends.nvidia import compiler as c
+            a = c.compile(sys.argv[1])[0].decode()[:11]
+            for h in sys.modules["volta_forever_triton"].client()._the_pool().helpers:
+                h.kill()
+            print("compiled", flush=True)
+            sys.stdin.readline()   # (the directory is replaced meanwhile)
+            print(json.dumps([a, c.compile(sys.argv[2])[0].decode()[:11]]), flush=True)
+            """)
+        p = subprocess.Popen([str(self.vf), sys.executable, "-c", code, dot("f16"), dot("bf16")],
+                             env=self.env(PYTHONPATH=str(self.standin), TRITON_CACHE_DIR=str(cache)),
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(p.stdout.readline().strip(), "compiled")
+            os.rename(own, str(own) + ".moved")
+            os.symlink(elsewhere, own)
+            out, err = p.communicate("go\n", timeout=60)
+        finally:
+            p.kill()
+            p.wait()
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]), ["cubin sm_80"] * 2, err)
+        self.assertEqual(sorted(os.listdir(elsewhere)), ["kept"])
+        self.assertTrue(any(n.startswith("slot-") for n in os.listdir(str(own) + ".moved")))
 
     def test_a_stopped_helper(self):
         # A helper stopped from outside (SIGSTOP, a debugger, a frozen control group) past the time-out
