@@ -824,16 +824,21 @@ extern "C" __global__ void __launch_bounds__(256, 2) vf_bf16_fallback_tn(VfFbArg
     count_call(p, ca, cb);
     // Column tiles: the configuration whose waves over the persistent grid take the least time, a tile
     // taking its whole chain over k. Times of one tile per element of k, measured on a V100 with the
-    // grid busy: 32x8 k-major 15 ns, 64x32 63 ns, 64x64 100 ns, 128x64 150 ns (units of 7.5 ns below).
-    // A few failed columns, or a few tens over few rows, take the short k-major tiles, more of them at
-    // once; many take the wide ones. The values do not depend on the choice.
+    // grid busy: 32x8 k-major 15 ns, 64x32 63 ns, 64x64 100 ns, 128x64 150 ns, in units of 1.875 ns
+    // below, the k-major tile's raised to 9 (17 ns). Timed as whole calls (103 TN products, m = 896 to
+    // 4096, k = 2048 to 9728, n = 64 to 2048, 1 to 75 % of the columns failing, each configuration
+    // forced), four waves of k-major tiles took up to 22 % longer than one wave of 64x32 tiles, which
+    // runs faster per block than its busy-grid time when its wave leaves SMs to it; with 9, the choice
+    // was within 3 % of the fastest configuration on every product. A few failed columns, or a few tens
+    // over few rows, take the short k-major tiles, more of them at once; many take the wide ones. The
+    // values do not depend on the choice.
     int cfg = 0;
     if (cb > 0) {
         const int G = (int)gridDim.x;
-        const int t0 = cdiv(cdiv(cb, FbK::BN) * cdiv(p.mc, FbK::BM), G) * 2;
-        const int t1 = cdiv(cdiv(cb, FbC1::BN) * cdiv(p.mc, FbC1::BM), G) * 8;
-        const int t3 = cdiv(cdiv(cb, FbC3::BN) * cdiv(p.mc, FbC3::BM), G) * 13;
-        const int t2 = cdiv(cdiv(cb, FbC2::BN) * cdiv(p.mc, FbC2::BM), G) * 20;
+        const int t0 = cdiv(cdiv(cb, FbK::BN) * cdiv(p.mc, FbK::BM), G) * 9;
+        const int t1 = cdiv(cdiv(cb, FbC1::BN) * cdiv(p.mc, FbC1::BM), G) * 32;
+        const int t3 = cdiv(cdiv(cb, FbC3::BN) * cdiv(p.mc, FbC3::BM), G) * 52;
+        const int t2 = cdiv(cdiv(cb, FbC2::BN) * cdiv(p.mc, FbC2::BM), G) * 80;
         int best = t0;
         if (t1 < best) best = t1, cfg = 1;
         if (t3 < best) best = t3, cfg = 3;
