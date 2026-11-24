@@ -158,16 +158,22 @@ mod tests {
 
     #[test]
     fn worker_threads_have_vf_ptx_names() {
-        let arrived = AtomicUsize::new(0);
-        let start = std::time::Instant::now();
+        // Each of the two items is held until the other one has been taken, so the calling thread
+        // cannot take both however late the worker starts. The limit is not a bound on the
+        // worker's start: it only makes the test fail, instead of hang, if no worker ever comes.
+        let arrived = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
         let inputs = [0usize, 1];
         let names = par_map(&inputs, 2, &|_| {
-            arrived.fetch_add(1, Ordering::AcqRel);
-            while arrived.load(Ordering::Acquire) < 2 && start.elapsed() < std::time::Duration::from_secs(2) {
-                std::thread::yield_now();
-            }
-            std::thread::current().name().unwrap_or("").to_string()
+            let (count, both) = &arrived;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            both.notify_all();
+            let limit = std::time::Duration::from_secs(60);
+            let (_count, waited) = both.wait_timeout_while(count, limit, |count| *count < 2).unwrap();
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            (name, waited.timed_out())
         });
-        assert!(names.iter().any(|n| n == "vf-ptx-1"), "got names: {names:?}");
+        assert!(names.iter().all(|(_, late)| !late), "no worker took an item: {names:?}");
+        assert!(names.iter().any(|(name, _)| name == "vf-ptx-1"), "got names: {names:?}");
     }
 }
