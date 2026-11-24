@@ -62,7 +62,7 @@ class Run:
 def case(name, proxy):
     run = Run(proxy)
     out = []
-    if name in ("candidates", "nofault", "exact"):
+    if name in ("candidates", "nofault", "exact", "off"):
         out.append(run.launch("add_one", grid=1))
         out.append(run.api.cuCtxSynchronize())
         out.append(run.launch("add_one", grid=2))
@@ -74,6 +74,35 @@ def case(name, proxy):
         # Met again: said once.
         out.append(run.api.cuCtxSynchronize())
         out.append(run.launch("add_one", grid=6))
+        # Whom a lookup leads to: the layer's own synchronisation, or, with VF_FAULT_REPORT=0, the
+        # driver's (as without the report of faults; the launch is the layer's while it adapts code).
+        mock = c.CDLL(os.environ["VF_REAL_LIBCUDA"])
+        for function in ("cuStreamSynchronize", "cuLaunchKernel"):
+            pointer = c.c_void_p()
+            assert run.api.cuGetProcAddress(function.encode(), c.byref(pointer), 12000, c.c_uint64(0)) == 0
+            ours = pointer.value == c.cast(getattr(mock, function), c.c_void_p).value
+            out.append(f"{function}:{'driver' if ours else 'layer'}")
+        out.append(c.c_uint.in_dll(mock, "synchronized").value)
+    elif name == "nofault-graph":
+        # A graph captured, instantiated, launched and destroyed, and streams made and destroyed:
+        # nothing faults.
+        stream = run.stream()
+        graph, exec_ = c.c_void_p(), c.c_void_p()
+        out.append(run.launch("add_one", stream, grid=1))
+        out.append(run.api.cuStreamSynchronize(stream))
+        out.append(run.api.cuStreamQuery(stream))
+        out.append(run.api.cuStreamBeginCapture_v2(stream, 2))
+        out.append(run.launch("add_one", stream, grid=2))
+        out.append(run.launch("add_one", None, grid=3, own_stream=True))
+        out.append(run.api.cuStreamEndCapture(stream, c.byref(graph)))
+        out.append(run.api.cuGraphInstantiateWithFlags(c.byref(exec_), graph, c.c_ulonglong(0)))
+        out.append(run.api.cuGraphLaunch(exec_, stream))
+        out.append(run.api.cuStreamSynchronize(stream))
+        out.append(run.api.cuStreamSynchronize_ptsz(None))
+        out.append(run.api.cuGraphExecDestroy(exec_))
+        out.append(run.api.cuGraphDestroy(graph))
+        out.append(run.api.cuStreamDestroy_v2(stream))
+        out.append(run.api.cuCtxDestroy_v2(run.context))
     elif name == "streams":
         first, second = run.stream(), run.stream()
         out.append(run.launch("add_one", first, grid=1))
@@ -257,7 +286,21 @@ def checks(name, log, summary, results):
     if name == "nofault":
         expect("no fault is said", not faults)
         expect("no fault in the report at exit", "faulted" not in summary)
-        expect("every call returned 0", results == ["0"] * 10)
+        expect("every call returned 0", results[:10] == ["0"] * 10)
+        return found
+    if name == "off":
+        # VF_FAULT_REPORT=0: what the program gets is the driver's, nothing is kept or said, nothing
+        # is waited for even with VF_FAULT_TRACE=1, and lookups of the synchronisations lead to the
+        # driver.
+        expect("no fault is said", not faults and "faulted" not in summary and "fault" not in log)
+        expect("every call returned what the driver returned",
+               results[:10] == ["0"] * 7 + ["700"] * 3)
+        expect("a lookup of cuStreamSynchronize leads to the driver, of cuLaunchKernel to the layer",
+               results[10:12] == ["cuStreamSynchronize:driver", "cuLaunchKernel:layer"])
+        expect("nothing waited for but the program's one stream synchronisation", results[12] == "1")
+        return found
+    if name == "nofault-graph":
+        expect("no fault is said, and every call returned 0", not faults and results == ["0"] * 15)
         return found
     if name == "exact-capture":
         expect("no fault is said", not faults)
@@ -268,6 +311,8 @@ def checks(name, log, summary, results):
         return found
     head = lines[faults[0]]
     if name == "candidates":
+        expect("lookups of the synchronisations lead to the layer",
+               results[10:12] == ["cuStreamSynchronize:layer", "cuLaunchKernel:layer"])
         expect("cuCtxSynchronize met 700", "cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS)" in head)
         expect("the three launches since the stream's synchronisation, the last first",
                "one of the 3 launched in this context since its last synchronisation" in head and
@@ -358,13 +403,17 @@ def main():
         mock = str(Path(tmp) / "libcuda_mock.so")
         subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-Bsymbolic", "-o", mock, str(here / "fault_mock_driver.c")],
                        check=True)
-        cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
-                 ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
+        cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("nofault-graph", {}),
+                 ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}), ("contexts", {}), ("context-gone", {}),
+                 ("own-stream", {}), ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("copy", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.
-                 ("candidates", {"VF_FAULT_TRACE": "true"})]
+                 ("candidates", {"VF_FAULT_TRACE": "true"}),
+                 # The report off: as without it, exact mode too; only the exact value turns it off.
+                 ("off", {"VF_FAULT_REPORT": "0"}), ("off", {"VF_FAULT_REPORT": "0", "VF_FAULT_TRACE": "1"}),
+                 ("candidates", {"VF_FAULT_REPORT": "false"})]
         for name, settings in cases:
             log, summary = Path(tmp) / f"{name}.log", Path(tmp) / f"{name}.summary"
             log.unlink(missing_ok=True)

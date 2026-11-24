@@ -344,6 +344,16 @@ CUresult cuEventRecord(void *event, void *stream) {
 CUresult cuEventSynchronize(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
 CUresult cuEventQuery(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
 
+// Lookups: the functions of this library that the tests look up.
+CUresult cuGetProcAddress(const char *symbol, void **pointer, int version, uint64_t flags) {
+    (void)version; (void)flags;
+    if (!strcmp(symbol, "cuStreamSynchronize")) *pointer = (void *)cuStreamSynchronize;
+    else if (!strcmp(symbol, "cuCtxSynchronize")) *pointer = (void *)cuCtxSynchronize;
+    else if (!strcmp(symbol, "cuLaunchKernel")) *pointer = (void *)cuLaunchKernel;
+    else return NOT_FOUND;
+    return 0;
+}
+
 CUresult cuMemAlloc_v2(uint64_t *pointer, size_t size) {
     (void)size;
     *pointer = 0x7f0000000000;

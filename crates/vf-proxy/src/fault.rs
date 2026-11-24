@@ -104,6 +104,15 @@ use crate::{REALS, config, idx, log};
 type CUresult = c_int;
 const CUDA_SUCCESS: CUresult = 0;
 
+/// Whether the report of faults is on: unless `VF_FAULT_REPORT=0` (exactly), which restores the
+/// layer's forwarding as it is without it: nothing is kept, nothing waited for, nothing said, and
+/// lookups of the functions hooked only for it lead to NVIDIA's (`crate::FAULT_ONLY`). Every entry
+/// of this file that the hooks call does nothing when it is off.
+#[inline(always)]
+pub fn on() -> bool {
+    crate::config().fault_report
+}
+
 /// Whether `result` is an error that a fault in a kernel leaves in its context (every later call
 /// that takes the context returns it). 700, 716 and 719 were seen on a V100 (`tests/kernels/
 /// test_fault.c`); the others are the errors that NVIDIA's documentation says the same of.
@@ -525,6 +534,9 @@ pub fn launched(
     entry: Entry,
     fitted: bool,
 ) -> Kept {
+    if !on() {
+        return Kept::Not;
+    }
     if CAPTURING.load(Relaxed) != 0
         && let Some(graph) = unsafe { capturing_into(stream, entry.per_thread()) }
     {
@@ -553,6 +565,9 @@ static EPOCH: AtomicU64 = AtomicU64::new(0);
 /// those whose epoch is at most this.
 #[inline]
 pub fn begin() -> u64 {
+    if !on() {
+        return 0;
+    }
     EPOCH.fetch_add(1, SeqCst)
 }
 
@@ -735,6 +750,9 @@ fn context_of_stream(stream: *mut c_void, per_thread: bool) -> u64 {
 /// current context (once in each context).
 #[inline]
 pub fn check(result: CUresult, call: &str) {
+    if !on() {
+        return;
+    }
     if is_fault(result) {
         seen(result, call, None);
     }
@@ -753,6 +771,9 @@ pub enum Scope {
 /// A synchronisation of `scope` that began with `begin` (which gave `covers`) returned `result`.
 #[inline]
 pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
+    if !on() {
+        return;
+    }
     if result != CUDA_SUCCESS {
         if is_fault(result) {
             let context = match scope {
@@ -796,6 +817,9 @@ pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
 
 /// The program destroys `stream`: a stream made at its handle later is another (`StreamCover`).
 pub fn stream_destroyed(stream: *mut c_void) {
+    if !on() {
+        return;
+    }
     let stream = stream_id(stream, false);
     if !matches!(stream, LEGACY | PER_THREAD) {
         let epoch = begin();
@@ -864,6 +888,9 @@ fn taken_map() -> MutexGuard<'static, HashMap<usize, Taken>> {
 
 /// The program took `handle` as the kernel `name` of `owner` (a lookup or an enumeration).
 pub fn taken(handle: usize, owner: usize, name: &str) {
+    if !on() {
+        return;
+    }
     if handle == 0 {
         return;
     }
@@ -888,6 +915,9 @@ pub fn taken(handle: usize, owner: usize, name: &str) {
 /// The program took `function` as the function of the kernel `kernel` (`cuKernelGetFunction`) in
 /// the context where the driver made `module` of its library: the same name.
 pub fn alias(function: usize, kernel: usize, module: Option<usize>) {
+    if !on() {
+        return;
+    }
     let mut map = taken_map();
     let Some(known) = map.get(&kernel).cloned() else {
         return;
@@ -964,6 +994,13 @@ pub fn unforget(forgot: Forgot) {
 /// As `forget`, for a module of `context` whose record `contexts` has dropped already (under its
 /// lock: `contexts` is not asked).
 pub fn forget_in(owner: usize, context: Option<usize>) -> Forgot {
+    if !on() {
+        return Forgot {
+            gone: Vec::new(),
+            at: None,
+            replaced: Vec::new(),
+        };
+    }
     let gone: Vec<(usize, Taken)> = {
         let mut map = taken_map();
         let handles: Vec<usize> = map
@@ -1231,6 +1268,9 @@ unsafe fn capture_status(stream: *mut c_void, per_thread: bool) -> (c_int, usize
 
 /// A capture began (`result` of the driver's call).
 pub fn capture_began(result: CUresult) {
+    if !on() {
+        return;
+    }
     if result == CUDA_SUCCESS {
         CAPTURING.fetch_add(1, Relaxed);
     }
@@ -1241,6 +1281,9 @@ pub fn capture_began(result: CUresult) {
 /// # Safety
 /// `stream` is the stream the program names.
 pub unsafe fn capture_ending(stream: *mut c_void, per_thread: bool) -> bool {
+    if !on() {
+        return false;
+    }
     // (Active or invalidated: either way, the call ends it.)
     CAPTURING.load(Relaxed) != 0 && unsafe { capture_status(stream, per_thread) }.0 != 0
 }
@@ -1260,6 +1303,9 @@ pub fn capture_ended(was: bool) {
 
 /// A kernel node of `function` was added to `graph`.
 pub fn node_added(graph: usize, function: u64, grid: [u32; 3], block: [u32; 3]) {
+    if !on() {
+        return;
+    }
     if graph == 0 || function == 0 {
         return;
     }
@@ -1276,6 +1322,9 @@ pub fn node_added(graph: usize, function: u64, grid: [u32; 3], block: [u32; 3]) 
 
 /// `exec` was instantiated from `graph`: it has what the graph has now.
 pub fn instantiated(result: CUresult, exec: *mut *mut c_void, graph: *mut c_void) {
+    if !on() {
+        return;
+    }
     if result != CUDA_SUCCESS || exec.is_null() {
         return;
     }
@@ -1304,11 +1353,17 @@ pub fn instantiated(result: CUresult, exec: *mut *mut c_void, graph: *mut c_void
 
 /// `graph` is destroyed (`cuGraphDestroy`).
 pub fn graph_destroyed(graph: *mut c_void) {
+    if !on() {
+        return;
+    }
     graphs().remove(&(graph as usize));
 }
 
 /// `exec` is destroyed (`cuGraphExecDestroy`).
 pub fn exec_destroyed(exec: *mut c_void) {
+    if !on() {
+        return;
+    }
     let exec = exec as usize;
     let to = begin();
     let mut execs = execs();
@@ -1333,6 +1388,9 @@ pub fn exec_destroyed(exec: *mut c_void) {
 /// # Safety
 /// `stream` is the stream the program launched on.
 pub unsafe fn graph_launched(result: CUresult, exec: *mut c_void, stream: *mut c_void, entry: Entry) -> CUresult {
+    if !on() {
+        return result;
+    }
     if result != CUDA_SUCCESS {
         check(result, entry.name());
         return result;
@@ -1731,12 +1789,18 @@ fn probe(context: u64, when: &str) {
 
 /// `context` is to be destroyed (or the primary context released): asked whether it faulted.
 pub fn context_ending(context: usize) {
+    if !on() {
+        return;
+    }
     probe(context as u64, "before the context was destroyed");
 }
 
 /// `context` was destroyed: a context given its handle later is another, whose fault is its own,
 /// and whose launches are those made after.
 pub fn context_gone(context: usize) {
+    if !on() {
+        return;
+    }
     let context = context as u64;
     reported().retain(|&c| c != context);
     let epoch = begin();

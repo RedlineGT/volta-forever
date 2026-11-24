@@ -420,8 +420,9 @@ that only a copy met, found before the context is destroyed and at exit; under `
 (only that value) the kernel or the graph named alone and its launch returning the error, and
 nothing waited for while a graph is being captured; that the report ends while another thread
 destroys contexts that have modules (120 threads' launches looked up meanwhile); that the waits of
-`VF_PROFILE` are the program's synchronisations for the report; and nothing said when nothing
-faults. Each case in a process of its own; it needs a C compiler.
+`VF_PROFILE` are the program's synchronisations for the report; that with `VF_FAULT_REPORT=0`
+(only that value) nothing is said or waited for and a lookup of a synchronisation leads to the
+driver; and nothing said when nothing faults. Each case in a process of its own; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
