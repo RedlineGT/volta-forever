@@ -279,7 +279,8 @@ fn stream_id(stream: *mut c_void, per_thread: bool) -> u64 {
 const KEPT: usize = 256;
 /// The threads whose launches are kept at a time. A ring whose thread ended is given to the next
 /// thread that launches (its launches stay until they are written over); a thread that finds every
-/// ring held keeps nothing, and the report says how many did (`UNKEPT`).
+/// ring held at its first launch keeps nothing, even after rings come free, and the report says
+/// how many did (`UNKEPT`).
 const RINGS: usize = 128;
 
 /// What a launch is.
@@ -1908,7 +1909,7 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
     if found.unkept > 0 {
         also += &format!(
             " (and the launches of {} threads, which the layer could not keep: it keeps those of {RINGS} threads at \
-             a time)",
+             a time, and a thread whose first launch found them all held keeps none)",
             found.unkept
         );
     }
@@ -2315,6 +2316,17 @@ mod tests {
             covers.context_gone(context, 2);
         }
         assert_eq!(live_contexts(&covers, &[8]), vec![7, 8]);
+    }
+
+    #[test]
+    fn the_threads_that_kept_nothing_are_said_with_why() {
+        let mut found = found_in(&launches(0, LEGACY, &[1], 0), &Covers::default(), 7);
+        found.unkept = 3;
+        let (lines, summary) = compose(&found, false, 1, 700, "cuCtxSynchronize");
+        let said = "(and the launches of 3 threads, which the layer could not keep: it keeps those of 128 threads at a \
+                    time, and a thread whose first launch found them all held keeps none)";
+        assert!(lines[0].contains(said), "{lines:?}");
+        assert!(summary.contains(said), "{summary}");
     }
 
     #[test]

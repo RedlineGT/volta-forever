@@ -364,8 +364,9 @@ What the layer cannot say:
   as it is. Under `VF_FAULT_TRACE=1` the graph is named, not its node: run without graphs (an
   engine's eager mode) to name the kernel.
 - launches older than the last 256 of their thread, when no synchronisation of the whole context
-  bounds them, and the launches of the threads beyond 128 that launch at the same time (the line
-  says so of both).
+  bounds them; and the launches of a thread whose first launch found the records of 128 threads
+  held (each thread holds one from its first launch to its end): it keeps none, even after records
+  come free (the line says so of both, with the number of such threads).
 - in which order the launches of two threads were made between the same two synchronisations:
   each thread's are in their order.
 - a fault that only a call that the layer does not route met (a copy, an allocation, which go
