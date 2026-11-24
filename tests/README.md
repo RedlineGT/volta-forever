@@ -425,7 +425,8 @@ and that the report at exit made then has the fault reported before; under `VF_F
 (only that value) the launch whose synchronisation met the fault named, alone when nothing else
 is uncovered (with a launch made during a capture elsewhere, which was not waited for), with what
 is not ruled out, and its launch returning the error, and
-nothing waited for while a graph is being captured; that the report ends while another thread
+nothing waited for while a graph is being captured, nor after an end of a capture that failed on a
+stream that joined it, while another capture is under way; that the report ends while another thread
 destroys contexts that have modules (120 threads' launches looked up meanwhile); that the waits of
 `VF_PROFILE` are the program's synchronisations for the report; that a fault of a context met by
 a wait for its stream while another is current is said of the stream's context, and one met by a

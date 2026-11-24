@@ -18,7 +18,10 @@
 // made with flags 0) of the same context is being captured returns 906 and invalidates that
 // capture, as NVIDIA's driver does (the CUDA programming guide: "any use of the legacy stream
 // while a blocking stream of the context is capturing is invalid"); a launch into an invalidated
-// capture and its end return 901.
+// capture and its end return 901. A stream that waits for an event recorded in a stream being
+// captured joins that capture (cuStreamWaitEvent); an end of it on a stream that joined returns
+// 903 and invalidates the capture, which goes on until the end on the stream that began it, after
+// which no stream is in it.
 //
 // A lookup (cuGetProcAddress, cuGetProcAddress_v2) gives any function of this library by its name.
 // The primary context of each device: made at its first retain, destroyed at its last release or
@@ -47,6 +50,7 @@ enum {
     ECC_UNCORRECTABLE = 214,
     ILLEGAL_ADDRESS = 700,
     CAPTURE_INVALIDATED = 901,
+    CAPTURE_UNMATCHED = 903,
     CAPTURE_IMPLICIT = 906,
 };
 
@@ -62,6 +66,9 @@ static _Atomic int sticky[SLOTS], pending[SLOTS], delay[SLOTS];
 // whether that capture was invalidated. By event: its context.
 static _Atomic uintptr_t stream_context[SLOTS], event_context[SLOTS], capturing[SLOTS];
 static _Atomic int stream_blocking[SLOTS], invalidated[SLOTS];
+// By stream: whether it began the capture it is in. By event: the capture it was recorded in.
+static _Atomic int origin[SLOTS];
+static _Atomic uintptr_t event_capture[SLOTS];
 // By graph: the error that its launch makes pending (0: none).
 static _Atomic int graph_faults[SLOTS];
 
@@ -240,6 +247,7 @@ CUresult cuStreamBeginCapture_v2(void *stream, int mode) {
     capturing[slot((uintptr_t)stream)] = next_graph++;
     graph_faults[slot(capturing[slot((uintptr_t)stream)])] = 0;
     invalidated[slot((uintptr_t)stream)] = 0;
+    origin[slot((uintptr_t)stream)] = 1;
     return 0;
 }
 CUresult cuStreamEndCapture(void *stream, void **graph) {
@@ -247,11 +255,21 @@ CUresult cuStreamEndCapture(void *stream, void **graph) {
     int s = slot((uintptr_t)stream);
     uintptr_t g = capturing[s];
     if (!g) return INVALID_VALUE;
-    capturing[s] = 0;
-    if (invalidated[s]) {
-        invalidated[s] = 0;
-        return CAPTURE_INVALIDATED;
+    // (Every stream in the capture: invalidated by an end on a stream that joined it, out of it at
+    // the end on the stream that began it.)
+    int joined = !origin[s], bad = invalidated[s];
+    for (uintptr_t h = 0x50010; h <= next_stream; h += 0x10) {
+        int t = slot(h);
+        if (capturing[t] != g) continue;
+        if (joined) {
+            invalidated[t] = 1;
+        } else {
+            capturing[t] = 0;
+            invalidated[t] = 0;
+        }
     }
+    if (joined) return CAPTURE_UNMATCHED;
+    if (bad) return CAPTURE_INVALIDATED;
     *graph = (void *)g;
     return 0;
 }
@@ -364,7 +382,18 @@ CUresult cuEventCreate(void **event, unsigned flags) {
 }
 CUresult cuEventRecord(void *event, void *stream) {
     event_context[slot((uintptr_t)event)] = context_of(stream);
+    event_capture[slot((uintptr_t)event)] = is_null_stream(stream) ? 0 : capturing[slot((uintptr_t)stream)];
     return queued(context_of(stream));
+}
+CUresult cuStreamWaitEvent(void *stream, void *event, unsigned flags) {
+    (void)flags;
+    uintptr_t g = event_capture[slot((uintptr_t)event)];
+    if (g && !is_null_stream(stream) && capturing[slot((uintptr_t)stream)] != g) {
+        capturing[slot((uintptr_t)stream)] = g;
+        origin[slot((uintptr_t)stream)] = 0;
+        invalidated[slot((uintptr_t)stream)] = 0;
+    }
+    return 0;
 }
 CUresult cuEventSynchronize(void *event) { return waited(event_context[slot((uintptr_t)event)]); }
 CUresult cuEventQuery(void *event) { return waited(event_context[slot((uintptr_t)event)]); }

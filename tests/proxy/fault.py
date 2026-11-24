@@ -294,6 +294,28 @@ def case(name, proxy):
         args = (c.c_void_p * 1)(c.cast(c.byref(word), c.c_void_p))
         out.append(launch(run.functions["write_null"], 1, 1, 1, 32, 1, 1, 0, None, args, None))
         out.append(run.api.cuCtxSynchronize())
+    elif name == "capture-joined":
+        # Exact mode: two captures under way; a stream joins the first (it waits for an event recorded
+        # in it), and the program ends the capture there (903: not the stream that began it), then on
+        # the stream that began it (901: invalidated by the end before). The second capture is still
+        # under way: a launch is not waited for; once that one ends, it is.
+        mock = c.CDLL(os.environ["VF_REAL_LIBCUDA"])
+        waits = c.c_uint.in_dll(mock, "synchronized")
+        first, joined, second, other = run.stream(), run.stream(), run.stream(), run.stream()
+        event, graph = c.c_void_p(), c.c_void_p()
+        assert run.api.cuEventCreate(c.byref(event), 0) == 0
+        out.append(run.api.cuStreamBeginCapture_v2(first, 2))
+        out.append(run.api.cuStreamBeginCapture_v2(second, 2))
+        out.append(run.api.cuEventRecord(event, first))
+        out.append(run.api.cuStreamWaitEvent(joined, event, 0))
+        out.append(run.api.cuStreamEndCapture(joined, c.byref(graph)))
+        out.append(run.api.cuStreamEndCapture(first, c.byref(graph)))
+        before = waits.value
+        out.append(run.launch("add_one", other, grid=1))
+        out.append(waits.value - before)
+        out.append(run.api.cuStreamEndCapture(second, c.byref(graph)))
+        out.append(run.launch("add_one", other, grid=2))
+        out.append(waits.value - before)
     elif name == "exact-done":
         # Exact mode, the fault seen one wait late (MOCK_DELAY=1, as on a GPU where write_null still
         # runs when the next wait returns): write_null is launched while another stream is captured
@@ -441,6 +463,12 @@ def checks(name, log, summary, results):
         expect("the capture was not invalidated: every call returned 0, its end too",
                results == ["0"] * (15 if name == "nofault-release" else 13))
         return found
+    if name == "capture-joined":
+        expect("no fault is said", not faults)
+        expect("the end on the stream that joined failed, the capture went on: not waited for while the other "
+               "capture is under way, waited for after",
+               results == ["0", "0", "0", "0", "903", "901", "0", "0", "0", "0", "1"])
+        return found
     if name == "exact-capture":
         expect("no fault is said", not faults)
         expect("not waited for during a capture, waited for after", results == ["0", "0", "0", "0", "0", "1"])
@@ -576,6 +604,28 @@ def checks(name, log, summary, results):
         expect("no launch known, and nothing asserted of where the kernel was launched",
                "The layer kept no launch of this context that no synchronisation that succeeded covers" in head
                and "the kernel was launched where" not in log and "may be what failed" in head)
+    elif name == "capture-joined":
+        # Exact mode: two captures under way; a stream joins the first (it waits for an event recorded
+        # in it), and the program ends the capture there (903: not the stream that began it), then on
+        # the stream that began it (901: invalidated by the end before). The second capture is still
+        # under way: a launch is not waited for; once that one ends, it is.
+        mock = c.CDLL(os.environ["VF_REAL_LIBCUDA"])
+        waits = c.c_uint.in_dll(mock, "synchronized")
+        first, joined, second, other = run.stream(), run.stream(), run.stream(), run.stream()
+        event, graph = c.c_void_p(), c.c_void_p()
+        assert run.api.cuEventCreate(c.byref(event), 0) == 0
+        out.append(run.api.cuStreamBeginCapture_v2(first, 2))
+        out.append(run.api.cuStreamBeginCapture_v2(second, 2))
+        out.append(run.api.cuEventRecord(event, first))
+        out.append(run.api.cuStreamWaitEvent(joined, event, 0))
+        out.append(run.api.cuStreamEndCapture(joined, c.byref(graph)))
+        out.append(run.api.cuStreamEndCapture(first, c.byref(graph)))
+        before = waits.value
+        out.append(run.launch("add_one", other, grid=1))
+        out.append(waits.value - before)
+        out.append(run.api.cuStreamEndCapture(second, c.byref(graph)))
+        out.append(run.launch("add_one", other, grid=2))
+        out.append(waits.value - before)
     elif name == "exact-done":
         expect("the last launch's wait met the fault and it returned it", results == ["0"] * 5 + ["700"])
         expect("not said to be the kernel: the launch not waited for is named with it",
@@ -634,6 +684,7 @@ def main():
                  ("unseen", {"VF_ADAPT": "0", "VF_FIT": "0"}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
+                 ("capture-joined", {"VF_FAULT_TRACE": "1"}),
                  ("exact-done", {"VF_FAULT_TRACE": "1", "MOCK_DELAY": "1"}),
                  ("copy", {}), ("copy-destroyed", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  ("sigexit", {"MOCK_SIGNAL": "1"}), ("sigexit-report", {"MOCK_SIGNAL": "1"}), ("event-again", {}),

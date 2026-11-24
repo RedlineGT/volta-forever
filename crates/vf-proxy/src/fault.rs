@@ -49,8 +49,9 @@
 //! synchronisation of the current context, of its legacy stream or of the thread's own default
 //! stream that succeeded (which context's launches it covers); and, while a capture is under way in
 //! the process, `cuStreamGetCaptureInfo_v2` (or its form for the thread's own stream) of the stream
-//! that a launch went into or whose capture is ended (whether the launch is a node of a graph,
-//! `capturing_into`). In exact mode (`VF_FAULT_TRACE=1`), the waits after each launch, by design.
+//! that a launch went into (whether the launch is a node of a graph, `capturing_into`) or whose
+//! capture is ended (before the end, and after an end that failed: whether the capture ended,
+//! `capture_ended`). In exact mode (`VF_FAULT_TRACE=1`), the waits after each launch, by design.
 //!
 //! The cost of a launch. What a launch keeps is written with plain stores into a ring that its own
 //! thread alone writes (a sequence lock that this thread alone takes, as the guard's slots are
@@ -1468,15 +1469,23 @@ pub unsafe fn capture_ending(stream: *mut c_void, per_thread: bool) -> bool {
     CAPTURING.load(Relaxed) != 0 && unsafe { capture_status(stream, per_thread) }.0 != 0
 }
 
-/// A capture that was under way ended (`was`: `capture_ending` said so).
-pub fn capture_ended(was: bool) {
-    if was {
-        let mut count = CAPTURING.load(Relaxed);
-        while count > 0 {
-            match CAPTURING.compare_exchange_weak(count, count - 1, Relaxed, Relaxed) {
-                Ok(_) => break,
-                Err(now) => count = now,
-            }
+/// The call that ends the capture of `stream` returned `result`, `was` being what `capture_ending`
+/// said before it: a capture under way ended when the call succeeded, or when the stream is
+/// captured no more. (An end that fails on a stream that joined a capture begun on another, by
+/// waiting for an event recorded in it, leaves that capture under way, invalidated, until the end on
+/// the stream that began it: it is counted down then, once.)
+///
+/// # Safety
+/// `stream` is the stream the program names.
+pub unsafe fn capture_ended(was: bool, result: CUresult, stream: *mut c_void, per_thread: bool) {
+    if !was || (result != CUDA_SUCCESS && unsafe { capture_status(stream, per_thread) }.0 != 0) {
+        return;
+    }
+    let mut count = CAPTURING.load(Relaxed);
+    while count > 0 {
+        match CAPTURING.compare_exchange_weak(count, count - 1, Relaxed, Relaxed) {
+            Ok(_) => break,
+            Err(now) => count = now,
         }
     }
 }

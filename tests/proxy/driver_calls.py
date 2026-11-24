@@ -27,8 +27,9 @@ thread, the calls are the same:
   without a fault, each of which is said, which are only these two getters: cuCtxGetCurrent after a
   synchronisation of the current context, of its legacy stream or of the thread's own default stream
   that succeeded (which context's launches it covers); and cuStreamGetCaptureInfo_v2 (or its _ptsz
-  form), while a capture is under way in the process, of the stream that the program launched into,
-  or whose capture it ends (whether the launch is a node of a graph). Nothing at exit. Any other call
+  form), while a capture is under way in the process, of the stream that the program launched into
+  (whether the launch is a node of a graph), or whose capture it ends (before, and after an end that
+  failed: whether the capture ended). Nothing at exit. Any other call
   fails the test, and so does a getter of these that no case shows (the list is the list);
 - by lookups and by names, with each build and setting: the same, but for the lookups (the calls
   through looked-up pointers were recorded).

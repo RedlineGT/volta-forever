@@ -3225,7 +3225,7 @@ pub unsafe extern "C" fn cuStreamEndCapture(stream: *mut c_void, graph: *mut *mu
     let real = real!(cuStreamEndCapture: EndCapture);
     let was = unsafe { fault::capture_ending(stream, false) };
     let result = unsafe { real(stream, graph) };
-    fault::capture_ended(was);
+    unsafe { fault::capture_ended(was, result, stream, false) };
     result
 }
 
@@ -3234,7 +3234,7 @@ pub unsafe extern "C" fn cuStreamEndCapture_ptsz(stream: *mut c_void, graph: *mu
     let real = real!(cuStreamEndCapture_ptsz: EndCapture);
     let was = unsafe { fault::capture_ending(stream, true) };
     let result = unsafe { real(stream, graph) };
-    fault::capture_ended(was);
+    unsafe { fault::capture_ended(was, result, stream, true) };
     result
 }
 
