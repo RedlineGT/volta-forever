@@ -178,6 +178,23 @@ def case(name, proxy):
         out.append(run.api.cuCtxSynchronize())
         stop.set()
         other.join()
+    elif name == "own-stream-threads":
+        # A thread's own default stream is not the next thread's, even when that thread is given the
+        # ended one's record of launches: its synchronisation covers its own launches only. (The fault
+        # is seen one wait late, MOCK_DELAY=1, as on a GPU where write_null still runs.)
+        def first():
+            out.append(run.api.cuCtxSetCurrent(run.context))
+            out.append(run.launch("write_null", grid=1, own_stream=True))
+
+        def second():
+            out.append(run.api.cuCtxSetCurrent(run.context))
+            out.append(run.launch("add_one", grid=2, own_stream=True))
+            out.append(run.api.cuStreamSynchronize_ptsz(None))
+        for target in (first, second):
+            thread = threading.Thread(target=target)
+            thread.start()
+            thread.join()
+        out.append(run.api.cuCtxSynchronize())
     elif name == "unload-failed":
         # The unload of a module that fails (here, after the fault, which only a copy met) leaves it
         # loaded: its kernels are still named as what the layer made of them.
@@ -283,6 +300,11 @@ def checks(name, log, summary, results):
         count = re.search(r"one of the (\d+) launched", head)
         expect("the report ended while contexts were destroyed, and named the launches of the 120 threads",
                results == ["0", "700"] and count is not None and int(count.group(1)) >= 120 * 255)
+    elif name == "own-stream-threads":
+        expect("the second thread's synchronisation succeeded, the main thread's met the fault",
+               results == ["0", "0", "0", "0", "0", "700"])
+        expect("the first thread's launch on its own default stream is named, the second's is not",
+               names == ["write_null"] and "grid 1x1x1" in log and "grid 2x1x1" not in log)
     elif name == "unload-failed":
         expect("the unload met the fault", results[2:] == ["700", "700"] and "cuModuleUnload returned 700" in head)
         line = next((line for line in lines if "grid 1x1x1" in line), "")
@@ -315,7 +337,7 @@ def main():
         subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-Bsymbolic", "-o", mock, str(here / "fault_mock_driver.c")],
                        check=True)
         cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
-                 ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("threads", {}),
+                 ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("copy", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.

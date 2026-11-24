@@ -263,15 +263,7 @@ impl Launch {
             | ((self.entry.code() & 0xf) << 52)
             | (u64::from(self.fitted) << 56)
     }
-
-    /// The epoch in 48 bits (a synchronisation a microsecond would take 8 years to fill them), the
-    /// thread in 16.
-    fn epoch_word(&self) -> u64 {
-        (self.epoch & EPOCH_MASK) | (self.thread << 48)
-    }
 }
-
-const EPOCH_MASK: u64 = (1 << 48) - 1;
 
 /// An entry of a ring: written by the thread that holds the ring, read without a lock. `version`
 /// is `2n + 1` while launch `n` is written, `2n + 2` once it is.
@@ -283,6 +275,9 @@ struct Slot {
     grid: AtomicU64,
     block: AtomicU64,
     epoch: AtomicU64,
+    /// The thread that made it, as the lines number threads: the whole number, as the
+    /// synchronisations of the thread's own default stream are kept by it (`Covers::own`).
+    thread: AtomicU64,
 }
 
 impl Slot {
@@ -294,6 +289,7 @@ impl Slot {
             grid: AtomicU64::new(0),
             block: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            thread: AtomicU64::new(0),
         }
     }
 
@@ -306,7 +302,8 @@ impl Slot {
         self.stream.store(launch.stream, Relaxed);
         self.grid.store(launch.grid_word(), Relaxed);
         self.block.store(launch.block_word(), Relaxed);
-        self.epoch.store(launch.epoch_word(), Relaxed);
+        self.epoch.store(launch.epoch, Relaxed);
+        self.thread.store(launch.thread, Relaxed);
         self.version.store(2 * number + 2, Release);
     }
 
@@ -316,12 +313,13 @@ impl Slot {
         if version & 1 != 0 || version == 0 {
             return None;
         }
-        let (what, stream, grid, block, epoch) = (
+        let (what, stream, grid, block, epoch, thread) = (
             self.what.load(Relaxed),
             self.stream.load(Relaxed),
             self.grid.load(Relaxed),
             self.block.load(Relaxed),
             self.epoch.load(Relaxed),
+            self.thread.load(Relaxed),
         );
         fence(Acquire);
         if self.version.load(Relaxed) != version {
@@ -330,7 +328,7 @@ impl Slot {
         Some(Launch {
             ring,
             number: version / 2 - 1,
-            thread: epoch >> 48,
+            thread,
             kind: (block >> 48) & 0xf,
             entry: Entry::of((block >> 52) & 0xf),
             fitted: (block >> 56) & 1 != 0,
@@ -342,7 +340,7 @@ impl Slot {
                 ((block >> 16) & 0xffff) as u32,
                 ((block >> 32) & 0xffff) as u32,
             ],
-            epoch: epoch & EPOCH_MASK,
+            epoch,
         })
     }
 }
@@ -378,7 +376,7 @@ impl Ring {
     #[inline(always)]
     fn push(&self, launch: &mut Launch) -> u64 {
         let number = self.next.load(Relaxed);
-        launch.thread = self.thread.load(Relaxed) & 0xffff;
+        launch.thread = self.thread.load(Relaxed);
         self.slots[number as usize % KEPT].write(number, launch);
         self.next.store(number + 1, Release);
         number
@@ -555,7 +553,7 @@ static EPOCH: AtomicU64 = AtomicU64::new(0);
 /// those whose epoch is at most this.
 #[inline]
 pub fn begin() -> u64 {
-    EPOCH.fetch_add(1, SeqCst) & EPOCH_MASK
+    EPOCH.fetch_add(1, SeqCst)
 }
 
 /// The most records of each kind kept: beyond, the records of that kind are dropped, which makes
@@ -578,8 +576,9 @@ struct Covers {
     /// The first epoch of a stream whose handle has no record (records were dropped: what was
     /// launched before may have been on another stream of that handle).
     streams_from: u64,
-    /// By ring and context: the thread's own default stream.
-    own: HashMap<(usize, u64), u64>,
+    /// By thread (as the lines number threads) and context: the thread's own default stream. (Not
+    /// by ring: a ring whose thread ended is given to another, whose own stream is another.)
+    own: HashMap<(u64, u64), u64>,
     /// The contexts destroyed, and not used since.
     gone: HashSet<u64>,
 }
@@ -650,8 +649,8 @@ impl Covers {
         cover(&mut self.legacy, context, covers);
     }
 
-    fn own_synchronized(&mut self, ring: usize, context: u64, covers: u64) {
-        cover(&mut self.own, (ring, context), covers);
+    fn own_synchronized(&mut self, thread: u64, context: u64, covers: u64) {
+        cover(&mut self.own, (thread, context), covers);
     }
 
     fn stream(&mut self, stream: u64) -> &mut StreamCover {
@@ -686,7 +685,7 @@ impl Covers {
             LEGACY => self.legacy.get(&context).is_some_and(|&c| launch.epoch <= c),
             PER_THREAD => self
                 .own
-                .get(&(launch.ring, context))
+                .get(&(launch.thread, context))
                 .is_some_and(|&c| launch.epoch <= c),
             stream => {
                 launch.epoch >= self.streams_from
@@ -786,9 +785,9 @@ pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
                     return;
                 };
                 // SAFETY: a ring is never freed.
-                let index = unsafe { &*ring }.index;
+                let thread = unsafe { &*ring }.thread.load(Relaxed);
                 let context = current_context();
-                record().own_synchronized(index, context, covers);
+                record().own_synchronized(thread, context, covers);
             }
             stream => record().stream_synchronized(stream, covers),
         },
@@ -1870,11 +1869,15 @@ mod tests {
         assert_eq!(whats(&found), vec![4, 2]);
         // Context 7's legacy stream is not context 8's.
         assert_eq!(whats(&found_in(&all, &covers, 8)), vec![4, 3, 2]);
-        // The thread's own stream, synchronised in context 7, by this thread (ring 0).
-        covers.own_synchronized(0, 7, 0);
+        // The thread's own stream, synchronised in context 7, by this thread (thread 1, of ring 0).
+        covers.own_synchronized(1, 7, 0);
         assert_eq!(whats(&found_in(&all, &covers, 7)), vec![2]);
-        covers.own_synchronized(1, 8, 0);
+        covers.own_synchronized(2, 8, 0);
         assert_eq!(whats(&found_in(&all, &covers, 8)), vec![4, 3, 2]);
+        // Another thread given the same ring later: its own stream is not this thread's.
+        let mut later = launch(0, 1, PER_THREAD, 5, 0);
+        later.thread = 3;
+        assert_eq!(whats(&found_in(&[later], &covers, 7)), vec![5]);
     }
 
     #[test]
