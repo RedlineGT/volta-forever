@@ -289,7 +289,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Thirteen more host regressions exercise the built libraries directly:
+Sixteen more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -307,6 +307,7 @@ python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
 python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
 python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
 python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
+python3 tests/proxy/fault.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -400,6 +401,17 @@ launched. Each case in a process of its own, with deferred libraries and without
 compiler. The fifteenth checks, with the same stand-in, whose synchronisation returns what the test
 sets, that with `VF_PROFILE` the first synchronisation after a launch that returns an error is said
 at once, with the kernel it followed and its sizes, and only that one; it needs a C compiler.
+The sixteenth checks, with a stand-in that shows a fault as NVIDIA's driver does (the launch of `write_null` returns 0, the next call that
+waits returns 700, and every call that takes the context after it), what the layer says after a
+fault: once, at the default level, the launches of the context that no synchronisation covers, the
+last first, with what the layer made of each image and its size and digest, and again in the report
+at exit (`VF_SUMMARY`); not those of another context, nor those made before a synchronisation of
+their stream (another stream's, the legacy stream's, the thread's own default stream's), and those
+of every thread, by thread; a CUDA graph's launch with the kernel nodes captured in it; a fault
+that only a copy met, found before the context is destroyed and at exit; under `VF_FAULT_TRACE=1`
+(only that value) the kernel or the graph named alone and its launch returning the error, and
+nothing waited for while a graph is being captured; and nothing said when nothing faults. Each case
+in a process of its own; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -424,7 +436,7 @@ No GPU needed.
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
-`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
+`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
 `log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;

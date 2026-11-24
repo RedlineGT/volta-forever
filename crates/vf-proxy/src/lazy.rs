@@ -494,8 +494,11 @@ pub unsafe fn setup_from_cache(
             .filter(|e| e.trap_only)
             .map(|e| e.name.clone())
             .collect();
-        let kept = crate::images::Replacement::from_vec(Vec::new());
+        let mut kept = crate::images::Replacement::from_vec(Vec::new());
         kept.set_identity(identity);
+        // (Only PTX is compiled kernel by kernel.)
+        kept.how =
+            Some("PTX retargeted by the layer, set up from the layer's cache (an earlier run adapted it)".into());
         crate::images::keep(lib_handle, kept);
         crate::kernels::describe(lib_handle, None, refused, emulated, true);
         if let Some(image) = program_image {
@@ -951,6 +954,24 @@ fn real_get_kernel_fn() -> unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *
 fn real_unload_fn() -> unsafe extern "C" fn(*mut c_void) -> CUresult {
     // SAFETY: REALS holds the address of NVIDIA's cuLibraryUnload.
     unsafe { std::mem::transmute(REALS[idx::cuLibraryUnload].load(Relaxed)) }
+}
+
+/// How the kernel `kernel` (the handle that the program was given) of the deferred library
+/// `library` was given: compiled alone (the handle of the sub-module given to the driver), or from
+/// the whole module (`None`); `None` when `library` is not deferred. For the lines of a fault.
+pub fn given_as(library: usize, kernel: usize) -> Option<Option<usize>> {
+    let (mutex, _) = &*LAZY_LIBS;
+    let libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let lazy_lib = libs.get(&library)?;
+    let alone = lazy_lib.kernels.values().find_map(|state| match state {
+        KernelState::Ready(entry)
+            if entry.kernel_handle == kernel && Some(entry.lib_handle) != lazy_lib.materialized_handle =>
+        {
+            Some(entry.lib_handle)
+        }
+        _ => None,
+    });
+    Some(alone)
 }
 
 /// Check if `library` is a lazy library handle.

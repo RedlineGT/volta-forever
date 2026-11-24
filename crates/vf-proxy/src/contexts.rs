@@ -133,6 +133,9 @@ pub fn of(context: usize) -> Modules {
 /// so is a module loaded since in a context at the same address. (The second translation of a
 /// module, for `fit`, is a module of the same context: it went too, and is one of these.)
 pub fn destroyed(modules: Modules) {
+    if let Some(context) = modules.context {
+        crate::fault::context_gone(context);
+    }
     let mut known = self::modules();
     for (module, record) in modules.records {
         if known.get(&module) != Some(&record) {
@@ -142,6 +145,7 @@ pub fn destroyed(modules: Modules) {
         // Under the lock: a load that the driver gives this handle to now waits for this to be
         // done before it keeps anything for it (`forget`, `loaded`).
         crate::fit::forget(module);
+        crate::fault::forget_in(module, Some(record.context));
         crate::images::dropped(module);
         crate::lazy::forget_module(module);
     }
@@ -194,6 +198,26 @@ pub fn restore_attaches(context: usize, attaches: Option<usize>) {
 /// The driver gave `context` as the primary context of `device`.
 pub fn primary_retained(device: c_int, context: usize) {
     primary().insert(device, context);
+}
+
+/// The contexts that modules were loaded in, and the primary contexts the program holds, as far as
+/// the layer knows (those destroyed through it are not), for the report of a fault (`fault`).
+pub fn known() -> Vec<usize> {
+    let mut known: Vec<usize> = modules().values().map(|record| record.context).collect();
+    known.extend(primary().values().copied());
+    known.sort_unstable();
+    known.dedup();
+    known
+}
+
+/// The context of `module`, when the layer knows it.
+pub fn context_of(module: usize) -> Option<usize> {
+    modules().get(&module).map(|record| record.context)
+}
+
+/// The primary context of `device`, as the driver gave it to the program, if it did.
+pub fn primary_of(device: c_int) -> Option<usize> {
+    primary().get(&device).copied()
 }
 
 /// The modules of the primary context of `device`, as `of`, before the driver is asked to release

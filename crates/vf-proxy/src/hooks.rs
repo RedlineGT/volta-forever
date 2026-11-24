@@ -10,7 +10,9 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use crate::guard;
 use crate::images::{CUDA_ERROR_INVALID_PTX, Replacement};
-use crate::{COUNTS, REALS, callers, config, contexts, fit, idx, images, kernels, lazy, log, own_entry, profile};
+use crate::{
+    COUNTS, REALS, callers, config, contexts, fault, fit, idx, images, kernels, lazy, log, own_entry, profile,
+};
 
 type CUresult = c_int;
 const CUDA_SUCCESS: CUresult = 0;
@@ -454,7 +456,8 @@ unsafe fn load(
 ///
 /// # Safety
 /// `module` must be null or point to the handle the driver stored.
-unsafe fn in_context(result: CUresult, module: *mut *mut c_void) -> CUresult {
+unsafe fn in_context(result: CUresult, module: *mut *mut c_void, call: &str) -> CUresult {
+    fault::check(result, call);
     if result == CUDA_SUCCESS && !module.is_null() {
         contexts::loaded(unsafe { *module } as usize);
     }
@@ -479,7 +482,7 @@ unsafe extern "C" fn module_load_data(module: *mut *mut c_void, image: *const c_
             |image| load_logged(module, image, 0, std::ptr::null_mut(), std::ptr::null_mut()),
         )
     };
-    unsafe { in_context(result, module) }
+    unsafe { in_context(result, module, "cuModuleLoadData") }
 }
 
 #[unsafe(naked)]
@@ -513,7 +516,7 @@ unsafe extern "C" fn module_load_data_ex(
             |image| load_logged(module, image, count, options, values),
         )
     };
-    unsafe { in_context(result, module) }
+    unsafe { in_context(result, module, "cuModuleLoadDataEx") }
 }
 
 #[unsafe(naked)]
@@ -534,7 +537,7 @@ unsafe extern "C" fn module_load_fat_binary(module: *mut *mut c_void, image: *co
             |image| load_logged(module, image, 0, std::ptr::null_mut(), std::ptr::null_mut()),
         )
     };
-    unsafe { in_context(result, module) }
+    unsafe { in_context(result, module, "cuModuleLoadFatBinary") }
 }
 
 #[unsafe(naked)]
@@ -546,7 +549,7 @@ pub unsafe extern "C" fn cuModuleLoad(module: *mut *mut c_void, path: *const c_c
 unsafe extern "C" fn module_load(module: *mut *mut c_void, path: *const c_char, caller: usize) -> CUresult {
     let _told = images::ForCaller::told(callers::told_sm(caller));
     let result = unsafe { load_file(module, path) };
-    unsafe { in_context(result, module) }
+    unsafe { in_context(result, module, "cuModuleLoad") }
 }
 
 /// `cuModuleLoad`, adapted if needed.
@@ -623,6 +626,9 @@ unsafe fn lookup(
     }
     if result == CUDA_SUCCESS {
         kernels::given(handle, &name);
+        if !kernel_out.is_null() {
+            fault::taken(unsafe { *kernel_out } as usize, handle, &name);
+        }
         // Record the kernel handle -> name mapping for the profiler: cuFuncGetName does not
         // work for lazily compiled sub-modules, so the profiler uses this map instead.
         if config().profile && !kernel_out.is_null() {
@@ -644,6 +650,7 @@ pub unsafe extern "C" fn cuModuleGetFunction(
     let real =
         real!(cuModuleGetFunction: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> CUresult);
     let result = unsafe { lookup(module as usize, name, function, || real(function, module, name)) };
+    fault::check(result, "cuModuleGetFunction");
     if result == CUDA_SUCCESS && !function.is_null() && !name.is_null() {
         let func_handle = unsafe { *function } as usize;
         let name_str = unsafe { CStr::from_ptr(name) }.to_string_lossy();
@@ -662,6 +669,7 @@ pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     let released = images::release(module as usize);
     let result = unsafe { real(module) };
     if result != CUDA_SUCCESS {
+        fault::check(result, "cuModuleUnload");
         images::unload_failed(released);
     }
     result
@@ -1376,6 +1384,7 @@ impl Enumeration {
             if !entry.is_null()
                 && let Ok(name) = self.name_of(entry)
             {
+                fault::taken(entry as usize, self.owner as usize, &name);
                 fit::register_kernel(entry as usize, self.owner as usize, &name, self.library);
             }
         }
@@ -1675,13 +1684,21 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
     } else {
         let get_library: GetHandle = unsafe { std::mem::transmute(REALS[idx::cuKernelGetLibrary].load(Relaxed)) };
         if unsafe { get_library(&mut library, kernel) } != CUDA_SUCCESS {
+            fault::alias(unsafe { *function } as usize, kernel as usize, None);
             return result;
         }
         library as usize
     };
     let get_module: GetHandle = unsafe { std::mem::transmute(REALS[idx::cuFuncGetModule].load(Relaxed)) };
     let mut module = std::ptr::null_mut();
-    if unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS {
+    let found = unsafe { get_module(&mut module, *function) } == CUDA_SUCCESS;
+    // (The module first: `contexts` gives the context of the function from it.)
+    fault::alias(
+        unsafe { *function } as usize,
+        kernel as usize,
+        (found && !module.is_null()).then_some(module as usize),
+    );
+    if found {
         // (The context's record first: see `contexts::destroyed`.)
         contexts::loaded(module as usize);
         share_on_this_device(module as usize, owner);
@@ -1986,6 +2003,33 @@ unsafe fn report_launch(
     ));
 }
 
+/// What a launch that the driver answered `result` returns to the program: a launch accepted (with
+/// `fitted`, from its second translation) is kept for the report of a fault and, in exact mode
+/// (`VF_FAULT_TRACE=1`), waited for; an error of a fault is reported (`fault`).
+///
+/// # Safety
+/// `stream` is the stream the program launched on.
+#[inline(always)]
+unsafe fn launched(
+    result: CUresult,
+    fitted: bool,
+    function: *mut c_void,
+    grid: [c_uint; 3],
+    block: [c_uint; 3],
+    stream: *mut c_void,
+    entry: fault::Entry,
+) -> CUresult {
+    if result != CUDA_SUCCESS {
+        fault::check(result, entry.name());
+        return result;
+    }
+    let kept = fault::launched(function, grid, block, stream, entry, fitted);
+    if config().fault_trace {
+        return unsafe { fault::settle(kept, stream, entry.per_thread(), entry.name()) };
+    }
+    result
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLaunchKernel(
     function: *mut c_void,
@@ -2060,7 +2104,17 @@ pub unsafe extern "C" fn cuLaunchKernel(
                 )
             };
         }
-        return fit_result;
+        return unsafe {
+            launched(
+                fit_result,
+                true,
+                function,
+                [grid_x, grid_y, grid_z],
+                [block_x, block_y, block_z],
+                stream,
+                fault::Entry::LaunchKernel,
+            )
+        };
     }
     if result != CUDA_SUCCESS && config().trace_launch {
         unsafe {
@@ -2085,7 +2139,17 @@ pub unsafe extern "C" fn cuLaunchKernel(
             )
         };
     }
-    result
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [grid_x, grid_y, grid_z],
+            [block_x, block_y, block_z],
+            stream,
+            fault::Entry::LaunchKernel,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2104,6 +2168,12 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
         unsafe { count_launch(function) };
     }
     let result = unsafe { real(launch, function, parameters, extra) };
+    let (grid, block, stream) = if launch.is_null() {
+        ([0; 3], [0; 3], std::ptr::null_mut())
+    } else {
+        let launch = unsafe { &*launch };
+        (launch.grid, launch.block, launch.stream)
+    };
     // Refused for its registers: from a second translation, as in `cuLaunchKernel`.
     if result == fit::OUT_OF_RESOURCES
         && !launch.is_null()
@@ -2128,7 +2198,17 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
                 )
             };
         }
-        return fit_result;
+        return unsafe {
+            launched(
+                fit_result,
+                true,
+                function,
+                grid,
+                block,
+                stream,
+                fault::Entry::LaunchKernelEx,
+            )
+        };
     }
     if result != CUDA_SUCCESS && config().trace_launch && !launch.is_null() {
         let launch_ref = unsafe { &*launch };
@@ -2162,7 +2242,17 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
             )
         };
     }
-    result
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            grid,
+            block,
+            stream,
+            fault::Entry::LaunchKernelEx,
+        )
+    }
 }
 
 // ---- per-thread default stream launch variants (`_ptsz`) -------------------------------------------
@@ -2258,7 +2348,17 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
                 )
             };
         }
-        return fit_result;
+        return unsafe {
+            launched(
+                fit_result,
+                true,
+                function,
+                [grid_x, grid_y, grid_z],
+                [block_x, block_y, block_z],
+                stream,
+                fault::Entry::LaunchKernelPtsz,
+            )
+        };
     }
     if result != CUDA_SUCCESS && config().trace_launch {
         unsafe {
@@ -2283,7 +2383,17 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
             )
         };
     }
-    result
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [grid_x, grid_y, grid_z],
+            [block_x, block_y, block_z],
+            stream,
+            fault::Entry::LaunchKernelPtsz,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2301,6 +2411,12 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
         unsafe { count_launch(function) };
     }
     let result = unsafe { real(launch, function, parameters, extra) };
+    let (grid, block, stream) = if launch.is_null() {
+        ([0; 3], [0; 3], std::ptr::null_mut())
+    } else {
+        let launch = unsafe { &*launch };
+        (launch.grid, launch.block, launch.stream)
+    };
     if result == fit::OUT_OF_RESOURCES
         && !launch.is_null()
         && let Some(fit_result) = unsafe {
@@ -2324,7 +2440,17 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
                 )
             };
         }
-        return fit_result;
+        return unsafe {
+            launched(
+                fit_result,
+                true,
+                function,
+                grid,
+                block,
+                stream,
+                fault::Entry::LaunchKernelExPtsz,
+            )
+        };
     }
     if result != CUDA_SUCCESS && config().trace_launch && !launch.is_null() {
         let launch_ref = unsafe { &*launch };
@@ -2358,7 +2484,17 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
             )
         };
     }
-    result
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            grid,
+            block,
+            stream,
+            fault::Entry::LaunchKernelExPtsz,
+        )
+    }
 }
 
 // The other launches: only the refusal of a refused kernel (`guard`).
@@ -2369,7 +2505,18 @@ pub unsafe extern "C" fn cuLaunch(function: *mut c_void) -> CUresult {
         return guard::REFUSED;
     }
     let real = real!(cuLaunch: unsafe extern "C" fn(*mut c_void) -> CUresult);
-    unsafe { real(function) }
+    let result = unsafe { real(function) };
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [0; 3],
+            [0; 3],
+            std::ptr::null_mut(),
+            fault::Entry::Launch,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2378,7 +2525,18 @@ pub unsafe extern "C" fn cuLaunchGrid(function: *mut c_void, width: c_int, heigh
         return guard::REFUSED;
     }
     let real = real!(cuLaunchGrid: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> CUresult);
-    unsafe { real(function, width, height) }
+    let result = unsafe { real(function, width, height) };
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [width as c_uint, height as c_uint, 1],
+            [0; 3],
+            std::ptr::null_mut(),
+            fault::Entry::LaunchGrid,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2392,7 +2550,18 @@ pub unsafe extern "C" fn cuLaunchGridAsync(
         return guard::REFUSED;
     }
     let real = real!(cuLaunchGridAsync: unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_void) -> CUresult);
-    unsafe { real(function, width, height, stream) }
+    let result = unsafe { real(function, width, height, stream) };
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [width as c_uint, height as c_uint, 1],
+            [0; 3],
+            stream,
+            fault::Entry::LaunchGridAsync,
+        )
+    }
 }
 
 type CooperativeLaunch = unsafe extern "C" fn(
@@ -2425,7 +2594,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel(
         return guard::REFUSED;
     }
     let real = real!(cuLaunchCooperativeKernel: CooperativeLaunch);
-    unsafe {
+    let result = unsafe {
         real(
             function,
             grid_x,
@@ -2437,6 +2606,17 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel(
             shared_memory,
             stream,
             parameters,
+        )
+    };
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [grid_x, grid_y, grid_z],
+            [block_x, block_y, block_z],
+            stream,
+            fault::Entry::Cooperative,
         )
     }
 }
@@ -2458,7 +2638,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel_ptsz(
         return guard::REFUSED;
     }
     let real = real!(cuLaunchCooperativeKernel_ptsz: CooperativeLaunch);
-    unsafe {
+    let result = unsafe {
         real(
             function,
             grid_x,
@@ -2470,6 +2650,17 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel_ptsz(
             shared_memory,
             stream,
             parameters,
+        )
+    };
+    unsafe {
+        launched(
+            result,
+            false,
+            function,
+            [grid_x, grid_y, grid_z],
+            [block_x, block_y, block_z],
+            stream,
+            fault::Entry::CooperativePtsz,
         )
     }
 }
@@ -2502,7 +2693,24 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernelMultiDevice(
         return guard::REFUSED;
     }
     let real = real!(cuLaunchCooperativeKernelMultiDevice: unsafe extern "C" fn(*mut LaunchParams, c_uint, c_uint) -> CUresult);
-    unsafe { real(launches, count, flags) }
+    let result = unsafe { real(launches, count, flags) };
+    if result != CUDA_SUCCESS {
+        fault::check(result, "cuLaunchCooperativeKernelMultiDevice");
+    } else if !launches.is_null() {
+        // (Not waited for in exact mode: each launch is on a device of its own.)
+        for i in 0..count as usize {
+            let launch = unsafe { &*launches.add(i) };
+            let _ = fault::launched(
+                launch.function,
+                launch.grid,
+                launch.block,
+                launch.stream,
+                fault::Entry::CooperativeMultiDevice,
+                false,
+            );
+        }
+    }
+    result
 }
 
 // ---- graphs: a kernel node is refused for a refused kernel, as its launch -----------------------------------
@@ -2579,6 +2787,31 @@ unsafe fn graph_node_allowed(params: *const GraphNodeParams, call: &str) -> bool
         || unsafe { node_allowed_v2(&raw const (*params).kernel, call) }
 }
 
+/// A kernel node of `params` (and of the library's `kernel` when its function is null) was added to
+/// `graph`: kept for the report of a fault (`fault`).
+///
+/// # Safety
+/// `params` are those the driver took.
+unsafe fn node_added(graph: *mut c_void, params: &KernelNodeParams, kernel: Option<*mut c_void>) {
+    let function = match kernel {
+        Some(kernel) if params.function.is_null() => kernel,
+        _ => params.function,
+    };
+    fault::node_added(graph as usize, function as u64, params.grid, params.block);
+}
+
+/// `cuGraphAddNode` answered `result` for `params`: a kernel node is kept as `node_added` keeps it.
+///
+/// # Safety
+/// `params` must be null or valid for reads, as for the driver.
+unsafe fn graph_node_added(result: CUresult, graph: *mut c_void, params: *const GraphNodeParams) {
+    const KERNEL_NODE: c_int = 0;
+    if result == CUDA_SUCCESS && !params.is_null() && unsafe { (*params).kind } == KERNEL_NODE {
+        let kernel = unsafe { &(*params).kernel };
+        unsafe { node_added(graph, &kernel.first, Some(kernel.kernel)) };
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuGraphAddKernelNode(
     node: *mut *mut c_void,
@@ -2593,7 +2826,11 @@ pub unsafe extern "C" fn cuGraphAddKernelNode(
     let real = real!(cuGraphAddKernelNode: unsafe extern "C" fn(
         *mut *mut c_void, *mut c_void, *const *mut c_void, usize, *const KernelNodeParams,
     ) -> CUresult);
-    unsafe { real(node, graph, dependencies, count, params) }
+    let result = unsafe { real(node, graph, dependencies, count, params) };
+    if result == CUDA_SUCCESS && !params.is_null() {
+        unsafe { node_added(graph, &*params, None) };
+    }
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -2610,7 +2847,11 @@ pub unsafe extern "C" fn cuGraphAddKernelNode_v2(
     let real = real!(cuGraphAddKernelNode_v2: unsafe extern "C" fn(
         *mut *mut c_void, *mut c_void, *const *mut c_void, usize, *const KernelNodeParamsV2,
     ) -> CUresult);
-    unsafe { real(node, graph, dependencies, count, params) }
+    let result = unsafe { real(node, graph, dependencies, count, params) };
+    if result == CUDA_SUCCESS && !params.is_null() {
+        unsafe { node_added(graph, &(*params).first, Some((*params).kernel)) };
+    }
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -2678,7 +2919,9 @@ pub unsafe extern "C" fn cuGraphAddNode(
     let real = real!(cuGraphAddNode: unsafe extern "C" fn(
         *mut *mut c_void, *mut c_void, *const *mut c_void, usize, *mut GraphNodeParams,
     ) -> CUresult);
-    unsafe { real(node, graph, dependencies, count, params) }
+    let result = unsafe { real(node, graph, dependencies, count, params) };
+    unsafe { graph_node_added(result, graph, params) };
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -2696,7 +2939,9 @@ pub unsafe extern "C" fn cuGraphAddNode_v2(
     let real = real!(cuGraphAddNode_v2: unsafe extern "C" fn(
         *mut *mut c_void, *mut c_void, *const *mut c_void, *const c_void, usize, *mut GraphNodeParams,
     ) -> CUresult);
-    unsafe { real(node, graph, dependencies, edges, count, params) }
+    let result = unsafe { real(node, graph, dependencies, edges, count, params) };
+    unsafe { graph_node_added(result, graph, params) };
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -2883,6 +3128,300 @@ pub unsafe extern "C" fn cuOccupancyMaxActiveClusters(
     unsafe { real(clusters, function, launch) }
 }
 
+// ---- synchronisations and graphs: what the report of a fault needs (`fault`) -----------------------
+//
+// A synchronisation that succeeds tells that the launches made before it began ended without a
+// fault; one that fails with the error of a fault, as a query, is reported. A launch made while its
+// stream is captured is a node of the graph being captured; an instantiated graph keeps the kernels
+// that its graph had, and its launch is kept as a launch is.
+
+type StreamCall = unsafe extern "C" fn(*mut c_void) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxSynchronize() -> CUresult {
+    let real = real!(cuCtxSynchronize: unsafe extern "C" fn() -> CUresult);
+    let covers = fault::begin();
+    let result = unsafe { real() };
+    fault::synchronized(result, covers, fault::Scope::Context, "cuCtxSynchronize");
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxSynchronize_v2(context: *mut c_void) -> CUresult {
+    let real = real!(cuCtxSynchronize_v2: StreamCall);
+    let covers = fault::begin();
+    let result = unsafe { real(context) };
+    fault::synchronized(result, covers, fault::Scope::Named(context), "cuCtxSynchronize_v2");
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamSynchronize(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamSynchronize: StreamCall);
+    let covers = fault::begin();
+    let result = unsafe { real(stream) };
+    fault::synchronized(
+        result,
+        covers,
+        fault::Scope::Stream(stream, false),
+        "cuStreamSynchronize",
+    );
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamSynchronize_ptsz(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamSynchronize_ptsz: StreamCall);
+    let covers = fault::begin();
+    let result = unsafe { real(stream) };
+    fault::synchronized(
+        result,
+        covers,
+        fault::Scope::Stream(stream, true),
+        "cuStreamSynchronize_ptsz",
+    );
+    result
+}
+
+/// A query that finds the stream idle is a synchronisation; one that finds it busy (600) says
+/// nothing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamQuery(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamQuery: StreamCall);
+    let covers = fault::begin();
+    let result = unsafe { real(stream) };
+    fault::synchronized(result, covers, fault::Scope::Stream(stream, false), "cuStreamQuery");
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamQuery_ptsz(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamQuery_ptsz: StreamCall);
+    let covers = fault::begin();
+    let result = unsafe { real(stream) };
+    fault::synchronized(result, covers, fault::Scope::Stream(stream, true), "cuStreamQuery_ptsz");
+    result
+}
+
+/// (Of an event, which stream it was recorded in is not known here: only a fault is looked at.)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventSynchronize(event: *mut c_void) -> CUresult {
+    let real = real!(cuEventSynchronize: StreamCall);
+    let result = unsafe { real(event) };
+    fault::check(result, "cuEventSynchronize");
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuEventQuery(event: *mut c_void) -> CUresult {
+    let real = real!(cuEventQuery: StreamCall);
+    let result = unsafe { real(event) };
+    fault::check(result, "cuEventQuery");
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamBeginCapture(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamBeginCapture: StreamCall);
+    let result = unsafe { real(stream) };
+    fault::capture_began(result);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamBeginCapture_ptsz(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamBeginCapture_ptsz: StreamCall);
+    let result = unsafe { real(stream) };
+    fault::capture_began(result);
+    result
+}
+
+type BeginCapture = unsafe extern "C" fn(*mut c_void, c_int) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamBeginCapture_v2(stream: *mut c_void, mode: c_int) -> CUresult {
+    let real = real!(cuStreamBeginCapture_v2: BeginCapture);
+    let result = unsafe { real(stream, mode) };
+    fault::capture_began(result);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamBeginCapture_v2_ptsz(stream: *mut c_void, mode: c_int) -> CUresult {
+    let real = real!(cuStreamBeginCapture_v2_ptsz: BeginCapture);
+    let result = unsafe { real(stream, mode) };
+    fault::capture_began(result);
+    result
+}
+
+type BeginCaptureToGraph =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *const *mut c_void, *const c_void, usize, c_int) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamBeginCaptureToGraph(
+    stream: *mut c_void,
+    graph: *mut c_void,
+    dependencies: *const *mut c_void,
+    edges: *const c_void,
+    count: usize,
+    mode: c_int,
+) -> CUresult {
+    let real = real!(cuStreamBeginCaptureToGraph: BeginCaptureToGraph);
+    let result = unsafe { real(stream, graph, dependencies, edges, count, mode) };
+    fault::capture_began(result);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamBeginCaptureToGraph_ptsz(
+    stream: *mut c_void,
+    graph: *mut c_void,
+    dependencies: *const *mut c_void,
+    edges: *const c_void,
+    count: usize,
+    mode: c_int,
+) -> CUresult {
+    let real = real!(cuStreamBeginCaptureToGraph_ptsz: BeginCaptureToGraph);
+    let result = unsafe { real(stream, graph, dependencies, edges, count, mode) };
+    fault::capture_began(result);
+    result
+}
+
+type EndCapture = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamEndCapture(stream: *mut c_void, graph: *mut *mut c_void) -> CUresult {
+    let real = real!(cuStreamEndCapture: EndCapture);
+    let was = unsafe { fault::capture_ending(stream, false) };
+    let result = unsafe { real(stream, graph) };
+    fault::capture_ended(was);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamEndCapture_ptsz(stream: *mut c_void, graph: *mut *mut c_void) -> CUresult {
+    let real = real!(cuStreamEndCapture_ptsz: EndCapture);
+    let was = unsafe { fault::capture_ending(stream, true) };
+    let result = unsafe { real(stream, graph) };
+    fault::capture_ended(was);
+    result
+}
+
+type InstantiateLogged =
+    unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut *mut c_void, *mut c_char, usize) -> CUresult;
+type InstantiateWith<T> = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, T) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphInstantiate(
+    exec: *mut *mut c_void,
+    graph: *mut c_void,
+    error_node: *mut *mut c_void,
+    log_buffer: *mut c_char,
+    size: usize,
+) -> CUresult {
+    let real = real!(cuGraphInstantiate: InstantiateLogged);
+    let result = unsafe { real(exec, graph, error_node, log_buffer, size) };
+    fault::instantiated(result, exec, graph);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphInstantiate_v2(
+    exec: *mut *mut c_void,
+    graph: *mut c_void,
+    error_node: *mut *mut c_void,
+    log_buffer: *mut c_char,
+    size: usize,
+) -> CUresult {
+    let real = real!(cuGraphInstantiate_v2: InstantiateLogged);
+    let result = unsafe { real(exec, graph, error_node, log_buffer, size) };
+    fault::instantiated(result, exec, graph);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphInstantiateWithFlags(
+    exec: *mut *mut c_void,
+    graph: *mut c_void,
+    flags: u64,
+) -> CUresult {
+    let real = real!(cuGraphInstantiateWithFlags: InstantiateWith<u64>);
+    let result = unsafe { real(exec, graph, flags) };
+    fault::instantiated(result, exec, graph);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphInstantiateWithParams(
+    exec: *mut *mut c_void,
+    graph: *mut c_void,
+    params: *mut c_void,
+) -> CUresult {
+    let real = real!(cuGraphInstantiateWithParams: InstantiateWith<*mut c_void>);
+    let result = unsafe { real(exec, graph, params) };
+    fault::instantiated(result, exec, graph);
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphInstantiateWithParams_ptsz(
+    exec: *mut *mut c_void,
+    graph: *mut c_void,
+    params: *mut c_void,
+) -> CUresult {
+    let real = real!(cuGraphInstantiateWithParams_ptsz: InstantiateWith<*mut c_void>);
+    let result = unsafe { real(exec, graph, params) };
+    fault::instantiated(result, exec, graph);
+    result
+}
+
+type GraphLaunch = unsafe extern "C" fn(*mut c_void, *mut c_void) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphLaunch(exec: *mut c_void, stream: *mut c_void) -> CUresult {
+    let real = real!(cuGraphLaunch: GraphLaunch);
+    let result = unsafe { real(exec, stream) };
+    unsafe { fault::graph_launched(result, exec, stream, fault::Entry::GraphLaunch) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphLaunch_ptsz(exec: *mut c_void, stream: *mut c_void) -> CUresult {
+    let real = real!(cuGraphLaunch_ptsz: GraphLaunch);
+    let result = unsafe { real(exec, stream) };
+    unsafe { fault::graph_launched(result, exec, stream, fault::Entry::GraphLaunchPtsz) }
+}
+
+// (Forgotten before the driver's call: once it returns, another thread may be given the handle.)
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphDestroy(graph: *mut c_void) -> CUresult {
+    let real = real!(cuGraphDestroy: StreamCall);
+    fault::graph_destroyed(graph);
+    unsafe { real(graph) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphExecDestroy(exec: *mut c_void) -> CUresult {
+    let real = real!(cuGraphExecDestroy: StreamCall);
+    fault::exec_destroyed(exec);
+    unsafe { real(exec) }
+}
+
+/// A stream made later at the handle of one destroyed is another (`fault::stream_destroyed`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamDestroy(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamDestroy: StreamCall);
+    fault::stream_destroyed(stream);
+    unsafe { real(stream) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuStreamDestroy_v2(stream: *mut c_void) -> CUresult {
+    let real = real!(cuStreamDestroy_v2: StreamCall);
+    fault::stream_destroyed(stream);
+    unsafe { real(stream) }
+}
+
 // ---- contexts: the modules of a context go with it ------------------------------------------------------
 
 type ContextDestroy = unsafe extern "C" fn(*mut c_void) -> CUresult;
@@ -2894,6 +3433,7 @@ type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
+    fault::context_ending(context as usize);
     let _ending = kernels::ending();
     let real = real!(cuCtxDestroy: ContextDestroy);
     let modules = contexts::of(context as usize);
@@ -2909,6 +3449,7 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
+    fault::context_ending(context as usize);
     let _ending = kernels::ending();
     let real = real!(cuCtxDestroy_v2: ContextDestroy);
     let modules = contexts::of(context as usize);
@@ -2941,6 +3482,7 @@ pub unsafe extern "C" fn cuCtxDetach(context: *mut c_void) -> CUresult {
     if !contexts::last_detach(context as usize) {
         return unsafe { real(context) };
     }
+    fault::context_ending(context as usize);
     let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
@@ -2958,6 +3500,9 @@ pub unsafe extern "C" fn cuGreenCtxDestroy(green: *mut c_void) -> CUresult {
     let mut context = std::ptr::null_mut();
     // (No context: no module loaded in it.)
     let known = unsafe { from_green(&mut context, green) } == CUDA_SUCCESS && !context.is_null();
+    if known {
+        fault::context_ending(context as usize);
+    }
     let modules = contexts::of(if known { context as usize } else { 0 });
     let attaches = if known {
         contexts::take_attaches(context as usize)
@@ -3004,6 +3549,9 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
     let _step = primary_step(device);
+    if let Some(context) = contexts::primary_of(device) {
+        fault::context_ending(context);
+    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -3017,6 +3565,9 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
     let _step = primary_step(device);
+    if let Some(context) = contexts::primary_of(device) {
+        fault::context_ending(context);
+    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -3030,6 +3581,9 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
     let _step = primary_step(device);
+    if let Some(context) = contexts::primary_of(device) {
+        fault::context_ending(context);
+    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -3043,6 +3597,9 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
     let _step = primary_step(device);
+    if let Some(context) = contexts::primary_of(device) {
+        fault::context_ending(context);
+    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {

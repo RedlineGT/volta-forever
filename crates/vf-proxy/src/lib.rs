@@ -47,6 +47,9 @@
 //!   launch);
 //! - `VF_TRACE_LAUNCH=1`: route kernel launches through this library and log the ones the driver
 //!   refuses (kernel name, grid, block, shared memory, launch attributes);
+//! - `VF_FAULT_TRACE=1` (exactly): synchronise the stream of every launch right after it, so that a
+//!   kernel that faults is named alone (`fault`; without it, the kernels that may have faulted are
+//!   named);
 //! - `VF_SAFE=1` (exactly): safe mode, the switches of the rewriting whose results are not
 //!   bit-identical to the default's are not used, nor the pairs of products of machine code
 //!   (`vf_adapt::Policy::make_safe`), said once at level 1;
@@ -65,6 +68,7 @@ mod generated {
 mod cache;
 mod callers;
 mod contexts;
+mod fault;
 pub mod fit;
 mod guard;
 mod hooks;
@@ -102,6 +106,8 @@ pub struct Config {
     pub capability_all: bool,
     pub stats: bool,
     pub trace_launch: bool,
+    /// `VF_FAULT_TRACE=1`: every launch is synchronised right after it (`fault`).
+    pub fault_trace: bool,
     pub policy: vf_adapt::Policy,
     /// Whether to retry a launch that fails with 701 using a second translation within the
     /// register budget (`VF_FIT`, default on).
@@ -139,6 +145,7 @@ pub fn config() -> &'static Config {
             capability_all: var("VF_CAPABILITY_ALL").as_deref() == Some("1"),
             stats: var("VF_STATS").is_some_and(|v| v != "0"),
             trace_launch: var("VF_TRACE_LAUNCH").is_some_and(|v| v != "0"),
+            fault_trace: var("VF_FAULT_TRACE").as_deref() == Some("1"),
             fit: var("VF_FIT").is_none_or(|v| v != "0"),
             fit_shared: var("VF_FIT_SHARED").as_deref() == Some("1"),
             policy,
@@ -156,8 +163,9 @@ pub fn own_entry(real: usize) -> Option<usize> {
 }
 
 /// The launch entries: lookups lead to them when the layer adapts code (a launch of a kernel it
-/// refused is refused there, `guard`), or when the fit mechanism, `VF_TRACE_LAUNCH`, statistics or
-/// the profile ask for them.
+/// refused is refused there, `guard`; the launches are recorded there for the report of a fault,
+/// `fault`), or when the fit mechanism, `VF_TRACE_LAUNCH`, `VF_FAULT_TRACE`, statistics or the
+/// profile ask for them.
 const TRACE_ONLY: [usize; 4] = [
     idx::cuLaunchKernel,
     idx::cuLaunchKernelEx,
@@ -278,7 +286,12 @@ extern "C" fn init() {
     for hooked in [false, true] {
         let wanted = |i: usize| {
             if TRACE_ONLY.contains(&i) {
-                config.adapt || config.trace_launch || config.stats || config.profile || config.fit
+                config.adapt
+                    || config.trace_launch
+                    || config.stats
+                    || config.profile
+                    || config.fit
+                    || config.fault_trace
             } else {
                 hooked || config.stats
             }
@@ -300,6 +313,18 @@ extern "C" fn init() {
             .capability
             .map_or("by caller".to_string(), |(major, minor)| format!("{major}.{minor}")),
     ));
+}
+
+/// A handler of `exit`, registered at the first launch kept (`fault::take_ring`): a fault that only a
+/// call the layer does not route met, in a context still there, is looked for (`fault::at_exit`).
+/// Not from `fini`: the destructors of the libraries run NVIDIA's first (it was loaded after this
+/// one), and its driver no longer answers then; nor registered when this library is loaded: the
+/// handlers that NVIDIA's library registers at `cuInit` would run before it.
+pub(crate) extern "C" fn at_exit() {
+    // (As `fini`: a child made by fork() reports nothing of its parent's.)
+    if std::process::id() == LOADED_IN.load(Relaxed) {
+        fault::at_exit();
+    }
 }
 
 extern "C" fn fini() {
@@ -324,11 +349,11 @@ fn report() -> Vec<String> {
     report_lines().into_iter().map(|(_, line)| line).collect()
 }
 
-/// The report at exit, line by line, with the level at which each is logged: the kernels with
-/// emulated instructions given to the program, the second translations, and with `VF_STATS` the
-/// calls and launches counted (asked for: logged at every level).
+/// The report at exit, line by line, with the level at which each is logged: the faults seen, the
+/// kernels with emulated instructions given to the program, the second translations, and with
+/// `VF_STATS` the calls and launches counted (asked for: logged at every level).
 fn report_lines() -> Vec<(u8, String)> {
-    let mut lines = Vec::new();
+    let mut lines: Vec<(u8, String)> = fault::summary_lines().into_iter().map(|line| (0, line)).collect();
     if let Some(line) = kernels::summary_line() {
         lines.push((1, line));
     }

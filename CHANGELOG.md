@@ -1,5 +1,15 @@
 # Changes
 
+## Unreleased
+
+### Added
+
+- After a kernel faults (an illegal address, a misaligned access, a `trap`: errors 700, 716, 719 and the others of their kind), the first call that the layer routes and that returns the error in a context makes the layer say, once and at every log level, which kernels may be the one: those launched in that context since their last synchronisation that succeeded, the last first, each with its grid, block, stream and thread, what the layer made of its image (as the program gave it, PTX retargeted, the PTX of a cubin retargeted, machine code translated and whether its tensor-core products are computed in pairs, compiled alone or with its whole module, from the layer's cache, launched from its second translation), the size and XXH64 of the image given to the driver and the program's image as its load named it; a CUDA graph's launch with the kernel nodes captured in it; and how to know more. A fault that only a copy met is found before the context is destroyed and at exit. The report at exit (`VF_SUMMARY`) says it too. What a launch keeps for this is written without a lock or a locked instruction into a record of its own thread's last 256 launches: about 25 ns a launch (an empty kernel launched in a loop on a V100 from one CPU: 1.86 µs a launch instead of 1.84, 2026-11-24). `VF_FAULT_TRACE=1` waits for every launch, names the kernel or the graph that faulted alone and makes its launch return the error (5.7 to 5.8 µs a launch of an empty kernel). `LIMITS.md`, "After a kernel faults", says what the layer cannot say.
+
+### Tests
+
+- `tests/proxy/fault.py` (in the CI): what the layer says after a fault, against a stand-in for the driver that shows a fault as NVIDIA's driver does. `tests/kernels/test_fault.c`: its `probe-*` modes recorded what NVIDIA's driver answers to each call after a fault (`crates/vf-proxy/src/fault.rs`), its `rate` mode measures launches per second (`docs/performance.md`).
+
 ## 0.1.5 (2026-11-24)
 
 ### Fixed

@@ -326,6 +326,57 @@ float32 and float64, `unfold` in float32 and three of the whole models need it.
   handle made from a library's kernel (`cuKernelGetFunction`), nor the old launch functions
   (`cuLaunch`, `cuLaunchGrid`).
 
+## After a kernel faults
+
+A kernel that faults (an illegal address, a misaligned access, a `trap`: errors 700, 716, 719 and
+the others of their kind) ends its CUDA context, and the program stops at a later call than the
+launch, often saying no more than "unspecified launch failure". The first time a call that the layer
+routes returns such an error in a context, the layer says, at every log level, which kernels may
+have faulted: those launched in that context since their last synchronisation that succeeded (of
+the context, of their stream, the thread's own default stream included, or a `cuStreamQuery` that
+found their stream idle), the last first, each with its grid, block, stream and thread, what the
+layer made of its image (loaded as the program gave it, PTX retargeted, the PTX kept in a cubin
+retargeted, machine code translated, with its tensor-core products computed in pairs on whole rows
+unless `VF_PAIRS=0` or `VF_SAFE=1` turned them off; compiled alone or with its whole module; set up from the layer's cache; launched from its second
+translation), the size and XXH64 of the image given to the driver, the program's image as the line
+of its load named it (its XXH64 from `VF_LOG_LEVEL=2`), and the instructions it runs emulated. The
+report at exit (`VF_SUMMARY`) says it again. `VF_FAULT_TRACE=1` waits for every launch and names the
+kernel that faulted alone, at a cost (`INSTALL.md`).
+
+What the layer cannot say:
+
+- which of the candidates faulted, without `VF_FAULT_TRACE=1`; nor why. A candidate is not a
+  culprit: a program's own code faults through the layer as it does without it, and only a
+  comparison with a native build or a newer GPU tells (`AGENTS.md`, step 8).
+- a kernel that the layer does not see launched: by another kernel, through a private interface of
+  the driver, by the driver from a CUDA graph. A graph's launch is named with the kernel nodes that
+  the layer saw it made of (launches captured on a stream, nodes added with `cuGraphAddKernelNode`
+  or `cuGraphAddNode`): a child graph, a clone, a graph changed after it was instantiated
+  (`cuGraphExecUpdate`, a node given other parameters) or one instantiated by a device is not known
+  as it is. Under `VF_FAULT_TRACE=1` the graph is named, not its node: run without graphs (an
+  engine's eager mode) to name the kernel.
+- launches older than the last 256 of their thread, when no synchronisation of the whole context
+  bounds them, and the launches of the threads beyond 128 that launch at the same time (the line
+  says so of both).
+- in which order the launches of two threads were made between the same two synchronisations:
+  each thread's are in their order.
+- a fault that only a call that the layer does not route met (a copy, an allocation, which go
+  straight to NVIDIA's driver) is found when the program destroys the context or releases the
+  primary context, or at exit, by one query of the context's stream that does not wait; a program
+  that ends without exiting (killed, `_exit`) is not told.
+- with `VF_ADAPT=0` and `VF_FIT=0`, the launches that a program makes through the entry points the
+  driver gives it (the CUDA runtime's) go straight to the driver, unless `VF_FAULT_TRACE=1` is
+  set: none of them is known. A synchronisation of an event bounds nothing (which stream an event
+  was recorded in is not known). A kernel of a library launched by its own handle runs in whatever
+  context is current: it is a candidate in every context (in a process of several, the line says
+  how many such). A kernel is named as the program asked for it; one of which it holds a handle that
+  it did not take by name through the layer is named by the driver if it is a library's kernel,
+  else by its address. A kernel whose module was unloaded (or went with its context) after its
+  launch is named as it was, without what the layer made of its image. Whether its products are computed in pairs is said of machine code that the
+  layer translated, not of PTX (whose pairs give the results of each product by itself).
+- under `VF_FAULT_TRACE=1`, a launch made while a graph is being captured anywhere in the process
+  is not waited for (a wait could end that capture), nor a cooperative launch on several devices.
+
 ## Speed
 
 `docs/performance.md` has the method and the detail. In short:

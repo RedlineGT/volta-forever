@@ -67,6 +67,15 @@ pub struct Replacement {
     /// without computing anything more: its file, or its digest once a line of its load printed it
     /// (`Who`, `kernels::describe`).
     pub shown: Option<String>,
+    /// What the layer made of the program's image, for the lines of a fault (`origin_text`): "PTX
+    /// for sm_75 retargeted by the layer" and the like.
+    pub how: Option<String>,
+    /// The program's image as the lines of its load name it: its file, or its size, with its digest
+    /// when a line of its load printed one (`Who::program`).
+    pub program: Option<String>,
+    /// The functions of a translation of machine code whose tensor-core products are computed two
+    /// at a time on whole rows (`docs/pairs.md`), for the lines of a fault.
+    pub paired: Vec<String>,
     /// The digest of the image given to the driver (`identity`), once it was asked for.
     identity: OnceLock<u64>,
 }
@@ -100,6 +109,9 @@ impl Replacement {
             origin: None,
             original_image: None,
             shown: None,
+            how: None,
+            program: None,
+            paired: Vec::new(),
             identity: OnceLock::new(),
         }
     }
@@ -140,6 +152,9 @@ impl Replacement {
         next.origin = self.origin;
         next.original_image = self.original_image.clone();
         next.shown = self.shown.clone();
+        next.how = self.how.clone();
+        next.program = self.program.clone();
+        next.paired = self.paired.clone();
         Some((next, retry.functions))
     }
 
@@ -238,6 +253,9 @@ impl Replacement {
         loaded.origin = self.origin;
         loaded.original_image = self.original_image;
         loaded.shown = self.shown;
+        loaded.how = self.how;
+        loaded.program = self.program;
+        loaded.paired = self.paired;
         loaded
     }
 
@@ -282,6 +300,7 @@ pub fn loaded_adapted(handle: usize) -> bool {
 /// The driver loaded `replacement` as `handle`: keep it, and what is known of its kernels.
 pub fn keep(handle: usize, mut replacement: Replacement) {
     given(handle);
+    crate::fault::forget(handle);
     // Context destruction can retire a CUmodule without an explicit unload.
     // The driver's next load starts a new lifetime at the same address. (The context's record
     // first: what `contexts::destroyed` drops for the handle is then dropped before this.)
@@ -371,6 +390,7 @@ pub fn load_of(handle: usize) -> u64 {
 /// what is taken is given back, for the caller to hold until the driver's unload returned
 /// (`unload_failed` when it failed).
 pub fn release(handle: usize) -> Released {
+    crate::fault::forget(handle);
     let load = load_of(handle);
     // (The context's record first, as in `keep`.)
     let context = crate::contexts::take(handle);
@@ -676,6 +696,92 @@ fn report_stubs(who: &dyn Display, stubs: &vf_adapt::Stubs) {
     }
 }
 
+/// What the layer made of an image, `what` (a "cubin", a "fat binary"...), by the outcome of its
+/// adaptation: for the lines of a fault.
+fn made_of(what: &str, outcome: &Outcome) -> Option<String> {
+    match outcome {
+        Outcome::Retargeted {
+            from_sm,
+            tensor_rewritten,
+            ..
+        } => {
+            let source = if what == "cubin" {
+                format!("the PTX kept in a cubin for sm_{from_sm}")
+            } else {
+                format!("PTX for sm_{from_sm}")
+            };
+            let tensor = if *tensor_rewritten > 0 {
+                format!(", {tensor_rewritten} tensor-core instructions rewritten")
+            } else {
+                String::new()
+            };
+            Some(format!("{source} retargeted by the layer{tensor}"))
+        }
+        Outcome::Translated { from_sm, .. } => Some(format!("machine code for sm_{from_sm} translated by the layer")),
+        _ => None,
+    }
+}
+
+/// What the layer made of the image of `owner`, a module or library that the program holds, for the
+/// line of its kernel `kernel` (the handle it took) after a fault (`fault`): how the code reached
+/// the driver, the image given to the driver (its size, and its XXH64, taken now), and the program's
+/// image as the lines of its load named it. The digest of a large image takes a few milliseconds:
+/// this is said once, when the context can run nothing more.
+pub fn origin_text(owner: usize, kernel: usize, name: &str) -> String {
+    let kept = |handle: usize| KEPT.lock().unwrap_or_else(|e| e.into_inner()).get(&handle).cloned();
+    let given = |replacement: &Replacement| {
+        format!(
+            "the image given to the driver: {} bytes, XXH64 {:016x}",
+            replacement.len(),
+            replacement.identity()
+        )
+    };
+    let image = kept(owner);
+    let mut parts: Vec<String> = Vec::new();
+    match image.as_deref() {
+        Some(replacement) => {
+            let mut how = match &replacement.how {
+                Some(how) => how.clone(),
+                None if replacement.len() == 0 => "set up from the layer's cache".to_string(),
+                None => "the program's code for this GPU, in which the layer refuses kernels".to_string(),
+            };
+            if !name.is_empty() && replacement.paired.iter().any(|paired| paired == name) {
+                how += ", its tensor-core products computed two at a time on whole rows (VF_PAIRS=0 or VF_SAFE=1 \
+                        computes each by itself)";
+            }
+            parts.push(how);
+        }
+        None if crate::lazy::is_lazy(owner) => parts.push("set up from the layer's cache".to_string()),
+        None => parts.push(
+            "native: loaded as the program gave it (its code for this GPU, or an image the layer did not change)"
+                .to_string(),
+        ),
+    }
+    let lazily = crate::lazy::given_as(owner, kernel);
+    match lazily {
+        Some(Some(alone)) => {
+            let sub = kept(alone);
+            parts.push(match sub.as_deref() {
+                Some(sub) if sub.len() > 0 => format!("compiled alone ({})", given(sub)),
+                _ => "compiled alone".to_string(),
+            });
+        }
+        Some(None) => parts.push("from the whole module".to_string()),
+        None => {
+            if let Some(replacement) = image.as_deref().filter(|r| r.len() > 0) {
+                parts.push(given(replacement));
+            }
+        }
+    }
+    if let Some(counts) = kernels::emulated_counts(owner, name).filter(|counts| counts.any()) {
+        parts.push(format!("emulated: {}", counts.summary()));
+    }
+    if let Some(program) = image.as_deref().and_then(|r| r.program.as_ref()) {
+        parts.push(format!("the program's image: {program}"));
+    }
+    parts.join("; ")
+}
+
 fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
     match outcome {
         Outcome::Native => log::trace(format_args!("{who}: {what} with code for this GPU")),
@@ -857,12 +963,19 @@ fn finish(
         Outcome::Translated { .. } => Some(kernels::Origin::MachineCodeTranslated),
         _ => None,
     };
+    let how = made_of(what, &adapted.outcome);
+    let paired = match &adapted.outcome {
+        Outcome::Translated { paired, .. } => paired.clone(),
+        _ => Vec::new(),
+    };
     let mut image = adapted.image?;
     if terminate {
         image.push(0);
     }
     let mut replacement = Replacement::new(image, wrapper);
     replacement.origin = origin;
+    replacement.how = how;
+    replacement.paired = paired;
     if over_budget
         && crate::fit::enabled()
         && let Some(original) = original
@@ -1096,6 +1209,15 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     result.emulated = emulated;
     result.trap_only = trap_only;
     result.origin = Some(origin);
+    result.how = match origin {
+        kernels::Origin::PtxRewritten => {
+            Some("relocatable PTX retargeted by the layer, linked by the driver".to_string())
+        }
+        kernels::Origin::MachineCodeTranslated => {
+            Some("relocatable machine code translated by the layer, linked by the driver".to_string())
+        }
+        _ => None,
+    };
     Some(result)
 }
 
@@ -1352,6 +1474,7 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
             // SAFETY: what `adapt` was given.
             replacement.program_image = unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
         }
+        replacement.program = named.program();
         Some(replacement)
     })
 }
@@ -1379,6 +1502,25 @@ impl Who<'_> {
         match self.image {
             Named::File(path) => Some(format!("file {}", path.to_string_lossy())),
             Named::Memory(..) => self.name.get()?.as_ref()?.1.clone(),
+        }
+    }
+
+    /// The image as the lines of a fault name it (`Replacement::program`): as a line of its load
+    /// named it (from level 2), else by its call and its size or file, without a digest.
+    fn program(&self) -> Option<String> {
+        if let Some(Some((name, _))) = self.name.get() {
+            return Some(name.clone());
+        }
+        match self.image {
+            // SAFETY: what `adapt` was given.
+            Named::Memory(ptr, len) => unsafe { image_extent(ptr, len) }.map(|image| {
+                format!(
+                    "{} of {} bytes (VF_LOG_LEVEL=2 prints its XXH64 when it is loaded)",
+                    self.call,
+                    image.len()
+                )
+            }),
+            Named::File(path) => Some(format!("{} of {}", self.call, path.to_string_lossy())),
         }
     }
 }
@@ -1457,6 +1599,7 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
             let file = &contents[..file_len];
             replacement.program_image = Some((file.len(), xxh64(file)));
         }
+        replacement.program = named.program();
         Some(replacement)
     })
 }
