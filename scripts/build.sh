@@ -12,8 +12,9 @@ CARGO_TARGET_DIR=$(vf_target_dir "$root")
 export CARGO_TARGET_DIR
 cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 cd "$root"
-# No path of the build host in the binaries (panic messages, line tables).
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME/.cargo=cargo --remap-path-prefix=$CARGO_TARGET_DIR=target --remap-path-prefix=$root=volta-forever"
+# No path of the build host in the binaries (panic messages, line tables). The crates are where cargo
+# keeps them, under CARGO_HOME, which is not always $HOME/.cargo.
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo --remap-path-prefix=$CARGO_TARGET_DIR=target --remap-path-prefix=$root=volta-forever"
 "$cargo" build --release "$@"
 mkdir -p dist/lib dist/bin
 # Replace by rename: a node may have the previous file mapped.

@@ -6,7 +6,10 @@
 #   scripts/build-forwarders.sh, run with a stand-in for cargo that says where it was told to
 #   build; CARGO_TARGET_DIR, when it is set, is where they build; each directory of a checkout has
 #   the file CHECKOUT with the checkout's path, and scripts/target-dir.sh --list says each directory
-#   with its checkout, and ORPHAN when that checkout is gone;
+#   with its checkout, and ORPHAN when that checkout is gone; scripts/build.sh has rustc remap the
+#   paths of the crates (CARGO_HOME, else ~/.cargo), of the build directory and of the checkout,
+#   so that no path of the build host is in the binaries and a build under another HOME gives the
+#   same bytes;
 # - with --build, two copies of this tree, the second's crates/vf-fwdgen/bf16tc/runtime.c changed
 #   and all its files older than what the first's build made, each built by
 #   scripts/build-forwarders.sh (with cargo, as a user's checkouts are): each checkout's generator
@@ -23,8 +26,9 @@ check() {  # check NAME CONDITION...
     if "$@"; then echo "PASS  $name"; else echo "FAIL  $name"; failed=1; fi
 }
 
-# The stand-in for cargo: writes where it was told to build, and stops the script.
-printf '#!/bin/sh\necho "$CARGO_TARGET_DIR" > "$SEEN"\nexit 3\n' > "$tmp/cargo"
+# The stand-in for cargo: writes where it was told to build and the flags it was given for rustc, and
+# stops the script.
+printf '#!/bin/sh\necho "$CARGO_TARGET_DIR" > "$SEEN"\necho " $RUSTFLAGS " > "$SEEN.flags"\nexit 3\n' > "$tmp/cargo"
 chmod +x "$tmp/cargo"
 for checkout in a b; do
     mkdir -p "$tmp/$checkout/scripts"
@@ -32,7 +36,7 @@ for checkout in a b; do
 done
 seen() {  # seen CHECKOUT SCRIPT [VAR=VALUE...]: where SCRIPT of CHECKOUT has cargo build
     local checkout=$1 script=$2; shift 2
-    rm -f "$tmp/seen"
+    rm -f "$tmp/seen" "$tmp/seen.flags"
     env -u CARGO_TARGET_DIR XDG_CACHE_HOME="$tmp/cache" CARGO="$tmp/cargo" SEEN="$tmp/seen" "$@" \
         "$tmp/$checkout/scripts/$script" >/dev/null 2>&1
     cat "$tmp/seen" 2>/dev/null
@@ -50,6 +54,19 @@ check "CARGO_TARGET_DIR when it is set" test "$given" = "$tmp/given"
 check "each directory names its checkout" test "$(cat "$a/CHECKOUT" 2>/dev/null)" = "$(cd "$tmp/a" && pwd -P)" \
     -a "$(cat "$b/CHECKOUT" 2>/dev/null)" = "$(cd "$tmp/b" && pwd -P)"
 check "none written where CARGO_TARGET_DIR names" test ! -e "$tmp/given/CHECKOUT"
+remaps() {  # remaps CARGO_HOME: whether build.sh, run with HOME=$tmp/home, remaps the crates of
+    # CARGO_HOME (an empty one: of ~/.cargo), the build directory and the checkout
+    local crates=${1:-$tmp/home/.cargo} dir flags
+    dir=$(seen a build.sh HOME="$tmp/home" CARGO_HOME="$1")
+    flags=$(cat "$tmp/seen.flags" 2>/dev/null)
+    echo "  CARGO_HOME=${1:-(empty)}: RUSTFLAGS=$flags"
+    case $flags in *" --remap-path-prefix=$crates=cargo "*) ;; *) return 1 ;; esac
+    case $flags in *" --remap-path-prefix=$dir=target "*) ;; *) return 1 ;; esac
+    case $flags in *" --remap-path-prefix=$tmp/a=volta-forever "*) ;; *) return 1 ;; esac
+}
+check "build.sh remaps the crates of CARGO_HOME, not of HOME, the build directory and the checkout" \
+    remaps "$tmp/crates"
+check "build.sh remaps the crates of ~/.cargo when CARGO_HOME is not set" remaps ""
 rm -rf "$tmp/b"
 listed=$(XDG_CACHE_HOME="$tmp/cache" "$tmp/a/scripts/target-dir.sh" --list 2>&1)
 echo "$listed" | sed 's/^/  /'
