@@ -6,7 +6,8 @@ FILE.PID, rewritten every VF_SUMMARY_INTERVAL seconds when it changed and at exi
 with SIGKILL leaves the report as it was. Without the variable no thread is started. A child made
 by fork() writes no report of its own, and does not stop on the lock of the writing thread. The
 file is readable by its owner only, and no link put where it goes, or where it was written first,
-leads the report into another file. A stand-in driver (link_mock_driver.c) loads the modules.
+leads the report into another file; nor one put where the profile goes (VF_PROFILE=FILE, FILE.PID at
+exit). A stand-in driver (link_mock_driver.c) loads the modules.
 
 Run with python3 tests/proxy/summary_file.py path/to/libcuda.so.1.
 """
@@ -59,6 +60,10 @@ def child(proxy, mode):
         print("children " + " ".join(map(str, pids)), flush=True)
     if mode == "exit":
         give(2)
+        return
+    if mode == "wait-exit":
+        print("ready", flush=True)
+        sys.stdin.readline()
         return
     print("ready", flush=True)
     if mode == "kill":
@@ -138,6 +143,25 @@ if __name__ == "__main__":
         assert "2 kernels with emulated" in path.read_text()
         assert os.readlink(f"{path}.tmp") == str(victims[1])
         print("PASS the file is its owner's only, and no link leads the report elsewhere")
+
+        # The profile (VF_PROFILE): a link put where it goes, and where it was written first until
+        # 2026-11-24 (FILE.PID itself, written through): neither leads it into the file it names.
+        profile = tmp / "profile"
+        victim = tmp / "victim-profile"
+        victim.write_text("victim\n")
+        p = start("wait-exit", VF_PROFILE=str(profile))
+        path = Path(f"{profile}.{p.pid}")
+        path.symlink_to(victim)
+        p.stdout.readline()
+        assert p.stdout.readline() == "ready\n"
+        p.communicate("\n", timeout=60)
+        assert p.returncode == 0
+        assert victim.read_text() == "victim\n", victim.read_text()
+        mode = path.lstat().st_mode
+        assert stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o600, oct(mode)
+        assert path.read_text().startswith("kernel\torigin\t") and "\nk1\t" in path.read_text(), path.read_text()
+        assert sorted(f.name for f in tmp.glob(f"profile.{p.pid}*")) == [path.name]
+        print("PASS the profile is its owner's only, and a link where it goes is replaced, not followed")
 
         # A file that cannot be written (a directory where it goes) is said once, and leaves nothing.
         p = start("kill", stderr=subprocess.PIPE, VF_SUMMARY=str(summary), VF_SUMMARY_INTERVAL="1")

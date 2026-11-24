@@ -142,8 +142,8 @@ const TEMPORARY_NAMES: usize = 16;
 /// a random part (`PATH.RANDOM.tmp`), with `O_CREAT | O_EXCL | O_NOFOLLOW` and mode 0600, so that
 /// nothing put there before (a file, or a link to another one) is written through; then it is renamed
 /// over `path`, which replaces a link at `path` itself and not what the link leads to. The temporary
-/// file is removed if anything fails.
-fn replace(path: &Path, text: &[u8]) -> std::io::Result<()> {
+/// file is removed if anything fails. (Also the profile's, `VF_PROFILE`.)
+pub fn replace(path: &Path, text: &[u8]) -> std::io::Result<()> {
     let mut taken = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
     for _ in 0..TEMPORARY_NAMES {
         let mut temporary = path.as_os_str().to_owned();

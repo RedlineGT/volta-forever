@@ -740,7 +740,9 @@ pub fn write() {
         );
     }
 
-    if let Err(e) = std::fs::write(&ps.path, &content) {
+    // Written as `VF_SUMMARY`'s file is: never through a link at that predictable name, its owner's
+    // only.
+    if let Err(e) = crate::summary::replace(std::path::Path::new(&ps.path), content.as_bytes()) {
         log::error(format_args!("profiling: cannot write {}: {e}", ps.path));
     } else {
         log::warn(format_args!(

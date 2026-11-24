@@ -339,7 +339,9 @@ thirteenth checks, with the same stand-in, that with `VF_SUMMARY` the report at 
 while the process runs, rewritten when it changes, and still there, as it last was, once the
 process is killed with SIGKILL; that it is written at exit (with `VF_STATS`'s counts); that no
 thread is started without the variable; and that children made by `fork()` while the thread
-writes end and write no report of their own; it needs a C compiler.
+writes end and write no report of their own; and that no link put where that file or the profile
+(`VF_PROFILE`) goes, or where the file was written first, leads either into the file it names,
+both being their owner's only; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
