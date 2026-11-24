@@ -828,7 +828,11 @@ mod tests {
             target: "cublasGemmEx".into(),
             words: 0,
         };
-        assert!(write_variant_sources(spec, variant, &bad, "libcublas.so.12", &vec![], &temp("bad")).is_err());
+        let bad_dir = temp("bad");
+        let refused = write_variant_sources(spec, variant, &bad, "libcublas.so.12", &vec![], &bad_dir);
+        // It makes the directory before it finds the entry it cannot take.
+        let _ = std::fs::remove_dir_all(&bad_dir);
+        assert!(refused.is_err());
     }
 
     /// sha256 of fwd.S, fwd.c, ver.map and status.c as 0.1.3's generator (7462e84) writes them for
