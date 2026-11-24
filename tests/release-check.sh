@@ -2,7 +2,8 @@
 # The checks of a release, one after the other, with a table at the end:
 #   tests/release-check.sh [--full]
 #
-# Host part (no GPU), in this order: formatting, lints (warnings are errors), the unit tests, the
+# Host part (no GPU), in this order: formatting, lints (warnings are errors), the unit tests (in an
+# empty home of their own, which they must leave empty: tests/scripts/untouched-home.sh), the
 # build of scripts/build.sh, every host suite that the CI runs (tests/README.md, "What the CI
 # runs"), the host suites it does not run when what they need is here (jitlink_objects.py and the
 # CUDA 12.9.2 toolkit, package-refusals.sh and the forwarding libraries, the bf16 kernels rebuilt
@@ -84,7 +85,7 @@ skip() {
 echo "== host part, tree $W, logs in $out"
 step fmt "$cargo" fmt --all --check
 step clippy "$cargo" clippy --workspace --all-targets -- -D warnings
-step unit-tests "$cargo" test --workspace
+step unit-tests tests/scripts/untouched-home.sh "$cargo" test --workspace
 step build scripts/build.sh
 if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step fit_api tests/proxy/fit_api.sh
