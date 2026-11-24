@@ -10,8 +10,9 @@
  *     the tensor-core path (k from the runtime's gate when that is above 2048);
  *   - TN with k past the wide rule's bound (the down projection of an MLP of 8960) goes to 12.9 with more columns
  *     than its n, for the wide rule, and to the tensor-core path at its n;
- *   - a long product of many rows (TN 7680 x 128 x 12800, of the class of the tall rule's former long-k branch) and an
- *     output layer at 128 columns (the tall rule's tier from 65 to 128 columns) go to the tensor-core path.
+ *   - a long product of many rows (TN, 128 columns) goes to 12.9, for the tall rule, with m at the long-k bound and k
+ *     one slice past its bound; to the tensor-core path at that m with k at its bound, and one step of m under it;
+ *   - an output layer at 128 columns (the tall rule's tier from 65 to 128 columns) goes to the tensor-core path.
  * The bounds are the runtime's (a test build reports them). Run by tests/gpu/forward-bf16.sh with
  * VF_CUBLAS_BF16_TC=1 and a test build of the runtime, then with VF_BF16_CONTROL=tc-layouts, tc-tall and tc-wide
  * (each rule removed), where it must fail. Prints "ok bf16-rules". */
@@ -117,10 +118,11 @@ int main(void)
     if (min_k) gate = min_k();
     int (*bound)(int) = NULL;
     if (rt) *(void **)&bound = dlsym(rt, "vf_bf16_test_rule_bound");
-    /* the tall rule's n and the wide rule's k and n (the documented values without a test build) */
+    /* the tall rule's n, its long-k bounds, and the wide rule's k and n (the documented values without a test build) */
     const int tall_n = bound ? bound(1) : 64, wide_k = bound ? bound(3) : 8192, wide_n = bound ? bound(4) : 256;
-    printf("the tensor-core path's gate: k >= %d; tall rule: n <= %d forwarded; wide rule: k > %d with n > %d forwarded\n",
-           gate, tall_n, wide_k, wide_n);
+    const int long_m = bound ? bound(5) : 6144, long_k = bound ? bound(2) : 9216;
+    printf("the tensor-core path's gate: k >= %d; tall rule: n <= %d forwarded, and m >= %d with k > %d; wide rule: k > %d "
+           "with n > %d forwarded\n", gate, tall_n, long_m, long_k, wide_k, wide_n);
     const int T = 2048, kt = gate > 2048 ? gate : 2048; /* the tokens of the step; k of the tall rows */
     /* input gradients (NN) and weight gradients (NT): 12.9's */
     product("the gradient of an MLP's input through its gate and up projections", 0, 0, 896, T, 4864, R_LAYOUT);
@@ -147,9 +149,17 @@ int main(void)
         product("the down projection of an MLP of 8960, past the wide rule's n", 1, 0, 1536, wide_n + 64, 8960, R_WIDE);
         product("the down projection of an MLP of 8960, at the wide rule's n", 1, 0, 1536, wide_n, 8960, -1);
     }
-    /* classes that the rules by shape class serve: a long product of many rows (one of the slowest points of its
-     * sweep), an output layer at 128 columns */
-    product("a long product of many rows", 1, 0, 7680, 128, 12800, -1);
+    /* a long product of many rows (TN, 128 columns, below the tall m): 12.9's from the long-k bound's m with k past
+     * its bound, the tensor-core path with k at its bound or one step of m under it */
+    if (long_k + 256 <= 16384 && long_m < 8192) {
+        product("a long product, m at the long-k bound, k one slice past its bound", 1, 0, long_m, 128, long_k + 256,
+                R_TALL);
+        product("a long product, m at the long-k bound, k at its bound", 1, 0, long_m, 128, long_k,
+                long_k >= gate ? -1 : R_SHORT_K);
+        product("a long product, m one step under the long-k bound, k one slice past its bound", 1, 0, long_m - 128, 128,
+                long_k + 256, long_k + 256 >= gate ? -1 : R_SHORT_K);
+    }
+    /* the tier from 65 to 128 columns of the tall rule, served */
     if (128 > tall_n) product("an output layer at 128 columns", 1, 0, 151936, 128, kt, -1);
     if (failures) {
         printf("%d checks failed\n", failures);

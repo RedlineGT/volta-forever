@@ -125,10 +125,11 @@ Where the GPU scripts write:
   served, failing when the gate is moved to 512 or 256, with `VF_ACCEPT_STRICT=1` (its two documented
   exceptions removed) and with the path off; with `VF_SAFE=1`, every result 12.9's); the path's layout
   rule, tall rule and wide rule (`bf16-rules.c`: a fine-tuning step's input and weight gradients, NN and
-  NT, an output layer up to the tall rule's n and a wide down projection past the wide rule's n
-  forwarded with 12.9's bits, the step's TN products, the output layer one column more and at 128
-  columns, the wide down projection at the wide rule's n and a long product of many rows (TN 7680 x 128
-  x 12800) served; with each rule removed by a control, it fails); with
+  NT, an output layer up to the tall rule's n, a wide down projection past the wide rule's n and a long
+  product of many rows at the tall rule's long-k m with k past its long-k bound forwarded with 12.9's
+  bits, the step's TN products, the output layer one column more and at 128 columns, the wide down
+  projection at the wide rule's n and the long product at the long-k bound or one step of m under it
+  served; with each rule removed by a control, it fails); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the

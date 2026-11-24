@@ -888,10 +888,12 @@ handle's workspace as 12.9 does, with the same rules for threads and streams.
 The tensor-core path takes a TN product with n >= 2 and k from 1024 (`VF_TC_MIN_K`) to 16384 when m k >=
 2^20 or n >= 32, after the skinny path has declined it; a product it does not take goes to cuBLAS 12.9. Three
 rules of speed leave more products to 12.9, the classes of shapes in which the path's median speed was below
-1.10 times 12.9's or its slowest below 0.90 times, decided before the shortest k, so that they hold whatever
+1.10 times 12.9's or its slowest below 0.90 times, or with no layer of a real model measured, decided before the
+shortest k, so that they hold whatever
 `VF_TC_MIN_K` is: the layout (TN only: in the other layouts the path was slower than 12.9 on the backward
-products of training, input gradients NN and weight gradients NT), narrow products of tall matrices (m >= 8192
-with n <= 64: 12.9 fills the GPU and was as fast or faster at some of these shapes), wide down projections
+products of training, input gradients NN and weight gradients NT), narrow products of tall matrices and long
+products of many rows (m >= 8192 with n <= 64, or m >= 6144 with k > 9216: 12.9 fills the GPU and was as fast or
+faster at some of these shapes; no layer of a real model was measured among the long ones), wide down projections
 (k > 8192 with n > 256: their gated inputs fail the exact check often enough on real text that the fallback cost
 more than the path saved) (`LIMITS.md`; `docs/performance.md`, section 7); a product they serve can still run below
 12.9's speed, down to 0.9 times by the classes' criterion, and below that when its input has many columns failing
