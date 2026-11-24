@@ -100,6 +100,12 @@ Where the GPU scripts write:
   translated in pairs and each by itself, and with `VF_SAFE=1` (`pair-bits`), and lookup tables
   asked for by name, answered as NVIDIA's driver answers them, except where the layer refuses one
   (`tables.py`).
+- `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
+  `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary
+  contexts, capture and launch per-GPU CUDA graphs simultaneously, and run a cross-device
+  `cuMemcpyPeerAsync` pipeline against native sm_70, retargeted sm_75 PTX and translated sm_75
+  cubins under `LAZY` and `EAGER` loading, comparing every case with the host's exact values
+  (skips when fewer than two GPUs are visible).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result, five of them again under
   `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
@@ -180,6 +186,7 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 | Script | What it runs | Compared with | Time | What it needs |
 |---|---|---|---|---|
 | `run.sh` | test kernels through the proxy | native sm_70 builds, host models, RTX 5090 reference vectors | a minute or two | toolkits |
+| `multi-gpu.sh` | one-process dual-GPU concurrency (`cuModuleLoadData`, `cuLibraryLoadData`, CUDA graphs) & peer copy | host exact computation | a few seconds | 2+ GPUs |
 | `forward.sh` | forwarding libraries | host computation | a minute | toolkits |
 | `torch.sh` | 925 PyTorch operations | the CPU | 3 min | PyTorch 2.14.0+cu130 wheel |
 | `torch-models.sh` | 32 small whole models | the CPU | 4 min | PyTorch 2.14.0+cu130 wheel |
