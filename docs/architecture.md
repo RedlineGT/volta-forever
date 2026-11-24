@@ -306,10 +306,12 @@ What is cached, keyed by a 128-bit hash of the image, the adaptation policy and 
 build identity of the layer:
 
 - A **manifest**: every entry point, which can be compiled alone, which are refused
-  (and why), which run emulated instructions (and how many).
+  (and why), which run emulated instructions (and how many), which have no code (a body
+  that is a trap and nothing else, section 5).
 - **Sub-module PTX** for each independent kernel a program actually used, as it was
   given to the driver.
-- For images with machine code only, the **translation**: the whole replacement image.
+- For images with machine code only, the **translation**: the whole replacement image, with
+  what was found of its kernels.
 
 What a program sees does not change: the same kernels are refused at the same call
 with the same message, the same emulation warnings appear at the same moment.
@@ -505,6 +507,44 @@ refusal and 2.18 to 2.19 with it; with a module with a refused kernel loaded, 2.
 independent review measured 1.85 to 1.90 on another V100 with and without the refusal, in one job
 after warming the clocks. In a loop of 40,000 small PyTorch operations (60,003 launches; PyTorch's
 libraries have refused kernels), the driver was asked what a handle is 4 times.
+
+### A launch of a kernel without code
+
+A fat binary holds every kernel for each architecture it is built for. A kernel built for some
+architectures only is emitted for the others too, with a body that is a trap and nothing else
+(CUDA's `__trap()` in the `#else` of an architecture test). Launched, such a kernel ends the
+context on any GPU: on a V100 with NVIDIA's driver and the sm_70 code of one, the launch returned
+0 and the next synchronisation 719 (`CUDA_ERROR_LAUNCH_FAILED`), and the GPU wrote an Xid 43 line
+(2026-11-24).
+
+Where it classifies the kernels of an image it adapts (`vf_adapt::Stubs`), the layer finds such
+kernels: in PTX (`crates/vf-ptx/src/stubs.rs`), a kernel whose only instructions are `trap`,
+`ret` and `exit`, the first of them an unguarded `trap` (declarations, debug lines, labels and
+comments are not instructions); in machine code for sm_75 that it translates
+(`vf_sass::effects::entry_stubs`), a kernel whose first instruction that runs is an unguarded
+`BPT.TRAP` (before it, only the setting of the stack pointer and instructions guarded by `!PT`).
+Anything else is code: a trap under a guard, behind a branch or after any other instruction. A
+kernel that the layer itself made to trap is a refused kernel (section 3), not one without code.
+
+Such a kernel is not refused at a lookup: fat binaries are full of them, and programs look them up
+(by name, by enumeration, at the start under eager loading) without launching them. It is given,
+and what is asked about it or set on it is answered by the driver. What would run it is refused
+with 218, the driver not being called, as for a refused kernel: the launches of the list above and
+the kernel nodes of a graph (`guard::allows_run`). A line at the default level names the kernel, the
+image the program gave (its size and XXH64 digest) and the call, once for each kernel. The context
+goes on; a capture in progress goes on, without the kernel. The record goes with the image through
+every path that adapts it: modules, libraries compiled whole or kernel by kernel, retained PTX,
+translated machine code, and the cache. An image that already has sm_70 code is given to the driver
+as it is and not read: a kernel without code there traps as it does without the layer.
+
+A kernel whose body does nothing (`ret`, or `EXIT` in machine code) is not refused: some are meant
+to do nothing. At `VF_LOG_LEVEL=2` each image adapted says how many kernels have a body that is a
+trap and how many an empty body, with the first names; below that level the line is not made.
+
+The search is one more pass over the kernels of an image when it is adapted, and stops reading a
+body at its 33rd statement. `vf adapt` of the two largest PTX modules of Strata's CUDA 13 engine
+(66 and 33 MB) took 1.3 % and 0.7 % longer with it, on average over three runs each, less than the
+spread between runs (2026-11-24).
 
 ### A second translation for a kernel that does not fit
 

@@ -40,6 +40,13 @@ where it is not from the build of this release. `docs/` says how each figure was
   cuFFT is now told 7.5. (Since 0.1.4, on main: such a handle is refused where it is used, at a
   launch, in a kernel node of a graph and in a question about it; what still traps is in
   [Kernels refused](#kernels-refused).)
+- **A kernel whose code is a trap and nothing else is launched, and the GPU stops.** A kernel
+  built for some architectures only is emitted for the others with a body that traps. A program
+  that chooses such a kernel for the V100 ends its context (Xid 43): Strata's CUDA 13 engine
+  0.1.66 does, with its default settings, at its first prompt of a few thousand tokens (4,021
+  here) ([its guide](docs/guides/strata.md)).
+  (Since 0.1.4, on main: the launch of such a kernel is refused with 218 and a line that names it;
+  [Kernels refused](#kernels-refused).)
 - **The bf16 cuBLAS variants are opt-in, and not finished.** `VF_CUBLAS_BF16_SKINNY=1` and
   `VF_CUBLAS_BF16_TC=1` are off by default. The tensor-core path's results are not cuBLAS 12.9's
   bits, and it makes bf16 training slower; there is no safe mode and no gate on k yet ([The bf16
@@ -147,6 +154,21 @@ line names the kernel and the reason once. What still traps: a kernel launched b
 (dynamic parallelism), a function reached from a kernel by an indirect call or through a call
 into another linker input (above), a launch through a private interface of the driver (cuFFT
 launches through `cuLaunchKernel`; no other is known).
+
+**A kernel without code is given, and its launch refused.** A kernel built for some
+architectures only is emitted for the others too, with a body that is a trap and nothing else.
+Launched, it ends the context on any GPU: with NVIDIA's driver and the sm_70 code of one, the
+launch returned 0, the next synchronisation 719 (`CUDA_ERROR_LAUNCH_FAILED`), and the GPU wrote an
+Xid 43 line (2026-11-24). Through the layer, such a kernel of PTX that it retargets or of sm_75
+machine code that it translates is given when the program asks for it and answered about, as
+NVIDIA's driver does, but a launch of any kind and a kernel node of a graph return 218 without
+calling the driver, and a line names the kernel and its image; the context goes on. Code that the
+image already has for sm_70 is loaded as it is and not read: a stub there traps as without the
+layer. A kernel with an empty body is not refused: launched, it does nothing, as without the layer,
+and nothing says so but `VF_LOG_LEVEL=2`, which counts both kinds in each image adapted. A program
+that chooses, for the V100 it detects, kernels that its CUDA 13 build carries only as such stubs
+now stops with that error and no GPU fault: Strata's CUDA 13 engine 0.1.66 ([its
+guide](docs/guides/strata.md)).
 
 A kernel can be refused after it was given, though it runs: the layer learns a refusal after it
 gave a kernel only when the driver's compiler refuses a function of a deferred library loaded
