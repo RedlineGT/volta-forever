@@ -218,8 +218,9 @@ fn reentered() -> bool {
 
 /// Whether the report of faults is on: unless `VF_FAULT_REPORT=0` (exactly), which restores the
 /// layer's forwarding as it is without it: nothing is kept, nothing waited for, nothing said, and
-/// lookups of the functions hooked only for it lead to NVIDIA's (`crate::FAULT_ONLY`). Every entry
-/// of this file that the hooks call does nothing when it is off.
+/// lookups of the functions hooked only for it lead to NVIDIA's (`crate::FAULT_ONLY`); a call of one
+/// by its exported name still passes through its hook, which forwards it. Every entry of this file
+/// that the hooks call does nothing when it is off.
 #[inline(always)]
 pub fn on() -> bool {
     crate::config().fault_report

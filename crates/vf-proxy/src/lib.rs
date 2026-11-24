@@ -51,8 +51,9 @@
 //!   launch whose synchronisation meets a fault is named (`fault`; without it, the kernels that may
 //!   have faulted are named);
 //! - `VF_FAULT_REPORT=0` (exactly): no report of faults: nothing kept of launches and
-//!   synchronisations, nothing said, the functions hooked only for it forwarded as they are
-//!   (`FAULT_ONLY`), and `VF_FAULT_TRACE` without effect;
+//!   synchronisations, nothing said, the functions hooked only for it forwarded as they are (a
+//!   lookup gives NVIDIA's, a call by the exported name passes through the entry here, which only
+//!   forwards and counts it, `FAULT_ONLY`), and `VF_FAULT_TRACE` without effect;
 //! - `VF_SAFE=1` (exactly): safe mode, the switches of the rewriting whose results are not
 //!   bit-identical to the default's are not used, nor the pairs of products of machine code
 //!   (`vf_adapt::Policy::make_safe`), said once at level 1;
@@ -182,7 +183,9 @@ const TRACE_ONLY: [usize; 4] = [
 ];
 
 /// The functions hooked only for the report of faults (`fault`): with `VF_FAULT_REPORT=0`, lookups
-/// of them lead to NVIDIA's own (and a call by their exported name goes straight there, `fault::on`).
+/// of them lead to NVIDIA's own, and a call by their exported name passes through their entry here,
+/// which calls NVIDIA's and returns its answer, having counted the call (`COUNTS`, for `VF_STATS`):
+/// every call of `fault` there returns at once (`fault::on`).
 pub(crate) const FAULT_ONLY: [usize; 27] = [
     idx::cuCtxSynchronize,
     idx::cuCtxSynchronize_v2,
