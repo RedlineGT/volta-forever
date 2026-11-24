@@ -221,12 +221,18 @@ CUresult cuFuncGetName(const char **name, void *function) {
     return 0;
 }
 
+// The handle that the next stream made is given (mock_reuse_stream, for the tests): a driver may
+// give a stream the handle of one that went with its context.
+static _Atomic uintptr_t reuse_stream;
+void mock_reuse_stream(void *stream) { reuse_stream = (uintptr_t)stream; }
+
 static int is_null_stream(void *stream) { return (uintptr_t)stream <= 2; }
 static uintptr_t context_of(void *stream) {
     return is_null_stream(stream) ? current() : stream_context[slot((uintptr_t)stream)];
 }
 CUresult cuStreamCreate(void **stream, unsigned flags) {
-    uintptr_t s = (next_stream += 0x10);
+    uintptr_t s = reuse_stream ? reuse_stream : (next_stream += 0x10);
+    reuse_stream = 0;
     stream_context[slot(s)] = current();
     stream_blocking[slot(s)] = (flags & 1) == 0;
     capturing[slot(s)] = 0;

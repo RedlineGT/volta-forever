@@ -16,7 +16,8 @@
 //! the context of a call that met a fault is never asked of the driver (`Of`): it is the current
 //! one for a call that takes it (a launch, a load, a synchronisation of the context or of a null
 //! stream), the module's for a lookup or an unload, and for a stream's synchronisation or query the
-//! context of the launches kept on that stream (a launch runs in its stream's context); a wait for
+//! context of the launches kept on that stream (a launch runs in its stream's context), unless that
+//! context was destroyed since (`stream_context`); a wait for
 //! an event, or a call with no context current, is of a context that the layer cannot tell, and its
 //! report names the launches of every context, each with its own, and takes no context for
 //! reported: such a fault is reported once until a context is destroyed, and again when it has a
@@ -721,6 +722,9 @@ struct Covers {
     /// By thread (as the lines number threads) and context: the thread's own default stream. (Not
     /// by ring: a ring whose thread ended is given to another, whose own stream is another.)
     own: HashMap<(u64, u64), u64>,
+    /// By context: its last destruction (the launches of a context at that address up to this were
+    /// of the context destroyed, `stream_context`).
+    destroyed: HashMap<u64, u64>,
 }
 
 /// What the synchronisations of a stream's handle cover: spans of epochs, from the first to the
@@ -778,6 +782,7 @@ impl Covers {
 
     fn context_gone(&mut self, context: u64, covers: u64) {
         cover(&mut self.contexts, context, covers);
+        cover(&mut self.destroyed, context, covers);
     }
 
     fn legacy_synchronized(&mut self, context: u64, covers: u64) {
@@ -1784,10 +1789,7 @@ fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
     }
     // Whatever goes wrong in making the report, the program gets what the driver answered.
     let context = match of {
-        Of::Stream(stream) => match catch_unwind(|| stream_context(stream)) {
-            Ok(Some(context)) => Of::Context(context),
-            _ => Of::Unknown("a stream on which the layer kept no launch of a context it knows"),
-        },
+        Of::Stream(stream) => catch_unwind(|| stream_context(stream)).unwrap_or(Of::Unknown(NO_STREAM_CONTEXT)),
         of => of,
     };
     match context {
@@ -1809,7 +1811,7 @@ fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
     let context = match context {
         Of::Context(context) => Ok(context),
         Of::Unknown(why) => Err(why),
-        Of::Stream(_) => Err("a stream on which the layer kept no launch of a context it knows"),
+        Of::Stream(_) => Err(NO_STREAM_CONTEXT),
     };
     let made = catch_unwind(AssertUnwindSafe(|| {
         let (mut found, read, contexts) = gather(context, met);
@@ -1899,15 +1901,18 @@ fn launch_context(launch: &Launch) -> Option<u64> {
     identify(launch.what as usize, Some(launch.epoch)).context
 }
 
-/// The context of the launches kept on the stream at `stream` (the stream there now: since its
-/// handle's last stream began), the last first, when the layer knows the context of one.
-fn stream_context(stream: u64) -> Option<u64> {
-    let from = {
+/// The context of the stream at `stream` (the stream there now: since its handle's last stream
+/// began): that of its last launch kept whose context the layer knows; not known when that context
+/// was destroyed after the launch (a stream that went with its context, whose handle the driver may
+/// have given to a stream of another context since), nor when the layer knows none.
+fn stream_context(stream: u64) -> Of {
+    let (from, destroyed) = {
         let covers = record();
-        covers
+        let from = covers
             .streams
             .get(&stream)
-            .map_or(covers.streams_from, |cover| cover.from)
+            .map_or(covers.streams_from, |cover| cover.from);
+        (from, covers.destroyed.clone())
     };
     let rings: Vec<&'static Ring> = hold(&RINGS_HELD).clone();
     let mut on: Vec<Launch> = rings
@@ -1916,8 +1921,16 @@ fn stream_context(stream: u64) -> Option<u64> {
         .filter(|launch| launch.stream == stream && launch.epoch >= from)
         .collect();
     on.sort_by(|a, b| b.epoch.cmp(&a.epoch).then(b.number.cmp(&a.number)));
-    on.iter().find_map(launch_context)
+    match on.iter().find_map(|launch| Some((launch, launch_context(launch)?))) {
+        Some((launch, context)) if destroyed.get(&context).is_some_and(|&at| launch.epoch <= at) => {
+            Of::Unknown("a stream of a context since destroyed")
+        }
+        Some((_, context)) => Of::Context(context),
+        None => Of::Unknown(NO_STREAM_CONTEXT),
+    }
 }
+
+const NO_STREAM_CONTEXT: &str = "a stream on which the layer kept no launch of a context it knows";
 
 /// What the layer finds of a fault of `context` (or of a context that the layer cannot tell, and
 /// why): the candidates, the number of the last launch that each ring held then, and the number of

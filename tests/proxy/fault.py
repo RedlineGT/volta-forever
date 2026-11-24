@@ -273,6 +273,26 @@ def case(name, proxy):
             out.append(run.api.cuEventSynchronize(event))
             if i == 0:
                 out.append(run.api.cuEventQuery(event))
+    elif name == "stream-outlived":
+        # A stream that went with its context (destroyed without destroying its streams), whose handle
+        # the driver gives to a stream of another context, on which the program launches a kernel that
+        # the layer cannot place (taken from the driver, not through the layer): the fault met by
+        # its synchronisation is of a stream of a context since destroyed, not of that context; the
+        # live context's own synchronisation then names it as its own.
+        mock = c.CDLL(os.environ["VF_REAL_LIBCUDA"])
+        stream = run.stream()
+        out.append(run.launch("add_one", stream, grid=1))
+        out.append(run.api.cuCtxDestroy_v2(run.context))
+        other, functions = run.new_context()
+        mock.mock_reuse_stream(stream)
+        again = run.stream()
+        out.append("same-handle" if again.value == stream.value else "other-handle")
+        module, unplaced = c.c_void_p(), c.c_void_p()
+        assert mock.cuModuleLoadData(c.byref(module), PTX) == 0
+        assert mock.cuModuleGetFunction(c.byref(unplaced), module, b"write_null") == 0
+        out.append(run.launch("write_null", again, grid=2, functions={"write_null": unplaced}))
+        out.append(run.api.cuStreamSynchronize(again))
+        out.append(run.api.cuCtxSynchronize())
     elif name == "ecc":
         # An uncorrectable ECC error (214), as an aged V100's memory reports one: not a kernel's fault.
         out.append(run.launch("add_one", grid=1))
@@ -473,6 +493,16 @@ def checks(name, log, summary, results):
         expect("no fault is said", not faults)
         expect("not waited for during a capture, waited for after", results == ["0", "0", "0", "0", "0", "1"])
         return found
+    if name == "stream-outlived":
+        expect("the second stream was given the first one's handle, and its synchronisation met the fault",
+               results == ["0", "0", "same-handle", "0", "700", "700"])
+        expect("said of a stream of a context since destroyed, naming the launch on it, not the dead "
+               "context's", len(faults) == 2 and "in a CUDA context that the layer cannot tell (a stream of a "
+               "context since destroyed)" in lines[faults[0]] and "cuStreamSynchronize returned 700" in lines[faults[0]]
+               and "grid 2x1x1" in "\n".join(lines[faults[0]:faults[1]]))
+        expect("then said of the live context, at its own synchronisation",
+               "cuCtxSynchronize returned 700" in lines[faults[1]] and "cannot tell" not in lines[faults[1]])
+        return found
     if name == "event-again":
         heads = [lines[i] for i in faults]
         grids = [sorted(int(g) for g in re.findall(r"grid (\d+)x1x1", "\n".join(lines[i:j])))
@@ -588,6 +618,26 @@ def checks(name, log, summary, results):
             out.append(run.api.cuEventSynchronize(event))
             if i == 0:
                 out.append(run.api.cuEventQuery(event))
+    elif name == "stream-outlived":
+        # A stream that went with its context (destroyed without destroying its streams), whose handle
+        # the driver gives to a stream of another context, on which the program launches a kernel that
+        # the layer cannot place (taken from the driver, not through the layer): the fault met by
+        # its synchronisation is of a stream of a context since destroyed, not of that context; the
+        # live context's own synchronisation then names it as its own.
+        mock = c.CDLL(os.environ["VF_REAL_LIBCUDA"])
+        stream = run.stream()
+        out.append(run.launch("add_one", stream, grid=1))
+        out.append(run.api.cuCtxDestroy_v2(run.context))
+        other, functions = run.new_context()
+        mock.mock_reuse_stream(stream)
+        again = run.stream()
+        out.append("same-handle" if again.value == stream.value else "other-handle")
+        module, unplaced = c.c_void_p(), c.c_void_p()
+        assert mock.cuModuleLoadData(c.byref(module), PTX) == 0
+        assert mock.cuModuleGetFunction(c.byref(unplaced), module, b"write_null") == 0
+        out.append(run.launch("write_null", again, grid=2, functions={"write_null": unplaced}))
+        out.append(run.api.cuStreamSynchronize(again))
+        out.append(run.api.cuCtxSynchronize())
     elif name == "ecc":
         expect("an error of the hardware, said so, not a kernel's fault",
                head.startswith("the GPU's memory reported an uncorrectable ECC error: cuCtxSynchronize returned 214 "
@@ -687,7 +737,7 @@ def main():
                  ("capture-joined", {"VF_FAULT_TRACE": "1"}),
                  ("exact-done", {"VF_FAULT_TRACE": "1", "MOCK_DELAY": "1"}),
                  ("copy", {}), ("copy-destroyed", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
-                 ("sigexit", {"MOCK_SIGNAL": "1"}), ("sigexit-report", {"MOCK_SIGNAL": "1"}), ("event-again", {}),
+                 ("sigexit", {"MOCK_SIGNAL": "1"}), ("sigexit-report", {"MOCK_SIGNAL": "1"}), ("event-again", {}), ("stream-outlived", {}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"}),
                  # The report off: as without it, exact mode too; only the exact value turns it off.

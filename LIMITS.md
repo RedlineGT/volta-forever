@@ -389,7 +389,9 @@ What the layer cannot say:
   same way with no launch since, or after those 4, is said only at a call that meets it in its own
   context. The context of a stream's synchronisation or query that meets a
   fault is that of the launches kept on the stream; on a stream with none of a context the layer
-  knows, it cannot be told either. A kernel of a library launched by its own handle runs in whatever
+  knows, it cannot be told either, nor when the context of its last such launch was destroyed since
+  (said "a stream of a context since destroyed": a stream that went with its context, whose handle
+  the driver may give to a stream of another). A kernel of a library launched by its own handle runs in whatever
   context is current: it is a candidate in every context (in a process of several, the line says
   how many such). A kernel is named as the program asked for it; one of which it holds a handle that
   it did not take by name through the layer is named by the driver if it is a library's kernel,

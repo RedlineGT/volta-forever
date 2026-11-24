@@ -429,8 +429,9 @@ nothing waited for while a graph is being captured, nor after an end of a captur
 stream that joined it, while another capture is under way; that the report ends while another thread
 destroys contexts that have modules (120 threads' launches looked up meanwhile); that the waits of
 `VF_PROFILE` are the program's synchronisations for the report; that a fault of a context met by
-a wait for its stream while another is current is said of the stream's context, and one met by a
-wait for an event, or with no context current, of a context that the layer cannot tell, with the
+a wait for its stream while another is current is said of the stream's context (and one met on a
+stream whose handle outlived its context, given to a stream of another context, of a stream of a
+context since destroyed), and one met by a wait for an event, or with no context current, of a context that the layer cannot tell, with the
 launches of every context, and again of its context later; that faults of six contexts, each met
 first by a wait for an event, are said once and then again for each one with launches made since,
 four times at most, and once more after a context is destroyed; that with `VF_FAULT_REPORT=0`
