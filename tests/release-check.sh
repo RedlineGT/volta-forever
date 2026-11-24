@@ -16,7 +16,8 @@
 # GPU part: printed, not run: the commands of tests/gpu/ with the settings a release is checked
 # with, then how to check an installed archive instead of this tree. VF_RELEASE_GPU_RUN='PREFIX'
 # runs each of the tree's commands as `PREFIX 'COMMAND'` (COMMAND one argument, a shell command
-# line, as a job runner takes it), one after the other, and puts them in the table:
+# line, as a job runner takes it), one after the other, and puts them in the table (a suite for two
+# GPUs, tests/gpu/multi-gpu.sh, is a skip when it ends with 2: fewer than two GPUs visible):
 #   VF_RELEASE_GPU_TREE   the path of this tree where COMMAND runs (default: this path)
 #   VF_GPU                the PCI-order index of the GPU there; by default CUDA_VISIBLE_DEVICES
 #                         as COMMAND finds it (its first entry), else 0
@@ -56,6 +57,8 @@ script_of() {
     done
 }
 # step NAME COMMAND...: run COMMAND in the tree, its output to NAME.log; PASS when it ends with 0.
+# With skip_on=N set for the call, an end with status N is a skip (what the step needs is not here:
+# multi-gpu.sh's 2 for fewer than two GPUs visible), not a failure.
 step() {
     local name=$1 start=$SECONDS status result script
     shift
@@ -64,10 +67,12 @@ step() {
     printf '%-24s ' "$name"
     (cd "$W" && "$@") > "$out/$name.log" 2>&1
     status=$?
-    if [ $status -eq 0 ]; then result=PASS; else result=FAIL; failed=1; fi
+    if [ $status -eq 0 ]; then result=PASS
+    elif [ -n "${skip_on:-}" ] && [ $status -eq "$skip_on" ]; then result=SKIP; skipped=1
+    else result=FAIL; failed=1; fi
     printf '%s (%d s)\n' "$result" $((SECONDS - start))
     rows+=("$(printf '%-24s %-5s %6d s  %s' "$name" "$result" $((SECONDS - start)) \
-        "$([ $result = FAIL ] && echo "status $status, $out/$name.log")")")
+        "$([ $result != PASS ] && echo "status $status, $out/$name.log")")")
 }
 # skip NAME WHY: a step that cannot run here.
 skip() {
@@ -177,6 +182,11 @@ gpu_suites=(
     "sglang|${VF_SGLANG_VENV:+VF_SGLANG_VENV=$VF_SGLANG_VENV}|tests/gpu/sglang.sh \"\$gpu\""
     "zml||tests/gpu/zml.sh \"\$gpu\""
 )
+# The suites for a machine with two GPUs, in the same form: they take every GPU that the command sees
+# (CUDA_VISIBLE_DEVICES) and end with status 2 when fewer than two are visible, which is a skip.
+gpu2_suites=(
+    "multi-gpu||tests/gpu/multi-gpu.sh"
+)
 # The GPU, as the command finds it: VF_GPU, else the first of CUDA_VISIBLE_DEVICES, else 0.
 pick='gpu=${VF_GPU:-${CUDA_VISIBLE_DEVICES:-0}}; gpu=${gpu%%,*}'
 command_of() {
@@ -187,7 +197,7 @@ command_of() {
 # Every script that a step or a GPU command runs directly is executable as git has it: a checkout
 # takes the mode of the index, whatever the mode of the file here (outside a git checkout, the file's
 # own is looked at). tests/gpu/triton.sh was not, and its command failed wherever it ran as printed.
-for suite in "${gpu_suites[@]}"; do
+for suite in "${gpu_suites[@]}" "${gpu2_suites[@]}"; do
     IFS='|' read -r name settings script <<< "$suite"
     read -r -a words <<< "$script"
     script=$(script_of "${words[@]}")
@@ -212,6 +222,11 @@ cat <<EOF
 Each command from the tree, on the machine with the GPU (VF_GPU: the GPU's PCI-order index):
 EOF
 for suite in "${gpu_suites[@]}"; do
+    IFS='|' read -r name settings script <<< "$suite"
+    printf '  %s\n' "$(command_of "$settings" "$script")"
+done
+echo "On a machine with two GPUs, both visible (exit status 2 when fewer are: a skip, not a failure):"
+for suite in "${gpu2_suites[@]}"; do
     IFS='|' read -r name settings script <<< "$suite"
     printf '  %s\n' "$(command_of "$settings" "$script")"
 done
@@ -247,6 +262,10 @@ if [ -n "${VF_RELEASE_GPU_RUN:-}" ]; then
     for suite in "${gpu_suites[@]}"; do
         IFS='|' read -r name settings script <<< "$suite"
         step "gpu-$name" "${prefix[@]}" "$(command_of "$settings" "$script")"
+    done
+    for suite in "${gpu2_suites[@]}"; do
+        IFS='|' read -r name settings script <<< "$suite"
+        skip_on=2 step "gpu-$name" "${prefix[@]}" "$(command_of "$settings" "$script")"
     done
 fi
 
