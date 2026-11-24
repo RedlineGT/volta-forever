@@ -292,9 +292,6 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
     {
         kernels::set_origin(handle, origin);
     }
-    let image = replacement
-        .program_image
-        .unwrap_or_else(|| (replacement.data.len(), replacement.identity()));
     kernels::describe(
         handle,
         replacement.shown.take(),
@@ -302,12 +299,15 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         std::mem::take(&mut replacement.emulated),
         FOR_LIBRARY.get(),
     );
-    kernels::without_code(
-        handle,
-        std::mem::take(&mut replacement.trap_only),
-        image,
-        FOR_LIBRARY.get(),
-    );
+    let trap_only = std::mem::take(&mut replacement.trap_only);
+    if !trap_only.is_empty() {
+        // What the line that refuses a launch names the image by: a digest is taken only for an
+        // image that has such kernels.
+        let image = replacement
+            .program_image
+            .unwrap_or_else(|| (replacement.data.len(), replacement.identity()));
+        kernels::without_code(handle, trap_only, image, FOR_LIBRARY.get());
+    }
     // For a second translation at launch (`fit`): the original of a translation that has a kernel
     // over its budget. Otherwise nothing: and nothing may be left there under a handle that the
     // driver gives again.
@@ -1532,5 +1532,33 @@ mod tests {
         assert_eq!(at_level_2, 1);
         let digest = xxh64(&EMULATED[..EMULATED.len() - 1]);
         assert_eq!(named.shown, Some(format!("image XXH64 {digest:016x}")));
+    }
+
+    const NO_CODE: &[u8] =
+        b".version 8.8\n.target sm_75\n.address_size 64\n.visible .entry k()\n{\n trap;\n ret;\n}\n\0";
+
+    #[test]
+    fn keeping_an_image_takes_a_digest_only_for_its_kernels_without_code() {
+        log::set_test_level(Some(1));
+        // An image without kernels without code, adapted and kept: no digest.
+        let emulated = unsafe { adapt("cuModuleLoadData", EMULATED.as_ptr().cast(), None) }.unwrap();
+        DIGESTS.set(0);
+        keep(0x7e57_0001, emulated);
+        let without = DIGESTS.get();
+        dropped(0x7e57_0001);
+        // An image with one: `adapt` takes the digest of the image the program gave, which the line
+        // that refuses a launch names; keeping it takes no other.
+        DIGESTS.set(0);
+        let no_code = unsafe { adapt("cuModuleLoadData", NO_CODE.as_ptr().cast(), None) }.unwrap();
+        assert_eq!(no_code.trap_only, ["k"]);
+        keep(0x7e57_0002, no_code);
+        let with = DIGESTS.get();
+        dropped(0x7e57_0002);
+        log::set_test_level(None);
+        assert_eq!(
+            without, 0,
+            "keeping an image without kernels without code took a digest"
+        );
+        assert_eq!(with, 1);
     }
 }
