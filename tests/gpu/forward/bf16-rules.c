@@ -13,14 +13,27 @@
  *   - a long product of many rows (TN, 128 columns) goes to 12.9, for the tall rule, with m at the long-k bound and k
  *     one slice past its bound; to the tensor-core path at that m with k at its bound, and one step of m under it;
  *   - an output layer at 128 columns (the tall rule's tier from 65 to 128 columns) goes to the tensor-core path.
- * The bounds are the runtime's (a test build reports them). Run by tests/gpu/forward-bf16.sh with
- * VF_CUBLAS_BF16_TC=1 and a test build of the runtime, then with VF_BF16_CONTROL=tc-layouts, tc-tall and tc-wide
- * (each rule removed), where it must fail. Prints "ok bf16-rules". */
+ * The bounds are the runtime's (a test build reports them). A bound it does not report (-1: a runtime without the
+ * rule or the branch) is a failed check, and the cases built from it are not run; VF_RULES_NO_BOUND=i reads bound i
+ * so, a control. Run by tests/gpu/forward-bf16.sh with VF_CUBLAS_BF16_TC=1 and a test build of the runtime, then with
+ * VF_BF16_CONTROL=tc-layouts, tc-tall and tc-wide (each rule removed), where it must fail, and with
+ * VF_RULES_NO_BOUND=5, where it must fail that check and exit with status 1. Prints "ok bf16-rules". */
 #include "bf16-common.h"
 
 static cublasHandle_t hv, h12;
 static cudaStream_t st;
 static int gate = 2048; /* the runtime's shortest k for the tensor-core path (test builds) */
+static int (*bound_fn)(int); /* vf_bf16_test_rule_bound of a test build */
+static int no_bound = -1;    /* VF_RULES_NO_BOUND=i (a control): bound i read as missing */
+
+/* Bound i of the rules as the runtime reports it, or the documented value without a test build. -1 means the
+ * runtime has no such bound: a failed check, and the caller builds none of the cases that would use it. */
+static int rule_bound(int i, int documented, const char *what)
+{
+    const int v = i == no_bound ? -1 : bound_fn ? bound_fn(i) : documented;
+    CHECK(v > 0, "the runtime reports no %s (vf_bf16_test_rule_bound(%d) = %d): its cases are not run", what, i, v);
+    return v;
+}
 
 /* Operands in [-scale, scale), from the shared generator (uniform: fast for the large ones). */
 static uint16_t *fill(size_t n, float scale)
@@ -116,11 +129,15 @@ int main(void)
     void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
     if (rt) *(void **)&min_k = dlsym(rt, "vf_bf16_test_tc_min_k");
     if (min_k) gate = min_k();
-    int (*bound)(int) = NULL;
-    if (rt) *(void **)&bound = dlsym(rt, "vf_bf16_test_rule_bound");
-    /* the tall rule's n, its long-k bounds, and the wide rule's k and n (the documented values without a test build) */
-    const int tall_n = bound ? bound(1) : 64, wide_k = bound ? bound(3) : 8192, wide_n = bound ? bound(4) : 256;
-    const int long_m = bound ? bound(5) : 6144, long_k = bound ? bound(2) : 9216;
+    if (rt) *(void **)&bound_fn = dlsym(rt, "vf_bf16_test_rule_bound");
+    if (getenv("VF_RULES_NO_BOUND")) no_bound = atoi(getenv("VF_RULES_NO_BOUND"));
+    /* the tall rule's n, its long-k bounds, and the wide rule's k and n */
+    const int tall_n = rule_bound(1, 64, "n bound of the tall rule");
+    const int wide_k = rule_bound(3, 8192, "k bound of the wide rule");
+    const int wide_n = rule_bound(4, 256, "n bound of the wide rule");
+    const int long_m = rule_bound(5, 6144, "m bound of the tall rule's long-k branch");
+    const int long_k = rule_bound(2, 9216, "k bound of the tall rule's long-k branch");
+    const int has_tall = tall_n > 0, has_wide = wide_k > 0 && wide_n > 0, has_long = long_m > 0 && long_k > 0;
     printf("the tensor-core path's gate: k >= %d; tall rule: n <= %d forwarded, and m >= %d with k > %d; wide rule: k > %d "
            "with n > %d forwarded\n", gate, tall_n, long_m, long_k, wide_k, wide_n);
     const int T = 2048, kt = gate > 2048 ? gate : 2048; /* the tokens of the step; k of the tall rows */
@@ -136,22 +153,26 @@ int main(void)
     product("a rank-16 adapter's B gradient, q or o projection", 0, 1, 16, 896, T, R_LAYOUT);
     product("a rank-16 adapter's A gradient, down projection", 0, 1, 4864, 16, T, R_LAYOUT);
     /* the forward products of the down projection (TN): the tensor-core path, from its gate on, unless wide */
-    const int down = 4864 > wide_k && T > wide_n ? R_WIDE : 4864 >= gate ? -1 : R_SHORT_K;
-    product("the down projection", 1, 0, 896, T, 4864, down);
+    if (has_wide) {
+        const int down = 4864 > wide_k && T > wide_n ? R_WIDE : 4864 >= gate ? -1 : R_SHORT_K;
+        product("the down projection", 1, 0, 896, T, 4864, down);
+    }
     product("a rank-16 adapter's A product, down projection", 1, 0, 16, T, 4864, 4864 >= gate ? -1 : R_SHORT_K);
     /* an output layer (TN, m = 151936): 12.9's up to the tall rule's n, the tensor-core path one column more */
     product("an output layer, n = 2", 1, 0, 151936, 2, kt, R_TALL);
-    product("an output layer, n at the tall rule's bound", 1, 0, 151936, tall_n, kt, R_TALL);
-    product("an output layer, one column past it", 1, 0, 151936, tall_n + 1, kt, -1);
+    if (has_tall) {
+        product("an output layer, n at the tall rule's bound", 1, 0, 151936, tall_n, kt, R_TALL);
+        product("an output layer, one column past it", 1, 0, 151936, tall_n + 1, kt, -1);
+    }
     /* the down projection of an MLP of 8960 (TN, k = 8960 past the wide rule's bound): 12.9's with more columns than
      * the wide rule's n, the tensor-core path at it */
-    if (8960 > wide_k) {
+    if (has_wide && 8960 > wide_k) {
         product("the down projection of an MLP of 8960, past the wide rule's n", 1, 0, 1536, wide_n + 64, 8960, R_WIDE);
         product("the down projection of an MLP of 8960, at the wide rule's n", 1, 0, 1536, wide_n, 8960, -1);
     }
     /* a long product of many rows (TN, 128 columns, below the tall m): 12.9's from the long-k bound's m with k past
      * its bound, the tensor-core path with k at its bound or one step of m under it */
-    if (long_k + 256 <= 16384 && long_m < 8192) {
+    if (has_long && long_k + 256 <= 16384 && long_m < 8192) {
         product("a long product, m at the long-k bound, k one slice past its bound", 1, 0, long_m, 128, long_k + 256,
                 R_TALL);
         product("a long product, m at the long-k bound, k at its bound", 1, 0, long_m, 128, long_k,
@@ -160,7 +181,7 @@ int main(void)
                 long_k + 256, long_k + 256 >= gate ? -1 : R_SHORT_K);
     }
     /* the tier from 65 to 128 columns of the tall rule, served */
-    if (128 > tall_n) product("an output layer at 128 columns", 1, 0, 151936, 128, kt, -1);
+    if (has_tall && 128 > tall_n) product("an output layer at 128 columns", 1, 0, 151936, 128, kt, -1);
     if (failures) {
         printf("%d checks failed\n", failures);
         return 1;

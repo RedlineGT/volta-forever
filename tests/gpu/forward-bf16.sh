@@ -148,7 +148,9 @@ fi
 # The tensor-core path's layout rule, tall rule and wide rule: a fine-tuning step's input and weight gradients (NN,
 # NT), an output layer up to the tall rule's n (TN, m = 151936) and a wide down projection past the wide rule's n go to
 # 12.9 with its bits; the TN products of the step, the output layer one column more and the wide down projection at
-# the wide rule's n to the tensor-core path. Each control that removes a rule (test builds) must make it fail there.
+# the wide rule's n to the tensor-core path. Each control that removes a rule (test builds) must make it fail there;
+# a bound the runtime does not report (VF_RULES_NO_BOUND=5: the long-k branch's m read as -1, as a runtime without
+# the branch reports it) must fail its check with exit status 1, not crash the test.
 if want bf16-rules; then
     if build bf16-rules; then
         run bf16-rules "$test_dir"; verdict bf16-rules
@@ -159,6 +161,11 @@ if want bf16-rules; then
                 echo "PASS  bf16-rules control: without the ${c#*:} (${c%%:*}) it fails there"
             else echo "FAIL  bf16-rules control ${c%%:*}: did not fail at the ${c#*:} ($out/logs/forward-bf16-rules-${c%%:*}.log)"; failed=1; fi
         done
+        run bf16-rules "$test_dir" VF_RULES_NO_BOUND=5 >/dev/null
+        cp "$log" "$out/logs/forward-bf16-rules-no-bound.log"
+        if [ "$status" = 1 ] && grep -q "^FAIL .*: the runtime reports no m bound of the tall rule's long-k branch" "$log"; then
+            echo "PASS  bf16-rules control: a bound the runtime does not report fails its check (exit status 1, no crash)"
+        else echo "FAIL  bf16-rules control VF_RULES_NO_BOUND=5: not that failed check with exit status 1 (exit status $status; $out/logs/forward-bf16-rules-no-bound.log)"; failed=1; fi
     fi
 fi
 # G3 with the skinny path: its captured calls are kernel nodes of the runtime's module.

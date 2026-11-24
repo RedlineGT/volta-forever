@@ -130,7 +130,8 @@ Where the GPU scripts write:
   product of many rows at the tall rule's long-k m with k past its long-k bound forwarded with 12.9's
   bits, the step's TN products, the output layer one column more and at 128 columns, the wide down
   projection at the wide rule's n and the long product at the long-k bound or one step of m under it
-  served; with each rule removed by a control, it fails); with
+  served; with each rule removed by a control, it fails, and a bound that the runtime does not report
+  is a failed check, not a crash: `VF_RULES_NO_BOUND=5`, a control); with
   `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the
