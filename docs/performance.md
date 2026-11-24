@@ -494,74 +494,81 @@ go through any of this: it uses Volta's instructions, and the layer leaves its c
 
 ## 7. bf16 products through cuBLAS: the opt-in variants on real programs
 
-Measured on 2026-11-24 on one Tesla V100-SXM2-32GB, driver 580.178.04, with the layer of the series of the bf16
-variants' rules of speed: the tensor-core path's gate on k (`VF_TC_MIN_K`, 1024), its three rules of speed (below),
-its fallback launched once per call with its tiles chosen from measured times. PyTorch 2.14.0+cu130 and
+Measured on 2026-11-24 on one Tesla V100-SXM2-32GB, driver 580.178.04, with the layer of 0.1.5 and this series of
+the bf16 variants: the tensor-core path's gate on k at 768 (`VF_TC_MIN_K`), its three rules of speed by shape class
+(below), its fallback launched once per call with its tiles chosen from measured times. PyTorch 2.14.0+cu130 and
 transformers 5.22.2, eager, in bf16: Qwen2.5-0.5B-Instruct (hidden size 896, MLP 4,864, vocabulary 151,936) for
 generation and training, BAAI/bge-base-en-v1.5 for embeddings, openai/whisper-small for speech. Each comparison is
 one GPU job in which the three settings (both switches off, `VF_CUBLAS_BF16_SKINNY=1`, `VF_CUBLAS_BF16_TC=1`, which
-turns the skinny path on too) take turns over two rounds, each process after 12 s of warm-up so that the card's
-clock has settled (1,530 MHz recorded), every process pinned to the CPUs nearest the GPU (the cases bound by the
-host, generation at batch 1 and 8 and Whisper's transcription, moved by up to about 30 % from one start of the
-process to the next unpinned). The rate with the switches off, then the ratios to it (the range over the two
+turns the skinny path on too) take turns over three rounds, each process after 12 s of warm-up so that the card's
+clock has settled (1,522 to 1,530 MHz recorded), every process pinned to the CPUs nearest the GPU (the cases bound
+by the host, generation at batch 1 and 8 and Whisper's transcription, moved by up to about 30 % from one start of
+the process to the next unpinned). The rate with the switches off, then the ratios to it (the range over the three
 rounds), and the share of the GPU's kernel time that bf16 cuBLAS products take with the switches off (from the
 profiles of the earlier measurements, 2026-11-23: what runs with the switches off is not changed by the series):
 
 | Workload | Switches off | Skinny | Tensor cores | bf16 products |
 |---|---:|---:|---:|---:|
-| `generate()`, batch 1 (one column: never served) | 36 tokens/s | 0.98 | 0.98-0.99 | 35 % |
-| `generate()`, batch 8 | 197 tokens/s | 1.27 | 1.39 | 82 % |
-| `generate()`, batch 32 | 637 tokens/s | 1.00 | 1.46 | 80 % |
-| Prompts of 512 to 2,048 tokens | 7.4k-10.4k tokens/s | 1.00 | 1.05-1.18 | |
-| Log-likelihood of 8 x 512 tokens | 8.8k tokens/s | 1.00 | 1.06 | |
-| The same model under `torch.compile`, at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` (one round) | 8.6k-12k tokens/s | | 1.07-1.22 | |
-| Embeddings, batches of 32 to 256 | 91-1,600 sequences/s | 1.00 | 1.11-1.16 | 82.5 % |
-| Whisper's encoder alone | 21 windows/s | 1.00 | 1.07 | 48 % (Whisper) |
-| Whisper's transcription, batch 16 | 104 audio-seconds/s | 1.04 | 1.20-1.21 | |
-| LoRA training step, 8 x 256 and 32 x 128 tokens | 1.40 and 0.81 steps/s | 1.03, 1.03 | 1.07, 1.07 | 83 % |
-| Full training step, 8 x 256 and 32 x 128 tokens | 1.24 and 0.70 steps/s | 1.00 | 1.02, 1.02 | 77.5 % |
+| `generate()`, batch 1 (each step one column: never served) | 35 tokens/s | 0.99-1.01 | 1.00-1.04 | 35 % |
+| `generate()`, batch 8 | 197 tokens/s | 1.27 | 1.40-1.43 | 82 % |
+| `generate()`, batch 32 | 637 tokens/s | 1.00 | 1.49-1.52 | 80 % |
+| Prompts of 512 to 2,048 tokens | 7.4k-10.5k tokens/s | 1.00 | 1.33-1.74 |  |
+| Log-likelihood of 8 x 512 tokens | 8.8k tokens/s | 1.00 | 1.60 |  |
+| The same model under `torch.compile`, at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` (one round) | 8.6k-12k tokens/s | | 1.46-1.92 | |
+| Embeddings, batches of 32 to 256 | 91-1,604 sequences/s | 1.00 | 1.53-1.77 | 82.5 % |
+| Whisper's encoder alone | 21 windows/s | 1.00 | 1.31 | 48 % (Whisper) |
+| Whisper's transcription, batch 16 | 104 audio-seconds/s | 1.04 | 1.26-1.29 |  |
+| LoRA training step, 8 x 256 and 32 x 128 tokens | 1.40 and 0.81 steps/s | 1.03, 1.03-1.04 | 1.24, 1.23 | 83 % |
+| Full training step, 8 x 256 and 32 x 128 tokens | 1.25 and 0.70 steps/s | 0.99-1.00, 1.00 | 1.12-1.13, 1.13-1.14 | 77.5 % |
 
-With the gate on k, every product of these three models with 768 or 896 in-features, all but the second product of
-each MLP (3,072 or 4,864 in-features), goes to the skinny path or to cuBLAS 12.9: only one of the seven products of
-each layer of the generation model, and one of the six of each layer of the two encoders, can go to the tensor
-cores. The prompts, the scoring, the embeddings and Whisper's encoder therefore gain less than in the measurements
-made before the gate, when the path served their products with 768 or 896 in-features too: 1.31 to 1.70, 1.56,
-1.51 to 1.74 and 1.30 then. Generation at batch 8 and 32 kept its gain (1.35 and 1.46 to 1.49 then).
+With the gate at k = 768, every linear layer of these three models is in the tensor-core path's gate (their products
+have 768, 896, 3,072 or 4,864 in-features), where at the gate of 1,024 only the second product of each MLP was. The
+prompts, the scoring, the embeddings and Whisper's encoder ran at 1.33 to 1.74, 1.60, 1.53 to 1.77 and 1.31 times
+12.9's speed, against 1.05 to 1.18, 1.06, 1.11 to 1.16 and 1.07 with the gate at 1,024 (a job of the same kind,
+earlier the same day) and 1.31 to 1.70, 1.56, 1.51 to 1.74 and 1.30 in the measurements made before any gate on k;
+generation at batch 8 and 32 at 1.40 to 1.43 and 1.49 to 1.52 (1.39 and 1.46 at the gate of 1,024). At batch 1 the
+steps' one column is never served, and the prompt's products (64 columns), which the gate of 768 serves, take under
+1 % of the run's time: its 1.00 to 1.04 is the noise of a case bound by the host, unchanged within it (0.98 to 0.99
+at the gate of 1,024; 0.99 to 1.04 in review, and 0.82 to 0.95 there with another job compiling on the CPUs near the
+GPU).
 
 With the skinny path alone, every output was bit for bit that with the switches off, in every workload and round:
 the generated tokens and logits, the embeddings, Whisper's transcripts, and the losses and trained weights of
 training. With the tensor-core path, the logits of a check batch (4 x 64 positions) differed from those with the
-switches off by 0.047 on average and 0.81 at most, with the same most likely token at 98.44 % of positions; from
-those of the same model in fp32 on the CPU, by 0.0602 on average with the switches off and 0.0584 with the path
-(the same most likely token at 97.66 % of positions with both). Greedy generation at batch 8 kept the tokens of the
-switches off for 77 of its 128 on average (one sequence of the 8 throughout), at batch 32 for 38; at batch 8 no
-sequence was the CPU's throughout with the switches off (42 tokens on average), 2 of 8 with the path (59).
-Embeddings had a cosine of at least 0.999952 to those with the switches off, and their nearest neighbour was the
-CPU's in every case, with the path and without. Of Whisper's 24 transcripts at batch 8 and 16, 18 were those of
-the switches off; of the others, two differ in a capital, two in "21," against "21st,", one in a comma and a word,
-and in one window the switches off stopped after the first word where the path gave the sentence. The losses of
-training differed from those with the switches off by 0.0042 at most; the first three of LoRA were within 0.0019
-of the CPU's in fp32 with the switches off and within 0.0017 with the path. Each setting gave the same bits in both
-rounds, in every workload.
+switches off by 0.048 on average and 0.92 at most, with the same most likely token at 98.05 % of positions; from
+those of the same model in fp32 on the CPU, by 0.0602 on average with the switches off and 0.0600 with the path (the
+same most likely token at 97.66 and 97.27 % of positions). Greedy generation at batch 8 kept the tokens of the
+switches off for 47 of its 128 on average (one sequence of the 8 throughout), at batch 32 for 45 (4 of 32
+throughout), and at batch 1, whose prompt the path now serves, for 66, where the switches off kept the CPU's tokens
+throughout; at batch 8 no sequence was the CPU's throughout, with the switches off (42 tokens on average) or with
+the path (34). Embeddings had a cosine of at least 0.999947 to those with the switches off, and their nearest
+neighbour was the CPU's in every case, with the path and without. Of Whisper's 24 transcripts at batch 8 and 16, 17
+were those of the switches off; of the others, three differ in a capital (two of them also in a comma and a word),
+two in "21," against "21st,", one in a dropped "the", and in one window the switches off stopped after the first
+word where the path gave the sentence; at batch 1 the transcript was that of the switches off and of the CPU. The
+losses of training differed from those with the switches off by 0.0034 at most; the first three of LoRA were within
+0.0019 of the CPU's in fp32 with the switches off and within 0.0040 with the path. Each setting gave the same bits in
+all three rounds, in every workload.
 
 ### Training
 
-bf16 fine-tuning of the 0.5B model: adapters of rank 16 on every linear layer (LoRA; the base frozen in bf16)
-and full fine-tuning (fp32 master weights), both under bf16 autocast with AdamW, 8 steps of 8 x 256 and of
-32 x 128 tokens after 2 of warm-up, on fixed windows of the model's own README and licence. Measured again in a
-job of its own, three runs of each setting alternated; beside them, two runs of the layer as it was before this
-series (the path then served every layout), from an earlier job of the same kind. Steps per second:
+bf16 fine-tuning of the 0.5B model: adapters of rank 16 on every linear layer (LoRA; the base frozen in bf16) and
+full fine-tuning (fp32 master weights), both under bf16 autocast with AdamW, 8 steps of 8 x 256 and of 32 x 128
+tokens after 2 of warm-up, on fixed windows of the model's own README and licence. Measured again with the gate at
+768, in this section's job (three rounds of each setting alternated); beside them, two runs of the layer as it was
+before this series (the path then served every layout), from an earlier job of the same kind. Steps per second:
 
 | Workload | Switches off | Tensor cores | Ratio | Tensor cores, before this series | Ratio |
 |---|---:|---:|---:|---:|---:|
-| LoRA, 8 x 256 tokens | 1.405 | 1.508 | 1.07 | 1.088 | 0.77 |
-| LoRA, 32 x 128 tokens | 0.808 | 0.863 | 1.07 | 0.444 | 0.55 |
-| Full fine-tuning, 8 x 256 tokens | 1.246 | 1.271 | 1.02 | 0.777 | 0.62 |
-| Full fine-tuning, 32 x 128 tokens | 0.702 | 0.717 | 1.02 | 0.250 | 0.36 |
+| LoRA, 8 x 256 tokens | 1.404 | 1.739 | 1.24 | 1.088 | 0.77 |
+| LoRA, 32 x 128 tokens | 0.809 | 0.996 | 1.23 | 0.444 | 0.55 |
+| Full fine-tuning, 8 x 256 tokens | 1.249 | 1.406 | 1.13 | 0.777 | 0.62 |
+| Full fine-tuning, 32 x 128 tokens | 0.702 | 0.798 | 1.14 | 0.250 | 0.36 |
 
 Every bf16 product of a real step timed in place (each call waited for; three runs of each setting), summed per
-step; then with the layout rule removed, by the test builds' controls `VF_BF16_CONTROL=tc-layouts,tc-tall,tc-wide`
-(no product of these steps is tall or wide), which serve the NN and NT products again:
+step, with the gate at 1,024; then with the layout rule removed, by the test builds' controls
+`VF_BF16_CONTROL=tc-layouts,tc-tall,tc-wide` (no product of these steps is tall or wide), which serve the NN and NT
+products again:
 
 | Workload | Switches off (ms per step) | Tensor cores | Speed | Layout rule removed | Speed |
 |---|---:|---:|---:|---:|---:|
@@ -570,10 +577,10 @@ step; then with the layout rule removed, by the test builds' controls `VF_BF16_C
 | Full fine-tuning, 8 x 256 tokens | 651.0 | 636.6 | 1.02 | 897.1 | 0.73 |
 | Full fine-tuning, 32 x 128 tokens | 1,211.0 | 1,181.3 | 1.03 | 1,976.9 | 0.61 |
 
-With the rule removed, 20 of the 22 NN and NT products within the path's gate (k from 1,024 to 16,384, n of 32
-or more) ran at 0.24 to 0.92 times 12.9's speed: the output layer's weight gradient (NT 896 x 151,936 x 4,096) at
-0.29, the MLP's input gradients (NN 896 x n x 4,864) at 0.42 to 0.44, a rank-16 adapter's B gradient (NT 16 x 4,864
-x 4,096) at 0.24; the other two, of 16 rows, at 1.01 and 1.35. The TN products that the path serves ran at 1.45 to
+With the rule removed, 20 of the 22 NN and NT products within the gate of 1,024 (k from 1,024 to 16,384, n of 32 or
+more) ran at 0.24 to 0.92 times 12.9's speed: the output layer's weight gradient (NT 896 x 151,936 x 4,096) at 0.29,
+the MLP's input gradients (NN 896 x n x 4,864) at 0.42 to 0.44, a rank-16 adapter's B gradient (NT 16 x 4,864 x
+4,096) at 0.24; the other two, of 16 rows, at 1.01 and 1.35. The TN products that the path serves ran at 1.45 to
 3.88 times 12.9's speed: the down projections (896 x n x 4,864) at 1.45 to 1.53, the adapters' 16 x n x 4,864 at
 2.12 and 3.88. In each setting every step's loss and the trained weights' checksum were the same bits from run to
 run; with the path they differ from those with the switches off (the losses by 0.0042 at most), since its products
@@ -581,7 +588,10 @@ differ from 12.9's in their last bits. With the rules by class (no product of th
 changed), the same steps measured again in a job of their own, through the release runtime, three runs of each
 setting alternated: steps per second at 1.07 to 1.08 and 1.07 times those with the switches off for LoRA (8 x 256
 and 32 x 128 tokens), 1.02 and 1.02 for full fine-tuning (the range over the three pairs of runs); every product of
-the steps timed in place, summed per step, at 1.02 to 1.08 times.
+the steps timed in place, summed per step, at 1.02 to 1.08 times. With the gate at 768, which serves these steps'
+forward products of 896 in-features too, every product of the steps timed in place again (in a job of its own, 3
+rounds): the products summed per step at 1.16 to 1.29 times 12.9's speed (LoRA at 1.29 and 1.27, full fine-tuning at
+1.16 and 1.17), their TN products of 896 in-features at 1.45 to 2.21.
 
 ### The rules of speed
 
@@ -597,21 +607,38 @@ shape (the exception, below). Three static rules of shape, decided before the ga
 to 12.9, and with them the products of those classes at which the path was faster: each gives its reason in the exit
 report, and a control of the test builds removes it (`VF_BF16_CONTROL`), with which the rule's tests fail
 (`bf16-rules`, `tests/forward/bf16.sh`). Speeds are 12.9's time over the path's. The classes, on the real operands
-of eight models (below: every linear layer of the gate, n = 32 to 2,048, two choices of columns, the path measured
-on every TN product, 3 rounds), on the products of four fine-tuning steps timed in place ("Training", above, with
-the layout rule removed) and on the sweeps of the long products of many rows and of the tall rule's n bound of 64
-(B15), below (operands that convert exactly; the earlier sweeps below are not in the table):
+of eight models (below: every linear layer of the gate, the layers of k = 768 to 1,023 that the gate of 768 adds
+measured in a job of their own; n = 32 to 2,048, two choices of columns, the path measured on every TN product, 3
+rounds), on the products of four fine-tuning steps timed in place ("Training", above, with the layout rule removed)
+and on the sweeps of the long products of many rows and of the tall rule's n bound of 64 (B15), below (operands that
+convert exactly; the earlier sweeps below are not in the table):
 
 | Class | Real members | Median | The slowest (its input's columns failing) | Points of the sweeps | Median | The slowest | Criterion | Rule |
 |---|---|---:|---|---:|---:|---|---|---|
-| Served remainder: every other TN product of the gate | 18,636 products of 8 models | 2.22 | 1.09: the MLP's down projection of the 0.5B model, 896 x 1,024 x 4,864 (the first n tokens; 12 % failing) | 214 | 1.44 | 1.05: 7,680 x 128 x 9,216 | passes | served |
-| Tall, n <= 64: TN, m >= 8,192 | 1,506 products of 3 models | 1.07 | 0.66: the output layer of the 4B hybrid, 248,320 x 64 x 2,560 (n spread over the batch; none failing) | 64 | 1.02 | 0.70: 248,320 x 64 x 4,096 | fails: median 1.07 < 1.10, slowest 0.66 < 0.90 | to 12.9 |
-| Tall, 65 to 128 columns: TN, m >= 8,192 | 1,004 products of 3 models | 1.24 | 1.04: the output layer of the 1.5B model, 151,936 x 128 x 1,536 (the first n tokens; none failing) | 148 | 1.37 | 1.05: 10,240 x 112 x 4,096 | passes | served |
+| Served remainder: every other TN product of the gate | 32,781 products of 8 models | 2.18 | 1.09: the MLP's down projection of the 0.5B model, 896 x 1,024 x 4,864 (the first n tokens; 12 % failing) | 214 | 1.44 | 1.05: 7,680 x 128 x 9,216 | passes | served |
+| Tall, n <= 64: TN, m >= 8,192 | 1,524 products of 6 models | 1.06 | 0.66: the output layer of the 4B hybrid, 248,320 x 64 x 2,560 (n spread over the batch; none failing) | 64 | 1.02 | 0.70: 248,320 x 64 x 4,096 | fails: median 1.06 < 1.10, slowest 0.66 < 0.90 | to 12.9 |
+| Tall, 65 to 128 columns: TN, m >= 8,192 | 1,016 products of 6 models | 1.24 | 1.04: the output layer of the 1.5B model, 151,936 x 128 x 1,536 (the first n tokens; none failing) | 148 | 1.37 | 1.05: 10,240 x 112 x 4,096 | passes | served |
 | Long products of many rows: TN, m >= 6,144, k > 9,216, n <= 256 | none |  |  | 951 | 1.30 | 0.94: 6,656 x 192 x 13,824 | fails: no real members | to 12.9 |
 | Wide, 257 to 320 columns: TN, k > 8,192 | 184 products of 3 models | 1.60 | 0.85: the MLP's down projection of the 1.5B model, 1,536 x 320 x 8,960 (the first n tokens; 64 % failing) |  |  |  | fails: slowest 0.85 < 0.90 | to 12.9 |
 | Wide, more than 320 columns: TN, k > 8,192 | 1,196 products of 3 models | 1.39 | 0.62: the MLP's down projection of the 1.5B model, 1,536 x 768 x 8,960 (n spread over the batch; 55 % failing) |  |  |  | fails: slowest 0.62 < 0.90 | to 12.9 |
 | The exception, in the served remainder: one layer, the 9B hybrid's first linear-attention output projection (TN 4,096 x n x 4,096, 20 to 38 % of its input's columns failing) | 29 products of 1 model | 1.19 | 0.88 at n = 320 (30 %; across processes; 0.857 in one process, at n = 320) | | | | below the floor; no rule of shape tells it from its shape's other products | served |
-| Layouts other than TN: NN, NT, TT (a fine-tuning step's backward products, timed in place) | 22 products of 1 model | 0.51 | 0.24: NT 16 x 4,864 x 4,096 | | | | fails: median 0.51 < 1.10, slowest 0.24 < 0.90 | to 12.9 |
+| Layouts other than TN: NN, NT, TT (a fine-tuning step's backward products, timed in place at the gate of 1,024) | 22 products of 1 model | 0.51 | 0.24: NT 16 x 4,864 x 4,096 | | | | fails: median 0.51 < 1.10, slowest 0.24 < 0.90 | to 12.9 |
+
+With the gate at 768 the served remainder takes the products of 768 to 1,023 in-features too, real members all:
+every such layer of the 0.5B model (145 of k = 896: its attention projections, its MLPs' gate and up projections and
+its output layer) and of the four ReLU and GELU models (350 of k = 768: their attention projections, their MLPs'
+first products, and the output layers of T5-base and OPT-125m), measured as above in a job of their own (3 rounds),
+their inputs with at most 0.4 % of their columns failing (whisper-small's encoder; none in the others); the other
+three language models have no layer of 768 to 1,023 in-features. The 14,145 that the rules serve in the remainder
+ran at a median of 2.17 times 12.9's speed and at 1.25 at worst (the 0.5B model's output layer, 151,936 x 192 x
+896); the output layers at 65 to 128 columns, in the tall rule's tier, at 1.09 to 1.37 (12 products, across
+processes; 1.04 to 1.27 in one process, measured in review: the 0.5B model's at n = 128 at 1.04), and at n <= 64
+they go to 12.9 with the tall rule (18 products: a median of 0.94, 0.79 at worst). With them served, each of these
+five models' summed step over every layer measured (k >= 768), at its lowest over every n and both choices of
+columns, is 1.82 or more: the 0.5B model 1.818, T5-base 1.910, OPT-125m 1.977, bge-base-en-v1.5 1.891 and
+whisper-small's encoder 1.977, against 1.079, 1.114, 1.106, 1.153 and 1.215 with the gate at 1,024 (the same layers,
+those of 768 to 1,023 in-features then at 12.9's time, which they take 56 to 79 % of); at every n and choice of
+columns, 1.54 to 1.98 times the speed of the gate of 1,024.
 
 The wide rule's class of 257 to 320 columns fails on its slowest product alone (its median: 1.60): the 1.5B
 model's MLP down projection with the most failing columns, TN 1,536 x 320 x 8,960 at n = 320 (the first 320
@@ -628,29 +655,30 @@ columns fail the exact check most (the wide rule's), and with 30 to 60 % of thei
 ran at 0.52 to 0.89 times 12.9's speed (measured in review, on synthetic operands: TN 7,168 x 128 x 12,288 at 0.52
 with 60 % failing, 6,144 x 128 x 16,384 at 0.70 and 0.61 with 30 and 60 %).
 
-With these rules, each model's summed step (the sum of its products' times over the layers measured, as a speed
-against 12.9) at its lowest over every n and both choices of columns, the exception's layer served, against the
-rules before the classes (the tall rule then took 65 to 128 columns too) and every product served; the fine-tuning
-steps' products together ran at 1.02 to 1.08 times 12.9's speed, and at 1.02 to 1.08 times in the check under these
-rules ("Training", above):
+With these rules and the gate at 768, each model's summed step (the sum of its products' times over the layers
+measured, every linear layer with k >= 768, as a speed against 12.9) at its lowest over every n and both choices of
+columns, the exception's layer served, against the rules before the classes (the tall rule then took 65 to 128
+columns too) and every product served, at the same gate; the fine-tuning steps' products together ran at 1.02 to
+1.08 times 12.9's speed with the gate at 1,024, in the check under these rules as before them, and at 1.16 to 1.29
+with the gate at 768 ("Training", above):
 
 | Model | Lowest summed step with these rules (n, choice of columns) | With the rules before | Every product served |
 |---|---|---|---|
-| 0.5B model | 1.495 (n = 2,048, the first n tokens) | 1.495 | 1.495 |
+| 0.5B model | 1.818 (n = 2,048, the first n tokens) | 1.818 | 1.818 |
 | 1.5B model | 1.521 (n = 320, the first n tokens) | 1.521 | 1.760 |
 | 9B hybrid | 1.488 (n = 320, n spread over the batch) | 1.308 | 1.543 |
 | 4B hybrid | 1.577 (n = 320, n spread over the batch) | 1.549 | 1.693 |
-| T5-base | 1.730 (n = 1,536, n spread over the batch) | 1.730 | 1.730 |
-| OPT-125m | 1.732 (n = 1,536, the first n tokens) | 1.732 | 1.732 |
-| bge-base-en-v1.5 | 1.716 (n = 1,536, the first n tokens) | 1.716 | 1.716 |
-| whisper-small's encoder | 2.137 (n = 1,024, the first n tokens) | 2.137 | 2.137 |
+| T5-base | 1.910 (n = 1,536, n spread over the batch) | 1.910 | 1.910 |
+| OPT-125m | 1.977 (n = 1,536, n spread over the batch) | 1.977 | 1.977 |
+| bge-base-en-v1.5 | 1.891 (n = 1,536, the first n tokens) | 1.891 | 1.891 |
+| whisper-small's encoder | 1.977 (n = 768, the first n tokens) | 1.977 | 1.977 |
 
 The rules:
 
 | Rule | Products left to 12.9 | Reason in the exit report | Measured on the side it leaves to 12.9 | Measured on the side it serves | Control |
 |---|---|---|---|---|---|
-| Layout | every layout but TN (op(A) = A^T, op(B) = B): a backward pass's input gradients (NN) and weight gradients (NT), TT | `not TN (the tensor-core path's layout)` | the NN and NT products of four fine-tuning steps, timed in place with the rule removed: 20 of the 22 that the path would serve at 0.24 to 0.92 (the output layer's weight gradient, NT 896 x 151,936 x 4,096, at 0.29), the two others, of 16 rows, at 1.01 and 1.35; the steps' products together at 0.61 to 0.84 | the same steps' TN products: 1.45 to 3.88; the steps' products together at 1.02 to 1.08 | `tc-layouts` |
-| Tall | TN with m >= 8,192 and n <= 64, or with m >= 6,144 and k > 9,216 | `m >= 8192 with n <= 64, or m >= 6144 with k > 9216 (12.9 as fast at some of these shapes)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96; at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; the sweep B15 (m = 8,192 to 248,320, k = 1,024 to 4,096) at n = 56 and 64: a median of 0.92, 28 of 42 points below 1.0, down to 0.70 (248,320 x 64 x 4,096); with m >= 6,144, k > 9,216 and n <= 256: no layer of a real model; on the sweeps 48 of 951 points below 1.03, down to 0.94, in bands that follow 12.9's waves, and the other widths of the same shapes at up to 1.9 | output layers at n = 65 to 128: 1.01 to 1.56, from 129: 1.21 and more; B15 at 65 to 128 columns: 126 points, a median of 1.40, the slowest 1.05 (10,240 x 112 x 4,096); with k up to 9,216 at m >= 6,144 and n <= 256: 1.05 and more (sweeps below) | `tc-tall` |
+| Layout | every layout but TN (op(A) = A^T, op(B) = B): a backward pass's input gradients (NN) and weight gradients (NT), TT | `not TN (the tensor-core path's layout)` | the NN and NT products of four fine-tuning steps, timed in place with the rule removed: 20 of the 22 that the path would serve at 0.24 to 0.92 (the output layer's weight gradient, NT 896 x 151,936 x 4,096, at 0.29), the two others, of 16 rows, at 1.01 and 1.35; the steps' products together at 0.61 to 0.84 | the same steps' TN products: 1.45 to 3.88; the steps' products together at 1.02 to 1.08 with the gate at 1,024, 1.16 to 1.29 with the gate at 768 | `tc-layouts` |
+| Tall | TN with m >= 8,192 and n <= 64, or with m >= 6,144 and k > 9,216 | `m >= 8192 with n <= 64, or m >= 6144 with k > 9216 (12.9 as fast at some of these shapes)` | output layers (m = 151,936 and 248,320, k = 1,024 to 4,096) at n <= 64: 0.65 to 0.96, and the real output layers that the gate of 768 adds (the 0.5B model's, T5-base's and OPT-125m's, k = 896 and 768) at n <= 64: 0.79 to 1.05 (18 products); at k = 1,536 and n = 64, 1.05 at m = 8,192, 1.02 to 1.03 at 8,320 to 8,448, 0.95 to 1.00 from 8,704; the sweep B15 (m = 8,192 to 248,320, k = 1,024 to 4,096) at n = 56 and 64: a median of 0.92, 28 of 42 points below 1.0, down to 0.70 (248,320 x 64 x 4,096); with m >= 6,144, k > 9,216 and n <= 256: no layer of a real model; on the sweeps 48 of 951 points below 1.03, down to 0.94, in bands that follow 12.9's waves, and the other widths of the same shapes at up to 1.9 | output layers at n = 65 to 128: 1.01 to 1.56, from 129: 1.21 and more; B15 at 65 to 128 columns: 126 points, a median of 1.40, the slowest 1.05 (10,240 x 112 x 4,096); with k up to 9,216 at m >= 6,144 and n <= 256: 1.05 and more (sweeps below) | `tc-tall` |
 | Wide | TN with k > 8,192 and n > 256 | `k > 8192 with n > 256 (the fallback's cost on real activations)` | a down projection (k = 8,960) with 53 to 70 % of its input's columns failing, the rule removed by its control: 0.85 and 1.08 at n = 320 (the two choices of columns), 0.62 to 0.98 at every n from 384 to 2,048 | the same layer at n = 256: 1.15 to 1.17, at n = 192: 1.17 to 1.23 | `tc-wide` |
 | None: the exception | nothing (no rule of shape tells these products from others of their shape) | none; from `VF_LOG_LEVEL=2` the exit report counts the calls with more than a quarter of their rows or columns failing | | served, and can run below 12.9's speed: a product whose input has a quarter or more of its columns failing the exact check, near the top of one of 12.9's waves; measured on one layer, TN 4,096 x n x 4,096 with 26 to 38 % failing: 0.86 to 0.97 at n = 128, 192 and 256 to 320 (below) | |
 
@@ -659,25 +687,27 @@ model of hidden size 896, a 1.5B model of hidden size 1,536, and two hybrid mode
 layers, 9B of hidden size 4,096 and 4B of hidden size 2,560): every linear layer with k >= 1,024 of one prefill of 8
 x 256 tokens of text, at n = 32 to 2,048 in 15 steps, two choices of n of those columns (the first n tokens; n
 spread over the batch), 3 rounds, the settings alternated in separate processes, the path measured on every TN
-product of its gate (a test build with the tall and wide rules removed by their controls). The products the rules
-serve:
+product of its gate (a test build with the tall and wide rules removed by their controls); and, measured the same
+way in a job of their own through the runtime of the gate of 768, every linear layer with k = 768 to 1,023 of the
+0.5B model and of the four models below (495 layers, their real operands). The products the rules serve:
 
 | Model | Layers | Products served | Median speed | The slowest served | Below 1.05 | Below 1.0 | Products left to 12.9 |
 |---|---:|---:|---:|---|---:|---:|---:|
-| 0.5B, hidden 896 | 24 | 696 | 3.28 | 1.09: the MLP's down projection, 896 x 4,864, n = 1,024 (12 % of its columns failing) | 0 | 0 | 0 |
+| 0.5B, hidden 896 | 169 | 4,895 | 2.41 | 1.09: the MLP's down projection, 896 x 4,864, n = 1,024 (12 % of its columns failing) | 0 | 0 | 6 |
 | 1.5B, hidden 1,536 | 197 | 4,951 | 2.56 | 1.04: the output layer, 151,936 x 1,536, n = 128 (none of its columns failing) | 2 | 0 | 762 |
 | 9B hybrid, hidden 4,096 | 249 | 6,159 | 1.95 | 0.88: a linear-attention output projection, 4,096 x 4,096, n = 320 (30 % of its columns failing) | 9 | 6 | 1,062 |
 | 4B hybrid, hidden 2,560 | 249 | 6,159 | 2.06 | 1.04: the output layer, 248,320 x 2,560, n = 128 (none of its columns failing) | 2 | 0 | 1,062 |
 
-and four models with ReLU and GELU activations (their MLPs' second products, k = 3,072, are their only layers of
-k >= 1,024; no column of their inputs failed the check):
+and four models with ReLU and GELU activations (every linear layer: their MLPs' second products, k = 3,072, in the
+first job, the others, k = 768, in the second; one column of their inputs failed the check, at the first attention
+layer of whisper-small's encoder: 0.4 % of the columns at most):
 
 | Model | Layers | Products served | Median speed | The slowest served | Products left to 12.9 |
 |---|---:|---:|---:|---|---:|
-| T5-base (ReLU), encoder and decoder | 24 | 696 | 3.92 | 1.71: 768 x 3,072, n = 1,536 | 0 |
-| OPT-125m (ReLU) | 12 | 348 | 3.92 | 1.70: 768 x 3,072, n = 1,536 | 0 |
-| bge-base-en-v1.5 (GELU, BERT encoder) | 12 | 348 | 3.90 | 1.67: 768 x 3,072, n = 1,536 | 0 |
-| whisper-small's encoder (GELU, 1,500 frames of audio) | 12 | 312 | 4.58 | 2.11: 768 x 3,072, n = 1,024 | 0 |
+| T5-base (ReLU), encoder and decoder | 193 | 5,591 | 2.17 | 1.26: 32,128 x 768, n = 128 | 6 |
+| OPT-125m (ReLU) | 73 | 2,111 | 2.19 | 1.29: 50,272 x 768, n = 128 | 6 |
+| bge-base-en-v1.5 (GELU, BERT encoder) | 72 | 2,088 | 2.22 | 1.50: 3,072 x 768, n = 320 | 0 |
+| whisper-small's encoder (GELU, 1,500 frames of audio) | 72 | 1,872 | 2.19 | 1.50: 3,072 x 768, n = 320 | 0 |
 
 Every product the rules serve in these eight models ran at 1.04 times 12.9's speed or more, but in one layer: the
 exception below.
@@ -772,10 +802,10 @@ evidence:
 
 | Model | n | Layers | 12.9, sum (ms) | Every product served | With the rules | Without the tall rule | Without the wide rule | Left to 12.9: tall / wide |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| 0.5B | 64 | 24 | 18.96 | 6.33 | 6.33 | 6.33 | 6.33 | 0 / 0 |
-| 0.5B | 128 | 24 | 18.62 | 5.52 | 5.52 | 5.52 | 5.52 | 0 / 0 |
-| 0.5B | 512 | 24 | 18.97 | 2.51 | 2.51 | 2.51 | 2.51 | 0 / 0 |
-| 0.5B | 2,048 | 24 | 45.60 | 1.49 | 1.49 | 1.49 | 1.49 | 0 / 0 |
+| 0.5B | 64 | 169 | 42.72 | 2.72 | 2.81 | 2.72 | 2.81 | 1 / 0 |
+| 0.5B | 128 | 169 | 44.56 | 2.52 | 2.52 | 2.52 | 2.52 | 0 / 0 |
+| 0.5B | 512 | 169 | 68.49 | 1.99 | 1.99 | 1.99 | 1.99 | 0 / 0 |
+| 0.5B | 2,048 | 169 | 205.13 | 1.82 | 1.82 | 1.82 | 1.82 | 0 / 0 |
 | 1.5B | 64 | 197 | 86.36 | 2.28 | 2.36 | 2.28 | 2.36 | 57 / 0 |
 | 1.5B | 128 | 197 | 92.88 | 2.11 | 2.11 | 2.11 | 2.11 | 0 / 0 |
 | 1.5B | 512 | 197 | 183.31 | 1.89 | 1.59 | 1.59 | 1.89 | 0 / 28 |
@@ -789,28 +819,33 @@ evidence:
 | 4B hybrid | 512 | 249 | 438.09 | 1.85 | 1.74 | 1.74 | 1.85 | 0 / 32 |
 | 4B hybrid | 2,048 | 249 | 1,579.80 | 1.81 | 1.69 | 1.69 | 1.81 | 0 / 32 |
 
-The four ReLU and GELU models have no product that a rule leaves to 12.9: their summed step is the same with and
-without the rules. The tall rule, at n <= 64, gives 12.9 the MLPs' up projections and the output layers of the three
-larger models, where 12.9 was as fast or faster at many shapes: with it their summed step is a little faster than
-with every product served (at n = 64: 2.36 against 2.28 on the 1.5B model, 1.56 against 1.54 on the 9B hybrid, 1.82
-against 1.78 on the 4B hybrid); from 65 columns on it gives 12.9 nothing (at n = 128 the rules before the classes,
-which gave it that tier too, ran the 9B hybrid at 1.31 against 1.66 now, the 4B hybrid at 1.56 against 1.71 and the
-1.5B model at 1.98 against 2.11). The wide rule, from n = 320 on, gives 12.9 their MLPs' down projections (1.89
-against 1.59 on the 1.5B model, 1.84 against 1.66 on the 9B hybrid, 1.85 against 1.74 on the 4B hybrid at n = 512,
-every product served against the rules): its class's slowest products, 0.62 times 12.9's speed on real text, fail
-the criterion, and its faster ones go to 12.9 with them. The tall rule's long-k branch costs these models nothing, as
-none of them has a product there.
+Of the four ReLU and GELU models, the two encoders without an output layer (bge-base-en-v1.5 and whisper-small's
+encoder) have no product that a rule leaves to 12.9: their summed step is the same with and without the rules. The
+tall rule, at n <= 64, gives 12.9 the MLPs' up projections and the output layers of the three larger language
+models, and with the gate at 768 the output layers of the 0.5B model, T5-base and OPT-125m, where 12.9 was as fast
+or faster at many shapes: with it the summed step is a little faster than with every product served (at n = 64: 2.81
+against 2.72 on the 0.5B model, 2.36 against 2.28 on the 1.5B model, 1.56 against 1.54 on the 9B hybrid, 1.82
+against 1.78 on the 4B hybrid, 2.67 against 2.66 on T5-base and on OPT-125m), or a little slower (OPT-125m at
+n = 32: 2.72 against 2.73); from 65 columns on it gives 12.9 nothing (at n = 128 the rules before the classes, which
+gave it that tier too, ran the 9B hybrid at 1.31 against 1.66 now, the 4B hybrid at 1.56 against 1.71, the 1.5B
+model at 1.98 against 2.11, and with the gate at 768 the 0.5B model at 2.47 against 2.52, T5-base at 2.55 against
+2.58 and OPT-125m at 2.45 against 2.56). The wide rule, from n = 320 on, gives 12.9 their MLPs' down projections
+(1.89 against 1.59 on the 1.5B model, 1.84 against 1.66 on the 9B hybrid, 1.85 against 1.74 on the 4B hybrid at
+n = 512, every product served against the rules): its class's slowest products, 0.62 times 12.9's speed on real
+text, fail the criterion, and its faster ones go to 12.9 with them. The tall rule's long-k branch costs these models
+nothing, as none of them has a product there.
 
 The tier from 65 to 128 columns of the tall rule (the MLPs' up projections and the output layers of the three larger
-models at a batch of 65 to 128 tokens) passes the criterion: on these models it ran at 1.24 (median) and 1.04 at
-worst; the earlier sweep of the n bound (k = 1,536 to 7,168, below) found points at 112 to 128 columns, at m =
-10,240 and on output layers, where 12.9 was within 3 % of the path or faster (down to 0.95), above the floor, and
-B15 (k = 1,024 to 4,096) none below 1.05. Through the release runtime of these rules, on the same models' layers of
-m >= 8,192 (n = 32 to 192, the first n tokens and n spread over the batch, against 12.9 in separate processes, 3
-rounds): at n = 96 and 128, the tier these rules serve, 1,004 products at a median of 1.24, the slowest 1.04 (the
-output layer of the 1.5B model, 151,936 x 128 x 1,536, the first n tokens), up to 1.76; at n = 192, served before
-too, 502 products at a median of 1.63, the slowest 1.25; at n <= 64, which the rule leaves to 12.9, 1,506 products at
-1.00 (12.9 against itself: 0.97 to 1.04).
+language models at a batch of 65 to 128 tokens, and with the gate at 768 the output layers of the 0.5B model,
+T5-base and OPT-125m) passes the criterion: on these models it ran at 1.24 (median) and 1.04 at worst (the three
+smaller output layers at 1.09 to 1.37, 1.04 to 1.27 in one process); the earlier sweep of the n bound (k = 1,536 to
+7,168, below) found points at 112 to 128 columns, at m = 10,240 and on output layers, where 12.9 was within 3 % of
+the path or faster (down to 0.95), above the floor, and B15 (k = 1,024 to 4,096) none below 1.05. Through the
+release runtime of these rules, on the same models' layers of m >= 8,192 (n = 32 to 192, the first n tokens and n
+spread over the batch, against 12.9 in separate processes, 3 rounds): at n = 96 and 128, the tier these rules serve,
+1,004 products at a median of 1.24, the slowest 1.04 (the output layer of the 1.5B model, 151,936 x 128 x 1,536, the
+first n tokens), up to 1.76; at n = 192, served before too, 502 products at a median of 1.63, the slowest 1.25; at
+n <= 64, which the rule leaves to 12.9, 1,506 products at 1.00 (12.9 against itself: 0.97 to 1.04).
 
 **The sweeps** (synthetic operands, every row and column converting, TN; the medians of 2 or 3 passes):
 

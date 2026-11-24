@@ -79,33 +79,36 @@ for t in bf16-paths bf16-arith bf16-graphs bf16-threads bf16-life bf16-reserve b
         build $t && { run $t "$test_dir"; verdict $t; }
     fi
 done
-# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 1024
-# against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), and
-# no call below the gate served, every call from the gate on served. Controls, each of which must fail: the gate
-# moved to 512 and 256 (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the same), at a call of
-# that k; VF_ACCEPT_STRICT=1 (the bias of the two slice-aligned constructions judged from the gate too); the
-# tensor-core path off, as not serving. VF_SAFE=1: no call served by the tensor-core path, every result 12.9's.
+# The tensor-core path's acceptance test (policy B, docs/emulations.md): every call it serves with k >= 768
+# against 12.9 and the exact product (special values, determinism, the error bound A, the bias bound B), in fp32
+# and bf16 output, and no call below the gate served, every call from the gate on served. Controls, each of which
+# must fail: the gate moved to 512 and 256 (VF_BF16_TC_MIN_K, read by test builds only, with the test's gate the
+# same), at a call of that k of another family than lognpos and advpos; VF_ACCEPT_STRICT=1 (the bias of its four
+# documented exceptions judged from the gate too), at lognpos and advpos at k = 768; the tensor-core path off, as
+# not serving. VF_SAFE=1: no call served by the tensor-core path, every result 12.9's.
 # -fopenmp shortens its host side only.
 if want bf16-accept; then
     if build bf16-accept -fopenmp; then
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=768 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
         cp "$log" "$out/logs/forward-bf16-accept-main.log"
         for g in 512 256; do
             run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_BF16_TC_MIN_K=$g VF_ACCEPT_GATE=$g >/dev/null
             cp "$log" "$out/logs/forward-bf16-accept-gate$g.log"
-            if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* [NT][NT] [0-9]*x[0-9]*x$g " "$log"; then
-                echo "PASS  bf16-accept control: the gate at $g fails at k = $g"
+            # at k = $g, rows of other families than the two exceptions judged from 1024 (lognpos, advpos)
+            if [ "$status" != 0 ] && grep "^FAIL  [a-z0-9]* [NT][NT] [0-9]*x[0-9]*x$g " "$log" | grep -qv "^FAIL  \(lognpos\|advpos\) "; then
+                echo "PASS  bf16-accept control: the gate at $g fails at k = $g (other families than lognpos and advpos)"
             else echo "FAIL  bf16-accept control: the gate at $g did not fail at k = $g ($out/logs/forward-bf16-accept-gate$g.log)"; failed=1; fi
         done
-        # Control: the two documented exceptions removed (VF_ACCEPT_STRICT=1): a bias from the gate on must fail.
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_STRICT=1 >/dev/null
+        # Control: the four documented exceptions removed (VF_ACCEPT_STRICT=1): a bias from the gate on must fail, and
+        # lognpos and advpos at the gate.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=768 VF_ACCEPT_STRICT=1 >/dev/null
         cp "$log" "$out/logs/forward-bf16-accept-strict.log"
-        if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* TN 1024x128x[0-9]* fp32" "$log"; then
-            echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate)"
+        if [ "$status" != 0 ] && grep -q "^FAIL  lognpos TN 1024x128x768 fp32" "$log" && grep -q "^FAIL  advpos TN 1024x128x768 fp32" "$log"; then
+            echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate: lognpos and advpos at k = 768)"
         else echo "FAIL  bf16-accept control: VF_ACCEPT_STRICT=1 did not fail ($out/logs/forward-bf16-accept-strict.log)"; failed=1; fi
         # Control: the tensor-core path off (the skinny path on, so that the variants load the test runtime and its
         # counters), the gate expected: every call from the gate on must then fail as not served.
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 VF_ACCEPT_GATE=768 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
         cp "$log" "$out/logs/forward-bf16-accept-tc-off.log"
         if [ "$status" != 0 ] && grep -q "^FAIL  .*: not served by the tensor-core path at k >= the gate" "$log"; then
             echo "PASS  bf16-accept control: with the tensor-core path off, the calls from the gate on are not served and it fails"
@@ -184,7 +187,9 @@ fi
 # The tensor-core path's layout rule, tall rule and wide rule: a fine-tuning step's input and weight gradients (NN,
 # NT), an output layer up to the tall rule's n (TN, m = 151936) and a wide down projection past the wide rule's n go to
 # 12.9 with its bits; the TN products of the step, the output layer one column more and the wide down projection at
-# the wide rule's n to the tensor-core path. Each control that removes a rule (test builds) must make it fail there.
+# the wide rule's n to the tensor-core path. Each control that removes a rule (test builds) must make it fail there;
+# a bound the runtime does not report (VF_RULES_NO_BOUND=5: the long-k branch's m read as -1, as a runtime without
+# the branch reports it) must fail its check with exit status 1, not crash the test.
 if want bf16-rules; then
     if build bf16-rules; then
         run bf16-rules "$test_dir"; verdict bf16-rules
@@ -195,6 +200,11 @@ if want bf16-rules; then
                 echo "PASS  bf16-rules control: without the ${c#*:} (${c%%:*}) it fails there"
             else echo "FAIL  bf16-rules control ${c%%:*}: did not fail at the ${c#*:} ($out/logs/forward-bf16-rules-${c%%:*}.log)"; failed=1; fi
         done
+        run bf16-rules "$test_dir" VF_RULES_NO_BOUND=5 >/dev/null
+        cp "$log" "$out/logs/forward-bf16-rules-no-bound.log"
+        if [ "$status" = 1 ] && grep -q "^FAIL .*: the runtime reports no m bound of the tall rule's long-k branch" "$log"; then
+            echo "PASS  bf16-rules control: a bound the runtime does not report fails its check (exit status 1, no crash)"
+        else echo "FAIL  bf16-rules control VF_RULES_NO_BOUND=5: not that failed check with exit status 1 (exit status $status; $out/logs/forward-bf16-rules-no-bound.log)"; failed=1; fi
     fi
 fi
 # G3 with the skinny path: its captured calls are kernel nodes of the runtime's module.

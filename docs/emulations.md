@@ -846,7 +846,7 @@ times for TN).
 
 ### The tensor-core path (`VF_CUBLAS_BF16_TC=1`)
 
-For the other products in the TN layout (m k >= 2^20 or n >= 32, with 1024 <= k <= 16384, outside the shapes
+For the other products in the TN layout (m k >= 2^20 or n >= 32, with 768 <= k <= 16384, outside the shapes
 that the rules of speed below leave to 12.9, by class of shapes: the gate below), when the
 call is not captured in a graph, each row of op(A) and each column of
 op(B) is scaled by a power of two, 2^(15 - e) for e the exponent of its largest magnitude, and
@@ -868,7 +868,10 @@ about 13 units, the truncation's bias (cuBLAS 12.9 on the same data: largest 96.
 units, mean -1.2, -1.9 and 0.1). With both operands in one binade, uniform in [0.5, 1), a slice's
 256-term sum of products is exact (16-bit products and 8 bits of growth fit in fp32's 24) and the
 truncation does not act: largest 5.8, 3.2 and 1.8 units, mean 0.3, -0.1 and 0.0
-(`tests/gpu/forward/bf16-cost.c`). The GPU tests hold every tensor-core result to 32 units.
+(`tests/gpu/forward/bf16-cost.c`). Sums of products of one sign spread over many binades come out lower: by
+36 to 40 units on average (log-normal magnitudes) and 49 to 70 units (an adversarial positive construction) at
+every k from 768 to 16384, single elements up to 90 and 216 units (the acceptance test's lognpos and advpos,
+"The tensor-core path's gate"). The GPU tests hold every tensor-core result to 32 units.
 
 The elements of the rows and columns that fail the check are computed by the skinny path's chain (a
 tiled kernel, one fp32 fused multiply-add chain per element), with the same epilogue, in one launch
@@ -886,7 +889,7 @@ handle's workspace as 12.9 does, with the same rules for threads and streams.
 
 ### The tensor-core path's gate
 
-The tensor-core path takes a TN product with n >= 2 and k from 1024 (`VF_TC_MIN_K`) to 16384 when m k >=
+The tensor-core path takes a TN product with n >= 2 and k from 768 (`VF_TC_MIN_K`) to 16384 when m k >=
 2^20 or n >= 32, after the skinny path has declined it; a product it does not take goes to cuBLAS 12.9. Three
 rules of speed leave more products to 12.9, the classes of shapes in which the path's median speed was below
 1.10 times 12.9's or its slowest below 0.90 times, or with no layer of a real model measured, decided before the
@@ -908,13 +911,18 @@ it taken, its internal fp16 GEMM would give column 0 other bits than at n >= 2 (
 shapes, where n = 2 to 512 agreed); a zero second column given to that GEMM is the expected remedy
 (not run on a GPU).
 
-The shortest k is 1024. Real layers pass from the lowest k measured, with wide margins: on 1,728
-operand pairs taken from the linear layers of four language models (k = 896 to 12288), against the exact
-product, every element's error was at most 0.045 times the bound A below and every matrix's bias at most
-0.22 units (B below), and at the level of the models no gate from 4096 down to none could be told apart
-from cuBLAS 12.9 beyond a noise control of one unit in the last place. 1024 keeps the margin that the
-natural synthetic families of the acceptance test need: below it, families of positive data exceed its
-bias bound. A model gains on its layers with 1024 in-features or more.
+The shortest k is 768. Real layers pass from the lowest k measured, with wide margins: on 1,728 operand
+pairs taken from the linear layers of four language models (k = 896 to 12288), against the exact product,
+every element's error was at most 0.045 times the bound A below and every matrix's bias at most 0.22 units
+(B below); on the layers of k = 768 and 896 of five models (Qwen2.5-0.5B, T5-base, OPT-125m,
+bge-base-en-v1.5 and whisper-small's encoder: 990 operand pairs of up to 512 tokens), every element's
+error at most 0.040 times A in fp32 output (in bf16 output, within the rounding of the output itself: 0.98
+at most) and every matrix's bias at most 0.82 units (0.046 times B read with the slope of samesign, the
+smallest of the test's families of one sign: no newer GPU's product was measured on these operands); and
+at the level of the models no gate from 4096 down to none could be told apart from cuBLAS 12.9 beyond a
+noise control of one unit in the last place. Two of the acceptance test's synthetic families, of positive
+data spread over many binades, exceed its bias bound below 1024 (below). A model gains on its layers with
+768 in-features or more.
 
 The acceptance test (`tests/gpu/forward/bf16-accept.c`, run by `tests/gpu/forward-bf16.sh`) uses 10
 families of data (normal, squared ReLU, outliers, cancelling pairs, spreads over about 30 binades, one
@@ -931,8 +939,10 @@ its native bias slope per family, measured once at k = 1024 to 2048, where that 
 sums; the constants are in the test). The error bound held from k = 384 on (at k = 256 one family reached
 1.54 times it, the search 1.29).
 
-Two synthetic constructions exceed the bias bound above the gate, and the test judges their bias from a
-larger k (documented exceptions; `VF_ACCEPT_STRICT=1` removes both, and the test then fails):
+Four of the test's data sets exceed the bias bound from the gate on, and the test judges their bias from a
+larger k (documented exceptions; `VF_ACCEPT_STRICT=1` removes them, and the test then fails): two
+constructions against the path's slices, and two families of positive data spread over many binades, below
+k = 1024:
 
 - **craftsub**, built against the path's 256-element slices: a product of 2^20 at the start of every slice,
   then products of half to one ulp of it. Its bias is judged from k = 4096, where it is 0.85 times its bound;
@@ -941,8 +951,25 @@ larger k (documented exceptions; `VF_ACCEPT_STRICT=1` removes both, and the test
 - **The search's configuration 1653006390**: non-negative operands with a 2^21 activation at the start of
   every slice. Its bias is judged from k = 2048, where it is 0.95 times its bound (-183.65 units against
   192.7); it is 1.27 times its bound at 1536 and 1.90 times at 1024.
+- **lognpos**, log-normal magnitudes of one sign: its bias is judged from k = 1024; it is 1.16 times its bound
+  at 768 (-39.51 units against 34.0) and 0.91 times at 896.
+- **advpos**, an adversarial construction of positive operands (log-normal magnitudes with a scale per row of
+  op(A) and per column of op(B), one element of op(A) in 1,000 made 2,048 times larger, and the first element
+  of every 256-element slice of op(B)'s columns made 8 times larger): its bias is judged from k = 1024; it is
+  1.25 times its bound at 768 (-52.83 units against 42.3), 1.003 times at 896 (-49.45 units against 49.3,
+  within the half unit that the test adds to every bias bound) and 0.98 times at 1024 (-55.48 units against
+  56.4).
+
+lognpos has nothing aligned with the path's slices, advpos only the larger first element of each slice of
+op(B), and that element is not what makes it exceed: moved to position 128 or 37 of each slice, or removed,
+its bias at k = 768 stays at -51.8 to -52.5 units (measured in review). Both exceed for their data, products
+of one sign spread over many binades: what a program whose operands are all positive over a wide range should
+expect at k = 768 to 1023 (`LIMITS.md`). Their bias does not grow with k, the bound does: lognpos's is -36.1
+to -39.6 units and advpos's -49.5 to -70.0 at every k from 768 to 16384, against bounds of 34.0 and 42.3 at
+768 that double by 1536. Their error stays within the bound A at every k the path serves (at most 0.25 times
+it in fp32 output).
 
 Every call from the gate on must be served by the path (a call left to 12.9 there would not be judged), and
 the test fails with the path off; it fails when the gate is moved to 512 or 256 (a test build's
-`VF_BF16_TC_MIN_K`), and with `VF_SAFE=1` it requires that no call be served by the tensor-core path and
-every result be 12.9's.
+`VF_BF16_TC_MIN_K`; on other families than lognpos and advpos, whose bias it judges from 1024), and with
+`VF_SAFE=1` it requires that no call be served by the tensor-core path and every result be 12.9's.

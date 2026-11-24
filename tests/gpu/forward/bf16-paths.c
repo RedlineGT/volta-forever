@@ -221,7 +221,7 @@ static void forwarded_cases(void)
     forwarded_case("n = 1", shape(1, 0, 512, 1, 512, CUDA_R_32F), 1.0f, CUBLAS_GEMM_DEFAULT, R_SHAPE);
     forwarded_case("k = 8", shape(1, 0, 512, 64, 8, CUDA_R_32F), 1.0f, CUBLAS_GEMM_DEFAULT, R_SHAPE);
     forwarded_case("alpha = 0", shape(1, 0, 512, 64, 2048, CUDA_R_32F), 0.0f, CUBLAS_GEMM_DEFAULT, R_ALPHA0);
-    forwarded_case("k = 1016, under the tensor-core path's gate", shape(1, 0, 512, 64, 1016, CUDA_R_32F), 1.0f,
+    forwarded_case("k = 760, under the tensor-core path's gate", shape(1, 0, 512, 64, 760, CUDA_R_32F), 1.0f,
                    CUBLAS_GEMM_DEFAULT, R_SHORT_K);
     forwarded_case("small product (m k < 2^20, n < 32, outside the skinny domain)", shape(0, 1, 16384, 20, 16, CUDA_R_32F),
                    1.0f, CUBLAS_GEMM_DEFAULT, R_DOMAIN);
