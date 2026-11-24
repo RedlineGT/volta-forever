@@ -107,6 +107,7 @@ else
     skip proxy-suites "no dist/lib/libcuda.so.1: the build failed"
 fi
 step stack tests/forward/stack.sh
+step kernel-log tests/scripts/kernel-log.sh
 step forward-bf16-host tests/forward/bf16.sh
 step launcher-dash dash tests/launcher/launcher.sh
 step launcher-bash bash --posix tests/launcher/launcher.sh

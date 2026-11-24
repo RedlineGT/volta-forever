@@ -91,8 +91,12 @@ Where the GPU scripts write:
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
   (`CUDA_MODULE_LOADING`), a refused kernel launched with a handle taken from NVIDIA's driver
   itself (218 from every launch function and graph node, and no line more with "Xid" in the
-  kernel's log, where it can be read: where it cannot, the last line of the output says "Xid lines
-  could not be checked (dmesg not readable)"), a kernel whose code is a trap and nothing else,
+  kernel's log, where it can be read: `run.sh` reads it with `dmesg`, else, where Ubuntu's
+  `kernel.dmesg_restrict=1` keeps that from users, with `journalctl -k` (readable by the groups
+  `adm` and `systemd-journal`), else with `sudo -n dmesg` (sudo without a password only: it never
+  asks for one), and says in each case's log which one it read; where none can be read, the last
+  line of the output says "Xid lines could not be checked (the kernel's log could not be read:
+  ...)"; `tests/scripts/kernel-log.sh` tests the three with stand-ins), a kernel whose code is a trap and nothing else,
   from PTX and from sm_75 machine code, given at the lookup and its launch refused with 218, the
   context going on (`nocode-*`, with the same check of the kernel's log; the control against
   NVIDIA's driver, `test_nocode IMAGE native` of `tests/kernels/test_nocode.c`, stops the context
@@ -509,6 +513,7 @@ No GPU needed.
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
 | `nvcc-host.sh` | `scripts/nvcc-host.sh`, through which every script and test that runs nvcc goes: on the machine as it is, nothing added and nothing said where nvcc compiles a probe as it is, and on a newer system (Ubuntu 26.04 for CUDA 12.9.2), what it adds builds a program that calls `rsqrt`, `sinpi` and `cospi`, which prints the right values (said skipped, `newer-system`, on a machine where nvcc compiles the probe as it is); with a C library that declares them as glibc 2.43 does (a `bits/mathcalls.h` of the test's, on any machine), the program does not compile without `scripts/nvcc-host` and does with what the helper adds; with a default host compiler that says it is GCC 99, a `g++-N` of `PATH` is chosen (skipped without one) | seconds | `toolkits/cuda-12.9.2` (and `cuda-13.5.0` when it is there), gcc |
+| `kernel-log.sh` | `tests/gpu/kernel-log.sh`, where `tests/gpu/run.sh` reads the kernel's log to count its Xid lines, with stand-ins for `dmesg`, `journalctl` and `sudo` first in `PATH`: `dmesg` when it can be read; else `journalctl -k` when it gives a line (it gives none, with status 0, to a user outside the groups `adm` and `systemd-journal`); else `sudo -n dmesg`, sudo never run without `-n`; else no source, and nothing counted | seconds | bash |
 | `target-dir.sh` | Where the build scripts have cargo build a checkout: two checkouts in two directories of their own (`scripts/target-dir.sh`), each naming its checkout in its `CHECKOUT` (`--list` says ORPHAN of one whose checkout is gone), each script of a checkout in the same one, `CARGO_TARGET_DIR` when it is set; with `--build` (as the CI and the release check run it), two copies of the tree, the second's `crates/vf-fwdgen/bf16tc/runtime.c` changed and all its files older than the first's outputs, each built by `scripts/build-forwarders.sh`: each generator embeds its own `runtime.c` (with one directory for every checkout, the second had the first's) | seconds | bash, git; cargo and gcc for `--build` |
 
 ### What the CI runs
@@ -519,7 +524,7 @@ checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
 `log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py` and
 `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
-`tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
+`tests/forward/bf16.sh`; `tests/scripts/kernel-log.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
 kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py` and

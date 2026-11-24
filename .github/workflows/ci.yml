@@ -52,6 +52,8 @@ jobs:
         run: python3 tests/proxy/nvml_capability.py dist/lib/libvf_audit.so
       - name: The stack handling of the forwarding libraries, against a mock library
         run: tests/forward/stack.sh
+      - name: Where the GPU tests read the kernel's log, with stand-ins for dmesg, journalctl and sudo
+        run: tests/scripts/kernel-log.sh
       - name: The bf16 cuBLAS variants and their runtime, against stand-ins for the driver and cuBLAS
         run: tests/forward/bf16.sh
       - name: The launcher, under dash and under bash

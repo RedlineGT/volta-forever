@@ -655,7 +655,10 @@ refuse refuse-link link "ALL CHECKS PASSED" \
 # the context still runs a kernel afterwards, and the GPU did not stop (no line more with "Xid" in
 # the kernel's log, where it can be read). Until 2026-11-23 the first launch trapped (Xid 43).
 [ -x "$out/bin/test_guard" ] && [ "$out/bin/test_guard" -nt "$G/test_guard.c" ] || gcc -O2 -Wall -o "$out/bin/test_guard" "$G/test_guard.c" -ldl || exit 2
-xids() { dmesg 2>/dev/null | grep -c Xid; }
+# The kernel's log is read from dmesg, else from `journalctl -k`, else from `sudo -n dmesg`
+# (tests/gpu/kernel-log.sh), whichever can be read here first.
+. "$W/tests/gpu/kernel-log.sh"
+xids() { kernel_log | grep -c Xid; }
 xid_unchecked=  # a guard or nocode case whose check of the kernel's log could not be made: said at the end
 guard() {  # guard NAME INTERFACE
     local name=$1 interface=$2 before after
@@ -663,8 +666,8 @@ guard() {  # guard NAME INTERFACE
     before=$(xids)
     DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_guard" "$interface" >"$log" 2>&1
     after=$(xids)
-    if dmesg >/dev/null 2>&1; then
-        echo "lines with Xid in the kernel's log: $before before, $after after" >>"$log"
+    if [ -n "$kernel_log_source" ]; then
+        echo "lines with Xid in the kernel's log ($kernel_log_source): $before before, $after after" >>"$log"
         [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
     else
         echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
@@ -695,8 +698,8 @@ nocode() {  # nocode NAME IMAGE INTERFACE
     before=$(xids)
     DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_nocode" "$image" "$interface" >"$log" 2>&1
     after=$(xids)
-    if dmesg >/dev/null 2>&1; then
-        echo "lines with Xid in the kernel's log: $before before, $after after" >>"$log"
+    if [ -n "$kernel_log_source" ]; then
+        echo "lines with Xid in the kernel's log ($kernel_log_source): $before before, $after after" >>"$log"
         [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
     else
         echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
@@ -830,6 +833,7 @@ if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
 fi
 
 # The guard and nocode cases above pass their check of the kernel's log where it cannot be read
-# (dmesg needs privileges that the user may not have): said once, at the end, so that it is seen.
-[ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (dmesg not readable)"
+# (dmesg, the journal and sudo need privileges that the user may not have): said once, at the end,
+# so that it is seen.
+[ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (the kernel's log could not be read: dmesg, journalctl -k and sudo -n dmesg were tried)"
 exit $failed
