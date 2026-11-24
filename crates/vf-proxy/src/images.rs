@@ -661,7 +661,8 @@ fn report_stubs(who: &dyn Display, stubs: &vf_adapt::Stubs) {
     };
     if !stubs.trap_only.is_empty() {
         log::info(format_args!(
-            "{who}: {} kernels have a body that is a trap and nothing else in this image (no code for any GPU it              serves): given if the program asks for them, refused if it launches them ({})",
+            "{who}: {} kernels have a body that is a trap and nothing else in this image: given if the program \
+             asks for them, refused if it launches them ({})",
             stubs.trap_only.len(),
             few(&stubs.trap_only)
         ));
