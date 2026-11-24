@@ -22,7 +22,12 @@
 # PyTorch site (PyTorch 2.14.0+cu130 with its Triton 3.8), numpy (VF_TRITON_EXTRA, below) and Python
 # 3.12 headers for Triton's C stub; or VF_TRITON_PYTHON, a Python that has all three, used as it is.
 # Settings: VF_TRITON_LEVEL (quick, or full), VF_TRITON_FILTER (a regular expression of case names),
-# VF_TRITON_JOBS (processes of the interpreter, default 8). Exit status 1 when a case fails.
+# VF_TRITON_JOBS (processes of the interpreter, default 8), VF_TRITON_VENDOR=1 (also the kernels of
+# vLLM or SGLang, whichever VF_TRITON_PYTHON has: tests/gpu/triton_vendor.py). Exit status 1 when a
+# case fails.
+# With VF_TRITON_TC set (INSTALL.md), the layer's python/ goes first in PYTHONPATH, as the launcher
+# puts it: the kernels whose products are of the types it names are compiled for sm_80, and the
+# layer runs the PTX that their cubins keep (route sass); the verdicts say so.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
@@ -49,6 +54,10 @@ if [ -z "${VF_TRITON_PYTHON:-}" ]; then
     export PYTHONPATH="$torch_site"
     [ -d "$extra" ] && export PYTHONPATH="$torch_site:$extra"
 fi
+case ${VF_TRITON_TC:-0} in
+    ''|0) ;;
+    *) export PYTHONPATH="$W/python${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
 export LD_LIBRARY_PATH="$proxy" LIBRARY_PATH="$proxy"
 [ -f "$map" ] && export LD_AUDIT="$proxy/libvf_audit.so" VF_AUDIT_MAP_FILE="$map"
 [ -d "$pydev/usr/include/python3.12" ] && export CPATH="$pydev/usr/include/python3.12:$pydev/usr/include"
@@ -57,6 +66,7 @@ export VF_LOG_LEVEL=2 VF_LOG=$work/run/vf.log
 
 args=(--work "$work/run" --level "${VF_TRITON_LEVEL:-quick}" --runs 5 --jobs "${VF_TRITON_JOBS:-8}")
 [ -n "${VF_TRITON_FILTER:-}" ] && args+=(--filter "$VF_TRITON_FILTER")
+[ "${VF_TRITON_VENDOR:-0}" = 1 ] && args+=(--vendor)
 "$python" -s "$W/tests/gpu/triton-diff.py" all "${args[@]}"
 status=$?
 echo "=== triton: status $status (verdicts in $work/run/verdicts.json, the layer's lines in $work/run/vf.log) ==="

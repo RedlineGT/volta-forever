@@ -38,6 +38,10 @@ Commands:
   triton-diff.py all --work DIR [--level quick] [--runs 5]
         the three above in order, as tests/gpu/triton.sh runs them; exit status 1 if a case fails
 
+With VF_TRITON_TC set (INSTALL.md; tests/gpu/triton.sh puts the layer's python/ first in PYTHONPATH),
+a kernel whose products are of the types it names is compiled for sm_80: on route sass the layer
+runs the PTX that its cubin keeps, and the verdict's reasons say "compiled for sm_80".
+
 Verdicts: PASS; PASS-PTX (the same, but the layer refused the machine code and ran the PTX that the
 cubin keeps: the translator was not tested); FAIL-REF (a route differs from the reference beyond the stated tolerance),
 FAIL-DET (the runs of a route differ), FAIL-ROUTE (the routes give different bits where the case
@@ -347,16 +351,21 @@ class VfLog:
         return [l for l in data.decode(errors='replace').splitlines() if l.strip()]
 
 
+TC = os.environ.get('VF_TRITON_TC', '').strip() not in ('', '0')
+
+
 def route_of(lines):
     """What the layer said of the modules loaded (Triton loads its modules with cuModuleLoadData;
-    PyTorch's libraries, loaded meanwhile with cuLibraryLoadData, are not counted)."""
+    PyTorch's libraries, loaded meanwhile with cuLibraryLoadData, are not counted). With
+    VF_TRITON_TC, a module of PTX for sm_80 is one that Triton was made to compile for sm_80
+    ('sm80'), not a cubin whose machine code was refused."""
     kinds = set()
     for l in lines:
         module = 'cuModuleLoadData' in l
         if module and ('machine code for sm_75 translated' in l or 'machine code for sm_80 translated' in l):
             kinds.add('translated')
         if module and 'retargeted' in l:
-            kinds.add('ptx')
+            kinds.add('sm80' if TC and 'PTX for sm_80 retargeted' in l else 'ptx')
         if 'cannot run on this GPU' in l:
             kinds.add('refused')
         if 'emulated in' in l:
@@ -600,6 +609,8 @@ def verdicts(files, cases_by_name=None):
             if v == 'PASS':
                 v = 'PASS-PTX'
             why.append('sass route: the machine code was refused and the layer ran the PTX kept in the cubin')
+        if s and s.get('status') == 'ok' and 'sm80' in s.get('vf', []):
+            why.append('compiled for sm_80 (VF_TRITON_TC): the layer ran the PTX that the cubin keeps')
         if p and p.get('status') == 'ok' and 'translated' in p.get('vf', []):
             if v in ('PASS', 'SKIP-REF'):
                 v = 'FAIL-ROUTE'
@@ -622,6 +633,9 @@ def cmd_report(a):
         if r['verdict'] not in ('PASS',) or a.all:
             print(f'{r["verdict"]:10s} {name}: ' + ' | '.join(r['why']).replace('\n', ' '))
     print('summary: ' + ', '.join(f'{k} {n}' for k, n in sorted(counts.items())) + f' (of {len(v)} cases)')
+    if TC:
+        tc = sum(1 for r in v.values() if 'sm80' in (r['vf'].get('sass') or []))
+        print(f'compiled for sm_80 (VF_TRITON_TC): {tc} of {len(v)} cases')
     if a.json:
         json.dump(v, open(a.json, 'w'), indent=1)
     bad = sum(n for k, n in counts.items() if k not in ('PASS', 'PASS-PTX', 'SKIP-REF', 'COMPILE'))

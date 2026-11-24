@@ -11,9 +11,9 @@
 # twice, a symlinked launcher, doctor exit status and what it says of the layer's cache directory,
 # fetch command line, help and unknown
 # options, the bf16 cuBLAS variants that VF_CUBLAS_BF16_TC and VF_CUBLAS_BF16_SKINNY
-# select (what is mapped, what is refused, what doctor says), and safe mode (VF_SAFE: what env
-# prints, what doctor says, what reaches a command). Prints PASS/FAIL per case; exits 1 on a
-# failure.
+# select (what is mapped, what is refused, what doctor says), safe mode (VF_SAFE: what env
+# prints, what doctor says, what reaches a command), the PYTHONPATH of VF_TRITON_TC. Prints
+# PASS/FAIL per case; exits 1 on a failure.
 set -eu
 
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -1594,6 +1594,118 @@ case $_d in
     *) _why="${_why:+$_why; }doctor: $_d" ;;
 esac
 if [ -z "$_why" ] && [ "$_s" = 0 ]; then pass "$name"; else fail "$name" "${_why:-doctor status $_s}"; fi
+
+# VF_TRITON_TC (setup_python): the installation's python/ goes first in PYTHONPATH, before what was
+# there, once (vf under vf), other copies of it taken out; not with VF_TRITON_TC unset or 0, nor
+# when python/ has no sitecustomize.py; env prints it only when it sets it; doctor says that it is on, and which
+# of the four files of python/ are missing. (tests/python/triton_tc.py runs Pythons through it.)
+name="triton-tc-pythonpath"
+tc=$tmp/tc-install
+mk_archive "$tc" cuda12
+mkdir -p "$tc/python"
+: >"$tc/python/sitecustomize.py"
+: >"$tc/python/volta_forever_triton.py"
+: >"$tc/python/volta_forever_triton_client.py"
+: >"$tc/python/volta_forever_triton_helper.py"
+pp() {  # what PYTHONPATH is for a command run through the launcher (unset: "unset")
+    env -u PYTHONPATH -u VF_TRITON_TC VF_QUIET=1 "$@" sh -c 'printf "%s" "${PYTHONPATH-unset}"'
+}
+_on=$(pp VF_TRITON_TC=1 "$tc/bin/vf")
+_list=$(pp VF_TRITON_TC=bf16,i8 PYTHONPATH='/a b:/c' "$tc/bin/vf")
+_twice=$(pp VF_TRITON_TC=1 "$tc/bin/vf" "$tc/bin/vf")
+_unset=$(pp "$tc/bin/vf")
+_zero=$(pp VF_TRITON_TC=0 PYTHONPATH=/c "$tc/bin/vf")
+_env=$(env -u PYTHONPATH VF_TRITON_TC=1 VF_QUIET=1 "$tc/bin/vf" env | grep '^export PYTHONPATH=' || true)
+_env_off=$(env -u PYTHONPATH -u VF_TRITON_TC VF_QUIET=1 "$tc/bin/vf" env | grep -c '^export PYTHONPATH=' || true)
+_doc=$(VF_TRITON_TC=1 "$tc/bin/vf" doctor 2>&1 || true)
+# Another installation's python/ (it holds volta_forever_triton.py) is taken out of PYTHONPATH: with
+# the switch, before this one goes first; without it, all copies, this one's too.
+mkdir -p "$tmp/other-python"
+: >"$tmp/other-python/volta_forever_triton.py"
+_drop=$(pp VF_TRITON_TC=1 PYTHONPATH="/a:$tmp/other-python:/b" "$tc/bin/vf")
+_drop0=$(pp VF_TRITON_TC=0 PYTHONPATH="/a:$tmp/other-python:$tc/python" "$tc/bin/vf")
+_dropall=$(env VF_TRITON_TC=0 VF_QUIET=1 PYTHONPATH="$tmp/other-python" "$tc/bin/vf" env | grep PYTHONPATH || true)
+rm "$tc/python/volta_forever_triton_client.py"
+_st3=0
+_doc3=$(VF_TRITON_TC=1 "$tc/bin/vf" doctor 2>&1) || _st3=$?
+: >"$tc/python/volta_forever_triton_client.py"
+rm "$tc/python/sitecustomize.py"
+_none=$(pp VF_TRITON_TC=1 "$tc/bin/vf")
+_st=0
+_doc2=$(VF_TRITON_TC=1 "$tc/bin/vf" doctor 2>&1) || _st=$?
+if [ "$_on" = "$tc/python" ] && [ "$_list" = "$tc/python:/a b:/c" ] && [ "$_twice" = "$tc/python" ] \
+    && [ "$_unset" = unset ] && [ "$_zero" = /c ] && [ "$_env" = "export PYTHONPATH='$tc/python'" ] \
+    && [ "$_env_off" = 0 ] && [ "$_none" = unset ] && [ "$_st" = 1 ] && [ "$_drop" = "$tc/python:/a:/b" ] \
+    && [ "$_drop0" = /a ] && [ "$_dropall" = "unset PYTHONPATH" ] && [ "$_st3" = 1 ]; then
+    case $_doc/$_doc2/$_doc3 in
+        *"ok    VF_TRITON_TC=1: "*/*"MISSING $tc/python: sitecustomize.py, which"*/*"MISSING $tc/python: volta_forever_triton_client.py, which"*) pass "$name" ;;
+        *) fail "$name" "doctor said: $_doc / $_doc2 / $_doc3" ;;
+    esac
+else
+    fail "$name" "on '$_on' list '$_list' twice '$_twice' unset '$_unset' zero '$_zero' env '$_env' '$_env_off' none '$_none' doctor $_st drop '$_drop' '$_drop0' '$_dropall'"
+fi
+
+# VF_TRITON_TC's default and VF_SAFE (setup_python): the launcher's one line triton_tc_default=0
+# decides what VF_TRITON_TC unset means; set to 1, an unset VF_TRITON_TC is on and exported as 1
+# (run and env), and 0 stays off. VF_SAFE=1 (exactly 1) turns it off whatever it is, and takes the
+# copies of python/ out of PYTHONPATH; another value of VF_SAFE does nothing. vf doctor lists it
+# among what safe mode turns off, set or by default.
+name="triton-tc-default-safe"
+tc2=$tmp/tc-default
+mk_archive "$tc2" cuda12
+mkdir -p "$tc2/python"
+: >"$tc2/python/sitecustomize.py"
+: >"$tc2/python/volta_forever_triton.py"
+: >"$tc2/python/volta_forever_triton_client.py"
+: >"$tc2/python/volta_forever_triton_helper.py"
+: >"$tc/python/sitecustomize.py"
+ppt() {  # PYTHONPATH and VF_TRITON_TC for a command run through the launcher
+    env -u PYTHONPATH -u VF_TRITON_TC -u VF_SAFE VF_QUIET=1 "$@" sh -c 'printf "%s|%s" "${PYTHONPATH-unset}" "${VF_TRITON_TC-unset}"'
+}
+_lines=$(grep -c '^triton_tc_default=' "$W/scripts/vf" || true)
+_value=$(sed -n 's/^triton_tc_default=//p' "$W/scripts/vf")
+_d0=$(ppt "$tc/bin/vf")
+_safe=$(ppt VF_SAFE=1 VF_TRITON_TC=1 PYTHONPATH="/a:$tc/python" "$tc/bin/vf")
+_notsafe=$(ppt VF_SAFE=true VF_TRITON_TC=1 "$tc/bin/vf")
+_safedoc=$(env -u VF_PAIRS VF_SAFE=1 VF_TRITON_TC=1 "$tc/bin/vf" doctor 2>&1 || true)
+sed 's/^triton_tc_default=0$/triton_tc_default=1/' "$tc2/bin/vf" >"$tc2/bin/vf.new"
+cat "$tc2/bin/vf.new" >"$tc2/bin/vf"
+rm "$tc2/bin/vf.new"
+_d1=$(ppt "$tc2/bin/vf")
+_d1zero=$(ppt VF_TRITON_TC=0 "$tc2/bin/vf")
+_d1list=$(ppt VF_TRITON_TC=f16 "$tc2/bin/vf")
+_d1safe=$(ppt VF_SAFE=1 "$tc2/bin/vf")
+_d1env=$(env -u PYTHONPATH -u VF_TRITON_TC -u VF_SAFE VF_QUIET=1 "$tc2/bin/vf" env | grep -E '^export (PYTHONPATH|VF_TRITON_TC)=' | tr '\n' ' ')
+_d1doc=$(env -u VF_TRITON_TC -u VF_SAFE "$tc2/bin/vf" doctor 2>&1 || true)
+_d1safedoc=$(env -u VF_TRITON_TC -u VF_PAIRS VF_SAFE=1 "$tc2/bin/vf" doctor 2>&1 || true)
+if [ "$_lines" = 1 ] && [ "$_value" = 0 ] && [ "$_d0" = "unset|unset" ] && [ "$_safe" = "/a|1" ] \
+    && [ "$_notsafe" = "$tc/python|1" ] && [ "$_d1" = "$tc2/python|1" ] && [ "$_d1zero" = "unset|0" ] \
+    && [ "$_d1list" = "$tc2/python|f16" ] && [ "$_d1safe" = "unset|unset" ] \
+    && [ "$_d1env" = "export PYTHONPATH='$tc2/python' export VF_TRITON_TC='1' " ]; then
+    case $_safedoc/$_d1doc/$_d1safedoc in
+        *"ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths; not used: VF_PAIRS in machine code, VF_TRITON_TC=1"*/*"ok    VF_TRITON_TC unset, by default 1: "*/*"; not used: VF_PAIRS in machine code, VF_TRITON_TC unset, by default 1"*)
+            case $_safedoc in
+                *"has Triton compile"*) fail "$name" "doctor in safe mode said it on: $_safedoc" ;;
+                *) pass "$name" ;;
+            esac ;;
+        *) fail "$name" "doctor said: $_safedoc / $_d1doc / $_d1safedoc" ;;
+    esac
+else
+    fail "$name" "lines $_lines value '$_value' d0 '$_d0' safe '$_safe' notsafe '$_notsafe' d1 '$_d1' zero '$_d1zero' list '$_d1list' d1safe '$_d1safe' env '$_d1env'"
+fi
+
+# Safe mode is decided by safe_mode alone (scripts/vf): the launcher tests the value of VF_SAFE in
+# that function and nowhere else; setup_python and vf doctor ask it for VF_TRITON_TC.
+name="safe mode: decided by safe_mode alone"
+_tests=$(grep -c '"${VF_SAFE-}" *!*= *1' "$launcher" || true)
+_fn=$(grep -c '^safe_mode() {$' "$launcher" || true)
+_asks=$(grep -c '^ *if safe_mode; then' "$launcher" || true)
+if [ "$_tests" = 1 ] && [ "$_fn" = 1 ] && [ "$_asks" -ge 2 ] \
+    && grep -q '^ *if safe_mode; then _py_value=0; fi$' "$launcher"; then
+    pass "$name"
+else
+    fail "$name" "$_tests tests of VF_SAFE's value, $_fn safe_mode(), $_asks calls"
+fi
 
 # --- done -----------------------------------------------------------------------
 
