@@ -6,7 +6,7 @@
 # build of scripts/build.sh, every host suite that the CI runs (tests/README.md, "What the CI
 # runs"), the host suites it does not run when what they need is here (jitlink_objects.py and the
 # CUDA 12.9.2 toolkit, package-refusals.sh and the forwarding libraries, the bf16 kernels rebuilt
-# with the CUDA 12.9.2 compiler), and tests/sass/compare.sh on the test kernels and on PyTorch's
+# with the CUDA 12.9.2 compiler, tests/scripts/nvcc-host.sh), and tests/sass/compare.sh on the test kernels and on PyTorch's
 # cubins when `TORCH` names them. With --full, then the independent validator over the corpora:
 # validate-corpus.sh on `TORCH`, heldout-validate.sh on `HELDOUT` and controls.sh (hours, and the
 # corpora of tests/README.md: a step whose corpus is missing is skipped).
@@ -98,9 +98,11 @@ step fetch-redist python3 tests/launcher/fetch-redist.py
 if [ -d "$W/toolkits/cuda-12.9.2" ]; then
     step jitlink_objects python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
     step bf16-kernels scripts/build-bf16-kernels.sh --check
+    step nvcc-host tests/scripts/nvcc-host.sh
 else
     skip jitlink_objects "no toolkits/cuda-12.9.2 (scripts/fetch-all.sh redist)"
     skip bf16-kernels "no toolkits/cuda-12.9.2 (scripts/fetch-all.sh redist)"
+    skip nvcc-host "no toolkits/cuda-12.9.2 (scripts/fetch-all.sh redist)"
 fi
 if [ -f "$W/dist/forward/libcublasLt.so.13" ]; then
     step package-refusals tests/forward/package-refusals.sh
