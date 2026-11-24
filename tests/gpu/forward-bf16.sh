@@ -65,8 +65,10 @@ cases=("$@")
 # the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them.
 controls=()
 if [ -x "$T12/bin/nvcc" ]; then
+    . "$W/scripts/nvcc-host.sh"
+    nvcc_host_args "$T12/bin/nvcc"
     for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS; do
-        (cd "$rt" && "$T12/bin/nvcc" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
+        (cd "$rt" && "$T12/bin/nvcc" "${NVCC_HOST_ARGS[@]}" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
             -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
     done
 fi

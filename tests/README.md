@@ -373,6 +373,14 @@ libraries against a mock library.
 | `stack.sh` | stack-word copying correctness | seconds | Cargo (`vf-fwdgen` crate) |
 | `package-refusals.sh` | what `scripts/package.sh` refuses to pack: a built tree with a forwarding library missing, with one older than the sources, with the report of a run for one library only, with some but not all of the three files of the bf16 cuBLAS variants (`forward/bf16tc`); and that it packs the three in `forward/bf16tc` when they are all there | seconds | a built `dist/` (`scripts/build.sh`, `scripts/build-forwarders.sh`) |
 
+### Build scripts (`tests/scripts/`)
+
+No GPU needed.
+
+| Script | What it does | Time | What it needs |
+|---|---|---|---|
+| `nvcc-host.sh` | `scripts/nvcc-host.sh`, through which every script and test that runs nvcc goes: on the machine as it is, nothing added and nothing said where nvcc compiles a probe as it is, and on a newer system (Ubuntu 26.04 for CUDA 12.9.2), what it adds builds a program that calls `rsqrt`, `sinpi` and `cospi`, which prints the right values (said skipped, `newer-system`, on a machine where nvcc compiles the probe as it is); with a C library that declares them as glibc 2.43 does (a `bits/mathcalls.h` of the test's, on any machine), the program does not compile without `scripts/nvcc-host` and does with what the helper adds; with a default host compiler that says it is GCC 99, a `g++-N` of `PATH` is chosen (skipped without one) | seconds | `toolkits/cuda-12.9.2` (and `cuda-13.5.0` when it is there), gcc |
+
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
@@ -384,8 +392,8 @@ checks and the unit tests (`cargo test`, 451 at 0.1.4); `scripts/build.sh`; `fit
 `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
-kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py`, which
-needs the CUDA 12.9.2 toolkit, nor
+kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py` and
+`tests/scripts/nvcc-host.sh`, which need the CUDA 12.9.2 toolkit, nor
 `tests/forward/package-refusals.sh`, which needs the forwarding libraries built from NVIDIA's
 toolkits (`scripts/fetch-all.sh redist`, `scripts/build-forwarders.sh`): it fetches neither.
 The tests on a GPU and the SASS tests over whole corpora are run by hand.
@@ -400,8 +408,8 @@ step failed, 2 when none failed but one could not run here (what it needs is mis
 - the CI's host steps (formatting, lints with warnings as errors, the unit tests, `scripts/build.sh`
   and every host suite of the list above); the host suites that the CI does not run, when what
   they need is here (`jitlink_objects.py`, `package-refusals.sh`, `scripts/build-bf16-kernels.sh
-  --check`); and `compare.sh`, on the test kernels and on PyTorch's cubins when `TORCH` names them
-  (about ten minutes in all with `JOBS=6`, eight of them for `compare.sh`);
+  --check`, `tests/scripts/nvcc-host.sh`); and `compare.sh`, on the test kernels and on PyTorch's
+  cubins when `TORCH` names them (about ten minutes in all with `JOBS=6`, eight of them for `compare.sh`);
 - with `--full`, then the validator over the corpora: `validate-corpus.sh` on `TORCH`,
   `heldout-validate.sh` on `HELDOUT` and `controls.sh` (hours; a step whose corpus is missing is
   skipped);
@@ -452,13 +460,16 @@ python3 -m pip install --target $VF_TEST_ROOT/torch-cu126/site \
 
 ### Native llama.cpp build for sm_70
 
-A build of the same llama.cpp sources for sm_70 with CUDA 12.9.2, for speed comparisons.
+A build of the same llama.cpp sources for sm_70 with CUDA 12.9.2, for speed comparisons. nvcc
+is given what `scripts/nvcc-host.sh` finds that it needs on this machine (nothing on most); the
+toolkit's paths are absolute (CMake 4.2 does not find nvcc from relative ones).
 
 ```sh
+export NVCC_PREPEND_FLAGS="$(scripts/nvcc-host.sh --args toolkits/cuda-12.9.2/bin/nvcc | tr '\n' ' ')"
 cmake -S src/llama.cpp-b12418 -B $VF_TEST_ROOT/llama-b12418-sm70/build -G Ninja \
     -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=70 \
-    -DCUDAToolkit_ROOT=toolkits/cuda-12.9.2 \
-    -DCMAKE_CUDA_COMPILER=toolkits/cuda-12.9.2/bin/nvcc \
+    -DCUDAToolkit_ROOT=$PWD/toolkits/cuda-12.9.2 \
+    -DCMAKE_CUDA_COMPILER=$PWD/toolkits/cuda-12.9.2/bin/nvcc \
     -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=ON \
     -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF \
     -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined

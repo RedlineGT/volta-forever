@@ -5,11 +5,13 @@ set -euo pipefail
 out=${1:?output directory}
 src=$(cd "$(dirname "$0")" && pwd)/rt_probe.cu
 W=$(cd "$(dirname "$0")/../.." && pwd)/toolkits
+. "$(dirname "$0")/../../scripts/nvcc-host.sh"
 mkdir -p "$out"
 build() {  # build NAME TOOLKIT LIBDIR NVCC-FLAGS...
     local name=$1 tk=$2 lib=$3; shift 3
     # no rpath: run with LD_LIBRARY_PATH=<toolkit>/<libdir> so the libraries can be swapped
-    "$tk/bin/nvcc" -O2 "$@" -o "$out/rt_probe.$name" "$src" -L"$tk/$lib" -lcublas 2>&1 | grep -v 'deprecated-gpu-targets' || true
+    nvcc_host_args "$tk/bin/nvcc"
+    "$tk/bin/nvcc" "${NVCC_HOST_ARGS[@]}" -O2 "$@" -o "$out/rt_probe.$name" "$src" -L"$tk/$lib" -lcublas 2>&1 | grep -v 'deprecated-gpu-targets' || true
     [ -x "$out/rt_probe.$name" ] && echo "built rt_probe.$name"
 }
 build 129.sm70 $W/cuda-12.9.2 lib -arch=sm_70
