@@ -1,0 +1,37 @@
+.version 8.8
+.target sm_80
+.address_size 64
+
+// Four bf16 products on accumulators of 1.0, each adding one term of 1.5 * 2^-24 (2^-12 times
+// 1.5 * 2^-12 at k = 0, zeros elsewhere: every multiplicand a normal half or zero, so the guarded
+// tensor-core paths may take them). Added one term at a time with fma.rn.f32, as the default
+// lowering adds, each term rounds up: 1 + 2^-21 (3f800004) in every element. Volta's tensor cores
+// truncate their sums: with VF_BF16_TC_GROUPS=1 the words differ.
+.visible .entry k(.param .u64 output) {
+.reg .u64 %out, %offset;
+.reg .b32 %lane, %t, %a, %b, %zero, %d<4>;
+.reg .pred %first_k;
+ld.param.u64 %out, [output];
+mov.u32 %lane, %laneid;
+mul.wide.u32 %offset, %lane, 16;
+add.u64 %out, %out, %offset;
+// A: 2^-12 everywhere. B: 1.5 * 2^-12 at k = 0 (the low half of b0 in lanes 4g), zero elsewhere.
+mov.b32 %a, 0x39803980;
+and.b32 %t, %lane, 3;
+setp.eq.u32 %first_k, %t, 0;
+selp.b32 %b, 0x000039c0, 0, %first_k;
+mov.b32 %zero, 0;
+mov.b32 %d0, 0x3f800000;
+mov.b32 %d1, 0x3f800000;
+mov.b32 %d2, 0x3f800000;
+mov.b32 %d3, 0x3f800000;
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%zero}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%zero}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%zero}, {%d0,%d1,%d2,%d3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%d0,%d1,%d2,%d3}, {%a,%a,%a,%a}, {%b,%zero}, {%d0,%d1,%d2,%d3};
+st.global.b32 [%out], %d0;
+st.global.b32 [%out+4], %d1;
+st.global.b32 [%out+8], %d2;
+st.global.b32 [%out+12], %d3;
+ret;
+}

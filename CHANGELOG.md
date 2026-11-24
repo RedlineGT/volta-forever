@@ -6,6 +6,14 @@
 
 - A kernel that the layer refuses, of which a program holds a handle that it did not get from a lookup (cuFFT enumerates the functions of each module it loads through a private table of the driver, and so took, told 8.0, a kernel the layer refuses), is refused with error 218 by every launch function, by a kernel node of a graph when it is made or changed, and by the questions and settings that take a function or a kernel, instead of being launched, trapping and ending the context (Xid 43). The layer asks the driver what a handle is once in each generation of its records, which every load and unload begins (`VF_STATS` counts the questions); `LIMITS.md` says what still traps (a kernel launched or called from another kernel) and when a kernel that runs is refused after it was given (the driver's compiler refusing a function of a deferred library loaded whole, after the kernel was given compiled alone; graph nodes made with it before go on launching it).
 
+### Added
+
+- `VF_SAFE=1`, safe mode: the layer keeps its conservative paths. The switches whose results are not bit-identical to the default's are not used, whatever their own variables say (`VF_BF16_TC_GROUPS=1`, `VF_BF16_TC_TILES=1`, `VF_BF16_COLUMN=tree`, `VF_BF16_ROW=tree`, `VF_TRANSLATE=first` and `force`), in `libcuda.so.1`, the nvJitLink adapter, `vf ptxas` and `vf adapt`, and one line at level 1 says what was turned off. Only the exact value `1` turns it on; it is read once in a process. The capability told, and what gives the default's bits (the `ordered` modes, the pairs of the PTX lowering), are unchanged. The proxy's cache keeps what is made with it and without it apart. The launcher passes it on as it is, `vf env` prints it, `vf doctor` says what it turns off, and `safe_mode` in `scripts/vf` is where the launcher decides it. `INSTALL.md` describes it, `LIMITS.md` ("Safe mode") says what it does not do.
+
+### Tests
+
+- `tests/proxy/safe_mode.py` (in the CI): each switch that safe mode turns off, against a stand-in for the driver that keeps every image, the values that leave it off, and the cache keys; `tests/launcher/launcher.sh`: what `vf env`, `vf doctor` and a command see of it; `tests/gpu/run.sh`: `bf16-group-rounding` (bf16 products whose terms round up one at a time, which the tensor cores truncate) and the `safe-*` cases, the default's words with `VF_SAFE=1` and a switch.
+
 ## 0.1.4 (2026-11-23)
 
 ### Fixed

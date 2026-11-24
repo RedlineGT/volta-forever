@@ -58,6 +58,64 @@ pub struct Policy {
     /// still given its own code. The driver of the device takes the replacement (machine code for
     /// it, or PTX it reaches); the later card, its entries as they were.
     pub keep_sources: bool,
+    /// Safe mode (`VF_SAFE=1`, `Safe`): the switches whose results are not bit-identical to the
+    /// default's are at their default (`make_safe`). In the policy, so that what is made in safe
+    /// mode and what is made without it are kept apart where the policy is a key (the proxy's
+    /// cache hashes it), even where they would be the same bytes.
+    pub safe: bool,
+}
+
+/// Safe mode, asked for with `VF_SAFE`: the layer keeps its conservative paths, those whose results
+/// are bit-identical to its default's. Only the exact value `1` turns it on; unset, `0` and any other
+/// value (empty, `true`, `yes`, ` 1`, `01`) leave it off, as the bf16 cuBLAS variants read the same
+/// variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Safe {
+    /// Unset, or `0`.
+    Off,
+    /// `1`.
+    On,
+    /// Another value, which leaves safe mode off and is said once.
+    NotOne(String),
+}
+
+impl Safe {
+    /// What a value of `VF_SAFE` asks for (`None`: the variable is not set).
+    pub fn from_value(value: Option<&std::ffi::OsStr>) -> Safe {
+        match value {
+            None => Safe::Off,
+            Some(value) if value == "1" => Safe::On,
+            Some(value) if value == "0" => Safe::Off,
+            Some(value) => Safe::NotOne(value.to_string_lossy().into_owned()),
+        }
+    }
+
+    pub fn on(&self) -> bool {
+        *self == Safe::On
+    }
+}
+
+/// `VF_SAFE`, read once in a process, at the first call.
+pub fn safe_mode() -> &'static Safe {
+    static SAFE: std::sync::OnceLock<Safe> = std::sync::OnceLock::new();
+    SAFE.get_or_init(|| Safe::from_value(std::env::var_os("VF_SAFE").as_deref()))
+}
+
+/// The line to say once about safe mode, `safe` as `safe_mode` gives it and `turned_off` what
+/// `Policy::make_safe` turned off: `None` when there is nothing to say (unset, or `0`).
+pub fn safe_line(safe: &Safe, turned_off: &[&str]) -> Option<String> {
+    match safe {
+        Safe::Off => None,
+        Safe::NotOne(value) => Some(format!("VF_SAFE='{value}' is not 1: safe mode stays off")),
+        Safe::On if turned_off.is_empty() => Some(
+            "VF_SAFE=1: the layer keeps its conservative paths (no switch that safe mode turns off is set)".to_string(),
+        ),
+        Safe::On => Some(format!(
+            "VF_SAFE=1: the layer keeps its conservative paths: {} not used (results not bit-identical to the \
+             default's)",
+            turned_off.join(", ")
+        )),
+    }
 }
 
 /// When machine code is translated.
@@ -146,6 +204,7 @@ impl Default for Policy {
             pairs: true,
             borrow: vf_sass::translate::BORROW_DEFAULT,
             keep_sources: false,
+            safe: false,
         }
     }
 }
@@ -327,8 +386,70 @@ impl Policy {
     /// a value that is not one, or is below 7.0, is not used (`requested_capability`).
     /// `VF_TRANSLATE=0`: do not translate machine code; `VF_TRANSLATE=first`: translate it also
     /// where an image has PTX (`Translate`). `VF_PAIRS=0`: compute every tensor-core product by
-    /// itself, in machine code (`pairs`) and in program text (`lowering.pairs`).
-    pub fn with_environment(mut self) -> Policy {
+    /// itself, in machine code (`pairs`) and in program text (`lowering.pairs`). `VF_SAFE=1`: what
+    /// these ask for whose results are not bit-identical to the default's is not used (`make_safe`).
+    pub fn with_environment(self) -> Policy {
+        self.with_environment_said().0
+    }
+
+    /// `with_environment`, and the line to say once about safe mode (`safe_line`; `None`: nothing
+    /// to say).
+    pub fn with_environment_said(self) -> (Policy, Option<String>) {
+        let mut policy = self.with_switches();
+        let safe = safe_mode();
+        let turned_off = if safe.on() { policy.make_safe() } else { Vec::new() };
+        (policy, safe_line(safe, &turned_off))
+    }
+
+    /// Safe mode (`Safe`): the settings of this policy whose results are not bit-identical to the
+    /// default's are put back to the default's, and `safe` is set. Returns what was turned off, as
+    /// the variables and values that ask for it. The reference of lowered and translated code is the
+    /// program's own instructions as the default computes them:
+    ///
+    /// - `VF_BF16_TC_GROUPS=1`, `VF_BF16_TC_TILES=1`: bf16 products on Volta's fp16 tensor cores, whose
+    ///   sums are truncated, and the path chosen by a vote over every operand (`docs/emulations.md`,
+    ///   "bf16");
+    /// - `VF_BF16_COLUMN=tree`, `VF_BF16_ROW=tree`: partial sums added in another order, the path
+    ///   chosen by a vote (their `ordered` modes give the default's bits and stay);
+    /// - `VF_TRANSLATE=first`, `VF_TRANSLATE=force`: another form of the program, its machine code
+    ///   translated where the default takes its PTX, its sm_75 code translated where its sm_70 code
+    ///   runs (`VF_TRANSLATE=0` refuses what it does not translate, and stays).
+    ///
+    /// Not changed: what the programs are told (`told_sm`): the code a program then chooses is its
+    /// own choice; nor `pairs`, `borrow` and `lowering.aligned_rows`.
+    pub fn make_safe(&mut self) -> Vec<&'static str> {
+        use vf_ptx::lower::{Bf16Column, Bf16Row};
+        let mut turned_off = Vec::new();
+        if self.lowering.bf16_tc_groups {
+            self.lowering.bf16_tc_groups = false;
+            turned_off.push("VF_BF16_TC_GROUPS=1");
+        }
+        if self.lowering.bf16_tc_tiles {
+            self.lowering.bf16_tc_tiles = false;
+            turned_off.push("VF_BF16_TC_TILES=1");
+        }
+        if self.lowering.bf16_column == Bf16Column::Tree {
+            self.lowering.bf16_column = Bf16Column::Off;
+            turned_off.push("VF_BF16_COLUMN=tree");
+        }
+        if self.lowering.bf16_row == Bf16Row::Tree {
+            self.lowering.bf16_row = Bf16Row::Off;
+            turned_off.push("VF_BF16_ROW=tree");
+        }
+        match self.translate {
+            Translate::First => turned_off.push("VF_TRANSLATE=first"),
+            Translate::Force => turned_off.push("VF_TRANSLATE=force"),
+            Translate::Never | Translate::WithoutPtx => {}
+        }
+        if matches!(self.translate, Translate::First | Translate::Force) {
+            self.translate = Translate::WithoutPtx;
+        }
+        self.safe = true;
+        turned_off
+    }
+
+    /// This policy with the switches that the environment sets, safe mode apart.
+    fn with_switches(mut self) -> Policy {
         match std::env::var("VF_TRANSLATE").as_deref() {
             Ok("0") => self.translate = Translate::Never,
             Ok("first") => self.translate = Translate::First,
@@ -2466,5 +2587,151 @@ mod tests {
         let kept = policy.kept_for_second(ELF75_PTX75).unwrap();
         assert!(kept.len() < ELF75_PTX75.len());
         assert_eq!(kept_cubin(&kept).as_deref(), Some(&*cubin.payload().unwrap()));
+    }
+
+    #[test]
+    fn safe_mode_is_the_exact_value_one() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(Safe::from_value(None), Safe::Off);
+        assert_eq!(Safe::from_value(Some(OsStr::new("1"))), Safe::On);
+        assert_eq!(Safe::from_value(Some(OsStr::new("0"))), Safe::Off);
+        for other in ["", "true", "yes", "on", " 1", "1 ", "01", "1\n", "2", "-1", "TRUE"] {
+            assert_eq!(
+                Safe::from_value(Some(OsStr::new(other))),
+                Safe::NotOne(other.to_string()),
+                "{other:?}"
+            );
+            assert!(!Safe::from_value(Some(OsStr::new(other))).on());
+        }
+        assert!(Safe::from_value(Some(OsStr::new("1"))).on());
+        // A value that is not text is not 1 either.
+        assert!(matches!(
+            Safe::from_value(Some(OsStr::from_bytes(b"1\xff"))),
+            Safe::NotOne(_)
+        ));
+        // What is said: nothing for unset and 0; the value that is not 1; what safe mode turned off.
+        assert_eq!(safe_line(&Safe::Off, &[]), None);
+        assert_eq!(
+            safe_line(&Safe::NotOne(" 1".into()), &[]).as_deref(),
+            Some("VF_SAFE=' 1' is not 1: safe mode stays off")
+        );
+        assert_eq!(
+            safe_line(&Safe::On, &[]).as_deref(),
+            Some("VF_SAFE=1: the layer keeps its conservative paths (no switch that safe mode turns off is set)")
+        );
+        let line = safe_line(&Safe::On, &["VF_BF16_TC_GROUPS=1", "VF_BF16_ROW=tree"]).unwrap();
+        assert!(
+            line.starts_with(
+                "VF_SAFE=1: the layer keeps its conservative paths: VF_BF16_TC_GROUPS=1, VF_BF16_ROW=tree not used"
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn safe_mode_turns_off_what_changes_results() {
+        use vf_ptx::lower::{Bf16Column, Bf16Row};
+        let safe_default = Policy {
+            safe: true,
+            ..Policy::default()
+        };
+        type Change<'a> = &'a dyn Fn(&mut Policy);
+        let with = |change: Change| {
+            let mut policy = Policy::default();
+            change(&mut policy);
+            policy
+        };
+        // Each switch whose results are not bit-identical to the default's: put back, and named.
+        let changing: [(&str, Change); 6] = [
+            ("VF_BF16_TC_GROUPS=1", &|p| p.lowering.bf16_tc_groups = true),
+            ("VF_BF16_TC_TILES=1", &|p| p.lowering.bf16_tc_tiles = true),
+            ("VF_BF16_COLUMN=tree", &|p| p.lowering.bf16_column = Bf16Column::Tree),
+            ("VF_BF16_ROW=tree", &|p| p.lowering.bf16_row = Bf16Row::Tree),
+            ("VF_TRANSLATE=first", &|p| p.translate = Translate::First),
+            ("VF_TRANSLATE=force", &|p| p.translate = Translate::Force),
+        ];
+        for (name, change) in changing {
+            let mut policy = with(change);
+            assert_ne!(format!("{policy:?}"), format!("{:?}", Policy::default()), "{name}");
+            assert_eq!(policy.make_safe(), vec![name]);
+            assert_eq!(format!("{policy:?}"), format!("{safe_default:?}"), "{name}");
+        }
+        // All of them at once, in one list.
+        let mut all = with(&|p| {
+            p.lowering.bf16_tc_groups = true;
+            p.lowering.bf16_tc_tiles = true;
+            p.lowering.bf16_column = Bf16Column::Tree;
+            p.lowering.bf16_row = Bf16Row::Tree;
+            p.translate = Translate::Force;
+        });
+        assert_eq!(all.make_safe().len(), 5);
+        assert_eq!(format!("{all:?}"), format!("{safe_default:?}"));
+        // What gives the default's bits, what refuses instead of computing otherwise, and what the
+        // programs are told: left as they are.
+        let kept: [Change; 7] = [
+            &|p| p.lowering.bf16_column = Bf16Column::Ordered,
+            &|p| p.lowering.bf16_row = Bf16Row::Ordered,
+            &|p| p.translate = Translate::Never,
+            &|p| p.told_sm = Some(80),
+            &|p| {
+                p.pairs = false;
+                p.lowering.pairs = false;
+            },
+            &|p| p.borrow = 9,
+            &|p| p.lowering.aligned_rows = false,
+        ];
+        for change in kept {
+            let mut policy = with(change);
+            let before = policy;
+            assert!(policy.make_safe().is_empty(), "{before:?}");
+            assert_eq!(format!("{policy:?}"), format!("{:?}", Policy { safe: true, ..before }));
+        }
+        // Made in safe mode or not, two policies are told apart, even when nothing was turned off.
+        assert_ne!(format!("{safe_default:?}"), format!("{:?}", Policy::default()));
+    }
+
+    #[test]
+    fn safe_mode_gives_the_default_lowering() {
+        // A bf16 product that the switches lower otherwise: in safe mode, the default's text.
+        let groups = include_bytes!("../../../tests/kernels/ptx-cases/bf16-group.ptx");
+        let row = include_bytes!("../../../tests/kernels/ptx-cases/bf16-row.ptx");
+        let text = |policy: &Policy, ptx: &[u8]| policy.adapt_ptx(ptx).image.unwrap();
+        let mut grouped = Policy::default();
+        grouped.lowering.bf16_tc_groups = true;
+        let mut tree = Policy::default();
+        tree.lowering.bf16_row = vf_ptx::lower::Bf16Row::Tree;
+        for (mut policy, ptx) in [(grouped, &groups[..]), (tree, &row[..])] {
+            assert_ne!(text(&policy, ptx), text(&Policy::default(), ptx));
+            policy.make_safe();
+            assert_eq!(text(&policy, ptx), text(&Policy::default(), ptx));
+        }
+        // Machine code translated where the default takes the PTX: in safe mode, the PTX.
+        let fat = fatbin::parse(ELF75_PTX75).unwrap();
+        let mut first = Policy {
+            translate: Translate::First,
+            ..Policy::default()
+        };
+        assert!(matches!(
+            first.adapt_fatbin(&fat).unwrap().outcome,
+            Outcome::Translated { .. }
+        ));
+        first.make_safe();
+        assert_eq!(
+            first.adapt_fatbin(&fat).unwrap().image,
+            Policy::default().adapt_fatbin(&fat).unwrap().image
+        );
+        // The program's sm_70 code, where force would translate its sm_75 code.
+        let native = fatbin::parse(ELF70_ELF75_PTX70).unwrap();
+        let mut force = Policy {
+            translate: Translate::Force,
+            ..Policy::default()
+        };
+        assert!(matches!(
+            force.adapt_fatbin(&native).unwrap().outcome,
+            Outcome::Translated { .. }
+        ));
+        force.make_safe();
+        assert_eq!(force.adapt_fatbin(&native).unwrap().outcome, Outcome::Native);
     }
 }
