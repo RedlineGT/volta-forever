@@ -42,7 +42,11 @@
 #                  libcublas.so.13 and libcublasLt.so.13 are the bf16 cuBLAS variants of
 #                  forward/bf16tc (bf16_select); refused when they are not installed
 #   VF_SAFE=1      (exactly 1) safe mode: the layer and the bf16 cuBLAS variants keep their
-#                  conservative paths; decided here by safe_mode
+#                  conservative paths, and VF_TRITON_TC is off; decided here by safe_mode
+#   VF_TRITON_TC=1 (or a list: f16,bf16,i8)
+#                  Triton compiles its matrix products of these types for sm_80, which the layer
+#                  runs on Volta's tensor cores (f16) or emulates (bf16, i8) (setup_python);
+#                  unset: triton_tc_default
 # A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 set -eu
 
@@ -78,6 +82,7 @@ case $(basename "$self_dir") in
         version_file=$home/VERSION
         scripts_dir=$home/scripts
         tool=$home/bin/vf-translate
+        python_dir=$home/python
         ;;
     scripts)
         # Source tree layout: home is the parent of scripts/.
@@ -88,6 +93,7 @@ case $(basename "$self_dir") in
         version_file=
         scripts_dir=$home/scripts
         tool=$home/dist/bin/vf-translate
+        python_dir=$home/python
         ;;
     *)
         echo "vf: cannot determine installation layout from $self_dir" >&2
@@ -116,8 +122,11 @@ get_version() {
 # too) and vf doctor says what it turns off. This function is the one place where the launcher
 # decides whether safe mode is on (status 0): what the launcher turns on by choice for speed, and
 # whose results are not bit-identical to what the program gets without it, is to ask it first and
-# stay off when it answers yes. (Nothing that the launcher turns on today is such: VF_JIT_LINEINFO
-# makes compilers keep line tables and PTX, with the same machine code.)
+# stay off when it answers yes: VF_TRITON_TC (setup_python), whose float16 products are summed
+# by Volta's tensor cores. (VF_JIT_LINEINFO is not such: it makes compilers keep line tables and
+# PTX, with the same machine code.) The layer's Python module reads VF_SAFE by the same rule
+# itself, for a PYTHONPATH set by hand (python/sitecustomize.py, _safe in
+# python/volta_forever_triton.py): a change of this rule is to be made there too.
 safe_mode() {
     [ "${VF_SAFE-}" = 1 ]
 }
@@ -657,6 +666,11 @@ cmd_env() {
     setup_jit
     [ "$_jit_nvcc" = 0 ] || printf 'export NVCC_APPEND_FLAGS=%s\n' "$(quoted "$NVCC_APPEND_FLAGS")"
     [ "$_jit_cute" = 0 ] || printf 'export CUTE_DSL_LINEINFO=%s\n' "$(quoted "$CUTE_DSL_LINEINFO")"
+    setup_python
+    if [ "$_py_path" = 1 ]; then
+        if [ -n "${PYTHONPATH+set}" ]; then printf 'export PYTHONPATH=%s\n' "$(quoted "$PYTHONPATH")"; else printf 'unset PYTHONPATH\n'; fi
+    fi
+    [ "$_py_tc" = 0 ] || printf 'export VF_TRITON_TC=%s\n' "$(quoted "$VF_TRITON_TC")"
 }
 
 # Bazel applications can select their own CUDA toolkit after startup. Give them a
@@ -717,12 +731,73 @@ setup_jit() {
     _jit_nvcc=1
 }
 
+# VF_TRITON_TC when it is not set: 0 (off), or 1 (f16, bf16 and i8). This line alone decides
+# whether a Python started through the launcher has Triton compile its matrix products for sm_80
+# when nothing is asked; safe mode (safe_mode: VF_SAFE=1) turns it off, whatever it is.
+triton_tc_default=0
+
+# Triton, told 7.5, computes tl.dot with float32 fma; told 8.0, it writes the matrix products that
+# the layer runs on Volta's tensor cores (float16) or emulates (bfloat16, int8). It takes the
+# capability from PyTorch, which must be told 7.5. With VF_TRITON_TC set (1, or some of
+# f16,bf16,i8), the directory of the layer's sitecustomize goes first in PYTHONPATH: in every
+# Python that the command starts, it installs an import hook that makes Triton compile a kernel
+# whose products are all of these types for sm_80 instead of 7.5 (python/volta_forever_triton.py),
+# and runs the sitecustomize that it hides. VF_TRITON_TC unset: triton_tc_default, then exported
+# when it is on; in safe mode (safe_mode): off. _py_path: 1 when PYTHONPATH was changed here;
+# _py_tc: 1 when VF_TRITON_TC is to be exported (the default made it on).
+setup_python() {
+    _py_path=0
+    _py_tc=0
+    # Copies of the layer's python/ already in PYTHONPATH (another installation's, from an
+    # eval "$(vf env)" or a vf venv of another release; this one's): taken out, the other
+    # components kept as they are. Two copies would each run the other's sitecustomize.
+    _py_old=${PYTHONPATH-}
+    _py_new=
+    _py_any=0
+    if [ -n "${PYTHONPATH+set}" ]; then
+        set -f
+        _oifs=$IFS; IFS=:
+        # shellcheck disable=SC2086
+        set -- $PYTHONPATH""
+        IFS=$_oifs
+        set +f
+        _py_first=1
+        for _p do
+            if [ -n "$_p" ] && [ -f "$_p/volta_forever_triton.py" ]; then
+                _py_any=1
+                continue
+            fi
+            if [ "$_py_first" = 1 ]; then _py_new=$_p; _py_first=0; else _py_new=$_py_new:$_p; fi
+        done
+    fi
+    _py_on=1
+    _py_value=${VF_TRITON_TC-$triton_tc_default}
+    if safe_mode; then _py_value=0; fi
+    case $_py_value in
+        ''|0) _py_on=0 ;;
+    esac
+    [ -f "$python_dir/sitecustomize.py" ] || _py_on=0
+    case $python_dir in
+        *:*) _py_on=0 ;;
+    esac
+    if [ "$_py_on" = 1 ]; then
+        PYTHONPATH=$python_dir${_py_new:+:$_py_new}
+        if [ -z "${VF_TRITON_TC+set}" ]; then VF_TRITON_TC=$_py_value; _py_tc=1; fi
+    elif [ "$_py_any" = 1 ]; then
+        if [ -n "$_py_new" ]; then PYTHONPATH=$_py_new; else unset PYTHONPATH; fi
+    fi
+    [ "${PYTHONPATH-}" = "$_py_old" ] || _py_path=1
+}
+
 # --- subcommand: run (prefix form) ---------------------------------------------
 
 cmd_run() {
     setup_env
     setup_jit
     export NVCC_APPEND_FLAGS CUTE_DSL_LINEINFO
+    setup_python
+    if [ "$_py_path" = 1 ] && [ -n "${PYTHONPATH+set}" ]; then export PYTHONPATH; fi
+    [ "$_py_tc" = 0 ] || export VF_TRITON_TC
     setup_runfiles "$1"
     [ -z "$_cuda12" ] || export VF_CUDA12="$_cuda12"
     export LD_LIBRARY_PATH="$_ldpath"
@@ -999,8 +1074,12 @@ cmd_doctor() {
     [ -z "$_venv_note" ] || echo "NOTICE $_venv_note"
     # Safe mode: on, with what it turns off that is in use (in the layer: the bf16 products on the
     # tensor cores and in tree order, another form of the program, and the pairs of products of
-    # machine code, on unless VF_PAIRS is 0; in the bf16 cuBLAS variants: their tensor-core path),
-    # in the order in which the layer names them; or a value of VF_SAFE that leaves it off.
+    # machine code, on unless VF_PAIRS is 0; in the bf16 cuBLAS variants: their tensor-core path;
+    # in the launcher: VF_TRITON_TC, set or by default), in the order in which the layer names
+    # them; or a value of VF_SAFE that leaves it off.
+    _py_doc=${VF_TRITON_TC-$triton_tc_default}
+    _py_how=VF_TRITON_TC=$_py_doc
+    [ -n "${VF_TRITON_TC+set}" ] || _py_how="VF_TRITON_TC unset, by default $_py_doc"
     if safe_mode; then
         _safe_off=
         for _var in VF_BF16_TC_GROUPS VF_BF16_TC_TILES VF_BF16_COLUMN VF_BF16_ROW VF_TRANSLATE VF_PAIRS VF_CUBLAS_BF16_TC; do
@@ -1013,13 +1092,32 @@ cmd_doctor() {
                     _safe_off="${_safe_off:+$_safe_off, }$_var=$_val" ;;
             esac
         done
+        case $_py_doc in
+            ''|0) ;;
+            *) _safe_off="${_safe_off:+$_safe_off, }$_py_how" ;;
+        esac
         if [ -n "$_safe_off" ]; then
             echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths; not used: $_safe_off"
         else
             echo "ok    VF_SAFE=1: the layer and the bf16 cuBLAS variants keep their conservative paths (nothing that safe mode turns off is in use)"
         fi
-    elif [ -n "${VF_SAFE+set}" ] && [ "$VF_SAFE" != 0 ]; then
-        echo "NOTICE VF_SAFE is '$VF_SAFE', not 1: safe mode is off (only the exact value 1 turns it on)"
+    else
+        if [ -n "${VF_SAFE+set}" ] && [ "$VF_SAFE" != 0 ]; then
+            echo "NOTICE VF_SAFE is '$VF_SAFE', not 1: safe mode is off (only the exact value 1 turns it on)"
+        fi
+        case $_py_doc in
+            ''|0) ;;
+            *)  _py_missing=
+                for _f in sitecustomize.py volta_forever_triton.py volta_forever_triton_client.py volta_forever_triton_helper.py; do
+                    [ -f "$python_dir/$_f" ] || _py_missing="${_py_missing:+$_py_missing, }$_f"
+                done
+                if [ -z "$_py_missing" ]; then
+                    echo "ok    $_py_how: a Python started through the launcher has Triton compile its products of these types for sm_80 ($python_dir first in PYTHONPATH)"
+                else
+                    echo "MISSING $python_dir: $_py_missing, which $_py_how needs"
+                    _ok=0
+                fi ;;
+        esac
     fi
     # (Told 8.0 or later, a program that compiles CUDA while it runs builds machine code for
     # sm_80 or later, of which the layer can translate little.)
@@ -1200,8 +1298,13 @@ Environment:
                  forward/bf16tc; refused when they are not installed (0 or 1; unset: 0)
   VF_SAFE=1      safe mode (exactly 1): the layer and the bf16 cuBLAS variants keep their
                  conservative paths, whose results are bit-identical to their default's
-                 with each product of translated machine code by itself (see INSTALL.md);
-                 vf doctor says what it turns off
+                 with each product of translated machine code by itself, and VF_TRITON_TC
+                 is off (see INSTALL.md); vf doctor says what it turns off
+  VF_TRITON_TC=1 (or some of f16,bf16,i8)
+                 Triton compiles a kernel whose products (tl.dot) are all of these types
+                 for sm_80, which the layer runs on Volta's tensor cores (f16) or with its
+                 emulated products: Pythons started through the launcher (see INSTALL.md).
+                 0: off; unset: the release's default (off); VF_SAFE=1: off
 A command named like one of these words: vf run COMMAND, or vf -- COMMAND.
 USAGE
 }

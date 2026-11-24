@@ -13,7 +13,10 @@ where it is not from the build of this release. `docs/` says how each figure was
   its float16 and bf16 matrix products ran 3 to 150 times slower than the same kernels told 8.0
   ([Speed](#speed)). In a program with PyTorch, `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` is the
   only way to the tensor cores in this release, and PyTorch's own attention is then refused
-  ([The capability told with `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
+  ([The capability told with `VF_CAPABILITY`](#the-capability-told-with-vf_capability)). After
+  0.1.5 (`CHANGELOG.md`, "Unreleased"), `VF_TRITON_TC=1` (opt-in, through the launcher) compiles
+  Triton's float16, bfloat16 and int8 products for sm_80 while everyone is still told 7.5
+  ([Triton's matrix products](#tritons-matrix-products)).
 - **Triton's machine code is validated on a corpus, not kernel by kernel.** Kernels that Triton
   makes while a program runs, and that run from their sm_75 machine code (the default for a
   program told 7.5), were run on a V100 in 3,516 configurations of 20 kernels and 241 cases of
@@ -445,6 +448,12 @@ are right and slow: a float16 GEMM at 0.23 to 3.2 TFLOPS, vLLM's mixture-of-expe
 `VF_CAPABILITY`](#the-capability-told-with-vf_capability)) at 26 to 33, 4.4 to 12.9, 13.6 and
 1.8 (2026-11-23, one session). The layer's translation adds 11 instructions to the 5,952 of
 Triton's GEMM kernel: the time is in that code (`docs/performance.md`, "Triton's matrix products").
+With `VF_TRITON_TC=1` (off by default; [Triton's matrix products](#tritons-matrix-products)),
+everyone still told 7.5, the same float16 GEMMs run at 17 to 38 TFLOPS, those of 16 rows at 4.6
+to 5.2 against 0.35 to 1.5; the bfloat16 GEMMs at 8.6 to 11.8 (16 rows: 1.9 to 2.8) against 0.22
+to 3.3 (0.34 to 1.5); vLLM's mixture of experts at 0.42 to 14.9 TFLOPS in float16 (13 to 98 times
+faster) and 0.23 to 6.4 in bfloat16 (7 to 43 times), its attention at 13.6 and 1.83 in float16
+and 5.2 and 1.07 in bfloat16 (2026-11-23, one session, through the launcher).
 
 **Blackwell's block-scaled products** (NVFP4, MXFP4): a matrix-vector product written with them
 runs at 2.7 times the time of a kernel written by hand for Volta (2026-11-18).
@@ -477,6 +486,269 @@ bytes, as the PTX manual requires. A program that does not stops with a misalign
 fault (error 716); `VF_ALIGNED_ROWS=0` makes the layer test the addresses, with slower
 emulated kernels.
 
+## Triton's matrix products
+
+Told 7.5, Triton computes `tl.dot` with float32 `fma` ([Speed](#speed)). `VF_TRITON_TC=1` (the
+launcher; `INSTALL.md`) makes it compile a kernel whose products all multiply float16, bfloat16
+or int8 operands for sm_80, as on an Ampere GPU, while PyTorch, NVML and every other reader of the
+capability are still told 7.5; the layer then runs the PTX that each such cubin keeps. It is off
+by default (one line of the launcher, `triton_tc_default`, decides that), and `VF_SAFE=1` turns it
+off whatever it is set to. What changes for a program, by type:
+
+- **float16**: the products run on Volta's tensor cores (`docs/emulations.md`, section 2).
+  Their sums are truncated, four terms at a time, where Triton's `fma` rounds each: on random
+  data of both signs the largest error of a float32 result against float64 was 6.8e-6 of the
+  largest value against 2.3e-6 (K = 4,096; 1.0e-5 against 4.8e-6 at K = 16,384); on long sums of
+  terms of one sign the results come out low, 8.5e-5 against 3.8e-6 at K = 4,096 and 3.3e-4
+  against 7.2e-6 at K = 16,384. Written as float16, the same results differ from float64 by
+  3.14e-4 against 3.13e-4 (the rounding of float16). This is what Volta's tensor cores give to
+  every program (PyTorch's own float16 products, through cuBLAS, are computed so). Up to 170
+  times faster in the GEMMs ([Speed](#speed)), 1.6 to 61 times in the kernels of vLLM and SGLang
+  timed with CUDA graphs (below).
+- **bfloat16**: the layer's scalar products (float32 `fma` in the order of k), which gave the
+  same bits as Triton's `fma` path in the GEMMs and in vLLM's mixture of experts; in vLLM's
+  attention, other bits in 56 of 146 shapes of a sweep (the others the same), with the same
+  largest error against the reference (4.7e-3 of the largest value, on as off); 1.4 to 50 times
+  faster.
+- **int8**: the layer's integer products, exact. Triton 3.3 to 3.9 cannot compile an int8
+  `tl.dot` for 7.5 at all (its compilation fails), nor Triton 3.3 one of float16 or bfloat16;
+  with `VF_TRITON_TC=1` they run.
+- **float32, float64, FP8, scaled products**, and a kernel with any of these beside products of
+  the three types: unchanged (compiled for 7.5, the same cubin). A float32 product compiled for
+  8.0 would be tf32, less exact than today: it is not.
+- A kernel whose pipelined sm_80 code needs more shared memory than a V100 has (96 KiB) is
+  compiled with one stage fewer, down to one: Triton's configurations tuned for Ampere (164 KiB)
+  run where they would stop with `OutOfResources`. The last bits of a float16 kernel's results can
+  depend on its number of stages: with B stored N x K, a float16 GEMM compiled for sm_80 gave
+  other last bits with one stage than with two to four (random data; the same bits where the sums
+  are exact; B stored K x N and bfloat16: the same bits for any number), where for 7.5 every
+  number gives the same bits. A kernel compiled with fewer stages for its shared memory can so
+  give other last bits than the configuration asked would give on an Ampere GPU. Of the 92 cases
+  of vLLM's and SGLang's kernels compiled for sm_80 below, one needed it. Three MLA decode
+  attentions of theirs, which ask 102,400 bytes for 7.5 and stop with `OutOfResources` without the
+  switch, run with it.
+- **Skinny products left to 7.5.** A bfloat16 product of a tile of at most 32 rows and 16 x 128 x
+  64 elements whose B is stored by rows (K x N, as `a @ b` with `b` contiguous), and a float16
+  product with float16 sums of a tile of 16 rows and 128 columns or more with B stored so, ran
+  slower for sm_80 than Triton's `fma` code for 1 or 16 rows: down to 0.53 times its speed in a
+  sweep of 432 such products (Volta's products read such a B with transposing loads). A kernel
+  all of whose products are of these kinds is compiled for 7.5 (`Triton kernel NAME: compiled
+  for sm_75: ... (measured slower for sm_80 on a V100)`). It gives up what these products gain at
+  256 rows (up to 2.6 times), which a kernel compiled once for any number of rows cannot know.
+  The products of the sweep that stay at sm_80 ran 0.96 to 32 times as fast as Triton's; B
+  stored by columns (N x K), as PyTorch keeps its weights, is never left so.
+- A kernel that the layer's tool would refuse, or whose sm_80 compilation fails in any way, is
+  compiled for 7.5, as without the switch; the line `Triton kernel NAME: compiled for sm_75: WHY`
+  (`VF_LOG_LEVEL=2`) says so. The sm_80 compilation runs in a **helper**, a child process of the
+  program's that compiles one kernel at a time, so that an error of LLVM or MLIR that ends it does
+  not take the program down: a helper ended by SIGSEGV, SIGILL or SIGFPE, a compilation that does
+  not end in `VF_TRITON_TC_TIMEOUT` seconds, and an exception of Triton's compiler leave that kernel
+  at 7.5, and Triton's cache keeps it so (`ptxas` that crashes too). A helper ended by SIGABRT or
+  SIGBUS, which a lack of resources gives too (LLVM aborts when an allocation fails, at `RLIMIT_AS`
+  or with memory overcommit off; a library truncated under the helper by a reinstall gives SIGBUS),
+  has the kernel compiled again at once in a new helper, once (said at `VF_LOG_LEVEL=2`): a second
+  such end is the kernel's, so that a kernel whose compilation aborts every time is compiled twice,
+  once per cache. A helper ended from outside (SIGKILL as by the out-of-memory killer, SIGTERM,
+  SIGINT or SIGHUP) or stopped from outside past the time-out (SIGSTOP, a debugger, a frozen
+  control group), `ptxas` ended so, or failing on a full disk or quota, no helper of the process
+  free in `VF_TRITON_TC_WAIT` seconds, the tool that did not run: the kernel is compiled for 7.5
+  this time and nothing is kept in Triton's cache. What Triton's compiler wrote then is written at
+  `VF_LOG_LEVEL=3` (the last 20,000 bytes of it, for a helper that crashed).
+- **What a helper is, and how long it lives.** A process starts one at its first kernel that may be
+  compiled for sm_80, and more, up to `VF_TRITON_TC_JOBS`, when its threads compile at once (an
+  Inductor process that precompiles its choices in threads); each is about 105 MB resident, 150 MB
+  while it compiles, and counts against the memory limit of the program's control group. A helper
+  ends with its process (`PR_SET_PDEATHSIG`, and the end of its socket), after `VF_TRITON_TC_IDLE`
+  seconds (10) with nothing to do, and after half a second with nothing to do while a process of
+  the user waits for a place: a server after its warm-up keeps none, and a kernel compiled later,
+  at a request that needs a new kernel, starts one again (about 0.6 s). Before it ends it kills
+  what it still runs and reaps its own children. A thread of the program waits for it (the wait of
+  its pid alone: the layer takes no other child of the program), and then reaps what of its group a
+  program that is a child subreaper inherits (Python as PID 1 of a container is given the `ptxas`
+  of a helper killed while it ran; not on PyPy, which has no `waitid`). A child made by `fork()`
+  does not use its parent's helpers (it closes its copies of their sockets and starts its own when
+  it needs one); `spawn` and `forkserver` workers are new processes.
+- **A helper is a child of the program.** A program that waits for any child (`os.wait()`,
+  `waitpid(-1)`, a `SIGCHLD` handler that reaps every child, a supervisor that counts its children)
+  can be given a helper's pid and status in place of one of its own; Python's `subprocess`,
+  `multiprocessing`, `concurrent.futures` and asyncio's child watchers wait by pid, and are not
+  affected. A program that ignores `SIGCHLD` or reaps every child itself takes the helper's status
+  from the layer, which then compiles that kernel for 7.5 and keeps nothing (a crash is compiled
+  twice, never kept wrongly). A program that replaces itself with `exec()` while a helper lives
+  does not pass the helper's socket on: the helper ends at once (one that compiles, when that
+  compilation ends) and stays a zombie of the new program, which does not know it, until that
+  program waits for any child or ends.
+- **The places.** The user's helpers on one host are `VF_TRITON_TC_JOBS` at most, all programs
+  together, each holding one of that many lock files (`flock`) from its start to its end; PyTorch
+  Inductor's compile workers included, `torch.compile` with max-autotune and 32 workers then holds
+  at most that many helpers (`docs/performance.md`). The lock files are in `volta-forever-EUID` of
+  Triton's cache directory as Triton finds it when the process compiles its first kernel that may
+  be compiled for sm_80: with PyTorch's Inductor and `TRITON_CACHE_DIR` unset, Inductor's own
+  cache's `triton/0`, which Inductor sets before it compiles anything (processes whose Triton
+  caches differ count their places apart). The cap is a best effort: where a lock file cannot be
+  opened or locked for another reason than another holder (a file system whose locks do not work,
+  as Lustre without its `flock` option or NFSv3 without a lock manager; a directory that cannot be
+  written, that is not one, or a link), the process does not count places (said once, at
+  `VF_LOG_LEVEL=2`), and its helpers start without one, `VF_TRITON_TC_JOBS` of its own at most;
+  no kernel waits. A process waits for a place `VF_TRITON_TC_WAIT` seconds (60) once in its life
+  (meanwhile an idle helper of another process gives its place up after half a second): when none
+  came, as when places are held by helpers that do not give them up (stopped by a debugger or a
+  freezer, also after their program died, or stuck in a compilation after their program died until
+  their own alarm, a minute after `VF_TRITON_TC_TIMEOUT`), it says so once, waits for none again,
+  and compiles with one helper of its own without a place when none is free, that kernel included.
+- Every wait has a bound: a request is taken in 30 s, an answer comes in `VF_TRITON_TC_TIMEOUT`
+  seconds (the time during which the program itself was stopped not counted), the first helper's
+  import of Triton is waited for `VF_TRITON_TC_START` seconds once (then each kernel goes to 7.5,
+  not kept, until it is ready, said once; an import that does not end ends the helper after
+  `VF_TRITON_TC_TIMEOUT` seconds), a place `VF_TRITON_TC_WAIT` seconds once in a process (above),
+  and a kernel whose process has all its helpers busy `VF_TRITON_TC_WAIT` seconds (then it goes to
+  7.5, not kept). A program with no descriptor left, or that can start no process (`RLIMIT_NPROC`,
+  a pids control group), gets that kernel at 7.5, not kept, said once in the process, and its next
+  kernels try again; a program that closes its descriptors (the helper's socket among them) gets a
+  new helper at its next kernel. The layer closes no descriptor that is no longer its own, also in
+  a child made by `fork()`: each is kept with what it is (device and inode) and closed only while
+  it still is that. It waits with `poll`, for any number of descriptors.
+- Triton's cache, and PyTorch Inductor's caches of compiled graphs and autotuning, keep what was
+  made with the switch apart from what was made without it.
+
+What was run with it (2026-11-24, 0.1.4 with the work after it, Triton 3.8.0, PyTorch 2.14, at the
+default capability, one V100): the engines of `tests/gpu/vllm.sh` (stages b to d: the engine greedy
+and sampling, the HTTP server) and `tests/gpu/sglang.sh` (Triton's attention, stages b to d) through
+the launcher, the CPU's text as without it, their attention kernels compiled for sm_80 (5 of 39 and
+2 of 16 kernels in Triton's cache); with the 0.5B model of the tests, decoding is not limited by
+those kernels: stage c at 85.5 tokens a second (vLLM; 86 to 92 off and on in the cold starts of
+`docs/performance.md`) and 6.8 (SGLang, one prompt at a time). `tests/gpu/triton.sh`: 164 PASS, 1
+PASS-PTX (a gather of 16 warps in float32, as without it) and 15 without a reference of 180 (13
+compiled for sm_80); `tests/gpu/triton-tc.sh`: 51 PASS. The kernels of vLLM and SGLang of
+`tests/gpu/triton_vendor.py` (full level) against Triton's interpreter, both routes: vLLM 148 PASS,
+2 PASS-PTX and one FP8 kernel that Triton refuses for 7.5, of 151 (65 compiled for sm_80), where
+without it (2026-11-23, before 0.1.4) 135 PASS, 10 PASS-PTX and 6 that Triton cannot run for 7.5
+(the same FP8 one, two MLA decode attentions that ask 102,400 bytes of shared memory, more than the
+V100 has, and three int8 `scaled_mm`, whose compilation fails); SGLang 87 PASS and 3 PASS-PTX of 90
+(27 compiled for sm_80), where without it 83 PASS, 5 PASS-PTX, one MLA decode attention that Triton
+cannot run for 7.5 (102,400 bytes of shared memory) and the MoE router of 128 experts, which 0.1.4
+runs (it passes with the switch and without it). Those runs were made when the compilation ran in a
+compile service shared by the user's processes; with the helpers of a process, as they are now (their
+temporary files in the temporary directory, the places a best effort; 2026-11-24, 0.1.5 with the
+work after it, the same Triton and PyTorch): `tests/gpu/triton-tc.sh` 51 PASS,
+`tests/gpu/triton.sh` 164 PASS, 1 PASS-PTX and 15 without a reference of 180 (13 compiled for
+sm_80), as before, `tests/gpu/vllm.sh` stages b to d PASS (5 of 39 kernels in Triton's cache
+compiled for sm_80), a part of `tests/gpu/torch.sh` (`lib.`, `attention`, `softmax`: 56 of 56),
+`tests/gpu/run.sh` without the switch 202 PASS; the cubins of eleven configurations byte for byte
+those of the same sm_80 compilation in the program's process; `torch.compile` with max-autotune and
+`TRITON_CACHE_DIR` unset: the places in Inductor's own `triton/0`, the kernels compiled for sm_80.
+
+The same kernels timed with CUDA graphs (the launches of a case captured and replayed: the best
+of 7 replays of 20 launches, each after products that raise the GPU's clocks, in four processes
+off, on, on, off; 2026-11-24, one V100): every case with a kernel compiled for sm_80 ran faster
+but one. vLLM's float16 cases 1.6 to 61 times (39, median 4.5), bfloat16 1.2 to 16 (12),
+products of quantized weights 0.94 to 3.9 (11; an AWQ product of 5 rows at 0.94, 35.5 us against
+33.7), int8 only with it (3); SGLang's float16 1.9 to 45 times (17), bfloat16 1.8 to 15 (7),
+quantized weights 1.1 to 1.2 (3). The kernels that the switch does not change ran at 0.97 to 1.14
+times. Two bfloat16 kernels of vLLM are left to 7.5 by the rule of skinny products (its paged
+attention, a chunk state of Mamba): their cases run 2.7 and 6.6 times faster than without the
+switch, 1 and 2 % faster than with those kernels compiled for sm_80. Timed eagerly, as before,
+`kernel_unified_attention` for 30 query tokens of 3 sequences with heads of 96 and a window of 127
+seemed as fast or slower (0.71 to 1.01): its 28 to 56 us hide behind the time Python takes to
+launch it; with CUDA graphs it runs 2.0 times faster, and every case of that kernel 1.2 to 4.5
+times. Compiling those kernels with one pipeline stage instead of the stages asked made some
+faster and others slower (timed eagerly): it is not done. `torch.compile` with Inductor's Triton
+template alone: 28 template kernels compiled for sm_80, the product 287 us against 702.
+
+What it does not cover:
+
+- It works through the launcher (or `PYTHONPATH` set by hand: `INSTALL.md`, "Triton's products,
+  by hand"); the layer's libraries alone do not do it. A Python started with `-I`, `-E` or `-S`
+  does not read it, nor one whose program sets `PYTHONPATH` without the launcher's directory.
+- **A helper runs the program's interpreter**, with `-I -S`: no `PYTHON*` setting, no user site, no
+  `sitecustomize`, no `.pth` file, nothing of the program's `sys.path` but the directory that holds
+  its Triton, after the standard library (a Triton of an editable installation whose import hook
+  finds `triton` elsewhere is found there only when the package and its `_C` are below the
+  directory that holds `triton/`; otherwise the helper's import fails, and the process compiles as
+  without the switch, said once); `-B` when the program writes no bytecode. The process checks that
+  the Triton it imported is the program's (its directory and version, and the device, inode, size
+  and time of its library, `libtriton`, and of its NVIDIA backend's module, as they were when the
+  program imported Triton: a Triton reinstalled or edited in place under a running program, with
+  the same version, is not taken, said once) and uses it only then. Its
+  environment is not the program's: the variables that a compilation reads (Triton's `TRITON_*`
+  but those of its caches and dumps, `MLIR_*`, `LLVM_*`, `NVPTX_*`, `PTXAS_*`, `DISABLE_*`, the
+  layer's `VF_*`) and `PATH`, `HOME`, `USER`, the locale, `LD_LIBRARY_PATH`, and `TMPDIR` the
+  program's temporary directory (below); no other (no
+  secret of the program's, no `LD_PRELOAD` or `LD_AUDIT`). Its working directory is `/`, it has its
+  own session and process group, and of the program's descriptors only its socket and its two
+  locks; it is started only with the interpreter that runs the process (a frozen application, or
+  one whose `sys.executable` is not that interpreter, does not use the switch, said once). A process
+  that cannot use a helper at all (its Triton cannot be imported there, or its import does not
+  end, or its files changed, or the helper's temporary directory cannot be made) says so once and then compiles as without the switch: its kernels' keys lose the mark, and
+  Triton's cache keeps them as it does without the switch, but for the first eligible kernel,
+  whose key had it (compiled for 7.5, not kept); what does not depend on a kernel (the
+  interpreter) is decided before any key has the mark, and the places' directory turns nothing off
+  (above).
+- **What a helper compiles**: what its process sends it, a TTIR and Triton's options, each value
+  checked: `ptx_options` (`PTXAS_OPTIONS`, or a kernel's) only of the options that Triton itself
+  gives `ptxas` (`-v`, `-lineinfo`, `--fmad`, `--opt-level N`, `--regAllocOptLevel=N`, `-g`,
+  `-suppress-debug-info`), the count of registers and the warnings, none that names a file;
+  `extern_libs` only files of Triton's own directory or the libdevice Triton links by default; no
+  IR given in place of a stage, no instrumentation; every other value a number or a short plain
+  text; 64 MiB a request. A kernel whose options are not such is compiled for 7.5, said once.
+- **Its temporary files, and whom it trusts.** A helper writes Triton's PTX, the cubin that
+  `ptxas` writes and the tool's files in a directory of its own (mode 0700, `mkdtemp`) in the
+  temporary directory where Triton's own compilation in the program writes the same files
+  (Python's `tempfile.gettempdir()`: `TMPDIR`, else `TEMP` or `TMP`, else `/tmp`), and reads the
+  cubin through that directory's descriptor, not following a link and only from a regular file:
+  the exposure of these files is Triton's own. It removes that directory when it ends, the
+  program's waiter after a crash; that of a helper killed with its program (both by SIGKILL) is
+  left to the system's cleaning of temporary files, as Triton's own files of such a run are.
+  `volta-forever-EUID` (mode 0700) of Triton's cache directory holds the lock files of the places
+  alone: opened once without following a link, then used by its descriptor (a link or another
+  directory put at its path afterwards is not followed); nothing else is made there, and nothing
+  there is removed. Whoever may write Triton's cache directory, or rename what is in it or above
+  it, can already give the program kernels of their choice through Triton's cache, without the
+  layer; with the lock files they can keep places taken (a process then waits once) or have the
+  places not counted, and nothing more. No other process can reach a helper (its socket has no
+  path). Nothing more is asked of these directories than Triton asks of its own (not their owner:
+  a network file system may give root's files to another uid).
+- **What a process takes from its helper.** Only an answer to the request it sent (the digest of
+  what it asked, given back) whose cubin is one for sm_80 (ELF, machine, SM, at most 64 MiB) that
+  keeps its PTX, the PTX it keeps being the answer's (compared line by line without comments,
+  `.loc` and `.file` lines and DWARF sections, as `ptxas` keeps it: a few ms), whose PTX is for
+  sm_80 and whose metadata is that kernel's (its name; its number of stages; no field of the
+  request changed but those that Triton's stages set). Anything else is refused, said once, and
+  the process compiles as without the switch. Against a bug or a Triton that makes something else
+  than the layer expects: no other process can answer in a helper's place.
+- Only at the default capability (`VF_CAPABILITY` unset or 7.5), on a machine whose GPUs are all
+  Voltas, and for Triton 3.3 to 3.9 (the versions tried). The hook replaces stages of Triton's
+  internal compiler (`CUDABackend.add_stages` and its stage methods, `triton_key`,
+  `FileCacheManager.put_group`), which it recognizes by their names and signatures: a Triton whose
+  methods differ is told so once and left as it is. A fork of Triton under another name (vLLM's `tokenspeed_triton`) is
+  not touched.
+- A kernel that the layer's tool accepts and the driver's compiler then refuses would fail at its
+  first launch; none did among the kernels run (2026-11-23).
+- Cubins made with it are sm_80 machine code that keeps its PTX: an ahead-of-time artifact
+  (AOTInductor, a saved Triton cache, a packaged kernel) built on a V100 with the switch is sm_80
+  code, which runs on a V100 through the layer and on Ampere and later GPUs, not on a Turing GPU.
+- The float16 sums of these kernels are Volta's tensor cores' truncated ones (above), wherever the
+  program asked for float32 accumulation: no setting gives Triton's rounded `fma` sums back but the
+  switch off.
+- A Python started through the launcher with the switch on runs the layer's `sitecustomize` at
+  its start, compiled each time in an installation of the archive (whose `python/` keeps no
+  bytecode, so that nothing is written into it): about 3.2 ms more per start; a process that
+  imports Triton compiles `volta_forever_triton.py` too, about 6.5 ms more, and one that compiles a
+  kernel for sm_80 the client of its helpers, about 7 ms more, and starts a helper (about 0.6 s, of
+  CPU time beside the program's; more from a cold disk) (`docs/performance.md`).
+- The first run after the switch is turned on, or off, compiles again every Triton kernel
+  (and Inductor's graphs) that the caches have only from the other way; they keep both. A first
+  run with the switch costs more than one without it: a cold `torch.compile` with max-autotune took
+  6 to 18 % longer in single jobs, about 13 % over the pooled runs (12 and 12, in six jobs of two
+  sessions; the same with Triton's cache on a network disk and in memory), of which about 8.8 s is
+  the driver compiling the PTX of each sm_80 kernel at its first launch (any compilation for sm_80
+  pays it, and the driver's cache keeps what it compiled) and 4 to 5 s the starts of the helpers;
+  later runs take the caches (`docs/performance.md`).
+- The rule that leaves skinny products to 7.5 (`SLOWER`) was fitted to one sweep on one V100 SXM2:
+  cells near its line (0.97 of off) measured on either side of it in another sweep (the method's
+  noise), vLLM's AWQ product of 5 rows stays at 0.95, and other V100s (PCIe, other clocks) and the
+  TITAN V were not measured.
+
 ## The capability told with `VF_CAPABILITY`
 
 `VF_CAPABILITY=8.0` (or later) is for programs whose kernels are PTX, which the layer then takes
@@ -502,13 +774,15 @@ What that does not cover:
   program that does not import it. With `VF_CAPABILITY=8.0` alone, Triton is then told 7.5, as
   PyTorch's CUDA runtime is, and its `tl.dot` runs without tensor cores ([Speed](#speed)).
   `VF_CAPABILITY_ALL=1` gives it 8.0 and the tensor cores, and gives PyTorch 8.0 too, with the
-  refusals of the first item. Told 8.0, Triton also computes a float32 `tl.dot` of its
-  default precision in tf32 (10 bits of mantissa), as on an Ampere GPU, where told 7.5 it
-  computes it in float32; a bf16 `tl.dot` told 8.0 runs on the layer's scalar bf16 products,
-  unless a `VF_BF16_TC_*` switch is set (`docs/emulations.md`, "bf16"); the `tf32x3` precision
-  is refused. With `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`, vLLM's engine (greedy and sampling)
-  and HTTP server gave the CPU's text with the small model of `tests/gpu/vllm.sh` (its stages b
-  to d, 2026-11-23); `transformers` with its default attention, which is PyTorch's, does not.
+  refusals of the first item (`VF_TRITON_TC` gives Triton the tensor cores at the default
+  capability: [Triton's matrix products](#tritons-matrix-products)). Told 8.0, Triton also
+  computes a float32 `tl.dot` of its default precision in tf32 (10 bits of mantissa), as on an
+  Ampere GPU, where told 7.5 it computes it in float32; a bf16 `tl.dot` told 8.0 runs on the
+  layer's scalar bf16 products, unless a `VF_BF16_TC_*` switch is set (`docs/emulations.md`,
+  "bf16"); the `tf32x3` precision is refused. With `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`,
+  vLLM's engine (greedy and sampling) and HTTP server gave the CPU's text with the small model of
+  `tests/gpu/vllm.sh` (its stages b to d, 2026-11-23); `transformers` with its default attention,
+  which is PyTorch's, does not.
   A program that does not itself import PyTorch can keep Triton from importing it with
   `TRITON_DEFAULT_BACKEND=nvidia`: Triton then asks the driver itself, and with
   `VF_CAPABILITY=8.0` it is told 8.0 while the libraries whose code runs from sm_75 machine code
@@ -829,9 +1103,15 @@ same everywhere:
   the same speed with `VF_SAFE=1` as without, Triton's with the same bits, while PyTorch's fp16
   attention (`scaled_dot_product_attention`, sm_75 machine code whose products pair) took 5.24 ms a
   call instead of 2.80, 1.9 times as long.
+- **Triton compiles for 7.5.** `VF_TRITON_TC`, set or by the launcher's default, is off: Triton's
+  float16 products are then computed with float32 `fma` as without the switch, not summed by
+  Volta's tensor cores ([Triton's matrix products](#tritons-matrix-products)); the kernels it
+  compiles and Triton's cache entries are those of a run without the switch.
 - **It is read once.** `libcuda.so.1` reads it when it is loaded, the nvJitLink adapter and the
   bf16 cuBLAS variants at their first use: a program that sets `VF_SAFE` while it runs does not get
-  safe mode from `libcuda.so.1`, and may get it from the others.
+  safe mode from `libcuda.so.1`, and may get it from the others. The layer's Python module reads it
+  at the start of each Python and again when Triton is imported: a program that sets it before it
+  imports Triton gets Triton's own compilation.
 
 ## Numerical accuracy
 
@@ -864,6 +1144,12 @@ same everywhere:
   another, and 128 x 128 x 64 with 2 stages a third, each differing from cuBLAS's in 0.09 to
   0.15 % of the outputs, by at most 0.03125. With B stored K x N, all six configurations gave the
   same bits (0.16 to 0.20 % of the outputs off cuBLAS's).
+- **Triton's products with `VF_TRITON_TC`**: float16 products on Volta's tensor cores, whose
+  truncated sums are less exact than Triton's `fma` path on long sums of one sign; bfloat16
+  products the same bits as without it in the GEMMs and the mixtures of experts measured, other
+  bits with the same largest error in 56 of 146 shapes of vLLM's attention; int8 products exact,
+  where without it Triton 3.3 to 3.9 cannot compile them for 7.5, so that there is no result
+  without it to compare with ([Triton's matrix products](#tritons-matrix-products)).
 - **Conversions of the 4-bit and 8-bit formats**: identical to an RTX 5090's on every value of
   the formats.
 - **Block-scaled products**: see the table above.

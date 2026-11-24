@@ -111,6 +111,7 @@ step launcher-dash dash tests/launcher/launcher.sh
 step launcher-bash bash --posix tests/launcher/launcher.sh
 step torch-workers python3 tests/gpu/torch-workers.py
 step vllm-engine-verdicts python3 tests/gpu/vllm-engine-verdicts.py
+step triton-tc python3 tests/python/triton_tc.py
 step install-syntax sh -c 'dash -n install.sh && bash --posix -n install.sh'
 step install-dash python3 tests/launcher/install.py
 step install-bash env VF_TEST_SHELL=bash python3 tests/launcher/install.py

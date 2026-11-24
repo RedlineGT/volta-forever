@@ -366,6 +366,202 @@ translation of a sum of scalar `fma` can reach the tensor cores, whose sums roun
 Told 8.0, Triton's cubins keep their PTX, which the layer lowers to Volta's products ("Pairs of
 products" in `docs/emulations.md`).
 
+#### With `VF_TRITON_TC`
+
+`VF_TRITON_TC=1` (off by default; `LIMITS.md`, "Triton's matrix products") makes Triton compile a
+kernel whose products are all float16, bfloat16 or int8 for sm_80 while it is told 7.5, as are
+PyTorch and NVML. The same kernels with the switch off (as today) and on, at the default
+capability, through the launcher of the build, in one session (2026-11-23, one V100,
+Triton 3.8.0 and PyTorch 2.14.0 of the vLLM 0.34.0 installation; TFLOPS from the median of three
+batches of three launches; GEMMs of 2048x7344x1536, or 16x7344x1536 for "16 rows", with float16
+outputs, each compared with float64 on the CPU over its first 256 rows; vLLM's kernels as in the
+table above, `fused_moe_kernel` with vLLM's default configuration for each number of tokens):
+
+| Kernel | Off | On |
+|---|---:|---:|
+| float16 GEMM, tiles 128x128x32, 8 warps, 1 stage | 0.23 | 37.9 |
+| the same, 3 stages | 0.23 | 31.2 |
+| float16, tiles 64x64x32, 4 warps, 3 stages | 3.24 | 28.3 |
+| float16, tiles 32x32x32, 2 warps, 1 stage | 3.09 | 24.7 |
+| float16, tiles 16x64x64, 4 warps, 2 stages | 2.35 | 17.3 |
+| float16, 16 rows, tiles 16x64x64, 1 stage | 1.53 | 5.18 |
+| float16, 16 rows, tiles 16x32x128, 2 warps, 2 stages | 0.35 | 5.24 |
+| float16, tiles 128x256x64, 8 warps, 4 stages (on: 3 stages, for 96 KiB of shared memory) | 0.18 | 1.32 |
+| float16, tiles 256x128x64, 8 warps, 3 stages (96 KiB) | 0.18 | 1.35 |
+| float16, tiles 128x128x128, 8 warps, 4 stages (on: 2 stages) | 0.26 | 27.7 |
+| bfloat16 GEMM, tiles 128x128x32, 3 stages | 0.22 | 11.8 |
+| bfloat16, tiles 64x64x32, 3 stages | 2.99 | 10.3 |
+| bfloat16, 16 rows, tiles 16x64x64, 1 stage | 1.52 | 2.28 |
+| bfloat16, 16 rows, tiles 16x128x64, 3 stages | 1.40 | 1.92 |
+| int8 GEMM 1024x4096x2048, tiles 32x64x64 (TOPS; off: Triton's compilation fails) | - | 28.3 |
+| float32 GEMM, tiles 64x64x32 (sm_75 both ways, the same cubin) | 5.42 | 5.71 |
+| vLLM's `fused_moe_kernel`, float16, 16, 256 and 2,048 tokens | 0.032, 0.093, 0.152 | 0.42, 4.63, 14.9 |
+| the same, bfloat16 | 0.034, 0.095, 0.150 | 0.23, 2.20, 6.39 |
+| vLLM's `kernel_unified_attention`, float16, prefill and decode | 2.58, 0.57 | 13.6, 1.83 |
+| the same, bfloat16 | 2.57, 0.55 | 5.21, 1.07 |
+
+Every output was within the same error of float64 off and on: 3.13e-4 against 3.14e-4 of the
+largest value for the float16 GEMMs (the rounding of float16), the same values for the bfloat16
+GEMMs, exact for int8. The errors of the products themselves, with float32 outputs, 256x256xK,
+tiles 64x64x32:
+
+| Operands, K | Off | On |
+|---|---:|---:|
+| float16, random of both signs, 4,096 | 2.3e-6 | 6.8e-6 |
+| float16, random of both signs, 16,384 | 4.8e-6 | 1.0e-5 |
+| float16, positive, 4,096 | 3.8e-6 | 8.5e-5 |
+| float16, positive, 16,384 | 7.2e-6 | 3.3e-4 |
+| bfloat16, every case above | 1.3e-6 to 7.3e-6 | the same |
+
+The float16 products run on Volta's tensor cores, whose sums are truncated (`docs/emulations.md`,
+section 1): on terms of one sign the sums come out low by up to about K x 2^-25 of their value.
+The bfloat16 products are the layer's scalar ones, float32 `fma` in the order of k: in the GEMMs
+and in vLLM's mixture of experts they gave the bits of Triton's `fma` path for 7.5.
+
+On the kernels of vLLM 0.34.0 and SGLang of `tests/gpu/triton_vendor.py` (full level), each case
+timed with its launches captured in a CUDA graph and replayed (the best of 7 replays of 20
+launches, each after 0.3 s of float16 products that raise the GPU's clocks: a V100 left with
+short kernels runs them at its base clock, 1,290 MHz, instead of 1,530, which made kernels that
+the switch does not change look 16 % slower), in four processes, off, on, on, off, the ratio the
+geometric mean of the two pairs, each case against Triton's interpreter (2026-11-24, one V100):
+
+| Products of the kernels compiled for sm_80 | Cases | Off / on, CUDA graphs: min, median, max | Slower | Against the interpreter, on (off) | Largest relative error, off / on | Bits of off |
+|---|---:|---|---:|---|---|---:|
+| float16, vLLM | 39 | 1.58, 4.49, 60.9 | 0 | 39 (38, and one MLA attention that needs 102,400 bytes of shared memory) | 6.4e-4 / 4.6e-4 | 15 of 38 |
+| float16, SGLang | 17 | 1.94, 6.43, 45.1 | 0 | 17 (17) | 4.3e-4 / 3.6e-4 | 7 of 17 |
+| bfloat16, vLLM | 12 | 1.19, 3.69, 16.2 | 0 | 12 (11, and one MLA attention) | 6.4e-3 / 6.4e-3 | 9 of 11 |
+| bfloat16, SGLang | 7 | 1.77, 5.35, 15.2 | 0 | 7 (6, and one MLA attention) | 5.5e-3 / 5.5e-3 | 5 of 6 |
+| int8 (`scaled_mm`), vLLM | 3 | (off: Triton's compilation fails) | - | 3 (0) | exact | - |
+| quantized weights, half-precision products (AWQ, `fused_moe` w8a16 and wna16), vLLM | 11 | 0.94, 1.26, 3.91 | 1 | 11 (11) | exact / exact | 11 of 11 |
+| the same, SGLang | 3 | 1.14, 1.22, 1.23 | 0 | 3 (3) | exact / exact | 3 of 3 |
+| kernels the switch does not change, both | 149 | 0.97, 1.00, 1.14 | none below 0.97 | as off | the same | all |
+
+The slower one is an AWQ product of 5 rows (35.5 us against 33.7). Where the float16 error is
+larger on (10 cases of attention and one of Mamba), it is about twice off's, at most 3.6e-4 of
+the largest value: the truncated sums of Volta's tensor cores. Timed eagerly, as in the first
+measures, the kernels that last a few tens of microseconds looked as fast or slower (vLLM's
+`kernel_unified_attention` at 0.71 to 1.01 for one case, 2.0 with CUDA graphs): the time Python
+takes to launch them hid theirs. vLLM's numbers come from the build before 0.1.4's release (the
+same translator), SGLang's from 0.1.4's, after the rule below.
+
+**Skinny products left to 7.5.** Two products that the review saw near the noise, one row of a
+bfloat16 product (tiles 16x128x64, 3 stages, B stored K x N) and the same in float16 with float16
+sums, timed again with CUDA graphs after 10 s of products, in 8 processes alternating
+off,on,on,off,off,on,on,off: 0.875 to 0.877 and 0.883 to 0.884, a spread under 1 %. A sweep of
+432 such products (bfloat16, and float16 with float16 sums; 1, 16 and 256 rows; tiles of 16, 32
+and 64 rows, 64 and 128 columns, k of 32 and 64; 1 to 3 stages; B stored K x N or N x K), four
+processes alternating, a warm-up before each measure: bfloat16 2.71 times faster in geometric
+mean, 41 of 216 cases slower, down to 0.53; float16 with float16 sums 2.87 times, 9 of 216
+slower, down to 0.66. Every case below 0.95 has B stored by rows (K x N), which Volta's products
+of the layer read with transposing loads, a small tile, and 1 or 16 rows; with B stored N x K
+every case is faster (1.04 to 32). The number of rows is not known when a kernel is compiled, how
+B is stored is (the sm_80 TTGIR loads it from shared memory of order [1, 0]): `SLOWER` in
+`python/volta_forever_triton.py` leaves to 7.5 a kernel all of whose products are bfloat16 ones
+of tiles of at most 32 rows and 16 x 128 x 64 elements with B stored by rows, or float16 ones with
+float16 sums of tiles of 16 rows and 128 columns or more with B stored so. On the sweep it leaves
+to 7.5 39 of the 41 slower bfloat16 cases (all those below 0.95) and 24 faster ones (geometric
+mean 1.44, mostly at 256 rows), the geometric mean going from 2.71 to 2.72 and the slowest case
+left at 0.98; and the 6 float16 cases below 0.95 with 12 faster ones (1.19), the slowest left at
+0.96. In vLLM's kernels it takes two (its paged attention and a chunk state of Mamba, both
+bfloat16), whose cases ran 1 and 2 % faster with them at 7.5 than at sm_80 (six processes, off,
+with the rule, without it, without it, with it, off); in SGLang's, none.
+
+The 0.97 line of the rule ("not slower than 0.97 of off") is within the noise of these measures.
+The third review measured some cells again (one V100, CUDA graphs, the best of 7 replays of 50
+after 8 s of products, five processes alternating): three cells that the rule keeps at sm_80 ran
+at 0.956 to 0.970 of off, and two that it leaves to 7.5, where on and off run the same kernel, at
+0.968 and 0.975 (their pairs 1.011 and 0.927, 1.000 and 0.952): for kernels of about 200 us the
+method's spread is a few percent, and a cell near 0.97 can fall on either side from one sweep to
+the next. The table is left as it was fitted, a decision of the project: the bfloat16 cell
+16x64x64 with B stored by rows stays at 7.5, which gives up 1.42 to 1.52 times at 256 rows for the
+0.73 to 0.76 it avoids at 1 and 16 rows (N = K = 4096; 1.15 at 16 rows for N = 7344, K = 1536);
+vLLM's AWQ product of 5 rows (not a cell of the table) stays at 0.946.
+
+What the switch costs besides (the build machine and one V100, 2026-11-24):
+
+- **Each Python's start.** With the switch on, a Python started through the launcher runs the
+  layer's `sitecustomize`, which installs an import hook. In the layout of an installed archive,
+  whose `python/` keeps no bytecode (its `__pycache__` is a file, so that nothing is ever written
+  into the installation), Python compiles `sitecustomize` at each start: `python3 -c pass` (vLLM's
+  environment, Python 3.12, the best of 30 alternated runs, 2026-11-24) took 3.2 ms more than
+  without it (3.0 in another such measure; 3.6 ms before `sitecustomize` was made shorter), of
+  which about 1.2 ms is Python's
+  first compilation in a process, whatever its size (a Python that starts from bytecode alone
+  compiles nothing). Bytecode shipped for the supported Pythons would need each of them when the
+  archive is made, or a `__pycache__` that no one may write, which an upgrade could not remove,
+  and that root would write: not done. With the switch off (the default) `python/` is not on
+  `PYTHONPATH`: nothing.
+- **Each process that imports Triton.** The hook reads `volta_forever_triton.py` (the patch and
+  the rules) when Triton is imported, compiled from its source (6.2 ms to compile): `import triton`
+  took 6.5 ms more than without the switch (vLLM's environment on a network disk, the best of 30
+  alternated runs, 2026-11-24; 8 to 11 ms in an earlier measure of the same kind). How a process
+  starts and asks its helpers
+  (`volta_forever_triton_client.py`, 6.4 ms to compile) is read at its first kernel that may be
+  compiled for sm_80, and the helper's own code only by the helper: a process that compiles no such
+  kernel (vLLM's front end, most of Inductor's processes) does not read them.
+- **The helpers.** The compilation for sm_80 runs in a helper of the process (`LIMITS.md`,
+  "Triton's matrix products"), started at its first eligible kernel. 12 float16 GEMM kernels
+  compiled for 7.5 in one process with Triton 3.8.0 (no GPU, 2026-11-24, three runs on, two off):
+  the first 0.90 s, of which about 0.55 s is starting the helper (its interpreter, the import of
+  Triton, the first compilation's set-up), the others 0.16 to 0.46 s each, against 0.26 to 2.34 s
+  without the switch
+  (Triton's `fma` code for 7.5 takes `ptxas` longer). The helper was 150 MB resident at its
+  largest. Each compilation runs the layer's tool once on its cubin (under 10 ms here) and
+  compiles nothing twice unless the sm_80 kernel needs fewer stages or is refused; a kernel that is
+  not eligible is compiled once, by Triton's own stages. The process checks each answer (its cubin,
+  and the PTX that the cubin keeps against the answer's: 0.9 ms for a kernel of 881 lines of PTX,
+  2.1 ms for one of 2,313).
+- **A first run.** What follows is the cost of a run whose caches are new (Triton's, Inductor's,
+  the layer's and the driver's): later runs take what the first one compiled. It is paid once per
+  kernel and per cache.
+- **torch.compile with max-autotune** (Inductor's Triton templates, 32 compile workers, four float16
+  products, every cache new, the layer's in memory; 2026-11-24, one V100 of a machine of 80
+  processors, so 8 places), in six jobs of two sessions (the author's three and a review's three,
+  each alternating off and on: off,on,on,off or on,off,off,on), 12 runs off and 12 on: the same
+  results (largest error 4.2e-4 relative, off and on), and on 6 to 18 % longer than off within a
+  job (5.9, 9.7, 10.5, 15.7, 16.7 and 18.1 %, from the medians of each job's runs). Pooled: with
+  Triton's cache on the network disk (8 and 8 runs), off median 54.95 s, on 61.9 s, 12.6 % more;
+  with it in memory (`/dev/shm`, 4 and 4), off 52.05 s, on 58.9 s, 13.2 % more: about 13 %, the same
+  either way (the network disk adds 3 to 4 s to off and to on alike). The spread from one job to
+  another is in the runs without the switch: their second product's precompilation takes about
+  11.5 s or about 16.3 s, in every session, and the jobs whose off runs fell mostly in the fast mode
+  gave 16 to 18 %, those whose off runs fell mostly in the slow one 6 to 10.5 %. Where the time
+  goes (Inductor's own figures, the same in every job): the first product's precompilation takes
+  14.6 to 15.4 s on against 10.4 to 10.7 off, 4 to 5 s more, the starts of the helpers (34 to 35 in
+  each run, 8 by the main process, which precompiles Inductor's choices in threads, 27 by 27 of the
+  32 workers, at most 8 at once); Inductor's benchmarking of the second product 11.8 to 12.2 s
+  against 3.1 to 3.3, about 8.8 s more: the first launch of an sm_80 kernel has the driver compile
+  its PTX (about 0.45 s each), which any compilation for sm_80 pays, whatever compiles it; and the
+  second product's precompilation 6.2 to 11.0 s on against 11.4 to 16.7 off, sm_80 kernels
+  compiling faster. No kernel fell back to 7.5 in any run. At most 8 helpers at once, 1.09 to 1.22
+  GB of resident sizes in all at their largest (296 to 348 MB of proportional set size: the pages
+  of Triton's library that they share counted once); none left after. The helpers' temporary
+  files in the temporary directory (`/dev/shm`) instead of Triton's cache directory on the network
+  disk took the same time in the same job (61.3 and 62.0 s against 59.9 and 61.6), and are where
+  they are now. With the helpers as they are now (their temporary files in the temporary directory,
+  `/dev/shm`, the places a best effort, found at the first eligible kernel), the same measure in
+  one job, off,on,on,off, Triton's cache on the network disk: off 57.6 and 52.8 s (one run in each
+  mode of the second precompilation, 16.3 and 11.7 s), on 62.9 and 61.3 s, 12.5 % more from the
+  medians, the first precompilation 15.0 to 15.2 s on against 10.5 off and the second benchmark
+  12.1 to 12.2 s against 3.3; 35 helpers started in each run, at most 8 at once, 1.21 GB of
+  resident sizes in all at their largest, 348 to 350 MB proportional; the same results (largest
+  error 3.6e-4 to 4.3e-4 relative, off and on). In the first session, the shared compile service of before (its tree as it was,
+  the same measure, 8 runs in two jobs): off 54.4 to 58.3 s (median 57.1), on 61.5 to 63.9 s
+  (median 62.0: 8.5 % more than its own runs off), within the same spread; 9 processes of it at
+  most, 893 to 978 MB of resident sizes in all (186 to 204 MB proportional): the helpers hold more
+  memory than the service's children, which were copies of one process and shared its pages.
+  Before a helper stopped reading all of `libtriton.so` at its start (`triton_key()`, 0.4 s each)
+  and gave its place up after 1 s, the same 8 runs were at 36 % more (72 to 80 s on). The layer's
+  cache does not shorten a first run; a run after it takes the driver's cache
+  (`~/.nv/ComputeCache`) and Triton's: the cost is that of a first run. Compiling the sm_70 code
+  ahead in a helper would need either a CUDA context in it (a GPU held by a process made to hold
+  none) or another compiler than the driver's: not done.
+- **vLLM's engine started with every cache new** (`tests/gpu/vllm.sh`, stage c, 4 of its 36
+  Triton kernels compiled for sm_80; the layer's cache in memory, new for each run), in two jobs:
+  off,on,on,off and on,off,off,on: off 114.3 to 131.2 s (median 118.7; the engine made in 83.9 to
+  96.2 s), on 114.8 to 121.3 s (median 120.1; 85.0 to 87.5 s), one helper at most, none left
+  after; decoding at 76 to 95 tokens a second either way, as the machine's other work lets it.
+
 ### Registers
 
 A translation needs registers of its own: one for each uniform register of the function, two

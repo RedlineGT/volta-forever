@@ -110,7 +110,7 @@ name="volta-forever-${version}-linux-x86_64"
 staging=$(mktemp -d "${TMPDIR:-/tmp}/volta-forever-pkg.XXXXXXXX")
 trap 'rm -rf "$staging"' EXIT
 pkg="$staging/$name"
-mkdir -p "$pkg/lib" "$pkg/forward" "$pkg/bin" "$pkg/scripts"
+mkdir -p "$pkg/lib" "$pkg/forward" "$pkg/bin" "$pkg/scripts" "$pkg/python"
 
 # lib/: the proxy, the audit library, the nvJitLink adapter
 cp "$out/lib/libcuda.so.1"       "$pkg/lib/"
@@ -135,6 +135,14 @@ if [ "${#bf16_missing[@]}" -eq 0 ]; then
         cp "$out/forward/bf16tc/$lib" "$pkg/forward/bf16tc/"
     done
 fi
+
+# python/: what the launcher puts first in PYTHONPATH with VF_TRITON_TC (Triton's products)
+cp "$root/python/sitecustomize.py" "$root/python/volta_forever_triton.py" \
+    "$root/python/volta_forever_triton_client.py" "$root/python/volta_forever_triton_helper.py" "$pkg/python/"
+# An empty file where Python would make python/__pycache__: it then writes no compiled file into
+# the installation when a program starts (the modules of VF_TRITON_TC are read without writing
+# one).
+: >"$pkg/python/__pycache__"
 
 # scripts/: what a user needs to fetch the CUDA 12.9 libraries
 cp "$root/scripts/fetch-redist.py" "$pkg/scripts/"
@@ -164,6 +172,7 @@ cp "$root/crates/vf-tables/LICENSE" "$pkg/LICENSE.LGPL-2.1"
 echo "--- verifying archive contents ---"
 expected_lib="libcuda.so.1 libnvJitLink.so.13 libvf_audit.so"
 expected_bin="vf vf-ptxas vf-translate volta-forever"
+expected_python="__pycache__ sitecustomize.py volta_forever_triton.py volta_forever_triton_client.py volta_forever_triton_helper.py"
 fail=0
 
 # Check lib/: only the three expected files
@@ -183,6 +192,15 @@ for f in "$pkg/bin/"*; do
     case " $expected_bin " in
         *" $fname "*) ;;
         *) echo "ERROR: unexpected file in bin/: $fname"; fail=1 ;;
+    esac
+done
+
+# Check python/: the two modules alone
+for f in "$pkg/python/"*; do
+    fname=$(basename "$f")
+    case " $expected_python " in
+        *" $fname "*) ;;
+        *) echo "ERROR: unexpected file in python/: $fname"; fail=1 ;;
     esac
 done
 

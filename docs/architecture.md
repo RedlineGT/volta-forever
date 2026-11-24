@@ -839,6 +839,17 @@ the nvJitLink adapter, `vf ptxas`, `vf adapt`), and the runtime of the bf16 cuBL
 its tensor-core path. The policy keeps it (`Policy::safe`), so the cache of section 3 keeps what
 is made with it and without it apart. The launcher decides it in one function, `safe_mode`.
 
+### Triton
+
+`VF_TRITON_TC` (launcher): Triton compiles a kernel whose products all multiply float16,
+bfloat16 or int8 for sm_80 where it would compile it for 7.5. It is not in the layer's libraries:
+the launcher puts `python/` first in `PYTHONPATH`, whose `sitecustomize` hooks the import of
+Triton's backends and patches the stages of its NVIDIA backend
+(`python/volta_forever_triton.py`; `LIMITS.md`, "Triton's matrix products"). The compilation
+for sm_80 runs in helpers, child processes of the program's that `python/volta_forever_triton_client.py`
+(read at the first kernel that may be compiled for sm_80) starts and asks through a socket pair;
+the helper's own code is `python/volta_forever_triton_helper.py`.
+
 ### Cache
 
 `VF_PROXY_CACHE`, `VF_PROXY_CACHE_MAX`: where the cache of section 3 is, and how large it may

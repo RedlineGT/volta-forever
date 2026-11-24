@@ -3,8 +3,8 @@
 What is here: the tests on a GPU (`tests/gpu/`), from single kernels to whole engines; the
 tests of the machine-code translator, which need no GPU (`tests/sass/`); a test of the
 forwarding libraries' stack handling (`tests/forward/`); the launcher tests
-(`tests/launcher/`); and the kernels, programs and reference vectors that they use
-(`tests/kernels/`). `docs/validation.md` says what each of them can and cannot show.
+(`tests/launcher/`); the tests of `VF_TRITON_TC` on the host (`tests/python/`); and the kernels,
+programs and reference vectors that they use (`tests/kernels/`). `docs/validation.md` says what each of them can and cannot show.
 
 ## Settings
 
@@ -214,7 +214,8 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 | `profile-torch.sh` | PyTorch with the layer's profile | the profile has the right columns | 15 min | both PyTorch wheels |
 | `launcher.sh` | PyTorch and llama.cpp through the launcher (`vf`), a virtual environment made by `vf venv` whose Python is started with no prefix, and `VF_SAFE=1` with `VF_CUBLAS_BF16_TC=1` | a matmul against the CPU (within 1e-3); the forwarding cuBLAS in `/proc/self/maps`; text from llama.cpp; the layer says that it is there, by its variable and by the functions of `libcuda.so.1`; with safe mode, what `vf doctor` says holds: the bf16 cuBLAS variants (`bf16-safe.c`) give cuBLAS 12.9's bits with no call on their tensor-core path, and other bits without `VF_SAFE` | 10 min | PyTorch 2.14.0+cu130 wheel, demos |
 | `vllm-topk-topp-run.sh` | vLLM's top-k and top-p sampling kernel (Triton), 18 cases, in two passes, each with a proxy cache of its own: at `VF_BORROW=1` (levels 2, 1, 0), then at `VF_BORROW=5` (level 3 with room made, as the second translation at launch translates) | the same kernel run on the CPU by Triton's interpreter | not timed | vLLM, PyTorch, Python headers; the GPU chosen by `CUDA_VISIBLE_DEVICES` |
-| `triton.sh` | 180 Triton kernels and configurations (the quick subset of `triton_corpus.py`, run by `triton-diff.py`): element-wise operations in every type, conversions, reductions, scans, sorts, `tl.dot` in several types, precisions, tiles, warps and stages, attention, gathers, atomics, loops, grids, libdevice; each through the translated machine code (5 runs) and through the retargeted PTX of the same kernel (2 runs) | Triton's interpreter on the CPU, or a PyTorch computation on the CPU; the runs and the two routes with each other | 4 min (2 of them for the interpreter) | PyTorch 2.14.0+cu130 with its Triton, numpy (`VF_TRITON_EXTRA`), Python headers; or `VF_TRITON_PYTHON` |
+| `triton-tc.sh` | Triton's matrix products with `VF_TRITON_TC` off, on, off again and on again, through the launcher of this tree, in four processes that share one cache of Triton: GEMMs of float16 (four configurations, one whose pipelined sm_80 kernel needs more than 96 KiB of shared memory), bfloat16, int8 and float32; with `VF_VLLM_VENV`, vLLM's `fused_moe_kernel` and `kernel_unified_attention` in float16 and bfloat16, and `torch.compile` of a matrix product with Inductor's Triton template alone | float64 on the CPU; on against off: what PyTorch, Triton and NVML are told (7.5 both), the target of each kernel's PTX (sm_80 on for the three types, sm_75 for float32 with the bits of off), the time (less on), the bits of the second off and on against the first | 15 min | PyTorch 2.14.0+cu130 with its Triton (or `VF_VLLM_VENV`), Python headers, the layer built with the forwarding and CUDA 12.9.2 libraries the launcher finds |
+| `triton.sh` | 180 Triton kernels and configurations (the quick subset of `triton_corpus.py`, run by `triton-diff.py`): element-wise operations in every type, conversions, reductions, scans, sorts, `tl.dot` in several types, precisions, tiles, warps and stages, attention, gathers, atomics, loops, grids, libdevice; each through the translated machine code (5 runs) and through the retargeted PTX of the same kernel (2 runs) | Triton's interpreter on the CPU, or a PyTorch computation on the CPU; the runs and the two routes with each other | 4 min (2 of them for the interpreter) | PyTorch 2.14.0+cu130 with its Triton, numpy (`VF_TRITON_EXTRA`), Python headers; or `VF_TRITON_PYTHON`. `VF_TRITON_TC` puts `python/` first in `PYTHONPATH` (the kernels of its types are then compiled for sm_80, and their verdicts say so); `VF_TRITON_VENDOR=1` adds the kernels of vLLM or SGLang (`triton_vendor.py`) |
 | `sglang-decode-graph.py` | SGLang's FP16 decode attention captured in CUDA graphs and replayed with new inputs, run through the layer with SGLang and PyTorch on `PYTHONPATH` | the CPU in FP32 | not timed | SGLang, PyTorch |
 
 (Times on one V100 with everything already compiled and in the file cache.)
@@ -284,11 +285,68 @@ exit status, standard input, a child process), what it refuses, how it is turned
 
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
-| `launcher.sh` | 113 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
+| `launcher.sh` | 114 checks; run it under `dash` and under `bash --posix` | seconds | the launcher (`scripts/vf`); python3 3.10 or later with `venv` for the checks of `vf venv` |
 | `install.py` | `install.sh` on local releases: an upgrade that keeps the CUDA 12.9.2 libraries and the `vf venv` environments of the release before, installs stopped half-way, two at once, what killed ones left, plain HTTP refused, redirections from HTTPS (through curl and through wget); under `dash`, or `bash --posix` with `VF_TEST_SHELL=bash` | seconds | dash, flock, python3 3.10 or later with `venv`; openssl for the redirections (skipped without it) |
 | `fetch-redist.py` | `scripts/fetch-redist.py` on local archives: retries after an interruption, concurrent fetches, runtime-only installs, the NCCL wheel, a failure or a signal half-way, a component killed while it is moved into place (the journal, which the next fetch completes), what an interrupted fetch left, a manifest over plain HTTP | seconds | python3, tar |
 
 Run the last two with `python3 tests/launcher/install.py` and `python3 tests/launcher/fetch-redist.py`.
+
+### Tests of `VF_TRITON_TC` (`tests/python/`)
+
+No GPU needed. `python3 tests/python/triton_tc.py` (74 cases, 67 without a Triton; the layer
+built, for the marker of its `libcuda.so.1`; python3 3.9 or later with `venv`; a short `TMPDIR`,
+for the socket of `multiprocessing`'s forkserver) runs the launcher on an installation of the
+archive's layout made for the test, with a stand-in for the offline tool and a stand-in for Triton
+(a package `triton` whose `CUDABackend` has the methods of Triton 3.3 to 3.9 and makes cubins with
+a table of sections): the `PYTHONPATH` that the launcher gives, its default and `VF_SAFE`; the
+import hook in a Python it starts, in that Python's children, in workers of `multiprocessing`
+(spawn, fork, forkserver), in a `vf venv` environment started with no prefix; two copies of
+`python/` on the path; the `sitecustomize` of the user, of the distribution and of an import finder
+still run, and `importlib.reload` of it; nothing under `-I`, `-E`, `-S`, nothing written into
+`python/`; which kernels are compiled for sm_80 and which keep Triton's stages (the guards: a stage
+replaced by a hook, several CTAs, an unknown size of shared memory; the skinny products of
+`SLOWER`); fewer stages for the shared memory, and the stages used in the metadata; every failure
+of the sm_80 compilation (an error, a crash or a hang of the compiler in a helper, a helper killed
+or stopped from outside, one killed while its `ptxas` runs, a helper that cannot import Triton,
+imports it slowly or never, one that ends on its own as a request reaches it, an executable that
+is not the interpreter, another Triton in the
+helper, too much shared memory, a cubin without its PTX, a kernel that the tool refuses or makes
+trap) leaves the kernel to Triton, and what Triton's cache keeps of it; the helpers of a process
+tree (threads, a `fork()` once the program has helpers, processes it starts, `multiprocessing`'s
+workers, a helper started by a thread that ended, a `fork()` while another thread holds the
+module's lock) and their end (idle, with the program killed during a compilation and its `ptxas`,
+when the program ends during one, by its own bound when it cannot see its program end); what a
+helper runs of the program (`-I -S`, its environment, `sys.path`, working directory, session,
+descriptors, no bytecode where the program writes none); its temporary files (in the temporary
+directory where Triton writes, removed, nothing of the places' directory removed; a FIFO or a link
+where the cubin is, its directory renamed and replaced during a compilation); the places of the
+helpers (2 places for 6 processes, places held without end: one wait per process, an idle helper
+that gives its place up, 100 processes at once, lock files that cannot be used: no wait, the
+directory of Triton's cache when the first eligible kernel is compiled, that directory replaced by
+a link after it was opened); a Triton changed on disk under the program; a subreaper program, an
+`exec()`, a `fork()` after the program closed its descriptors, an abort tried again once, much
+written before a crash, no process that can be started; what a request may ask (each value: `ptxas` options, libraries, an IR,
+plain values without a line end, a path of 7 MB, JSON nested too deep, a message over 64 MiB) and
+what an answer must be (not an ELF, for another SM, a kept PTX that is not the answer's, a changed
+metadata); the bounds of each wait (a stopped helper, the program stopped during a compilation, a
+program with no descriptor left, one that closes its descriptors, a compilation whose `ptxas`
+outlives it, a send to a closed peer with SIGPIPE at its default); `ptxas` ended from outside or
+out of disk; 1,100 descriptors; the mark in the backend's hash and in `triton_key` (with the
+layer's settings), and its absence in a process that can use no helper; when nothing is done (not
+a Volta, `VF_CAPABILITY`, `VF_SAFE=1`, no layer, a Triton whose methods differ); and, read in the
+process, the rule of `SLOWER`, the checks of an answer's cubin and kept PTX, the messages, the
+values of a request. With `VF_TRITON_PYTHON` (a Python with Triton; with `PYTHONPATH` naming
+another Triton, that one), 7 more through the launcher of this tree and its tool:
+`tests/python/triton_tc_compile.py` compiles kernels for 7.5 (float16, bfloat16 and int8 products
+made for sm_80, each cubin the same as that of the helper's `compile80` run in the process, for six
+configurations; float32 and no product the same cubin as off; the cache used off, on, off, on, and
+with `VF_TRANSLATE=first` or `VF_PAIRS=0`; a failure of the tool that leaves nothing in the cache;
+fewer stages for a block of 128x256x64; `TRITON_DISABLE_LINE_INFO=1` keeps sm_75; a skinny
+bfloat16 product with B stored K x N at 7.5, with B stored N x K at sm_80). They were run with
+Triton 3.3.1, 3.4.0, 3.5.1, 3.6.0, 3.7.1, 3.8.0 and 3.9.0 (2026-11-24, CPython 3.12; each installed
+alone, without its dependencies, in a directory given by `PYTHONPATH`; with 3.3.1 two are skipped:
+Triton alone compiles no product of halves for 7.5), and the 67 others with CPython 3.9 to 3.14
+and PyPy 3.10 and 3.11.
 
 ### Tests of the machine-code translator (`tests/sass/`)
 
@@ -502,6 +560,7 @@ checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit
 `log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
+`tests/python/triton_tc.py` (without a Triton);
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test
 kernels; then `install.sh` on five distributions. It does not run `jitlink_objects.py` and
