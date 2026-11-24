@@ -32,11 +32,22 @@ reverse engineering them to debug such modifications.
 2. No NVIDIA software
 ---------------------
 
-The archive contains no file of NVIDIA's. The forwarding libraries (forward/) are generated
-from lists of symbol names and contain no NVIDIA code. forward/bf16tc/libvf_cublas_bf16.so, the
-runtime of the opt-in bf16 cuBLAS variants, holds sm_70 machine code that NVIDIA's CUDA 12.9.2
-compiler made from this project's source crates/vf-fwdgen/bf16tc/kernels.cu, which uses no
-routine of an NVIDIA library or header (crates/vf-fwdgen/bf16tc/kernels.manifest;
+The archive contains no file of NVIDIA's. forward/bf16tc/libvf_cublas_bf16.so is built against
+crates/vf-fwdgen/bf16tc/decls.h, a header written for this project that declares the part of
+the programming interfaces of NVIDIA's CUDA driver, cuBLAS and cuBLASLt that the runtime calls:
+the names, types and values of those functions, enumerations and structures as NVIDIA's CUDA
+12.9 headers define them, which vf-fwdgen checks against those headers when it builds the
+runtime. It contains no text of NVIDIA's headers or documentation. These interfaces are
+NVIDIA's; they are declared here only so that the runtime can work with NVIDIA's libraries,
+which it opens at run time and does not contain. NVIDIA publishes declarations of the same
+interfaces under the Apache License 2.0 in its cuda-python and nvmath-python projects
+(https://github.com/NVIDIA/cuda-python, https://github.com/NVIDIA/nvmath-python). The
+forwarding libraries (forward/) are generated from lists of symbol names and contain no NVIDIA
+code. forward/bf16tc/libvf_cublas_bf16.so, the runtime of the opt-in bf16 cuBLAS variants,
+holds sm_70 machine code that NVIDIA's CUDA 12.9.2 compiler made from this project's source
+crates/vf-fwdgen/bf16tc/kernels.cu, which calls no routine of an NVIDIA library: it uses only
+built-in functions of the CUDA language (such as __ldg and __shfl_xor_sync), which the compiler
+turns into single instructions (crates/vf-fwdgen/bf16tc/kernels.manifest;
 scripts/build-bf16-kernels.sh rebuilds it to the same bytes). scripts/fetch-redist.py downloads
 the CUDA 12.9 libraries that a user needs from NVIDIA's own public redistributable archives,
 under NVIDIA's licence, onto the user's machine.

@@ -108,7 +108,10 @@ The rules agents break most often:
   check Python/Rust agreement, run the unit tests and verify the affected kernels on a V100.
 - **An emulation states its arithmetic** in `docs/emulations.md`, and its expected values come
   from the hardware that has the instruction, or from the PTX manual with that said.
-- **Nothing of NVIDIA's in the repository.**
+- **Nothing of NVIDIA's in the repository:** no library, header, documentation or tool, and no
+  text taken from them. The one header that declares NVIDIA's interfaces,
+  `crates/vf-fwdgen/bf16tc/decls.h`, is this project's own text (names, types and values only,
+  checked against the toolkits' headers when the runtime is built; NOTICE, section 2).
 
 Build and check, without a GPU:
 
