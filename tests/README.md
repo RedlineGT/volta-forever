@@ -115,7 +115,11 @@ Where the GPU scripts write:
   cuBLASLt calls that keep 12.9's behaviour: an explicit algorithm other than 12.9's heuristic one,
   and a workspace size without a workspace (`bf16-lt.c`); the tensor-core path's fallback in the TN
   layout of linear layers, bit for bit against a host model, also with failing rows and columns spread
-  over the chunks of a call, there against cuBLAS 12.9 too (`bf16-fallback.c`); the runtime told
+  over the chunks of a call, there against cuBLAS 12.9 too (`bf16-fallback.c`); verify mode, every
+  skinny call of each kind (entry points, layouts, output types, C read, scalars on the device, an
+  unaligned C) and a tensor-core call's fallback elements against 12.9, eager and replayed from a graph,
+  silent when nothing differs, failing with a fat binary that changes one element of the skinny kernel's
+  (`bf16-verify.c`), and bf16-graphs' cases with the skinny path's calls captured under it; the runtime told
   the real capability under the layer's settings, under both module loading modes
   (`CUDA_MODULE_LOADING=EAGER` and `LAZY`);
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the

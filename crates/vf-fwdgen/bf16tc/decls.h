@@ -83,6 +83,11 @@ typedef enum CUmemLocationType_enum {
     CU_MEM_LOCATION_TYPE_DEVICE = 1
 } CUmemLocationType;
 
+typedef enum CUstream_flags_enum {
+    CU_STREAM_DEFAULT = 0x0,
+    CU_STREAM_NON_BLOCKING = 0x1
+} CUstream_flags;
+
 typedef struct CUmemLocation_st {
     CUmemLocationType type;
     int id;
@@ -125,6 +130,8 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
 CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream);
 CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
 CUresult cuStreamSynchronize(CUstream hStream);
+CUresult cuStreamCreate(CUstream *phStream, unsigned int Flags);
+CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize);
 CUresult cuGetErrorName(CUresult error, const char **pStr);
 
 /* ---- library types (library_types.h) ----------------------------------------------------- */

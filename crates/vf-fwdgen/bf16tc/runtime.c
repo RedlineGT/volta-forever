@@ -124,6 +124,7 @@ static struct {
     int tc_safe;        /* VF_CUBLAS_BF16_TC=1 turned off by VF_SAFE=1: its calls are counted for safe mode */
     int measured_build; /* the cuBLAS the skinny path's rule was measured on */
     int tc_min_k;       /* VF_TC_MIN_K (test builds: VF_BF16_TC_MIN_K, for the controls that move it) */
+    int verify;         /* VF_CUBLAS_BF16_VERIFY=1: every call a path serves also computed by 12.9, compared */
 } cfg;
 static int g_on; /* a switch is set and the CUDA 12.9 libraries are there */
 
@@ -238,6 +239,8 @@ static struct {
     FN(cuMemcpyDtoH_v2) MemcpyDtoH;            /* and read for the exit report */
     FN(cuCtxPushCurrent_v2) CtxPushCurrent;
     FN(cuCtxPopCurrent_v2) CtxPopCurrent;
+    FN(cuStreamCreate) StreamCreate; /* verify mode: a stream of the runtime's own, and its scratch memory */
+    FN(cuMemAlloc_v2) MemAlloc;
 } cu;
 #undef FN
 
@@ -313,7 +316,8 @@ static void bind_driver(void)
                 BIND(d, cu.MemFreeAsync, "cuMemFreeAsync") && BIND(d, cu.MemsetD32Async, "cuMemsetD32Async") &&
                 BIND(d, cu.GetErrorName, "cuGetErrorName") && BIND(d, cu.StreamSynchronize, "cuStreamSynchronize") &&
                 BIND(d, cu.MemcpyDtoH, "cuMemcpyDtoH_v2") && BIND(d, cu.CtxPushCurrent, "cuCtxPushCurrent_v2") &&
-                BIND(d, cu.CtxPopCurrent, "cuCtxPopCurrent_v2");
+                BIND(d, cu.CtxPopCurrent, "cuCtxPopCurrent_v2") && BIND(d, cu.StreamCreate, "cuStreamCreate") &&
+                BIND(d, cu.MemAlloc, "cuMemAlloc_v2");
     if (!g_cuda_ok) say("a function is missing from libcuda.so.1; every call is forwarded");
 #ifdef VF_BF16_TEST
     *(void **)&test_module_unload = dlsym(d, "cuModuleUnload");
@@ -381,8 +385,10 @@ static atomic_ullong st_tc_captured[API_N];
 static atomic_ullong st_tc_elems; /* the elements (m * n) of the calls the tensor-core path served, every entry point */
 static int read_stats(unsigned long long out[3], int *made);
 
+static void report_verify(void);
 static void report(void)
 {
+    if (cfg.verify) report_verify();
     if (cfg.level < 2) return;
     for (int a = 0; a < API_N; ++a) {
         const unsigned long long calls = atomic_load(&st_calls[a]);
@@ -435,6 +441,7 @@ static void init(void)
 #endif
     cfg.tc = switch_value("VF_CUBLAS_BF16_TC", 0);
     cfg.skinny = switch_value("VF_CUBLAS_BF16_SKINNY", cfg.tc);
+    cfg.verify = switch_value("VF_CUBLAS_BF16_VERIFY", 0);
     /* VF_SAFE=1 keeps the conservative paths: the tensor-core path, whose results differ from 12.9's,
      * serves nothing whatever VF_CUBLAS_BF16_TC says; the skinny path, which gives 12.9's bits, stays. Only
      * the exact value 1 turns safe mode on; any other value (empty, 0, true, yes, " 1", ...) leaves it off. */
@@ -448,6 +455,7 @@ static void init(void)
         cfg.tc = 0;
         cfg.tc_safe = !CONTROL("safe-domain"); /* control: counted as outside the paths' domains, as before */
     }
+    if (cfg.verify && !cfg.tc && !cfg.skinny) say("VF_CUBLAS_BF16_VERIFY=1 with both paths off: nothing to verify");
     if (!cfg.tc && !cfg.skinny) return;
     if (!bind_libraries()) {
         say("every call is forwarded");
@@ -500,6 +508,11 @@ typedef struct Ctx {
     cublasLtHandle_t lt; /* the internal fp16 GEMM's, never the caller's */
     atomic_int stats_made;  /* the fallback's counters (abi.h, VfFbArgs.stats): 0 not made yet, 1 there, -1 not */
     CUdeviceptr stats;
+    CUfunction copy, compare; /* verify mode's */
+    atomic_int vmade;         /* verify mode: its stream and signature counters, 0 not made yet, 1 there, -1 not */
+    CUstream vstream;         /* the runtime's own non-blocking stream, to zero what it allocates */
+    CUdeviceptr vslots;       /* VF_VERIFY_SLOTS signatures' counters (abi.h, VfCmpArgs.slot) */
+    struct VScratch *vscr;    /* each stream's scratch buffer, under g_setup_mu */
 } Ctx;
 
 static Ctx g_no_ctx = {.kernels = -1, .tc = -1}; /* a handle whose context has no state: every call forwarded */
@@ -579,7 +592,10 @@ static void setup_kernels(Ctx *x)
         !load_function(x, &x->epilogue, "vf_bf16_epilogue", VF_EPI_ROWS, 0, max_smem) ||
         !load_function(x, &x->fb_wide, "vf_bf16_fallback_wide", 256, 0, max_smem) ||
         !load_function(x, &x->fb_narrow, "vf_bf16_fallback_narrow", 256, 0, max_smem) ||
-        !load_function(x, &x->fb_tn, "vf_bf16_fallback_tn", 256, VF_BF16_FB_TN_SMEM, max_smem))
+        !load_function(x, &x->fb_tn, "vf_bf16_fallback_tn", 256, VF_BF16_FB_TN_SMEM, max_smem) ||
+        /* verify mode's kernels, only with it on */
+        (cfg.verify && (!load_function(x, &x->copy, "vf_bf16_copy", 256, 0, max_smem) ||
+                        !load_function(x, &x->compare, "vf_bf16_compare", 256, 0, max_smem))))
         goto fail;
     for (int i = 0; i < SK_N; ++i)
         for (int fast = 0; fast < 2; ++fast) {
@@ -698,6 +714,8 @@ typedef struct {
     Ctx *ctx;
     atomic_int workspace_ok;
     int lt; /* made by cublasLtCreate (else cublasCreate: usable as a cuBLASLt handle too) */
+    atomic_ullong ws_size; /* verify mode's reports: the workspace set (SIZE_MAX: cuBLAS's default) */
+    atomic_uint ws_mod;    /* and its address modulo 256 */
 } HState;
 
 /* Handle -> state, for handles of both APIs. A sorted array read without a lock under a sequence
@@ -777,6 +795,8 @@ static void handle_add(const void *h, Ctx *ctx, int lt)
     x->ctx = ctx;
     x->lt = lt;
     atomic_init(&x->workspace_ok, default_workspace_ok());
+    atomic_init(&x->ws_size, (unsigned long long)SIZE_MAX);
+    atomic_init(&x->ws_mod, 0u);
     pthread_mutex_lock(&g_h_mu);
     HTab *t = g_ht;
     const size_t n = t ? t->n : 0;
@@ -862,7 +882,10 @@ EXPORT cublasStatus_t vf_bf16_cublasSetStream_v2(cublasHandle_t handle, cudaStre
 {
     const cublasStatus_t s = cb.SetStream(handle, stream);
     HState *h = s == CUBLAS_STATUS_SUCCESS ? handle_state(handle) : NULL;
-    if (h) atomic_store_explicit(&h->workspace_ok, default_workspace_ok(), memory_order_relaxed);
+    if (h) {
+        atomic_store_explicit(&h->workspace_ok, default_workspace_ok(), memory_order_relaxed);
+        atomic_store_explicit(&h->ws_size, (unsigned long long)SIZE_MAX, memory_order_relaxed);
+    }
     return s;
 }
 
@@ -872,10 +895,13 @@ EXPORT cublasStatus_t vf_bf16_cublasSetWorkspace_v2(cublasHandle_t handle, void 
     HState *h = s == CUBLAS_STATUS_SUCCESS ? handle_state(handle) : NULL;
     /* A workspace that is not 256-byte aligned counts as too small: with 4 MiB at 8 to 255 bytes past such an
      * address, 12.9 ran gemmSN_TN_kernel, not its sequential kernel, at TN 448 x 8 x 256 (tests/gpu/forward/bf16-lt.c). */
-    if (h)
+    if (h) {
         atomic_store_explicit(&h->workspace_ok,
                               size >= VF_SEQ_MIN_WORKSPACE && ((uintptr_t)workspace % 256 == 0 || CONTROL("ws-align")),
                               memory_order_relaxed);
+        atomic_store_explicit(&h->ws_size, (unsigned long long)size, memory_order_relaxed);
+        atomic_store_explicit(&h->ws_mod, (unsigned)((uintptr_t)workspace % 256), memory_order_relaxed);
+    }
     return s;
 }
 
@@ -904,6 +930,7 @@ typedef struct {
     const unsigned short *A, *B;
     long long lda, ldb;
     VfOut o;
+    const struct VRef *ref; /* verify mode: the call as it came, to make 12.9's (NULL when verify mode is off) */
 } Call;
 
 enum { PATH_NONE, PATH_SKINNY, PATH_TC };
@@ -1004,6 +1031,374 @@ static CUresult launch(Ctx *x, CUfunction f, unsigned gx, unsigned gy, unsigned 
     return cu.LaunchKernel(f, gx, gy, 1, bx, 1, 1, smem, s, params, NULL);
 }
 
+/* ---- verify mode (VF_CUBLAS_BF16_VERIFY=1) ------------------------------------------------ */
+
+/* The call as the program made it. cuBLAS 12.9 is called the same way, through the same entry point, handle (so
+ * with its workspace, pointer mode, math mode and stream), descriptors, algorithm and workspace, with only its
+ * output in a scratch buffer that has the output's address modulo 256 and leading dimension (and, when the call
+ * reads C, a copy of C made before the call wrote D, with C's). */
+typedef struct VRef {
+    int api;
+    cublasHandle_t h; /* the legacy entry points */
+    cublasOperation_t ta, tb;
+    int64_t m, n, k, lda, ldb, ldc, batch;
+    long long sa, sb, sc;
+    const void *alpha, *beta, *A, *B;
+    cudaDataType at, bt, ct;
+    cublasComputeType_t comp;
+    cublasGemmAlgo_t algo;
+    cublasLtHandle_t lh; /* cublasLtMatmul */
+    cublasLtMatmulDesc_t desc;
+    cublasLtMatrixLayout_t Ad, Bd, Cd, Dd;
+    const cublasLtMatmulAlgo_t *lalgo;
+    void *ws;
+    size_t wss;
+    cudaStream_t stream;
+} VRef;
+
+#define VF_VERIFY_SLOTS 1024 /* call signatures counted apart; past them, the last slot counts the others together */
+#define VF_VERIFY_WORDS 5    /* abi.h, VfCmpArgs.slot */
+
+typedef struct VScratch {
+    CUstream s;
+    CUdeviceptr base;
+    size_t size;
+    struct VScratch *next;
+} VScratch;
+
+static struct {
+    char *what[VF_VERIFY_SLOTS]; /* what the report says of each signature: enough to make the call again */
+    unsigned long long hash[VF_VERIFY_SLOTS];
+    int tc[VF_VERIFY_SLOTS];     /* 1: the tensor-core path's fallback elements; 0: the skinny path's call */
+    int m[VF_VERIFY_SLOTS], dtype[VF_VERIFY_SLOTS];
+    int full; /* a signature found no slot: the last counts the others */
+} g_vsig;
+static pthread_mutex_t g_vsig_mu = PTHREAD_MUTEX_INITIALIZER;
+static atomic_ullong st_ver_set;     /* verifications set up: eager calls, and calls captured into graphs */
+static atomic_ullong st_ver_skip[3]; /* calls not verified: [0] no stream or scratch memory, [1] 12.9 refused the
+                                      * call, [2] a launch failed */
+
+static cublasStatus_t vref_call(const VRef *r, void *Cs, void *Ds)
+{
+    switch (r->api) {
+    case API_GEMMEX:
+        return cb.GemmEx(r->h, r->ta, r->tb, (int)r->m, (int)r->n, (int)r->k, r->alpha, r->A, r->at, (int)r->lda, r->B,
+                         r->bt, (int)r->ldb, r->beta, Cs, r->ct, (int)r->ldc, r->comp, r->algo);
+    case API_GEMMEX64:
+        return cb.GemmEx64(r->h, r->ta, r->tb, r->m, r->n, r->k, r->alpha, r->A, r->at, r->lda, r->B, r->bt, r->ldb,
+                           r->beta, Cs, r->ct, r->ldc, r->comp, r->algo);
+    case API_SB:
+        return cb.GemmSB(r->h, r->ta, r->tb, (int)r->m, (int)r->n, (int)r->k, r->alpha, r->A, r->at, (int)r->lda, r->sa,
+                         r->B, r->bt, (int)r->ldb, r->sb, r->beta, Cs, r->ct, (int)r->ldc, r->sc, (int)r->batch, r->comp,
+                         r->algo);
+    case API_SB64:
+        return cb.GemmSB64(r->h, r->ta, r->tb, r->m, r->n, r->k, r->alpha, r->A, r->at, r->lda, r->sa, r->B, r->bt,
+                           r->ldb, r->sb, r->beta, Cs, r->ct, r->ldc, r->sc, r->batch, r->comp, r->algo);
+    default:
+        return cb.LtMatmul(r->lh, r->desc, r->alpha, r->A, r->Ad, r->B, r->Bd, r->beta, Cs, r->Cd, Ds, r->Dd, r->lalgo,
+                           r->ws, r->wss, r->stream);
+    }
+}
+
+static unsigned mod256(const void *p) { return (unsigned)((uintptr_t)p % 256); }
+
+/* What the report says of a call: the entry point, operations, sizes, leading dimensions, types, the addresses
+ * modulo 256, the scalars and their pointer mode, the algorithm, the epilogue and the workspace. */
+static void vsig_text(const Call *c, int tc, char *out, size_t n)
+{
+    const VRef *r = c->ref;
+    char al[64], be[64], tail[512];
+    if (c->o.beta_mode == 2) {
+        snprintf(al, sizeof al, "at a device address %u mod 256", mod256(r->alpha));
+        snprintf(be, sizeof be, "at a device address %u mod 256", mod256(r->beta));
+    } else {
+        snprintf(al, sizeof al, "%.9g", (double)*(const float *)r->alpha);
+        snprintf(be, sizeof be, "%.9g", (double)*(const float *)r->beta);
+    }
+    const char *dt = c->o.dtype ? "bf16" : "fp32";
+    if (r->api != API_LT) {
+        HState *hs = handle_state(r->h);
+        const unsigned long long w = hs ? atomic_load(&hs->ws_size) : (unsigned long long)SIZE_MAX;
+        cublasMath_t mm = CUBLAS_DEFAULT_MATH;
+        cb.GetMathMode(r->h, &mm);
+        char ws[96], sb[96] = "";
+        if (w == (unsigned long long)SIZE_MAX)
+            snprintf(ws, sizeof ws, "cuBLAS's default");
+        else
+            snprintf(ws, sizeof ws, "%llu bytes at %u mod 256", w, hs ? atomic_load(&hs->ws_mod) : 0u);
+        if (r->api == API_SB || r->api == API_SB64)
+            snprintf(sb, sizeof sb, ", strides %lld %lld %lld, batch %lld", r->sa, r->sb, r->sc, (long long)r->batch);
+        snprintf(tail, sizeof tail, "algo %d, math mode %d, workspace %s%s", (int)r->algo, (int)mm, ws, sb);
+    } else {
+        char algo[256] = "none (12.9's heuristic)", bias[96] = "default";
+        if (r->lalgo) {
+            static const int at[] = {CUBLASLT_ALGO_CONFIG_ID,           CUBLASLT_ALGO_CONFIG_TILE_ID,
+                                     CUBLASLT_ALGO_CONFIG_SPLITK_NUM,   CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
+                                     CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION,
+                                     CUBLASLT_ALGO_CONFIG_STAGES_ID,    CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID,
+                                     CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID};
+            static const char *const an[] = {"id", "tile", "split-k", "reduction", "swizzling", "custom", "stages",
+                                             "inner shape", "cluster shape"};
+            int len = 0;
+            for (size_t i = 0; i < sizeof at / sizeof at[0] && len < (int)sizeof algo; ++i) {
+                uint64_t v = 0;
+                size_t w = 0;
+                if (cb.LtAlgoConfigGet(r->lalgo, (cublasLtMatmulAlgoConfigAttributes_t)at[i], NULL, 0, &w) ==
+                        CUBLAS_STATUS_SUCCESS &&
+                    w > 0 && w <= sizeof v &&
+                    cb.LtAlgoConfigGet(r->lalgo, (cublasLtMatmulAlgoConfigAttributes_t)at[i], &v, w, &w) ==
+                        CUBLAS_STATUS_SUCCESS)
+                    len += snprintf(algo + len, sizeof algo - (size_t)len, "%s%s %lld", len ? ", " : "", an[i],
+                                    w == 4 ? (long long)(int32_t)v : (long long)v);
+            }
+        }
+        if (c->o.btype >= 0) snprintf(bias, sizeof bias, "bias (%s at %u mod 256)", dt, mod256(c->o.bias));
+        snprintf(tail, sizeof tail, "epilogue %s, algo %s, workspace %zu bytes at %u mod 256", bias, algo, r->wss,
+                 mod256(r->ws));
+    }
+    snprintf(out, n,
+             "%s %s: transa %c transb %c, m %d n %d k %d, A bf16 lda %lld at %u, B bf16 ldb %lld at %u, C %s ldc %lld at "
+             "%u, D %s ldd %lld at %u%s (addresses mod 256), compute 32F, alpha %s, beta %s (%s pointer mode), %s",
+             tc ? "the tensor-core path's fallback elements of" : "the skinny path's", api_name[r->api],
+             c->opA ? 'T' : 'N', c->opB ? 'T' : 'N', c->m, c->n, c->k, c->lda, mod256(c->A), c->ldb, mod256(c->B), dt,
+             c->o.ldc, mod256(c->o.C), dt, c->o.ldd, mod256(c->o.D), c->o.C == c->o.D ? ", C is D" : "", al, be,
+             c->o.beta_mode == 2 ? "device" : "host", tail);
+}
+
+/* The signature's slot: its text, looked up (or added) in the table. */
+static int vsig_slot(const Call *c, int tc)
+{
+    char text[1536];
+    vsig_text(c, tc, text, sizeof text);
+    unsigned long long h = 1469598103934665603ull;
+    for (const char *q = text; *q; ++q) h = (h ^ (unsigned char)*q) * 1099511628211ull;
+    const int n = VF_VERIFY_SLOTS - 1;
+    int slot = (int)(h % (unsigned long long)n), found = -1;
+    pthread_mutex_lock(&g_vsig_mu);
+    for (int probe = 0; probe < n && found < 0; ++probe, slot = (slot + 1) % n) {
+        if (!g_vsig.what[slot]) {
+            if (!(g_vsig.what[slot] = strdup(text))) break;
+            g_vsig.hash[slot] = h;
+            g_vsig.tc[slot] = tc;
+            g_vsig.m[slot] = c->m;
+            g_vsig.dtype[slot] = c->o.dtype;
+            found = slot;
+        } else if (g_vsig.hash[slot] == h && !strcmp(g_vsig.what[slot], text)) {
+            found = slot;
+        }
+    }
+    if (found < 0) g_vsig.full = 1;
+    pthread_mutex_unlock(&g_vsig_mu);
+    return found >= 0 ? found : VF_VERIFY_SLOTS - 1;
+}
+
+/* A slot that a signature has (the last when the table was full). */
+static int vslot_used(int s) { return g_vsig.what[s] || (s == VF_VERIFY_SLOTS - 1 && g_vsig.full); }
+
+/* The context's stream of the runtime's own (non-blocking: never ordered with the program's) and its signatures'
+ * counters, zeroed on it: made at the first call verified there, in relaxed capture mode, outside any graph. */
+static int vsetup(Ctx *x)
+{
+    int st = atomic_load_explicit(&x->vmade, memory_order_acquire);
+    if (st) return st > 0;
+    pthread_mutex_lock(&g_setup_mu);
+    if (!(st = atomic_load_explicit(&x->vmade, memory_order_relaxed))) {
+        CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+        const int relaxed = cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
+        const size_t bytes = (size_t)VF_VERIFY_SLOTS * VF_VERIFY_WORDS * 8;
+        CUresult r = cu.StreamCreate(&x->vstream, CU_STREAM_NON_BLOCKING);
+        if (r == CUDA_SUCCESS) r = cu.MemAlloc(&x->vslots, bytes);
+        if (r == CUDA_SUCCESS) r = cu.MemsetD32Async(x->vslots, 0, bytes / 4, x->vstream);
+        if (r == CUDA_SUCCESS) r = cu.StreamSynchronize(x->vstream);
+        if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
+        st = r == CUDA_SUCCESS ? 1 : -1;
+        if (st < 0)
+            SAY(1, "verify mode: device %d: no stream or memory for it (%s): its calls are not verified", x->ordinal,
+                cu_error(r));
+        atomic_store_explicit(&x->vmade, st, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_setup_mu);
+    return st > 0;
+}
+
+/* A stream's scratch buffer: a header (one call's counters, zero between calls) and room for 12.9's output and a
+ * copy of C. Allocated outside any graph (cuMemAlloc, in relaxed capture mode) and its header zeroed on the
+ * runtime's stream. A call that needs more gets a larger one, and the old one is kept: a graph captured before
+ * still uses it. The calls of one stream run in order and share it; two streams have two. */
+static CUdeviceptr vscratch(Ctx *x, CUstream s, size_t need)
+{
+    CUdeviceptr base = 0;
+    pthread_mutex_lock(&g_setup_mu);
+    VScratch *v = x->vscr;
+    while (v && v->s != s) v = v->next;
+    if (v && v->size >= need) {
+        base = v->base;
+    } else {
+        size_t size = need < ((size_t)1 << 20) ? (size_t)1 << 20 : need;
+        if (v && size < 2 * v->size) size = 2 * v->size;
+        CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+        const int relaxed = cu.ThreadExchangeStreamCaptureMode(&mode) == CUDA_SUCCESS;
+        CUdeviceptr d = 0;
+        CUresult r = cu.MemAlloc(&d, size);
+        if (r == CUDA_SUCCESS) r = cu.MemsetD32Async(d, 0, 64, x->vstream);
+        if (r == CUDA_SUCCESS) r = cu.StreamSynchronize(x->vstream);
+        if (relaxed) cu.ThreadExchangeStreamCaptureMode(&mode);
+        if (r == CUDA_SUCCESS && !v && (v = calloc(1, sizeof *v))) {
+            v->s = s;
+            v->next = x->vscr;
+            x->vscr = v;
+        }
+        if (r == CUDA_SUCCESS && v) {
+            v->base = d;
+            v->size = size;
+            base = d;
+        }
+    }
+    pthread_mutex_unlock(&g_setup_mu);
+    return base;
+}
+
+/* One call's verification: its signature, its scratch buffer, and where 12.9's output goes. */
+typedef struct {
+    int on, slot;
+    CUdeviceptr base, Cs, Ds;
+} VCall;
+
+/* Before the path writes D: the scratch buffer, and C copied there when the call reads it (beta != 0, or scalars
+ * on the device), since D may be C. The launches go on the call's stream: in a graph capture they are nodes. */
+static void verify_pre(const Call *c, int tc, VCall *v)
+{
+    v->on = 0;
+    if (!cfg.verify || !c->ref) return;
+    Ctx *x = c->x;
+    const long long es = c->o.dtype ? 2 : 4;
+    const int same = !c->o.C || c->o.C == c->o.D;
+    const long long spanD = ((long long)(c->n - 1) * c->o.ldd + c->m) * es;
+    const long long spanC = c->o.C ? ((long long)(c->n - 1) * c->o.ldc + c->m) * es : 0;
+    /* the header (256 bytes), D's region from the next 256-byte boundary at D's address modulo 256, then C's likewise */
+    if (!vsetup(x) || !(v->base = vscratch(x, c->stream, (size_t)(spanD + (same ? 0 : spanC) + 2048)))) {
+        atomic_fetch_add(&st_ver_skip[0], 1);
+        return;
+    }
+    v->slot = vsig_slot(c, tc);
+    v->Ds = ((v->base + 511) & ~(CUdeviceptr)255) + (uintptr_t)c->o.D % 256;
+    v->Cs = !c->o.C ? 0 : same ? v->Ds : ((v->Ds + (CUdeviceptr)spanD + 255) & ~(CUdeviceptr)255) + (uintptr_t)c->o.C % 256;
+    if (c->o.C && c->o.beta_mode != 0) {
+        VfCopyArgs a = {(const unsigned short *)c->o.C, (unsigned short *)(uintptr_t)v->Cs, spanC / 2};
+        const long long most = (long long)x->sms * 4, blocks = (a.n + 2047) / 2048 < most ? (a.n + 2047) / 2048 : most;
+        if (INJECT("verify-copy") || launch(x, x->copy, (unsigned)blocks, 1, 256, 0, c->stream, &a) != CUDA_SUCCESS) {
+            atomic_fetch_add(&st_ver_skip[2], 1);
+            return;
+        }
+    }
+    v->on = 1;
+}
+
+/* After the path's last launch: 12.9's call into the scratch buffer, then the comparison, on the call's stream.
+ * eA and eB (the tensor-core path's check results): only the fallback's elements are compared. */
+static void verify_post(const Call *c, const VCall *v, CUdeviceptr eA, CUdeviceptr eB)
+{
+    if (!v->on) return;
+    const cublasStatus_t st = CONTROL("verify-skip-129") ? CUBLAS_STATUS_NOT_SUPPORTED
+                                                           : vref_call(c->ref, (void *)(uintptr_t)v->Cs,
+                                                                       (void *)(uintptr_t)v->Ds);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        atomic_fetch_add(&st_ver_skip[1], 1);
+        static atomic_int said;
+        if (!atomic_exchange(&said, 1))
+            SAY(1, "verify mode: cuBLAS 12.9 returned %d for a call to verify: such calls are not verified", (int)st);
+        return;
+    }
+    VfCmpArgs a;
+    memset(&a, 0, sizeof a);
+    a.D = c->o.D;
+    a.ldd = c->o.ldd;
+    a.S = (const void *)(uintptr_t)v->Ds;
+    a.lds = c->o.ldd;
+    a.eA = (const int *)(uintptr_t)eA;
+    a.eB = (const int *)(uintptr_t)eB;
+    a.slot = (unsigned long long *)(uintptr_t)(c->x->vslots + (CUdeviceptr)v->slot * VF_VERIFY_WORDS * 8);
+    a.call = (unsigned *)(uintptr_t)v->base;
+    a.m = c->m;
+    a.n = c->n;
+    a.dtype = c->o.dtype;
+    const long long elems = (long long)c->m * c->n, most = (long long)c->x->sms * 4;
+    const long long blocks = (elems + 255) / 256 < most ? (elems + 255) / 256 : most;
+    if (INJECT("verify-compare") ||
+        launch(c->x, c->x->compare, (unsigned)blocks, 1, 256, 0, c->stream, &a) != CUDA_SUCCESS) {
+        atomic_fetch_add(&st_ver_skip[2], 1);
+        return;
+    }
+    atomic_fetch_add(&st_ver_set, 1);
+}
+
+/* The signatures' counters summed over the contexts (out: VF_VERIFY_SLOTS x VF_VERIFY_WORDS; the first difference
+ * kept from the first context that has one), read with each context made current. 1 when every context's could be
+ * read. */
+static int read_verify(unsigned long long (*out)[VF_VERIFY_WORDS])
+{
+    static unsigned long long buf[VF_VERIFY_SLOTS][VF_VERIFY_WORDS];
+    memset(out, 0, sizeof buf);
+    int ok = 1;
+    pthread_mutex_lock(&g_ctx_mu);
+    for (Ctx *x = g_ctxs; x; x = x->next) {
+        if (atomic_load_explicit(&x->vmade, memory_order_acquire) <= 0) continue;
+        unsigned long long id = 0;
+        CUcontext prev = NULL;
+        if (cu.CtxGetId(x->ctx, &id) != CUDA_SUCCESS || id != x->id || cu.CtxPushCurrent(x->ctx) != CUDA_SUCCESS) {
+            ok = 0;
+            continue;
+        }
+        if (cu.MemcpyDtoH(buf, x->vslots, sizeof buf) == CUDA_SUCCESS) {
+            for (int s = 0; s < VF_VERIFY_SLOTS; ++s) {
+                for (int w = 0; w < 3; ++w) out[s][w] += buf[s][w];
+                if (!out[s][3] && buf[s][3]) out[s][3] = buf[s][3], out[s][4] = buf[s][4];
+            }
+        } else {
+            ok = 0;
+        }
+        cu.CtxPopCurrent(&prev);
+    }
+    pthread_mutex_unlock(&g_ctx_mu);
+    return ok;
+}
+
+/* The report at exit (verify mode, at any log level): calls verified and calls that differed, for the skinny path
+ * and for the tensor-core path's fallback elements, then each signature that differed, once. */
+static void report_verify(void)
+{
+    static unsigned long long v[VF_VERIFY_SLOTS][VF_VERIFY_WORDS];
+    const int ok = read_verify(v);
+    unsigned long long calls[2] = {0, 0}, diff[2] = {0, 0}, elems[2] = {0, 0};
+    int sigs[2] = {0, 0};
+    for (int s = 0; s < VF_VERIFY_SLOTS; ++s) {
+        if (!v[s][0] || !vslot_used(s)) continue;
+        const int t = g_vsig.tc[s];
+        calls[t] += v[s][0], diff[t] += v[s][1], elems[t] += v[s][2], ++sigs[t];
+    }
+    static const char *const kind[2] = {"the skinny path's calls", "the tensor-core path's fallback elements"};
+    for (int t = 0; t < 2; ++t)
+        if (calls[t] || t == 0)
+            say("verify: %s against cuBLAS 12.9's, bit for bit: %llu calls verified (eager calls and graph replays), in "
+                "%d call signatures; %llu differed, in %llu elements", kind[t], calls[t], sigs[t], diff[t], elems[t]);
+    const unsigned long long sk = atomic_load(&st_ver_skip[0]) + atomic_load(&st_ver_skip[1]) + atomic_load(&st_ver_skip[2]);
+    if (sk)
+        say("verify: %llu calls not verified (%llu without a stream or scratch memory for it, %llu refused by cuBLAS "
+            "12.9, %llu whose launch failed)", sk, (unsigned long long)atomic_load(&st_ver_skip[0]),
+            (unsigned long long)atomic_load(&st_ver_skip[1]), (unsigned long long)atomic_load(&st_ver_skip[2]));
+    if (!ok) say("verify: the counters of a context could not be read at exit");
+    for (int s = 0; s < VF_VERIFY_SLOTS; ++s) {
+        if (!v[s][1] || !vslot_used(s)) continue;
+        const long long e = (long long)v[s][3] - 1, m = g_vsig.m[s] > 0 ? g_vsig.m[s] : 1;
+        const int w = g_vsig.dtype[s] ? 4 : 8;
+        say("verify: DIFFERED: %s: %llu of %llu calls, %llu elements; the first: row %lld, column %lld, the call's "
+            "0x%0*llx, 12.9's 0x%0*llx", g_vsig.what[s] ? g_vsig.what[s] : "other call signatures (the table was full)",
+            v[s][1], v[s][0], v[s][2], e < 0 ? -1 : e % m, e < 0 ? -1 : e / m, w, v[s][4] >> 32, w,
+            v[s][4] & 0xffffffffull);
+    }
+    if (g_vsig.full) say("verify: more than %d call signatures: the others are counted together", VF_VERIFY_SLOTS - 1);
+}
+
 static cublasStatus_t run_skinny(const Call *c, int *reason)
 {
     if (!ready(c->x, 0)) { /* the first call the path would serve in this context loads the module */
@@ -1030,6 +1425,8 @@ static cublasStatus_t run_skinny(const Call *c, int *reason)
     const int big = (c->m + rb256 - 1) / rb256 >= 2 * c->x->sms; /* 256 threads when that still fills the GPU */
     const int shape = (ncp == 8 ? SK_8_16 : ncp == 16 ? SK_16_8 : SK_32_4) + big;
     const int rb = sk_rb[shape];
+    VCall v;
+    verify_pre(c, 0, &v); /* verify mode: C copied before the kernel writes D */
     const CUresult r = INJECT("skinny") ? CUDA_ERROR_LAUNCH_FAILED
                                          : launch(c->x, c->x->skinny[fast][shape], (unsigned)((c->m + rb - 1) / rb), 1,
                                                   (unsigned)(ncp * rb), 0, c->stream, &a);
@@ -1037,6 +1434,7 @@ static cublasStatus_t run_skinny(const Call *c, int *reason)
         *reason = R_LAUNCH;
         return FWD;
     }
+    verify_post(c, &v, 0, 0);
     return CUBLAS_STATUS_SUCCESS;
 }
 
@@ -1328,6 +1726,8 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
     /* 0. counters, once for the call: [0] failed rows of op(A), [1] failed columns of op(B) */
     r = CONTROL("no-reset") ? CUDA_SUCCESS : cu.MemsetD32Async(cnt, 0, 2, c->stream);
     if (r != CUDA_SUCCESS) goto fail;
+    VCall v;
+    verify_pre(c, 1, &v); /* verify mode: C copied before the epilogue writes D */
     for (int jc = 0; jc < p.nch; ++jc) {
         const int j0 = jc * p.NS;
         const int nc = (c->n - j0) < p.NS ? (c->n - j0) : p.NS;
@@ -1454,6 +1854,7 @@ static cublasStatus_t run_tc(const Call *c, int *reason)
         }
         if (r != CUDA_SUCCESS) goto fail;
     }
+    verify_post(c, &v, eA, eB); /* verify mode: the fallback's elements, before the workspace is freed */
     free_workspace(base, c->stream, capturing);
     return CUBLAS_STATUS_SUCCESS;
 fail:
@@ -1515,9 +1916,9 @@ static cublasStatus_t serve(Call *c, int path, int *reason)
 
 static cublasStatus_t legacy(int api, cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
                              int64_t m, int64_t n, int64_t k, const void *alpha, const void *A, cudaDataType Atype,
-                             int64_t lda, const void *B, cudaDataType Btype, int64_t ldb, const void *beta, void *C,
-                             cudaDataType Ctype, int64_t ldc, cublasComputeType_t computeType, cublasGemmAlgo_t algo,
-                             int64_t batch)
+                             int64_t lda, long long strideA, const void *B, cudaDataType Btype, int64_t ldb,
+                             long long strideB, const void *beta, void *C, cudaDataType Ctype, int64_t ldc,
+                             long long strideC, cublasComputeType_t computeType, cublasGemmAlgo_t algo, int64_t batch)
 {
     atomic_fetch_add_explicit(&st_calls[api], 1, memory_order_relaxed);
     int reason = R_TYPES, path = PATH_NONE;
@@ -1593,6 +1994,15 @@ static cublasStatus_t legacy(int api, cublasHandle_t handle, cublasOperation_t t
     mat_range(B, tb ? n : k, tb ? k : n, ldb, 2, &b0, &b1);
     mat_range(C, m, n, ldc, c.o.dtype ? 2 : 4, &c0, &c1);
     if (overlap(c0, c1, a0, a1) || overlap(c0, c1, b0, b1)) goto forward;
+    VRef ref;
+    if (cfg.verify) {
+        memset(&ref, 0, sizeof ref);
+        ref.api = api, ref.h = handle, ref.ta = transa, ref.tb = transb, ref.m = m, ref.n = n, ref.k = k;
+        ref.lda = lda, ref.ldb = ldb, ref.ldc = ldc, ref.batch = batch, ref.sa = strideA, ref.sb = strideB;
+        ref.sc = strideC, ref.alpha = alpha, ref.beta = beta, ref.A = A, ref.B = B, ref.at = Atype, ref.bt = Btype;
+        ref.ct = Ctype, ref.comp = computeType, ref.algo = algo;
+        c.ref = &ref;
+    }
     const cublasStatus_t s = serve(&c, path, &reason);
     if (s != FWD) return s;
 forward:
@@ -1606,8 +2016,8 @@ EXPORT cublasStatus_t vf_bf16_cublasGemmEx(cublasHandle_t handle, cublasOperatio
                                            void *C, cudaDataType Ctype, int ldc, cublasComputeType_t computeType,
                                            cublasGemmAlgo_t algo)
 {
-    const cublasStatus_t s = legacy(API_GEMMEX, handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype, ldb,
-                                    beta, C, Ctype, ldc, computeType, algo, 1);
+    const cublasStatus_t s = legacy(API_GEMMEX, handle, transa, transb, m, n, k, alpha, A, Atype, lda, 0, B, Btype, ldb,
+                                    0, beta, C, Ctype, ldc, 0, computeType, algo, 1);
     if (s != FWD) return s;
     return cb.GemmEx(handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype, ldb, beta, C, Ctype, ldc,
                      computeType, algo);
@@ -1620,8 +2030,8 @@ EXPORT cublasStatus_t vf_bf16_cublasGemmEx_64(cublasHandle_t handle, cublasOpera
                                               void *C, cudaDataType Ctype, int64_t ldc,
                                               cublasComputeType_t computeType, cublasGemmAlgo_t algo)
 {
-    const cublasStatus_t s = legacy(API_GEMMEX64, handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype,
-                                    ldb, beta, C, Ctype, ldc, computeType, algo, 1);
+    const cublasStatus_t s = legacy(API_GEMMEX64, handle, transa, transb, m, n, k, alpha, A, Atype, lda, 0, B, Btype,
+                                    ldb, 0, beta, C, Ctype, ldc, 0, computeType, algo, 1);
     if (s != FWD) return s;
     return cb.GemmEx64(handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype, ldb, beta, C, Ctype, ldc,
                        computeType, algo);
@@ -1633,8 +2043,8 @@ EXPORT cublasStatus_t vf_bf16_cublasGemmStridedBatchedEx(
     long long int strideB, const void *beta, void *C, cudaDataType Ctype, int ldc, long long int strideC,
     int batchCount, cublasComputeType_t computeType, cublasGemmAlgo_t algo)
 {
-    const cublasStatus_t s = legacy(API_SB, handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype, ldb,
-                                    beta, C, Ctype, ldc, computeType, algo, batchCount);
+    const cublasStatus_t s = legacy(API_SB, handle, transa, transb, m, n, k, alpha, A, Atype, lda, strideA, B, Btype,
+                                    ldb, strideB, beta, C, Ctype, ldc, strideC, computeType, algo, batchCount);
     if (s != FWD) return s;
     return cb.GemmSB(handle, transa, transb, m, n, k, alpha, A, Atype, lda, strideA, B, Btype, ldb, strideB, beta, C,
                      Ctype, ldc, strideC, batchCount, computeType, algo);
@@ -1646,8 +2056,8 @@ EXPORT cublasStatus_t vf_bf16_cublasGemmStridedBatchedEx_64(
     cudaDataType Btype, int64_t ldb, long long int strideB, const void *beta, void *C, cudaDataType Ctype,
     int64_t ldc, long long int strideC, int64_t batchCount, cublasComputeType_t computeType, cublasGemmAlgo_t algo)
 {
-    const cublasStatus_t s = legacy(API_SB64, handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype, ldb,
-                                    beta, C, Ctype, ldc, computeType, algo, batchCount);
+    const cublasStatus_t s = legacy(API_SB64, handle, transa, transb, m, n, k, alpha, A, Atype, lda, strideA, B, Btype,
+                                    ldb, strideB, beta, C, Ctype, ldc, strideC, computeType, algo, batchCount);
     if (s != FWD) return s;
     return cb.GemmSB64(handle, transa, transb, m, n, k, alpha, A, Atype, lda, strideA, B, Btype, ldb, strideB, beta,
                        C, Ctype, ldc, strideC, batchCount, computeType, algo);
@@ -2003,6 +2413,14 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     } else if (C == D && lc.ld != ld.ld) {
         goto forward;
     }
+    VRef ref;
+    if (cfg.verify) {
+        memset(&ref, 0, sizeof ref);
+        ref.api = API_LT, ref.lh = handle, ref.desc = desc, ref.Ad = Adesc, ref.Bd = Bdesc, ref.Cd = Cdesc;
+        ref.Dd = Ddesc, ref.alpha = alpha, ref.beta = beta, ref.A = A, ref.B = B, ref.lalgo = algo, ref.ws = workspace;
+        ref.wss = workspaceSizeInBytes, ref.stream = stream;
+        c.ref = &ref;
+    }
     const cublasStatus_t s = serve(&c, path, &reason);
     if (s != FWD) return s;
 forward:
@@ -2063,6 +2481,25 @@ EXPORT int vf_bf16_test_fallback_counters(unsigned long long *out, int n)
     if (n < 4 || !read_stats(out, &made)) return 0;
     out[3] = atomic_load(&st_tc_elems);
     return 4;
+}
+
+/* Test builds: verify mode's counters, as its report reads them: out[0] calls verified (eager calls and graph
+ * replays), out[1] calls that differed, out[2] elements that differed, out[3] verifications set up (eager calls and
+ * captured calls), out[4] calls not verified, out[5] signatures, out[6] signatures that differed. Returns 7, or 0
+ * when a context's counters could not be read. */
+EXPORT int vf_bf16_test_verify(unsigned long long *out, int n)
+{
+    static unsigned long long v[VF_VERIFY_SLOTS][VF_VERIFY_WORDS];
+    if (n < 7 || !read_verify(v)) return 0;
+    memset(out, 0, 7 * sizeof *out);
+    for (int s = 0; s < VF_VERIFY_SLOTS; ++s) {
+        if (!vslot_used(s)) continue;
+        out[0] += v[s][0], out[1] += v[s][1], out[2] += v[s][2];
+        out[5] += v[s][0] != 0, out[6] += v[s][1] != 0;
+    }
+    out[3] = atomic_load(&st_ver_set);
+    out[4] = atomic_load(&st_ver_skip[0]) + atomic_load(&st_ver_skip[1]) + atomic_load(&st_ver_skip[2]);
+    return 7;
 }
 
 /* Test builds: the counters of one entry point (calls, skinny, tensor-core, failed, then forwarded

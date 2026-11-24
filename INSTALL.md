@@ -246,6 +246,20 @@ Both are off by default. What they change, for bf16 products with fp32 accumulat
 - `VF_CUBLAS_BF16_SKINNY=1`: products of 2 to 16 columns (fewer than 32 when small) where cuBLAS
   12.9 runs its sequential kernel are computed by one kernel of the layer, with 12.9's bits
   (`docs/emulations.md`, section 11, says where exactly, and how that was established).
+- `VF_CUBLAS_BF16_VERIFY=1` (verify mode, a diagnostic, with a path on): every call the skinny path
+  serves is also made by cuBLAS 12.9 itself, through the same entry point, handle, descriptors,
+  algorithm and workspace, on the same stream, with its output in a scratch buffer that has the
+  output's address modulo 256 and its leading dimension (and a copy of C made first when the call reads
+  C), and the two outputs are compared bit for bit on the GPU, eager or captured in a CUDA graph (the
+  copy, 12.9's call and the comparison are then nodes of the graph, which allocates nothing); with the
+  tensor-core path on, its fallback's elements too. No result changes. At exit the report says how many
+  calls were verified (each replay of a graph counts) and how many differed, in how many elements, and
+  says each call signature that differed once, with what it takes to make the call again (entry point,
+  operations, sizes, leading dimensions, types, addresses modulo 256, scalars and their pointer mode,
+  algorithm, epilogue, workspace) and its first differing element. It costs a 12.9 call and a
+  comparison per verified call; per CUDA context, 40 KiB of counters and a non-blocking stream of the
+  runtime's own; per stream, a scratch buffer of 1 MiB or more, kept to the end of the process
+  (`LIMITS.md`, "Verify mode").
 - `VF_SAFE=1` (safe mode: the proxy's table of "Environment variables", below, says what it is and
   how it is read): the variants' tensor-core path serves nothing, whatever `VF_CUBLAS_BF16_TC` says;
   the skinny path, whose results are 12.9's bits, is not affected. Every result is then cuBLAS 12.9's
@@ -522,6 +536,7 @@ that loaded it, not by a child made with `fork()`.
 |---|---|---|
 | `VF_FWD_<KEY>` | the CUDA 12.9.2 library's name | The library that one forwarding library opens instead, by path or name. KEY is its short name in capitals, `-` written `_`: `VF_FWD_CUBLAS`, `VF_FWD_CUBLASLT`, `VF_FWD_CUFFT`, `VF_FWD_NVRTC_BUILTINS`, `VF_FWD_NPPIF`, ... (`crates/vf-fwdgen/src/libs.rs`) |
 | `VF_FWD_VERBOSE` | off | Set: each forwarding library says which library it opened and each function that it binds |
+| `VF_CUBLAS_BF16_VERIFY` | `0` | `1`: verify mode of the bf16 cuBLAS variants (`forward/bf16tc`), with a path on: every call the skinny path serves, and the tensor-core path's fallback elements, also computed by cuBLAS 12.9 and compared bit for bit; the report at exit ("The bf16 cuBLAS variants", above). Read at the variants' first intercepted call |
 | `VF_SAFE` | unset | Safe mode (the proxy's table, above, is its description): in the bf16 cuBLAS variants (`forward/bf16tc`) the tensor-core path serves nothing, whatever `VF_CUBLAS_BF16_TC` says, and the skinny path keeps cuBLAS 12.9's bits ("The bf16 cuBLAS variants", above). Read at the variants' first intercepted call |
 
 **Launcher (`vf`) and `vf ptxas`:**

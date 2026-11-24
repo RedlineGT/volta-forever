@@ -568,6 +568,15 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   (measured: 11 % of the speed of eager decoding at batch 32) and would make an element's bits depend on
   other columns: the path serves it. The report at exit counts the calls with more than a quarter of their
   rows or columns failing (above).
+- **Verify mode** (`VF_CUBLAS_BF16_VERIFY=1`) checks the calls a program makes, not more. The graphs
+  captured on one stream share that stream's scratch buffer: two of them replayed at the same time on
+  different streams can report differences that are not there, or miss some (each graph replayed on the
+  stream it was captured on, or one at a time, does not). The tensor-core path's fallback elements equal
+  12.9's where 12.9 computes each element in one chain over k, as its kernels for these products do on a
+  V100 (`tests/gpu/forward/bf16-fallback.c`, `bf16-verify.c`); a product for which 12.9 splits k would be
+  reported as differing there. A call is not verified when no stream or memory could be made for it, when
+  12.9 refuses it, or when a launch fails (the report counts them). The report reads its counters at exit,
+  with each context made current: a program that destroys its context first loses them (said).
 - **What a program sees of the layer's own work**: cuBLAS's logging (`CUBLASLT_LOG_LEVEL`) shows the
   layer's internal fp16 products; a framework's allocator does not see the layer's workspace, which
   the pool of the context keeps up to 64 MiB between eager calls.

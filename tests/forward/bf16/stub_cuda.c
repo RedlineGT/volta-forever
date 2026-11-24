@@ -167,7 +167,7 @@ EXPORT CUresult cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode)
 typedef struct {
     char name[64];
 } Func;
-static Func funcs[256];
+static Func funcs[512];
 static int nfuncs;
 EXPORT CUresult cuModuleLoadData(CUmodule *m, const void *image)
 {
@@ -181,7 +181,7 @@ EXPORT CUresult cuModuleLoadData(CUmodule *m, const void *image)
 }
 EXPORT CUresult cuModuleGetFunction(CUfunction *f, CUmodule m, const char *name)
 {
-    if (nfuncs >= 256) return CUDA_ERROR_OUT_OF_MEMORY;
+    if (nfuncs >= 512) return CUDA_ERROR_OUT_OF_MEMORY;
     snprintf(funcs[nfuncs].name, sizeof funcs[nfuncs].name, "%s", name);
     *f = (CUfunction)&funcs[nfuncs++];
     return CUDA_SUCCESS;
@@ -250,10 +250,17 @@ EXPORT CUresult cuMemsetD32Async(CUdeviceptr d, unsigned v, size_t n, CUstream s
 /* The fallback's counters: made on a stream that is then waited for, read back with their context pushed. The
  * copies to the host return what the test set (stub_set_dtoh). */
 static unsigned long long dtoh_values[8];
+static int dtoh_repeat; /* the values repeated over the whole copy, every dtoh_repeat words */
 EXPORT void stub_set_dtoh(const unsigned long long *v, int n)
 {
     memset(dtoh_values, 0, sizeof dtoh_values);
     memcpy(dtoh_values, v, (size_t)(n < 8 ? n : 8) * sizeof *v);
+    dtoh_repeat = 0;
+}
+EXPORT void stub_set_dtoh_repeat(const unsigned long long *v, int n)
+{
+    stub_set_dtoh(v, n);
+    dtoh_repeat = n < 8 ? n : 8;
 }
 EXPORT CUresult cuStreamSynchronize(CUstream s)
 {
@@ -266,7 +273,33 @@ EXPORT CUresult cuMemcpyDtoH_v2(void *dst, CUdeviceptr src, size_t bytes)
     const int fail = failing("cuMemcpyDtoH_v2");
     stub_event("copy to host ptr=0x%llx bytes=%zu context=%llu%s", src, bytes, cur()->id, fail ? " FAILED" : "");
     if (fail) return CUDA_ERROR_INVALID_CONTEXT;
-    memcpy(dst, dtoh_values, bytes < sizeof dtoh_values ? bytes : sizeof dtoh_values);
+    memset(dst, 0, bytes);
+    if (dtoh_repeat)
+        for (size_t w = 0; (w + 1) * 8 <= bytes; ++w) ((unsigned long long *)dst)[w] = dtoh_values[w % dtoh_repeat];
+    else
+        memcpy(dst, dtoh_values, bytes < sizeof dtoh_values ? bytes : sizeof dtoh_values);
+    return CUDA_SUCCESS;
+}
+/* Verify mode: the runtime's own stream, and memory allocated outside the pool ("memalloc" events). */
+EXPORT CUresult cuStreamCreate(CUstream *s, unsigned flags)
+{
+    static int n;
+    const int fail = failing("cuStreamCreate");
+    *s = fail ? NULL : (CUstream)(uintptr_t)(0x6000 + ++n);
+    stub_event("stream create flags=%u%s", flags, fail ? " FAILED" : "");
+    return fail ? CUDA_ERROR_OUT_OF_MEMORY : CUDA_SUCCESS;
+}
+EXPORT CUresult cuMemAlloc_v2(CUdeviceptr *d, size_t bytes)
+{
+    if (failing("cuMemAlloc_v2")) {
+        stub_event("memalloc bytes=%zu FAILED", bytes);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    pthread_mutex_lock(&mu);
+    *d = next_ptr;
+    next_ptr += (bytes + 0xffff) & ~0xffffull;
+    pthread_mutex_unlock(&mu);
+    stub_event("memalloc bytes=%zu ptr=0x%llx", bytes, *d);
     return CUDA_SUCCESS;
 }
 static __thread int pushed[8], npushed;

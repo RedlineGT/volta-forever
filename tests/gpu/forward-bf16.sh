@@ -62,13 +62,13 @@ want() { [ ${#cases[@]} -eq 0 ] && return 0; local c; for c in "${cases[@]}"; do
 cases=("$@")
 
 # Fat binaries with a kernel control (VF_BF16_FATBIN=<file> makes the test runtime load one), when
-# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them, and bf16-fallback with NO_STATS
-# (the exit report's counters left at zero).
+# the CUDA 12.9.2 compiler is there: the arithmetic tests must fail with them, bf16-fallback with NO_STATS
+# (the exit report's counters left at zero) and bf16-verify with PERTURB (the skinny kernel's element (0, 0) changed).
 controls=()
 if [ -x "$T12/bin/nvcc" ]; then
     . "$W/scripts/nvcc-host.sh"
     nvcc_host_args "$T12/bin/nvcc"
-    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS NO_STATS; do
+    for c in MULADD EPI_SEPARATE NO_ZERO_TERM ZERO_BETA0 ZERO_ALWAYS EPI_ALL SPLITK NAN_BITS NO_STATS PERTURB; do
         (cd "$rt" && "$T12/bin/nvcc" "${NVCC_HOST_ARGS[@]}" -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false \
             -std=c++17 -DVF_KERNEL_CONTROL_$c -fatbin -o "$test_dir/control-$c.fatbin" kernels.cu) && controls+=("$c")
     done
@@ -114,6 +114,29 @@ if want bf16-accept; then
         cp "$log" "$out/logs/forward-bf16-accept-safe.log"
         if [ "$status" = 0 ] && grep -qx "ok bf16-accept safe" "$log"; then echo "PASS  bf16-accept safe (VF_SAFE=1)"
         else echo "FAIL  bf16-accept safe: under VF_SAFE=1 a call was served by the tensor-core path or lost 12.9's bits ($log)"; failed=1; fi
+    fi
+fi
+# Verify mode (VF_CUBLAS_BF16_VERIFY=1): every call the skinny path serves, and the tensor-core path's fallback
+# elements, also computed by cuBLAS 12.9 and compared on the device, eager and captured; the report at exit says
+# that nothing differed, once. Then the skinny path's captured calls in bf16-graphs' cases (two instantiations, a
+# child graph, device launch, a conditional node's body, an update from a recapture) with their verification nodes:
+# each step must do what it does with 12.9 alone, and nothing may differ.
+if want bf16-verify; then
+    if build bf16-verify; then
+        run bf16-verify "$test_dir" VF_CUBLAS_BF16_VERIFY=1
+        tot=$(grep -c "verify: the skinny path's calls against cuBLAS 12.9's, bit for bit: [1-9][0-9]* calls verified (eager calls and graph replays), in [0-9]* call signatures; 0 differed, in 0 elements" "$log")
+        dif=$(grep -c "verify: DIFFERED" "$log")
+        if [ "$status" = 0 ] && grep -qx "ok bf16-verify" "$log" && [ "$tot" = 1 ] && [ "$dif" = 0 ]; then
+            echo "PASS  bf16-verify (the report at exit: nothing differed, said once)"
+        else echo "FAIL  bf16-verify (exit status $status; report's totals $tot times, $dif signatures that differed; $log)"; failed=1; fi
+    fi
+    if build bf16-graphs; then
+        run bf16-graphs "$test_dir" VF_BF16_GRAPHS_N=8 VF_CUBLAS_BF16_VERIFY=1
+        cp "$log" "$out/logs/forward-bf16-graphs-verify.log"
+        tot=$(grep -c "verify: the skinny path's calls against cuBLAS 12.9's, bit for bit: [1-9][0-9]* calls verified (eager calls and graph replays), in [0-9]* call signatures; 0 differed, in 0 elements" "$log")
+        if [ "$status" = 0 ] && grep -qx "ok bf16-graphs" "$log" && [ "$tot" = 1 ]; then
+            echo "PASS  bf16-graphs with the skinny path captured, verify mode (each graph case as with 12.9 alone; nothing differed)"
+        else echo "FAIL  bf16-graphs with the skinny path captured, verify mode (exit status $status; report's totals $tot times; $out/logs/forward-bf16-graphs-verify.log)"; failed=1; fi
     fi
 fi
 # Lazy setup: one process per case, the first served call of the process's context in each.

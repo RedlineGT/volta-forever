@@ -81,4 +81,28 @@ typedef struct {
     VfOut o;
 } VfSkArgs;
 
+/* Verify mode (VF_CUBLAS_BF16_VERIFY=1): a call's output against cuBLAS 12.9's result of the same call, written to a
+ * scratch buffer, bit for bit: every element, or (eA and eB given) the tensor-core path's fallback elements, those of
+ * a failed row or column. */
+typedef struct {
+    const void *D;             /* the call's output */
+    long long ldd;
+    const void *S;             /* 12.9's output, in the scratch buffer */
+    long long lds;
+    const int *eA, *eB;        /* the tensor-core path's check results (VF_BF16_SENT: failed), or NULL */
+    unsigned long long *slot;  /* the call's signature: [0] calls verified, [1] calls that differed, [2] elements that
+                                * differed, [3] the first element that differed (1 + i + j m; 0: none yet), [4] its
+                                * bits: the call's in the high half, 12.9's in the low half */
+    unsigned *call;            /* the stream's counters of one call: [0] elements that differed, [1] blocks done;
+                                * zero before and after each call */
+    int m, n, dtype, pad_;
+} VfCmpArgs;
+
+/* A copy of n 2-byte units: C into the scratch buffer, before a call that reads C writes D, which may be C. */
+typedef struct {
+    const unsigned short *src;
+    unsigned short *dst;
+    long long n;
+} VfCopyArgs;
+
 #endif

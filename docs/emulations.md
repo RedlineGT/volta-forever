@@ -830,7 +830,8 @@ both output types, n = 8 and 16), the 76 it served had 12.9's bits too, and neit
 wrote outside the m rows of a column. Where 12.9 runs `gemmSN`, that kernel is the more accurate
 one (at m = 777, TN, k = 1536: 0.35-0.45 units of 2^-24 sum |a b| against 1.45-2.38 for the chain),
 and the skinny path does not serve. The rule rests on samples of one GPU and one driver: it is not a property that
-cuBLAS documents.
+cuBLAS documents. `VF_CUBLAS_BF16_VERIFY=1` checks it on a program's own calls: each call the path serves is also
+made by 12.9 and the two outputs compared bit for bit (`INSTALL.md`, "The bf16 cuBLAS variants").
 
 The path also has bounds of its own, a rule of performance and not of correctness (inside them and
 outside, the bits are 12.9's where the rule above serves), from the time it takes against 12.9's (G1,

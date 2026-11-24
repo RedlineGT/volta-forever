@@ -726,6 +726,21 @@ on, they still take most of it: the products with 896 in-features and, in traini
 this series, in full fine-tuning, the fallback took 31.7 % of the kernel time, the scaling kernel about 34 % and
 the fp16 products 12.5 %, for the backward pass's products that now go to 12.9.
 
+### Verify mode on these programs
+
+With `VF_CUBLAS_BF16_VERIFY=1` (the release runtime), each call the skinny path served was made a second time
+through cuBLAS 12.9 and the two outputs compared bit for bit on the GPU. Generation at batch 2 to 16 and prompts of
+512 tokens: 111,744 calls verified, in 8 call signatures; LoRA fine-tuning at batches of 16 tokens: 12,606, in 5;
+SGLang serving the generation model in bf16 (at `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1`, as its guide says),
+1 to 128 requests generating 128 tokens each and 1 to 32 prompts of 512 tokens, three rounds, its decode replayed
+from CUDA graphs:
+74,208 calls verified, in 13 call signatures, of which 1,584 were made outside a graph and the others were replays
+of captured calls. None differed, and the same calls verified again with the tensor-core path on did not either. With the tensor-core path on as well, the fallback's elements of the path's calls
+that had any were compared the same way: those of 1,601 calls (14.6 million elements) in generation and of 137
+calls (0.57 million) in fine-tuning, and of 200 calls (158 million) in SGLang's prefills; none differed. The embedding encoder at batches of 1 to 16 tokens
+gave the skinny path no call: cuBLAS 12.9 does not run its sequential kernel on its shapes there. Verify mode is a
+diagnostic: generation at batch 8 ran at 0.76 times its speed without it (not pinned to CPUs).
+
 An engine that replays its steps from CUDA graphs gains little (`LIMITS.md`, "The bf16 cuBLAS
 variants"): SGLang at its default settings computes in fp16 on this card, with no bf16 product, and
 made to use bf16 it replays prefill and decode from graphs. Not measured: other models of each
