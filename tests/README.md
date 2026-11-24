@@ -121,9 +121,10 @@ Where the GPU scripts write:
   the checked-in fat binary rebuilt when the CUDA 12.9.2 compiler is there (`bf16-kernels`); the
   tensor-core path's special values against 12.9 (`bf16-s1.c`) and its acceptance test
   (`bf16-accept.c`: 12.9's classes, determinism, an error bound and a bias bound against the exact
-  product for every call it serves at k >= 1024, nothing served below and every TN call from there on
-  served, failing when the gate is moved to 512 or 256, with `VF_ACCEPT_STRICT=1` (its two documented
-  exceptions removed) and with the path off; with `VF_SAFE=1`, every result 12.9's); the path's layout
+  product for every call it serves at k >= 768, nothing served below and every TN call from there on
+  served, failing when the gate is moved to 512 or 256 (on other families than the two judged from 1024),
+  with `VF_ACCEPT_STRICT=1` (its four documented exceptions removed: lognpos and advpos then fail at the
+  gate) and with the path off; with `VF_SAFE=1`, every result 12.9's); the path's layout
   rule, tall rule and wide rule (`bf16-rules.c`: a fine-tuning step's input and weight gradients, NN and
   NT, an output layer up to the tall rule's n, a wide down projection past the wide rule's n and a long
   product of many rows at the tall rule's long-k m with k past its long-k bound forwarded with 12.9's

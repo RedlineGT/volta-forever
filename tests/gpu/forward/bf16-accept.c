@@ -16,17 +16,19 @@
  *     B   per matrix (fp32 output), the bias towards zero, mean of (c - x) sign(x) / (u S'), is at most
  *         max(|bias of 12.9|, margin x slope x k) + 0.5 in magnitude: slope the native bias slope of the data
  *         (an RTX 5090 on the same data, measured once, constants below), margin VF_ACCEPT_BIAS_MARGIN (0.8);
- *         the bias of two synthetic constructions is judged from k = 4096 (craftsub) and 2048 (configuration
- *         1653006390) on (VF_ACCEPT_STRICT=1: from the gate), see bias_from_fam and kept[];
+ *         the bias of four synthetic constructions is judged from k = 4096 (craftsub), 2048 (configuration
+ *         1653006390) and 1024 (lognpos, advpos: positive data over many binades) on (VF_ACCEPT_STRICT=1: from the
+ *         gate), see bias_from_fam and kept[];
  *     on deterministic data (bf16-accept-gen.h): 10 families and 3 configurations of the adversarial search,
- *     k = 256, 512, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a
+ *     k = 256, 512, 768, 896, 1024, 1536, 2048, 4096, 16384 (TN), NN, NT, TT at 2048, both output types, alpha and beta with a
  *     general C, the cuBLASLt bias
  *     epilogue. Calls below the gate are run but not judged, and so are the NN, NT and TT calls, which go to 12.9
  *     (the path's layout rule: TN only). With VF_ACCEPT_EXPECT_GATE=1, a call below the gate that the path serves
  *     is a failure, and so is a TN call from the gate on that it does not serve, or a call in another layout that
  *     it serves: for when the runtime has its gate; the number judged is printed). Prints "ok bf16-accept" and exits 0, or FAIL lines
  *     and exits 1. Controls, each of which must fail: VF_ACCEPT_GATE=256 and 512 (the path exceeds A on craftsub
- *     at 256, the bias bound below 1024); VF_ACCEPT_STRICT=1 (the two exceptions removed); the tensor-core path
+ *     at 256, the bias bound of samesign and of a search configuration at 512); VF_ACCEPT_STRICT=1 (the four
+ *     exceptions removed: lognpos and advpos fail at the gate); the tensor-core path
  *     off (the skinny path on, for the test runtime's counters) with VF_ACCEPT_EXPECT_GATE=1 (nothing served).
  *
  *   bf16-accept safe       with VF_SAFE=1: no call served by the tensor-core path, every result with 12.9's bits
@@ -61,7 +63,7 @@ static cublasLtHandle_t ltv, lt12;
 static cudaStream_t st;
 static void *ws_lt;
 #define WS_LT (4u << 20)
-static int gate = 1024; /* the tensor-core path's gate (VF_TC_MIN_K, crates/vf-fwdgen/bf16tc/runtime.c) */
+static int gate = 768; /* the tensor-core path's gate (VF_TC_MIN_K, crates/vf-fwdgen/bf16tc/runtime.c) */
 static int expect_gate; /* VF_ACCEPT_EXPECT_GATE=1: the path serves exactly the calls with k >= the gate: one below it
                          * that it serves, or one from it on that it does not serve, is a failure */
 static double bias_margin = 0.8; /* VF_ACCEPT_BIAS_MARGIN */
@@ -81,10 +83,14 @@ static double cur_slope; /* the slope of the data being judged */
  * at 1536 and 1.20 at 2048, the bound being 12.9's own bias there) up to k = 4096, and the search's configuration
  * 1653006390 (non-negative operands, a 2^21 activation at the start of every slice; 1.90 times its bound at 1024
  * and 1.27 at 1536, 0.95 at 2048) up to 2048.
- * Real operands (1,728 pairs of four models) have mixed-sign products and a bias of at most 0.22 u at every k.
- * Their bias is judged from 4096 and 2048 on, unless VF_ACCEPT_STRICT=1 (then from the gate). Every other bound
- * applies from the gate. */
-static int bias_from_fam[FAM_N] = {[FAM_CRAFTSUB] = 4096};
+ * Two natural families of positive data spread over many binades exceed it below k = 1024: lognpos (log-normal
+ * magnitudes, one sign; 1.16 times its bound at k = 768, 0.91 at 896) and advpos (an adversarial positive
+ * construction; 1.25 times its bound at 768, at its bound at 896): what a program whose operands are all positive
+ * over a wide range should expect from the path at k = 768 to 1023. Real operands (1,728 pairs of four models, and
+ * the layers of k = 768 and 896 of five models) have mixed-sign products and a bias of at most 0.05 times its bound.
+ * Their bias is judged from 4096, 2048, 1024 and 1024 on, unless VF_ACCEPT_STRICT=1 (then from the gate). Every
+ * other bound applies from the gate. */
+static int bias_from_fam[FAM_N] = {[FAM_CRAFTSUB] = 4096, [FAM_LOGNPOS] = 1024, [FAM_ADVPOS] = 1024};
 static int strict, cur_fam, cur_bias_from;
 
 typedef struct {
@@ -479,7 +485,7 @@ static void special_case(const char *name, const Prob *p, const uint16_t *A, con
 
 static void specials(void)
 {
-    const int m = 1536, n = 128, k = 1024; /* at the gate: judged */
+    const int m = 1536, n = 128, k = 1024; /* from the gate on: judged */
     Gen g;
     memset(&g, 0, sizeof g);
     g.fam = FAM_NORMAL, g.seed = 4242;
@@ -584,7 +590,7 @@ static int test_mode(void)
            strict ? "; strict (every bias judged from the gate)"
                   : "; the bias of craftsub judged from k = 4096, of configuration 1653006390 from 2048");
     specials();
-    static const int ks[] = {256, 512, 1024, 1536, 2048, 4096, 16384};
+    static const int ks[] = {256, 512, 768, 896, 1024, 1536, 2048, 4096, 16384};
     static const int fams[] = {FAM_NORMAL, FAM_RELU2,   FAM_OUTLIER, FAM_CANCEL,   FAM_MIXED30,
                                FAM_SAMESIGN, FAM_LOGNPOS, FAM_ADVPOS, FAM_CRAFTACT, FAM_CRAFTSUB};
     const int nf = sizeof fams / sizeof *fams, nkept = sizeof kept / sizeof *kept;

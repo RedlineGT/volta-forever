@@ -55,9 +55,9 @@ where it is not from the build of this release. `docs/` says how each figure was
   them in each image adapted ([Kernels refused](#kernels-refused)).
 - **The bf16 cuBLAS variants are opt-in.** `VF_CUBLAS_BF16_SKINNY=1` and `VF_CUBLAS_BF16_TC=1`
   are off by default. The tensor-core path's results are not cuBLAS 12.9's bits, and it takes TN
-  products with k from 1024 to 16384 only, but for the classes of shapes that its rules of speed
-  leave to 12.9: a model whose layers have fewer than 1024 in-features gets it only on its wider
-  layers. A bf16 fine-tuning step ran at 1.02 to 1.07 times its speed without it, its backward
+  products with k from 768 to 16384 only, but for the classes of shapes that its rules of speed
+  leave to 12.9: a model whose layers have fewer than 768 in-features gets it only on its wider
+  layers. A bf16 fine-tuning step ran at 1.12 to 1.24 times its speed without it, its backward
   products going to 12.9 (0.1.5 served them too, and made such a step slower). `VF_SAFE=1` turns
   it off ([The bf16 cuBLAS variants](#the-bf16-cublas-variants)).
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
@@ -451,16 +451,15 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 `docs/emulations.md` (section 11). Both are off by default. Their limits:
 
 - **The tensor-core path's results are not cuBLAS 12.9's bits**: they differ in the last bits
-  (`docs/emulations.md`, section 11), in inference and in training. What it gains depends on the program's
-  shapes. Measured on one model of each kind on one V100 (`docs/performance.md`, "bf16 products through cuBLAS:
-  the opt-in variants on real programs"): eager generation at batch 8 and 32 ran 1.39 and 1.46 times as fast
-  with it, prompts and scoring 1.05 to 1.18 times, an embedding encoder 1.11 to 1.16 times, Whisper's encoder
-  1.07 times and its transcription at batch 16 1.20 times, the generation model under `torch.compile` 1.07 to
-  1.22 times, and generation at batch 1 (one column, never served) at 0.98 to 0.99 times its speed without the
-  switch. With the gate on k, these models' products with 768 or 896 in-features, all but the second product
-  of each MLP, go to the skinny path or to 12.9. A bf16 fine-tuning step (LoRA and full fine-tuning of the same
-  0.5B model) ran at 1.02 to 1.07 times its speed without the switch: its forward products are served, those of
-  its backward pass go to 12.9 (below, the TN layout). `VF_SAFE=1` keeps every call at 12.9's bits whatever
+  (`docs/emulations.md`, section 11), in inference and in training. What it gains depends on the program's shapes.
+  Measured on one model of each kind on one V100 (`docs/performance.md`, "bf16 products through cuBLAS: the opt-in
+  variants on real programs"): eager generation at batch 8 and 32 ran 1.40 to 1.43 and 1.49 to 1.52 times as fast
+  with it, prompts and scoring 1.33 to 1.74 times, an embedding encoder 1.53 to 1.77 times, Whisper's encoder 1.31
+  times and its transcription at batch 16 1.26 to 1.29 times, the generation model under `torch.compile` 1.46 to
+  1.92 times, and generation at batch 1 (the steps' one column never served, the prompt's products served) at 1.00
+  to 1.04 times its speed without the switch. A bf16 fine-tuning step (LoRA and full fine-tuning of the same 0.5B
+  model) ran at 1.12 to 1.24 times its speed without the switch: its forward products are served, those of its
+  backward pass go to 12.9 (below, the TN layout). `VF_SAFE=1` keeps every call at 12.9's bits whatever
   `VF_CUBLAS_BF16_TC` says ([Safe mode](#safe-mode-vf_safe1)).
 - **Graph captures.** A tensor-core call captured in a graph is computed by cuBLAS 12.9: its
   workspace would be an allocation node of the program's graph, and with one, measured on driver
@@ -480,7 +479,7 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
 - **One element's bits depend on the batch size, and on capture.** With the tensor-core path on, the
   same row of op(A) times the same column of op(B) has cuBLAS 12.9's bits when the product is narrow
   (n = 1, or within the skinny path's rule: n <= 16, or n < 32 when m k < 2^20) and the tensor-core
-  path's when it is wide (m k >= 2^20 or n >= 32, outside the skinny path's rule, with k from 1024 to
+  path's when it is wide (m k >= 2^20 or n >= 32, outside the skinny path's rule, with k from 768 to
   16384) and made outside a graph capture; captured, the same call has 12.9's bits again. `VF_SAFE=1`
   removes what the variants add: it gives cuBLAS 12.9's bits for that call, whatever n and whatever the
   capture ([Safe mode](#safe-mode-vf_safe1)). 12.9's own results depend on n at n = 1 and, on some
@@ -489,10 +488,19 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   shape gave other bits at n = 1 (in 77 to 95 % of the elements); TN 384 x 1536 and 256 x 2048, where
   12.9 runs another kernel up to n = 16, gave other bits in about 90 % of the elements at every n from
   2 to 16 and the same bits from n = 17; the 16 others gave the same bits at every n from 2 to 63.
-- **The tensor-core path takes k >= 1024 only** (`docs/emulations.md`, "The tensor-core path's gate"):
-  a model gains on its layers with 1024 in-features or more. One whose hidden size is smaller (896, as
-  Qwen2.5's 0.5B) gets it only on its wider layers, such as the MLP's down-projection (k = 4864); its
-  other products go to the skinny path (n <= 16, within its rule) or to cuBLAS 12.9. The skinny path is
+- **The tensor-core path takes k >= 768 only** (`docs/emulations.md`, "The tensor-core path's gate"): a model
+  gains on its layers with 768 in-features or more; a shorter product goes to the skinny path (n <= 16, within its
+  rule) or to cuBLAS 12.9. On real operands at k = 768 and 896 (the layers of k = 768 and 896 of five models:
+  Qwen2.5-0.5B, T5-base, OPT-125m, bge-base-en-v1.5 and whisper-small's encoder, 990 pairs against the exact
+  product) every element's error was within 0.040 times the acceptance test's bound in fp32 output, and every
+  matrix's mean error towards zero within 0.046 times its bias bound (0.82 units at most). Data whose products all
+  have one sign and spread over many binades fare worse below k = 1024: two such families of the acceptance test,
+  log-normal magnitudes and an adversarial positive construction, ran at 1.16 and 1.25 times the bias bound at
+  k = 768 (0.91 and 1.003 at 896): what a program whose operands are all positive over a wide range should expect
+  at k = 768 to 1023, a mean error towards zero above that bound (the bound being 0.8 times an RTX 5090's own on
+  the same data), each element still within the error bound. The test judges these two families' bias from
+  k = 1024 (documented exceptions, as the two constructions aligned with the path's k-slices are from 2048 and
+  4096). `VF_SAFE=1` keeps every call at 12.9's bits ([Safe mode](#safe-mode-vf_safe1)). The skinny path is
   unaffected.
 - **The tensor-core path serves the TN layout only** (op(A) = A^T, op(B) = B: a framework's linear layer,
   y = x W^T, as cuBLAS gets it), a rule of speed. Inference keeps the path on the linear layers it gates in,
@@ -540,7 +548,7 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   explicit algorithms of `cublasGemmEx` and `cublasGemmStridedBatchedEx`, a `cublasLtMatmul`
   algorithm on the skinny path other than the one 12.9's heuristic gives there (id 16 with every
   configuration attribute as `cublasLtMatmulAlgoInit` leaves it, k in one split),
-  pedantic modes, k above 16384 or below 1024 on the tensor cores, products in another layout than TN on the
+  pedantic modes, k above 16384 or below 768 on the tensor cores, products in another layout than TN on the
   tensor cores, and TN with m >= 8192 and n <= 64, with m >= 6144 and k > 9216, or with k > 8192 and n > 256
   there, cuBLASLt descriptors with any attribute outside
   the supported set, a `cublasLtMatmul` without a C descriptor, with a workspace size and no

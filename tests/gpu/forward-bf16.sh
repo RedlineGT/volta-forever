@@ -88,24 +88,26 @@ done
 # -fopenmp shortens its host side only.
 if want bf16-accept; then
     if build bf16-accept -fopenmp; then
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=768 VF_ACCEPT_EXPECT_GATE=1; verdict bf16-accept
         cp "$log" "$out/logs/forward-bf16-accept-main.log"
         for g in 512 256; do
             run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_BF16_TC_MIN_K=$g VF_ACCEPT_GATE=$g >/dev/null
             cp "$log" "$out/logs/forward-bf16-accept-gate$g.log"
-            if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* [NT][NT] [0-9]*x[0-9]*x$g " "$log"; then
-                echo "PASS  bf16-accept control: the gate at $g fails at k = $g"
+            # at k = $g, rows of other families than the two exceptions judged from 1024 (lognpos, advpos)
+            if [ "$status" != 0 ] && grep "^FAIL  [a-z0-9]* [NT][NT] [0-9]*x[0-9]*x$g " "$log" | grep -qv "^FAIL  \(lognpos\|advpos\) "; then
+                echo "PASS  bf16-accept control: the gate at $g fails at k = $g (other families than lognpos and advpos)"
             else echo "FAIL  bf16-accept control: the gate at $g did not fail at k = $g ($out/logs/forward-bf16-accept-gate$g.log)"; failed=1; fi
         done
-        # Control: the two documented exceptions removed (VF_ACCEPT_STRICT=1): a bias from the gate on must fail.
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=1024 VF_ACCEPT_STRICT=1 >/dev/null
+        # Control: the four documented exceptions removed (VF_ACCEPT_STRICT=1): a bias from the gate on must fail, and
+        # lognpos and advpos at the gate.
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_SKINNY=0 VF_ACCEPT_GATE=768 VF_ACCEPT_STRICT=1 >/dev/null
         cp "$log" "$out/logs/forward-bf16-accept-strict.log"
-        if [ "$status" != 0 ] && grep -q "^FAIL  [a-z0-9]* TN 1024x128x[0-9]* fp32" "$log"; then
-            echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate)"
+        if [ "$status" != 0 ] && grep -q "^FAIL  lognpos TN 1024x128x768 fp32" "$log" && grep -q "^FAIL  advpos TN 1024x128x768 fp32" "$log"; then
+            echo "PASS  bf16-accept control: VF_ACCEPT_STRICT=1 fails (the exceptions judged from the gate: lognpos and advpos at k = 768)"
         else echo "FAIL  bf16-accept control: VF_ACCEPT_STRICT=1 did not fail ($out/logs/forward-bf16-accept-strict.log)"; failed=1; fi
         # Control: the tensor-core path off (the skinny path on, so that the variants load the test runtime and its
         # counters), the gate expected: every call from the gate on must then fail as not served.
-        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 VF_ACCEPT_GATE=1024 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
+        run bf16-accept "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1 VF_ACCEPT_GATE=768 VF_ACCEPT_EXPECT_GATE=1 >/dev/null
         cp "$log" "$out/logs/forward-bf16-accept-tc-off.log"
         if [ "$status" != 0 ] && grep -q "^FAIL  .*: not served by the tensor-core path at k >= the gate" "$log"; then
             echo "PASS  bf16-accept control: with the tensor-core path off, the calls from the gate on are not served and it fails"

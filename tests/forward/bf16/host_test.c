@@ -425,7 +425,7 @@ static void stats_mode(void)
  * at the gate and at the bounds of the tall and wide rules are written from these constants, which the runtime must
  * report (VF_TC_MIN_K and the others): moving a bound means changing both, and a gate moved in the runtime alone
  * (VF_BF16_TC_MIN_K=512, a test build's way) makes the first table fail; the second holds whatever the gate is. ---- */
-#define RULE_GATE 1024
+#define RULE_GATE 768
 #define RULE_TALL_M 8192
 #define RULE_TALL_MAX_N 64
 #define RULE_TALL_LONG_M 6144

@@ -57,16 +57,18 @@ extern const unsigned char vf_bf16_fatbin[] __attribute__((visibility("hidden"))
 #define VF_TC_MAX_K 16384            /* the tensor-core path forwards a longer k (review 3.8) */
 #define VF_TC_GATE_MK (1LL << 20)    /* tensor-core path: m * k at least this, or n >= VF_TC_GATE_N */
 #define VF_TC_GATE_N 32
-/* The tensor-core path's shortest k. On real operands (1,728 pairs of the linear layers of four models, k = 896
- * to 12288, against the exact product) every element's error was within 0.045 times the bound of the acceptance
- * test (the larger of 12.9's own error and the classical fp32 bound (k - 1) u sum |a b|) and every matrix's mean
- * error towards zero within 0.22 u, from the lowest k measured; at the level of models, no gate from 4096 down to
- * none could be told apart from cuBLAS 12.9. 1024 keeps the margin that the natural synthetic families of
- * tests/gpu/forward/bf16-accept.c need: below it they exceed its bias bound (0.8 times an RTX 5090's own mean
- * error on the same data). Two constructions aligned with the 256-element k-slices exceed that bound above the
- * gate, and the test judges their bias from k = 2048 and 4096 (docs/emulations.md, "The tensor-core path's gate").
- * A shorter product goes to the skinny path (within its rule) or to cuBLAS 12.9. */
-#define VF_TC_MIN_K 1024
+/* The tensor-core path's shortest k. On real operands against the exact product, every element's error was within
+ * 0.045 times the bound of the acceptance test (the larger of 12.9's own error and the classical fp32 bound
+ * (k - 1) u sum |a b|) and every matrix's mean error towards zero within 0.22 u (1,728 pairs of the linear layers of
+ * four models, k = 896 to 12288), and at k = 768 and 896 (the layers of five models) within 0.040 times that bound
+ * and 0.046 times the bias bound (0.8 times an RTX 5090's own mean error on the same data, or 12.9's); at the level of
+ * models, no gate from 4096 down to none could be told apart from cuBLAS 12.9. Of the synthetic families of
+ * tests/gpu/forward/bf16-accept.c, two of positive data spread over many binades (log-normal, and an adversarial
+ * positive construction) exceed that bias bound below k = 1024 (at 768: 1.16 and 1.25 times it), and two
+ * constructions aligned with the 256-element k-slices above it: the test judges their bias from k = 1024, 1024, 2048
+ * and 4096 (docs/emulations.md, "The tensor-core path's gate"). A shorter product goes to the skinny path (within its
+ * rule) or to cuBLAS 12.9. */
+#define VF_TC_MIN_K 768
 /* The tensor-core path's layout: op(A) = A^T and op(B) = B (TN, how cuBLAS sees a framework's linear layer
  * y = x W^T, in inference and in the forward pass of training). A rule of speed (the class of the other layouts
  * fails the class criterion above: down to 0.24 times 12.9's speed on a fine-tuning step's products): in the other
