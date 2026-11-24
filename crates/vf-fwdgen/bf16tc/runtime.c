@@ -1744,8 +1744,9 @@ EXPORT cublasStatus_t vf_bf16_cublasLtMatmul(cublasLtHandle_t handle, cublasLtMa
     if (m > INT_MAX || n > INT_MAX) goto forward;
     reason = R_SHAPE;
     if (m < 1 || n < 2) goto forward;
-    reason = R_DOMAIN; /* n >= 32: wider than the skinny path's widest, and the tensor-core path is off */
-    if (!cfg.tc && n >= 32) goto forward;
+    reason = R_DOMAIN; /* n >= 32: wider than the skinny path's widest, and the tensor-core path is off (with
+                        * VF_SAFE=1 the call goes on, to be counted under safe mode's reason, as in the legacy entry) */
+    if (!cfg.tc && !cfg.tc_safe && n >= 32) goto forward;
     int32_t transa = 0, transb = 0, pmode = 0, btype = -1;
     uint32_t epilogue = 0;
     const void *bias = NULL;

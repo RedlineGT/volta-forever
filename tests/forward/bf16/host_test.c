@@ -931,6 +931,34 @@ int main(int argc, char **argv)
         expect_forwarded("safe: a large tensor-core call", &g, R_SAFE);
         g = gemm(0, 1, 1536, 8, 1920);
         expect_skinny("safe: a skinny call", &g, "vf_bf16_skinny_g_8_16");
+        /* a cuBLASLt call the tensor-core path would serve (n >= 32): forwarded, and counted under safe mode's
+         * reason in the exit report, as the legacy entry counts it, not as outside the paths' domains */
+        cublasLtHandle_t lt;
+        v.LtCreate(&lt);
+        cublasLtMatmulDesc_t d;
+        cublasLtMatrixLayout_t la, lb, lc;
+        v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+        const int32_t ta = CUBLAS_OP_T;
+        v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof ta);
+        v.LayoutCreate(&la, CUDA_R_16BF, 4096, 1536, 4096);
+        v.LayoutCreate(&lb, CUDA_R_16BF, 4096, 128, 4096);
+        v.LayoutCreate(&lc, CUDA_R_32F, 1536, 128, 1536);
+        const float one = 1.0f, zero = 0.0f;
+        const Counts c0 = counts(API_LT);
+        take();
+        const cublasStatus_t st = v.LtMatmul(lt, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), lc, DEV(3), lc, NULL, NULL,
+                                             0, S1);
+        take();
+        const Counts c1 = counts(API_LT);
+        CHECK(st == 0 && count("ltmatmul ") == 1 && count("launch") == 0,
+              "safe: a cuBLASLt tensor-core call (TN 1536 x 128 x 4096): not one call of 12.9's cublasLtMatmul");
+        CHECK(!rt_counters || (c1.v[4 + R_SAFE] - c0.v[4 + R_SAFE] == 1 && c1.v[4 + R_DOMAIN] == c0.v[4 + R_DOMAIN]),
+              "safe: a cuBLASLt tensor-core call (TN 1536 x 128 x 4096): counted as reason %d, not VF_SAFE=1 (%d)",
+              c1.v[4 + R_DOMAIN] != c0.v[4 + R_DOMAIN] ? R_DOMAIN : -1, R_SAFE);
+        v.LayoutDestroy(la);
+        v.LayoutDestroy(lb);
+        v.LayoutDestroy(lc);
+        v.DescDestroy(d);
     } else if (!strcmp(mode, "notsafe")) { /* VF_SAFE set to another value than 1, VF_CUBLAS_BF16_TC=1 */
         G g = gemm(1, 0, 1536, 128, 4096);
         take();
