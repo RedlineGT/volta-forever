@@ -85,7 +85,7 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 200 cases at 0.1.5 (165 at 0.1.4), including nonconsecutive MMA fragments, a
+  an RTX 5090 say. 212 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
   partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -606,7 +606,7 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 511, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 513, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
