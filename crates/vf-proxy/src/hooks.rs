@@ -2004,12 +2004,15 @@ unsafe fn report_launch(
 }
 
 /// What a launch that the driver answered `result` returns to the program: a launch accepted (with
-/// `fitted`, from its second translation) is kept for the report of a fault and, in exact mode
-/// (`VF_FAULT_TRACE=1`), waited for; an error of a fault is reported (`fault`).
+/// `fitted`, from its second translation) is kept for the report of a fault, then profiled when
+/// `VF_PROFILE` is set and the entry is one the profile measures (`profiled`: the launch's bytes
+/// of dynamic shared memory), and, in exact mode (`VF_FAULT_TRACE=1`), waited for; an error of a
+/// fault is reported (`fault`). (Kept before the profile waits: its wait covers the launch.)
 ///
 /// # Safety
 /// `stream` is the stream the program launched on.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 unsafe fn launched(
     result: CUresult,
     fitted: bool,
@@ -2018,12 +2021,18 @@ unsafe fn launched(
     block: [c_uint; 3],
     stream: *mut c_void,
     entry: fault::Entry,
+    profiled: Option<c_uint>,
 ) -> CUresult {
     if result != CUDA_SUCCESS {
         fault::check(result, entry.name());
         return result;
     }
     let kept = fault::launched(function, grid, block, stream, entry, fitted);
+    if let Some(shared_memory) = profiled
+        && config().profile
+    {
+        unsafe { profile::profile_launch(function, grid, block, shared_memory, stream) };
+    }
     if config().fault_trace {
         return unsafe { fault::settle(kept, stream, entry.per_thread(), entry.name()) };
     }
@@ -2093,17 +2102,6 @@ pub unsafe extern "C" fn cuLaunchKernel(
             )
         }
     {
-        if fit_result == CUDA_SUCCESS && config().profile {
-            unsafe {
-                profile::profile_launch(
-                    function,
-                    [grid_x, grid_y, grid_z],
-                    [block_x, block_y, block_z],
-                    shared_memory,
-                    stream,
-                )
-            };
-        }
         return unsafe {
             launched(
                 fit_result,
@@ -2113,6 +2111,7 @@ pub unsafe extern "C" fn cuLaunchKernel(
                 [block_x, block_y, block_z],
                 stream,
                 fault::Entry::LaunchKernel,
+                Some(shared_memory),
             )
         };
     }
@@ -2128,17 +2127,6 @@ pub unsafe extern "C" fn cuLaunchKernel(
             )
         };
     }
-    if result == CUDA_SUCCESS && config().profile {
-        unsafe {
-            profile::profile_launch(
-                function,
-                [grid_x, grid_y, grid_z],
-                [block_x, block_y, block_z],
-                shared_memory,
-                stream,
-            )
-        };
-    }
     unsafe {
         launched(
             result,
@@ -2148,6 +2136,7 @@ pub unsafe extern "C" fn cuLaunchKernel(
             [block_x, block_y, block_z],
             stream,
             fault::Entry::LaunchKernel,
+            Some(shared_memory),
         )
     }
 }
@@ -2168,11 +2157,11 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
         unsafe { count_launch(function) };
     }
     let result = unsafe { real(launch, function, parameters, extra) };
-    let (grid, block, stream) = if launch.is_null() {
-        ([0; 3], [0; 3], std::ptr::null_mut())
+    let (grid, block, stream, profiled) = if launch.is_null() {
+        ([0; 3], [0; 3], std::ptr::null_mut(), None)
     } else {
         let launch = unsafe { &*launch };
-        (launch.grid, launch.block, launch.stream)
+        (launch.grid, launch.block, launch.stream, Some(launch.shared_memory))
     };
     // Refused for its registers: from a second translation, as in `cuLaunchKernel`.
     if result == fit::OUT_OF_RESOURCES
@@ -2186,18 +2175,6 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
             )
         }
     {
-        if fit_result == CUDA_SUCCESS && config().profile && !launch.is_null() {
-            let launch_ref = unsafe { &*launch };
-            unsafe {
-                profile::profile_launch_ex(
-                    function,
-                    launch_ref.grid,
-                    launch_ref.block,
-                    launch_ref.shared_memory,
-                    launch_ref.stream,
-                )
-            };
-        }
         return unsafe {
             launched(
                 fit_result,
@@ -2207,6 +2184,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
                 block,
                 stream,
                 fault::Entry::LaunchKernelEx,
+                profiled,
             )
         };
     }
@@ -2230,18 +2208,6 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
             )
         };
     }
-    if result == CUDA_SUCCESS && config().profile && !launch.is_null() {
-        let launch_ref = unsafe { &*launch };
-        unsafe {
-            profile::profile_launch_ex(
-                function,
-                launch_ref.grid,
-                launch_ref.block,
-                launch_ref.shared_memory,
-                launch_ref.stream,
-            )
-        };
-    }
     unsafe {
         launched(
             result,
@@ -2251,6 +2217,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
             block,
             stream,
             fault::Entry::LaunchKernelEx,
+            profiled,
         )
     }
 }
@@ -2337,17 +2304,6 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
             )
         }
     {
-        if fit_result == CUDA_SUCCESS && config().profile {
-            unsafe {
-                profile::profile_launch(
-                    function,
-                    [grid_x, grid_y, grid_z],
-                    [block_x, block_y, block_z],
-                    shared_memory,
-                    stream,
-                )
-            };
-        }
         return unsafe {
             launched(
                 fit_result,
@@ -2357,6 +2313,7 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
                 [block_x, block_y, block_z],
                 stream,
                 fault::Entry::LaunchKernelPtsz,
+                Some(shared_memory),
             )
         };
     }
@@ -2372,17 +2329,6 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
             )
         };
     }
-    if result == CUDA_SUCCESS && config().profile {
-        unsafe {
-            profile::profile_launch(
-                function,
-                [grid_x, grid_y, grid_z],
-                [block_x, block_y, block_z],
-                shared_memory,
-                stream,
-            )
-        };
-    }
     unsafe {
         launched(
             result,
@@ -2392,6 +2338,7 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
             [block_x, block_y, block_z],
             stream,
             fault::Entry::LaunchKernelPtsz,
+            Some(shared_memory),
         )
     }
 }
@@ -2411,11 +2358,11 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
         unsafe { count_launch(function) };
     }
     let result = unsafe { real(launch, function, parameters, extra) };
-    let (grid, block, stream) = if launch.is_null() {
-        ([0; 3], [0; 3], std::ptr::null_mut())
+    let (grid, block, stream, profiled) = if launch.is_null() {
+        ([0; 3], [0; 3], std::ptr::null_mut(), None)
     } else {
         let launch = unsafe { &*launch };
-        (launch.grid, launch.block, launch.stream)
+        (launch.grid, launch.block, launch.stream, Some(launch.shared_memory))
     };
     if result == fit::OUT_OF_RESOURCES
         && !launch.is_null()
@@ -2428,18 +2375,6 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
             )
         }
     {
-        if fit_result == CUDA_SUCCESS && config().profile && !launch.is_null() {
-            let launch_ref = unsafe { &*launch };
-            unsafe {
-                profile::profile_launch_ex(
-                    function,
-                    launch_ref.grid,
-                    launch_ref.block,
-                    launch_ref.shared_memory,
-                    launch_ref.stream,
-                )
-            };
-        }
         return unsafe {
             launched(
                 fit_result,
@@ -2449,6 +2384,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
                 block,
                 stream,
                 fault::Entry::LaunchKernelExPtsz,
+                profiled,
             )
         };
     }
@@ -2472,18 +2408,6 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
             )
         };
     }
-    if result == CUDA_SUCCESS && config().profile && !launch.is_null() {
-        let launch_ref = unsafe { &*launch };
-        unsafe {
-            profile::profile_launch_ex(
-                function,
-                launch_ref.grid,
-                launch_ref.block,
-                launch_ref.shared_memory,
-                launch_ref.stream,
-            )
-        };
-    }
     unsafe {
         launched(
             result,
@@ -2493,6 +2417,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
             block,
             stream,
             fault::Entry::LaunchKernelExPtsz,
+            profiled,
         )
     }
 }
@@ -2515,6 +2440,7 @@ pub unsafe extern "C" fn cuLaunch(function: *mut c_void) -> CUresult {
             [0; 3],
             std::ptr::null_mut(),
             fault::Entry::Launch,
+            None,
         )
     }
 }
@@ -2535,6 +2461,7 @@ pub unsafe extern "C" fn cuLaunchGrid(function: *mut c_void, width: c_int, heigh
             [0; 3],
             std::ptr::null_mut(),
             fault::Entry::LaunchGrid,
+            None,
         )
     }
 }
@@ -2560,6 +2487,7 @@ pub unsafe extern "C" fn cuLaunchGridAsync(
             [0; 3],
             stream,
             fault::Entry::LaunchGridAsync,
+            None,
         )
     }
 }
@@ -2617,6 +2545,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel(
             [block_x, block_y, block_z],
             stream,
             fault::Entry::Cooperative,
+            None,
         )
     }
 }
@@ -2661,6 +2590,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel_ptsz(
             [block_x, block_y, block_z],
             stream,
             fault::Entry::CooperativePtsz,
+            None,
         )
     }
 }

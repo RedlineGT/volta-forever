@@ -141,6 +141,13 @@ def case(name, proxy):
         out.append(run.api.cuStreamEndCapture(captured, c.byref(graph)))
         out.append(run.launch("add_one", other, grid=2))
         out.append(waits.value - before)
+    elif name == "profile":
+        # VF_PROFILE waits for each launch: its wait that met the fault is the one reported, and its
+        # waits that succeeded cover what they waited for.
+        out.append(run.launch("add_one", grid=1))
+        out.append(run.launch("write_null", grid=2))
+        out.append(run.launch("add_one", grid=3))
+        out.append(run.api.cuCtxSynchronize())
     elif name in ("copy", "exit"):
         out.append(run.launch("add_one", grid=1))
         out.append(run.launch("write_null", grid=2))
@@ -225,6 +232,10 @@ def checks(name, log, summary, results):
         expect("the graph named", head.startswith("a kernel of a CUDA graph faulted on the GPU") and
                "    write_null (grid 3x1x1" in log)
         expect("the graph's launch returned the fault", results[7] == "700")
+    elif name == "profile":
+        expect("the profile's wait after write_null met it",
+               "the synchronisation of the stream after a launch (VF_PROFILE) returned 700" in head)
+        expect("write_null alone: the profile's wait after add_one covered it", names == ["write_null"])
     elif name == "copy":
         expect("found before the context was destroyed",
                "cuStreamQuery, asked by the layer before the context was destroyed returned 700" in head)
@@ -250,7 +261,7 @@ def main():
         cases = [("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
                  ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
-                 ("copy", {}), ("exit", {}),
+                 ("copy", {}), ("exit", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"})]
         for name, settings in cases:
