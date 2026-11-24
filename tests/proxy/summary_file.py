@@ -4,8 +4,9 @@ With VF_SUMMARY=FILE, the report that the layer prints when the process exits (h
 with emulated instructions given to the program, and with VF_STATS the calls counted) is also in
 FILE.PID, rewritten every VF_SUMMARY_INTERVAL seconds when it changed and at exit: a process killed
 with SIGKILL leaves the report as it was. Without the variable no thread is started. A child made
-by fork() writes no report of its own, and does not stop on the lock of the writing thread. A
-stand-in driver (link_mock_driver.c) loads the modules.
+by fork() writes no report of its own, and does not stop on the lock of the writing thread. The
+file is readable by its owner only, and no link put where it goes, or where it was written first,
+leads the report into another file. A stand-in driver (link_mock_driver.c) loads the modules.
 
 Run with python3 tests/proxy/summary_file.py path/to/libcuda.so.1.
 """
@@ -13,6 +14,7 @@ import ctypes as c
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,9 +91,9 @@ if __name__ == "__main__":
                      "VF_EMULATION_WARNINGS"):
             base.pop(name, None)
         summary = tmp / "summary"
-        start = lambda mode, **env: subprocess.Popen(
+        start = lambda mode, stderr=subprocess.DEVNULL, **env: subprocess.Popen(
             [sys.executable, __file__, sys.argv[1], mode], env=dict(base, **env), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            stdout=subprocess.PIPE, stderr=stderr, text=True)
 
         # Killed with SIGKILL: the file has the report as it was, rewritten when it changed.
         p = start("kill", VF_SUMMARY=str(summary), VF_SUMMARY_INTERVAL="1")
@@ -110,6 +112,50 @@ if __name__ == "__main__":
         text = path.read_text()
         assert "running for" in text and "2 kernels with emulated" in text and "at its exit" not in text, text
         print("PASS a process killed with SIGKILL leaves its report, as it was when it last changed")
+
+        # Links put, before the first write, where the file goes and where it was written first
+        # (until 2026-11-24, FILE.PID.tmp): neither leads the report into the files they name.
+        victims = [tmp / "victim-final", tmp / "victim-temporary"]
+        for victim in victims:
+            victim.write_text("victim\n")
+        p = start("kill", VF_SUMMARY=str(summary), VF_SUMMARY_INTERVAL="1")
+        path = Path(f"{summary}.{p.pid}")
+        path.symlink_to(victims[0])
+        Path(f"{path}.tmp").symlink_to(victims[1])
+        p.stdout.readline()
+        assert p.stdout.readline() == "ready\n"
+        p.stdin.write("more\n")
+        p.stdin.flush()
+        assert p.stdout.readline() == "ready\n"
+        end = time.time() + 15
+        while time.time() < end and (path.is_symlink() or "2 kernels" not in path.read_text()):
+            time.sleep(0.1)
+        p.send_signal(signal.SIGKILL)
+        p.wait()
+        assert [victim.read_text() for victim in victims] == ["victim\n"] * 2, [v.read_text() for v in victims]
+        mode = path.lstat().st_mode
+        assert stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o600, oct(mode)
+        assert "2 kernels with emulated" in path.read_text()
+        assert os.readlink(f"{path}.tmp") == str(victims[1])
+        print("PASS the file is its owner's only, and no link leads the report elsewhere")
+
+        # A file that cannot be written (a directory where it goes) is said once, and leaves nothing.
+        p = start("kill", stderr=subprocess.PIPE, VF_SUMMARY=str(summary), VF_SUMMARY_INTERVAL="1")
+        path = Path(f"{summary}.{p.pid}")
+        path.mkdir()
+        p.stdout.readline()
+        assert p.stdout.readline() == "ready\n"
+        time.sleep(1.5)
+        p.stdin.write("more\n")
+        p.stdin.flush()
+        assert p.stdout.readline() == "ready\n"
+        time.sleep(2.5)
+        p.send_signal(signal.SIGKILL)
+        _, err = p.communicate()
+        said = [line for line in err.splitlines() if "VF_SUMMARY: cannot write" in line]
+        assert len(said) == 1 and str(path) in said[0], err
+        assert sorted(f.name for f in tmp.glob(f"summary.{p.pid}*")) == [path.name]
+        print("PASS a file that cannot be written is said once, and leaves no temporary file")
 
         # Without VF_SUMMARY: no thread, no file.
         p = start("none")

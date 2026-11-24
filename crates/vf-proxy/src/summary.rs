@@ -3,8 +3,9 @@
 //! `FILE.PID`, and rewritten while the process runs, every `VF_SUMMARY_INTERVAL` seconds (30 by
 //! default) when it changed: a process that is killed without exiting (some servers end their
 //! workers with SIGKILL) leaves the report as it was at most that long before. The file is replaced
-//! whole (written beside it, then renamed), and its first line says whether the process had exited.
-//! Without the variable, nothing is started.
+//! whole (`replace`: written to a new file of this process's own beside it, which no link can lead
+//! elsewhere, then renamed), readable by its owner only, and its first line says whether the process
+//! had exited. Without the variable, nothing is started.
 //!
 //! As the reports at exit, it is the report of the process that loaded the library: a child made by
 //! `fork()` has no thread to write it, and does not write it when it exits (`fini`). The lock that
@@ -13,6 +14,9 @@
 //! (the announcer's, the counts') held by a thread it does not have.
 
 use std::cell::UnsafeCell;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
@@ -124,12 +128,105 @@ fn write(settings: &Settings, report: &[String], exited: bool) {
     for line in report {
         text += &format!("[volta-forever] {line}\n");
     }
-    let temporary = format!("{path}.tmp");
-    let written = std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &path));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&temporary);
-        if !FAILED.swap(true, Relaxed) {
-            log::warn(format_args!("VF_SUMMARY: cannot write {path}: {e}"));
+    if let Err(e) = replace(Path::new(&path), text.as_bytes())
+        && !FAILED.swap(true, Relaxed)
+    {
+        log::warn(format_args!("VF_SUMMARY: cannot write {path}: {e}"));
+    }
+}
+
+/// Names tried for the temporary file of one write, if the ones before are taken.
+const TEMPORARY_NAMES: usize = 16;
+
+/// Replace the file `path` by one that holds `text`: a new file is made beside it, under a name with
+/// a random part (`PATH.RANDOM.tmp`), with `O_CREAT | O_EXCL | O_NOFOLLOW` and mode 0600, so that
+/// nothing put there before (a file, or a link to another one) is written through; then it is renamed
+/// over `path`, which replaces a link at `path` itself and not what the link leads to. The temporary
+/// file is removed if anything fails.
+fn replace(path: &Path, text: &[u8]) -> std::io::Result<()> {
+    let mut taken = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+    for _ in 0..TEMPORARY_NAMES {
+        let mut temporary = path.as_os_str().to_owned();
+        temporary.push(format!(".{:016x}.tmp", random()));
+        let temporary = Path::new(&temporary);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(temporary);
+        let mut file = match file {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                taken = e;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let written = file.write_all(text).and_then(|()| {
+            drop(file);
+            std::fs::rename(temporary, path)
+        });
+        if written.is_err() {
+            let _ = std::fs::remove_file(temporary);
         }
+        return written;
+    }
+    Err(taken)
+}
+
+/// 64 random bits, from the kernel; if it gives none, the process, a count and the time mixed.
+fn random() -> u64 {
+    let mut bits = 0u64;
+    // SAFETY: eight writable bytes.
+    let got = unsafe { libc::getrandom((&raw mut bits).cast(), 8, libc::GRND_NONBLOCK) };
+    if got == 8 {
+        return bits;
+    }
+    use std::hash::Hasher;
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut hasher = twox_hash::XxHash64::with_seed(0x7375_6d6d_6172_7900);
+    hasher.write_u32(std::process::id());
+    hasher.write_u64(COUNT.fetch_add(1, Relaxed));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    hasher.write_u128(now.as_nanos());
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_where_the_file_goes_is_replaced_not_followed() {
+        let dir = std::env::temp_dir().join(format!("vf-summary-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"victim").unwrap();
+        let path = dir.join("report");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        replace(&path, b"report").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"report");
+        // A write that fails (here: a directory where the file goes) leaves no temporary file.
+        let blocked = dir.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("inside"), b"x").unwrap();
+        assert!(replace(&blocked, b"report").is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left.len(), 3, "{left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
