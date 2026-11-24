@@ -582,7 +582,7 @@ class _Helper(object):
                 # (What tells it to give its slot up when a process waits for one.)
                 try:
                     waiting = _open_lock("waiting-" + _host(), places)
-                    pool.held.add(waiting)
+                    pool.held[waiting] = _inode(waiting)
                 except OSError as e:
                     if _limit(e):
                         raise
@@ -599,12 +599,12 @@ class _Helper(object):
             raise
         finally:
             if slot is not None:
-                pool.held.discard(slot)
+                pool.held.pop(slot, None)
                 os.close(slot)   # (the helper holds it: the slot is free when the helper ends, however)
             if theirs is not None:
                 theirs.close()
             if waiting is not None:
-                pool.held.discard(waiting)
+                pool.held.pop(waiting, None)
                 os.close(waiting)
         mine.setblocking(False)
         self.sock, self.pid, self.started = mine, self.proc.pid, time.monotonic()
@@ -807,9 +807,10 @@ class _Pool(object):
         self.cond = threading.Condition(threading.Lock())
         self.helpers = []
         self.starting = 0
-        # (Descriptors of locks taken and not yet given to a helper: a child made by fork() at that
-        # moment closes its copies, which would hold the lock.)
-        self.held = set()
+        # (Descriptors of locks taken and not yet given to a helper, with what each is (device,
+        # inode): a child made by fork() at that moment closes its copies, which would hold the
+        # lock; and the lock files of slots that were taken, by name.)
+        self.held = {}
         self.files = {}
 
     def drop(self, helper):
@@ -836,11 +837,14 @@ def _in_child():
     _places_lock = threading.Lock()   # (free, whatever another thread of the parent did at the fork)
     old, _pool = _pool, None
     if old is not None and old.pid != os.getpid():
-        for fd in list(old.held) + [fd for fd, _ in old.files.values()]:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        # (Only those that are still the layer's: a program that closed its descriptors and opened
+        # its own at their numbers keeps them.)
+        for fd, inode in list(old.held.items()) + list(old.files.values()):
+            if inode is not None and _inode(fd) == inode:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         _forget(old)
 
 
@@ -896,18 +900,18 @@ def _take():
                         except _NoCap as e:
                             _no_cap(str(e))
                     if slot is not None:
-                        pool.held.add(slot)
+                        pool.held[slot] = _inode(slot)
                         break
                     if _state.get("nocap") or (_state.get("alone") and alive < ALONE):
                         break   # (a helper without a slot)
                     if waiting is None and not _state.get("alone"):
                         try:
                             waiting = _open_lock("waiting-" + _host(), places)
-                            pool.held.add(waiting)
+                            pool.held[waiting] = _inode(waiting)
                             fcntl.flock(waiting, fcntl.LOCK_SH | fcntl.LOCK_NB)
                         except OSError as e:
                             if waiting is not None:
-                                pool.held.discard(waiting)
+                                pool.held.pop(waiting, None)
                                 os.close(waiting)
                                 waiting = None
                             if _limit(e):
@@ -931,7 +935,7 @@ def _take():
             pool.starting += 1
     finally:
         if waiting is not None:
-            pool.held.discard(waiting)
+            pool.held.pop(waiting, None)
             os.close(waiting)
     try:
         helper = _Helper(pool, slot)

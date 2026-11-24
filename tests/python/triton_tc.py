@@ -1897,6 +1897,63 @@ class Decisions(Base):
         r = self.run_vf([sys.executable, "-c", code, dot("f16"), dot("bf16")], self.env(PYTHONPATH=str(self.standin)))
         self.assertEqual(self.last(r), ["cubin sm_80", "cubin sm_80", True, [False]], r.stderr)
 
+    def test_a_fork_after_the_program_closed_its_descriptors(self):
+        # A program that closed its descriptors (the layer's lock files of places that were taken
+        # among them) and opened its own at their numbers, then forks: in the child, the program's
+        # descriptors are left open (the layer closes there only those that are still its own).
+        import fcntl
+        import socket
+        host = __import__("re").sub(r"[^A-Za-z0-9_.]", "_", socket.gethostname())[:64]
+        cache = self.root / "cache-fork-fds"
+        own = self.own(cache)
+        own.mkdir(parents=True, mode=0o700, exist_ok=True)
+        log = self.root / "program.log"
+        held = []
+        try:
+            for i in range(7):   # (7 of 8 places taken by another holder: the pool keeps their files open)
+                fd = os.open(str(own / ("slot-%s-%d" % (host, i))), os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                held.append(fd)
+            code = textwrap.dedent("""
+                import json, os, sys
+                from triton.backends.nvidia import compiler as c
+                a = c.compile(sys.argv[1])[0].decode()[:11]
+                vft = sys.modules["volta_forever_triton"].client()
+                pool = vft._the_pool()
+                assert vft._slot(pool, vft._places()) is None   # (every place taken now, its helper's too)
+                kept = sorted(fd for fd, _ in pool.files.values())
+                os.closerange(3, 1024)
+                log = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                r, w = os.pipe()
+                mine = [log, w] + [os.open(os.devnull, os.O_RDONLY) for _ in range(10)]
+                pid = os.fork()
+                if pid == 0:
+                    closed = []
+                    for fd in mine:
+                        try:
+                            os.fstat(fd)
+                        except OSError:
+                            closed.append(fd)
+                    try:
+                        os.write(log, b"child\\n")
+                        os.write(w, json.dumps(closed).encode())
+                    finally:
+                        os._exit(0)
+                os.close(w)
+                os.waitpid(pid, 0)
+                print(json.dumps([a, kept, sorted(mine + [r]), os.read(r, 1000).decode()]))
+                """)
+            r = self.run_vf([sys.executable, "-c", code, dot("f16"), str(log)],
+                            self.env(PYTHONPATH=str(self.standin), TRITON_CACHE_DIR=str(cache), VF_TRITON_TC_JOBS="8"))
+            a, kept, mine, closed = self.last(r)
+            self.assertEqual((a, len(kept)), ("cubin sm_80", 8), r.stderr)
+            self.assertTrue(set(kept) & set(mine), (kept, mine))   # (the program's own at the layer's numbers)
+            self.assertEqual(closed, "[]", r.stderr)
+            self.assertEqual(log.read_text(), "child\n")
+        finally:
+            for fd in held:
+                os.close(fd)
+
     def test_a_helper_killed_during_a_compilation(self):
         # The helper killed from outside (SIGKILL, as by the out-of-memory killer) while it compiles: the
         # kernel is compiled by Triton's own stages and not kept in Triton's cache, the next compilation
