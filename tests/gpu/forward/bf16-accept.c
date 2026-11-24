@@ -86,12 +86,12 @@ static double cur_slope; /* the slope of the data being judged */
  * Two families of positive data spread over many binades exceed it below k = 1024: lognpos (log-normal magnitudes,
  * one sign; 1.16 times its bound at k = 768, 0.91 at 896) and advpos (an adversarial positive construction; 1.25
  * times its bound at 768, 1.003 at 896, within the half unit added): what a program whose operands are all positive
- * over a wide range should expect from the path at k = 768 to 1023. Their bias does not grow with k (lognpos's is
- * 36 to 40 units at every k from 768 to 16384), the bound does; advpos's element aligned with the slices is not what
- * makes it exceed (moved or removed, its bias at 768 stays within 1.1 units of -52.83, measured in review). Real
- * operands (1,728 pairs of four models, and the layers of k = 768 and 896 of five models) have mixed-sign products
- * and a bias of at most 0.82 units (0.05 times the bound read with the slope of samesign, the smallest of the
- * families of one sign).
+ * over a wide range should expect from the path at k = 768 to 1023. Their bias grows little with k, the bound in
+ * proportion to it (lognpos's is 36 to 40 units at every k from 768 to 16384, advpos's 49 to 70, its largest at
+ * 16384); advpos's element aligned with the slices is not what makes it exceed (moved or removed, its bias at 768
+ * stays within 1.1 units of -52.83, measured in review). Real operands (1,728 pairs of four models, and the layers
+ * of k = 768 and 896 of five models) have mixed-sign products and a bias of at most 0.82 units (0.05 times the bound
+ * read with the slope of samesign, the smallest of the families of one sign).
  * Their bias is judged from 4096, 2048, 1024 and 1024 on, unless VF_ACCEPT_STRICT=1 (then from the gate). Every
  * other bound applies from the gate. */
 static int bias_from_fam[FAM_N] = {[FAM_CRAFTSUB] = 4096, [FAM_LOGNPOS] = 1024, [FAM_ADVPOS] = 1024};
