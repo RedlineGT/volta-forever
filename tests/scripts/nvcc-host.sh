@@ -7,7 +7,7 @@
 #   than the toolkit, such as Ubuntu 26.04 with glibc 2.43 and GCC 15, for CUDA 12.9.2), the
 #   helper finds what makes it compile, and a program that calls rsqrt, sinpi and cospi in host
 #   and device code is compiled with that, runs, and prints the right values. The second half
-#   runs only on such a system;
+#   runs only on such a system, and is said skipped elsewhere (newer-system);
 # - a C library that declares rsqrt, sinpi and cospi as glibc 2.43 does, on any machine: a
 #   directory whose bits/mathcalls.h adds those declarations, given to nvcc after the helper's
 #   (NVCC_APPEND_FLAGS). Without nvcc-host/, the program does not compile ("exception
@@ -62,7 +62,7 @@ args() {
 }
 
 # ---- this machine as it is
-plain=1
+plain=1 newer_skipped=0
 for nvcc in "$nvcc12" "$nvcc13"; do
     [ -x "$nvcc" ] || continue
     v=${nvcc%/bin/nvcc}
@@ -70,9 +70,11 @@ for nvcc in "$nvcc12" "$nvcc13"; do
     args "here-$v" "$nvcc"
     if [ ${#added[@]} = 0 ]; then
         if [ -s "$tmp/here-$v.said" ]; then
+            [ "$v" != 12.9.2 ] || plain=0
             fail "here-$v (nothing added, but it said something)" "$(cat "$tmp/here-$v.said")"
         elif build "here-$v" "$nvcc"; then
             pass "here-$v (nvcc $v compiles as it is: nothing added, nothing said)"
+            [ "$v" != 12.9.2 ] || newer_skipped=1
         else
             fail "here-$v (nothing added, and the program does not build or print $want)" "$(tail -3 "$tmp/here-$v.log")"
         fi
@@ -85,6 +87,7 @@ for nvcc in "$nvcc12" "$nvcc13"; do
         fi
     fi
 done
+[ "$newer_skipped" = 0 ] || echo "SKIP  newer-system (nvcc 12.9.2 compiles the probe as it is here; what the helper adds is built on a system that needs it, such as Ubuntu 26.04)"
 
 # ---- a C library that declares the three functions as glibc 2.43 does
 mkdir -p "$tmp/c-library/bits"

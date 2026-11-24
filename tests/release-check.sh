@@ -6,10 +6,11 @@
 # build of scripts/build.sh, every host suite that the CI runs (tests/README.md, "What the CI
 # runs"), the host suites it does not run when what they need is here (jitlink_objects.py and the
 # CUDA 12.9.2 toolkit, package-refusals.sh and the forwarding libraries, the bf16 kernels rebuilt
-# with the CUDA 12.9.2 compiler, tests/scripts/nvcc-host.sh), and tests/sass/compare.sh on the test kernels and on PyTorch's
-# cubins when `TORCH` names them. With --full, then the independent validator over the corpora:
-# validate-corpus.sh on `TORCH`, heldout-validate.sh on `HELDOUT` and controls.sh (hours, and the
-# corpora of tests/README.md: a step whose corpus is missing is skipped).
+# with the CUDA 12.9.2 compiler, tests/scripts/nvcc-host.sh), and tests/sass/compare.sh on the
+# test kernels and on PyTorch's cubins when `TORCH` names them. With --full, then the independent
+# validator over the corpora: validate-corpus.sh on `TORCH`, heldout-validate.sh on `HELDOUT` and
+# controls.sh (hours, and the corpora of tests/README.md: a step whose corpus is missing is
+# skipped).
 #
 # GPU part: printed, not run: the commands of tests/gpu/ with the settings a release is checked
 # with, then how to check an installed archive instead of this tree. VF_RELEASE_GPU_RUN='PREFIX'

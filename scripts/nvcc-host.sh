@@ -72,6 +72,7 @@ nvcc_host_args() {
     _nvcc_host_known[$nvcc]=
     _nvcc_host_probe "$nvcc" && return 0
     first=$(grep -m1 -i 'error' <<< "$_nvcc_host_out" || head -n1 <<< "$_nvcc_host_out")
+    first=${first%.}
     # The host compilers after the default one: g++-N, without those of the default's version.
     case " ${NVCC_PREPEND_FLAGS:-} ${NVCC_APPEND_FLAGS:-} " in
         *" -ccbin"* | *" --compiler-bindir"*) chosen=1 ;;
