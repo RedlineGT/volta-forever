@@ -388,6 +388,10 @@ What the layer cannot say:
   layer translated, not of PTX (whose pairs give the results of each product by itself).
 - under `VF_FAULT_TRACE=1`, a launch made while a graph is being captured anywhere in the process
   is not waited for (a wait could end that capture), nor a cooperative launch on several devices.
+  A program whose work waits for what it does later never ends under it: kernels that wait for one
+  another, a host function (`cuLaunchHostFunc`) that waits for something the launching thread
+  does after the launch, a `cuStreamWaitValue32`/`64` of a value written later (the layer does not
+  tell them apart: the wait after the next launch on that stream lasts for ever).
 
 ## Speed
 

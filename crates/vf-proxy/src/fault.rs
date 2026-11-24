@@ -85,9 +85,11 @@
 //! waited for yet, are named with it. Even alone, it is said to be the launch whose
 //! synchronisation met the fault, not the kernel that faulted: work that the layer does not see on
 //! that stream since the launch before (a copy, a memset, a host function) is not ruled out. The
-//! waits of `VF_PROFILE` are the same. The program waits for every kernel: it runs much slower, and kernels
-//! that wait for one another (a collective across GPUs, a kernel that waits for a flag that a later
-//! one sets) never end. A launch into a stream being captured is not synchronised (nothing runs),
+//! waits of `VF_PROFILE` are the same. The program waits for every kernel: it runs much slower, and
+//! work that waits for what the program does later never ends: kernels that wait for one another
+//! (a collective across GPUs, a kernel that waits for a flag that a later one sets), a host function
+//! that waits for something the launching thread does after the launch, a `cuStreamWaitValue` of a
+//! value written later. (The layer does not route those to tell them: it says so, INSTALL.md.) A launch into a stream being captured is not synchronised (nothing runs),
 //! nor any launch while a capture is under way in the process (a synchronisation could end it).
 //!
 //! Locks. The locks of this file are taken in this order, and none of them is held while another
