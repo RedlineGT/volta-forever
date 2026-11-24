@@ -422,6 +422,8 @@ def _find_places():
             pass
         fd, inode = _open_dir(path)
     except OSError as e:
+        if _limit(e):
+            raise   # (this process's limit, this time: not a property of the directory)
         why = "it is a symbolic link" if e.errno in (errno.ELOOP, errno.ENOTDIR) and os.path.islink(path) else \
             e.strerror or str(e)
         return {"fd": None, "why": "%s: %s" % (path, why)}
@@ -433,7 +435,8 @@ _places_lock = threading.Lock()
 
 def _places():
     """The descriptor of the directory of the user's places on this host, or None when the places
-    are not counted in this process (_no_cap: said once).
+    are not counted in this process (_no_cap: said once); OSError when this process can open no
+    descriptor (that kernel is then compiled by Triton's own stages, and not kept).
 
     It is volta-forever-EUID (made with mode 0700, and Triton's directory as Triton makes it) in
     Triton's cache directory as Triton finds it when this is first asked: at the first kernel of
@@ -454,6 +457,8 @@ def _places():
             try:
                 fd, inode = _open_dir(known["path"])
             except OSError as e:
+                if _limit(e):
+                    raise
                 known.update(fd=None, why="%s: %s" % (known["path"], e.strerror or e))
             else:
                 if inode == known["inode"]:
@@ -1090,7 +1095,11 @@ def compile80_isolated(backend, ttir, metadata, options):
         except Exception as e:  # noqa: BLE001 (a helper that cannot be started: the process goes on without)
             why = "a helper could not be started: %s: %s" % (type(e).__name__, str(e).strip()[:200])
             if isinstance(e, OSError) and e.errno in (errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE):
-                return None, why, True   # (no process or descriptor this time: another time, perhaps)
+                # (No process or descriptor this time, as at RLIMIT_NPROC or a pids cgroup's limit:
+                # another time, perhaps. Said once; each kernel's line is then for VF_LOG_LEVEL=2.)
+                _quiet("VF_TRITON_TC: %s: kernels are compiled by Triton's own stages, and not kept in Triton's "
+                       "cache, while none can be started" % why, "nostart")
+                return None, why, True
             _broken(why)
             raise HelperFailed(why, False)
         result = refused = None

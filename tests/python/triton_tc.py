@@ -1888,8 +1888,30 @@ class Decisions(Base):
         r = self.run_vf([sys.executable, "-c", code, dot("f16"), dot("bf16"), dot("i8")],
                         self.env(PYTHONPATH=str(self.standin), VF_TRITON_TC_IDLE="1"))
         self.assertEqual(self.last(r), ["cubin sm_75", "cubin sm_80"], r.stderr)
-        self.assertIn("not kept in Triton's cache: a helper could not be started: OSError: [Errno 24]", r.stderr)
+        self.assertIn("VF_TRITON_TC: a helper could not be started: OSError: [Errno 24]", r.stderr)
+        self.assertIn("not kept in Triton's cache, while none can be started", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+
+    def test_a_program_that_can_start_no_process(self):
+        # A program that can start no process (RLIMIT_NPROC reached, as a pids control group's limit
+        # gives): each kernel is compiled by Triton's own stages, not kept, and the layer says so
+        # once at the default level (each kernel's line at VF_LOG_LEVEL=2).
+        if os.geteuid() == 0:
+            self.skipTest("RLIMIT_NPROC does not hold for root")
+        code = textwrap.dedent("""
+            import json, resource, sys
+            from triton.backends.nvidia import compiler as c
+            resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
+            print(json.dumps([c.compile(t)[0].decode()[:11] for t in sys.argv[1:]]))
+            """)
+        kernels = [dot("f16"), dot("bf16"), dot("i8"), dot("f16", "// 2\n"), dot("f16", "// 3\n")]
+        for level, lines in (("1", 1), ("2", 6)):
+            r = self.run_vf([sys.executable, "-c", code] + kernels,
+                            self.env(PYTHONPATH=str(self.standin), VF_LOG_LEVEL=level))
+            self.assertEqual(self.last(r), ["cubin sm_75"] * 5, r.stderr)
+            said = [x for x in r.stderr.splitlines() if "a helper could not be started: BlockingIOError" in x]
+            self.assertEqual(len(said), lines, r.stderr)
+            self.assertEqual(r.stderr.count("while none can be started"), 1, r.stderr)
 
     def test_a_program_that_closes_its_descriptors(self):
         # A program that closes every descriptor (its helper's socket with them) and opens others at
