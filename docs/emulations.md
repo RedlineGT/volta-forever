@@ -964,9 +964,9 @@ lognpos has nothing aligned with the path's slices, advpos only the larger first
 op(B), and that element is not what makes it exceed: moved to position 128 or 37 of each slice, or removed,
 its bias at k = 768 stays at -51.8 to -52.5 units (measured in review). Both exceed for their data, products
 of one sign spread over many binades: what a program whose operands are all positive over a wide range should
-expect at k = 768 to 1023 (`LIMITS.md`). Their bias does not grow with k, the bound does: lognpos's is -36.1
-to -39.6 units and advpos's -49.5 to -70.0 at every k from 768 to 16384, against bounds of 34.0 and 42.3 at
-768 that double by 1536. Their error stays within the bound A at every k the path serves (at most 0.25 times
+expect at k = 768 to 1023 (`LIMITS.md`). Their bias grows little with k, the bound in proportion to it:
+lognpos's is -36.1 to -39.6 units and advpos's -49.5 to -70.0 (its largest at 16384) at every k from 768 to
+16384, against bounds of 34.0 and 42.3 at 768 that double by 1536. Their error stays within the bound A at every k the path serves (at most 0.25 times
 it in fp32 output).
 
 Every call from the gate on must be served by the path (a call left to 12.9 there would not be judged), and

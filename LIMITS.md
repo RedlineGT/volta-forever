@@ -578,15 +578,17 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   Qwen2.5-0.5B, T5-base, OPT-125m, bge-base-en-v1.5 and whisper-small's encoder, 990 pairs against the exact
   product) every element's error was within 0.040 times the acceptance test's bound in fp32 output (35.8 units of
   2^-24 sum |a b| at most, 12.9's own up to 36.0), and every matrix's mean error towards zero was 0.82 units at
-  most (0.046 times the test's bias bound read with the slope of its family of one sign, samesign: no newer GPU's
-  product was measured on these operands). None of these layers had non-negative inputs (42 to 59 % of each
-  input's values were positive) and at most 51 % of a layer's products a b were positive (measured in review).
+  most (0.046 times the test's bias bound read with the slope of samesign, the smallest of its families of one
+  sign: no newer GPU's product was measured on these operands). None of these layers had non-negative inputs
+  (42 to 59 % of each input's values were positive) and at most 51 % of a layer's products a b were positive
+  (measured in review).
   Products of two operands of one sign spread over many binades fare worse: the acceptance test's two such
   families, log-normal magnitudes and an adversarial positive construction, come out low by 36 to 40 and 49 to 70
   units on average at every k from 768 to 16384, about 2.2e-6 to 4.2e-6 of their value (in fp32 output; far below
   bf16's own rounding), with single elements up to 90 and 216 units, each element still within the error bound;
-  the same at k >= 1024, which the gate of 1024 served. That bias does not grow with k; the test's bias bound, 0.8
-  times an RTX 5090's own on the same data, grows with it, and is exceeded below k = 1024: 1.16 and 1.25 times at
+  the same at k >= 1024, which the gate of 1024 served. That bias grows little with k (lognpos's is 36 to 40
+  units at every k, advpos's 49 to 70, its largest at 16384); the test's bias bound, 0.8 times an RTX 5090's
+  own on the same data, grows in proportion to k, and is exceeded below k = 1024: 1.16 and 1.25 times at
   k = 768 (where the path's bias is 0.93 and 1.00 times the RTX 5090's, from its slope on that data), 0.91 and
   1.003 at 896. The test judges these two families' bias from k = 1024 (documented exceptions, as the two
   constructions aligned with the path's k-slices are from 2048 and 4096). The data concerned are products of two
