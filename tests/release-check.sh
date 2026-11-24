@@ -93,6 +93,7 @@ if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step nccl_remedy python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
     step launch_guard python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1
     step fault python3 tests/proxy/fault.py dist/lib/libcuda.so.1
+    step driver_calls python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
     step guard_stress tests/proxy/guard_stress.sh
     step jitlink_fork python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
     step safe_mode python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1

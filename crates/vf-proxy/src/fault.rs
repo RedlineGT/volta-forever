@@ -29,9 +29,19 @@
 //!   are named in one report at level 0, the last first, with the image of each and what the layer
 //!   made of it (`report`), and again in the report at exit (`summary_lines`). The calls looked at
 //!   are the launches, the synchronisations and queries of streams, events and contexts, the loads
-//!   and unloads of modules, and, before a context is destroyed or at exit, one query of the
-//!   context's stream (`probe`): a fault that a copy met first (not routed: copies go straight to
-//!   NVIDIA's driver) is found there.
+//!   and unloads of modules, and at exit one query of the null stream of each context known to be
+//!   alive, when no capture is under way (`at_exit`): a fault that only a copy met (not routed:
+//!   copies go straight to NVIDIA's driver) is found there, or at the next call that the layer
+//!   routes; not when the program destroys the context first.
+//!
+//! Without a fault, the layer makes no call of the driver that the program's calls would not make
+//! (`tests/proxy/driver_calls.py` records them), but these, which change nothing the program sees:
+//! `cuCtxGetCurrent` after a synchronisation of the current context, of its legacy stream or of the
+//! thread's own default stream that succeeded (which context's launches it covers); while a capture
+//! is under way in the process, `cuStreamGetCaptureInfo_v2` of the stream that a launch went into
+//! or whose capture is ended (whether the launch is a node of a graph, `capturing_into`); and, at
+//! exit, the query of each context above. In exact mode (`VF_FAULT_TRACE=1`), the waits after each
+//! launch, by design.
 //!
 //! The cost of a launch. What a launch keeps is written with plain stores into a ring that its own
 //! thread alone writes (a sequence lock that this thread alone takes, as the guard's slots are
@@ -408,7 +418,7 @@ static RINGS_HELD: Mutex<Vec<&'static Ring>> = Mutex::new(Vec::new());
 static THREADS: AtomicU64 = AtomicU64::new(0);
 /// The threads that launched kernels and found no ring.
 static UNKEPT: AtomicU64 = AtomicU64::new(0);
-/// Whether any launch was kept (`probe` asks nothing of a process that launched nothing).
+/// Whether any launch was kept (`at_exit` asks nothing of a process that launched nothing).
 static LAUNCHED: AtomicBool = AtomicBool::new(false);
 /// The value of this thread's ring pointer once the thread has none to keep its launches in.
 const NO_RING: usize = 1;
@@ -594,8 +604,11 @@ struct Covers {
     /// By thread (as the lines number threads) and context: the thread's own default stream. (Not
     /// by ring: a ring whose thread ended is given to another, whose own stream is another.)
     own: HashMap<(u64, u64), u64>,
-    /// The contexts destroyed, and not used since.
+    /// The contexts destroyed, and not synchronised since (the first `COVERS_KEPT`).
     gone: HashSet<u64>,
+    /// The contexts synchronised and not destroyed since (the first `COVERS_KEPT`): alive, as far as
+    /// the layer knows (`live_contexts`).
+    alive: HashSet<u64>,
 }
 
 /// What the synchronisations of a stream's handle cover: spans of epochs, from the first to the
@@ -647,24 +660,34 @@ fn cover<K: std::hash::Hash + Eq>(map: &mut HashMap<K, u64>, key: K, value: u64)
 }
 
 impl Covers {
-    fn context_synchronized(&mut self, context: u64, covers: u64) {
+    /// A synchronisation that succeeded in `context`: it is alive.
+    fn used(&mut self, context: u64) {
         self.gone.remove(&context);
+        if self.alive.len() < COVERS_KEPT {
+            self.alive.insert(context);
+        }
+    }
+
+    fn context_synchronized(&mut self, context: u64, covers: u64) {
+        self.used(context);
         cover(&mut self.contexts, context, covers);
     }
 
     fn context_gone(&mut self, context: u64, covers: u64) {
         cover(&mut self.contexts, context, covers);
+        self.alive.remove(&context);
         if self.gone.len() < COVERS_KEPT {
             self.gone.insert(context);
         }
     }
 
     fn legacy_synchronized(&mut self, context: u64, covers: u64) {
-        self.gone.remove(&context);
+        self.used(context);
         cover(&mut self.legacy, context, covers);
     }
 
     fn own_synchronized(&mut self, thread: u64, context: u64, covers: u64) {
+        self.used(context);
         cover(&mut self.own, (thread, context), covers);
     }
 
@@ -1747,14 +1770,19 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
     (lines, summary)
 }
 
-// ---- before a context goes, and at exit ----------------------------------------------------------
+// ---- at exit -------------------------------------------------------------------------------------
 
-/// Ask the driver whether `context` faulted, without waiting: a query of its null stream, which
-/// returns the error of a fault when there was one (`cuStreamQuery` returned 700 after a fault on a
-/// V100); reported if so. When the layer saw launches and the fault of the context, if it had one,
-/// was not reported: a fault that only an unrouted call (a copy) met is found here.
-fn probe(context: u64, when: &str) {
-    if context == 0 || !LAUNCHED.load(Relaxed) || reported().contains(&context) {
+/// Ask the driver, at exit, whether `context` faulted, without waiting: a query of its null stream,
+/// which returns the error of a fault when there was one (`cuStreamQuery` returned 700 after a fault
+/// on a V100); reported if so. When the layer saw launches and the fault of the context, if it had
+/// one, was not reported: a fault that only an unrouted call (a copy) met is found here. (Never
+/// while the program runs: a use of the null stream while a stream of the context is captured
+/// invalidates that capture, and a query of a context that another thread destroys meanwhile could
+/// be of another; and not before a context is destroyed: the layer makes no call of the driver that
+/// the program's calls would not make, without a fault, but those of `at_exit` and the few the
+/// record needs, which ask and change nothing: see the header.)
+fn probe_at_exit(context: u64) {
+    if context == 0 || reported().contains(&context) {
         return;
     }
     type Push = unsafe extern "C" fn(*mut c_void) -> CUresult;
@@ -1768,7 +1796,7 @@ fn probe(context: u64, when: &str) {
     let pushed = unsafe { push(context as *mut c_void) };
     if pushed != CUDA_SUCCESS {
         log::trace(format_args!(
-            "fault: context {context:#x} not asked {when}: cuCtxPushCurrent returned {pushed}"
+            "fault: context {context:#x} not asked at exit: cuCtxPushCurrent returned {pushed}"
         ));
         return;
     }
@@ -1776,23 +1804,11 @@ fn probe(context: u64, when: &str) {
     let mut popped = std::ptr::null_mut();
     unsafe { pop(&mut popped) };
     log::trace(format_args!(
-        "fault: context {context:#x} asked {when}: cuStreamQuery returned {result}"
+        "fault: context {context:#x} asked at exit: cuStreamQuery returned {result}"
     ));
     if is_fault(result) {
-        seen(
-            result,
-            &format!("cuStreamQuery, asked by the layer {when}"),
-            Some(context),
-        );
+        seen(result, "cuStreamQuery, asked by the layer at exit", Some(context));
     }
-}
-
-/// `context` is to be destroyed (or the primary context released): asked whether it faulted.
-pub fn context_ending(context: usize) {
-    if !on() {
-        return;
-    }
-    probe(context as u64, "before the context was destroyed");
 }
 
 /// `context` was destroyed: a context given its handle later is another, whose fault is its own,
@@ -1807,18 +1823,17 @@ pub fn context_gone(context: usize) {
     record().context_gone(context, epoch);
 }
 
-/// The `known` contexts (`contexts::known`: of the modules loaded, and the primary contexts held),
-/// and of those that synchronisations were made in, the ones not destroyed since.
+/// The contexts known to be alive: the `known` ones (`contexts::known`: of the modules loaded, and
+/// the primary contexts held), but for those that the layer saw destroyed and saw no
+/// synchronisation of since (a primary context that was reset is among those, though it stays the
+/// device's), and those that synchronisations were made in and that the layer did not see
+/// destroyed since. (Not from the records of what synchronisations cover: a context destroyed is
+/// kept there too, as covering its launches.)
 fn live_contexts(covers: &Covers, known: &[u64]) -> Vec<u64> {
-    let synchronized = covers
-        .contexts
-        .keys()
-        .chain(covers.legacy.keys())
-        .chain(covers.own.keys().map(|(_, context)| context))
-        .filter(|context| !covers.gone.contains(context));
     let mut live: Vec<u64> = known
         .iter()
-        .chain(synchronized)
+        .filter(|context| !covers.gone.contains(context))
+        .chain(covers.alive.iter())
         .copied()
         .filter(|&context| context != 0)
         .collect();
@@ -1827,16 +1842,21 @@ fn live_contexts(covers: &Covers, known: &[u64]) -> Vec<u64> {
     live
 }
 
-/// At exit: the contexts that the layer knows, not destroyed, whose fault was not reported, are
-/// asked whether they faulted (when the layer saw launches).
+/// At exit: the contexts known to be alive whose fault was not reported are asked whether they
+/// faulted, when the layer saw launches, and when no capture is under way in the process (a thread
+/// may still be capturing: a query of the null stream would invalidate its capture).
 pub fn at_exit() {
-    if !LAUNCHED.load(Relaxed) {
+    if !on() || !LAUNCHED.load(Relaxed) {
+        return;
+    }
+    if CAPTURING.load(Relaxed) != 0 {
+        log::trace(format_args!("fault: no context asked at exit: a capture is under way"));
         return;
     }
     let known: Vec<u64> = crate::contexts::known().into_iter().map(|c| c as u64).collect();
     let live = live_contexts(&record().clone(), &known);
     for context in live {
-        probe(context, "at exit");
+        probe_at_exit(context);
     }
 }
 
@@ -2036,12 +2056,18 @@ mod tests {
         // A new context given the same handle.
         assert!(found_in(&all, &covers, 7).launches.is_empty());
         assert_eq!(live_contexts(&covers, &[8]), vec![8]);
-        // (One that the layer knows a module of is alive, as `contexts` says.)
-        assert_eq!(live_contexts(&covers, &[7, 8]), vec![7, 8]);
+        // (Nor when `contexts` still knows it: a primary context reset is still the device's.)
+        assert_eq!(live_contexts(&covers, &[7, 8]), vec![8]);
         all.extend(launches(1, LEGACY, &[3], 1));
         assert_eq!(whats(&found_in(&all, &covers, 7)), vec![3]);
         // Synchronised since: alive.
         covers.legacy_synchronized(7, 1);
+        assert_eq!(live_contexts(&covers, &[8]), vec![7, 8]);
+        // More contexts destroyed than the record of those gone keeps: none of them is alive.
+        for context in 0x1000..0x1000 + 2 * COVERS_KEPT as u64 {
+            covers.context_synchronized(context, 1);
+            covers.context_gone(context, 2);
+        }
         assert_eq!(live_contexts(&covers, &[8]), vec![7, 8]);
     }
 

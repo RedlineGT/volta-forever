@@ -3364,7 +3364,6 @@ type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
-    fault::context_ending(context as usize);
     let _ending = kernels::ending();
     let real = real!(cuCtxDestroy: ContextDestroy);
     let modules = contexts::of(context as usize);
@@ -3380,7 +3379,6 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
-    fault::context_ending(context as usize);
     let _ending = kernels::ending();
     let real = real!(cuCtxDestroy_v2: ContextDestroy);
     let modules = contexts::of(context as usize);
@@ -3413,7 +3411,6 @@ pub unsafe extern "C" fn cuCtxDetach(context: *mut c_void) -> CUresult {
     if !contexts::last_detach(context as usize) {
         return unsafe { real(context) };
     }
-    fault::context_ending(context as usize);
     let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
@@ -3431,9 +3428,6 @@ pub unsafe extern "C" fn cuGreenCtxDestroy(green: *mut c_void) -> CUresult {
     let mut context = std::ptr::null_mut();
     // (No context: no module loaded in it.)
     let known = unsafe { from_green(&mut context, green) } == CUDA_SUCCESS && !context.is_null();
-    if known {
-        fault::context_ending(context as usize);
-    }
     let modules = contexts::of(if known { context as usize } else { 0 });
     let attaches = if known {
         contexts::take_attaches(context as usize)
@@ -3480,9 +3474,6 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
     let _step = primary_step(device);
-    if let Some(context) = contexts::primary_of(device) {
-        fault::context_ending(context);
-    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -3496,9 +3487,6 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
     let _step = primary_step(device);
-    if let Some(context) = contexts::primary_of(device) {
-        fault::context_ending(context);
-    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -3512,9 +3500,6 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
     let _step = primary_step(device);
-    if let Some(context) = contexts::primary_of(device) {
-        fault::context_ending(context);
-    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {
@@ -3528,9 +3513,6 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
     let _step = primary_step(device);
-    if let Some(context) = contexts::primary_of(device) {
-        fault::context_ending(context);
-    }
     let modules = contexts::of_primary(device);
     let result = unsafe { real(device) };
     if result == CUDA_SUCCESS {

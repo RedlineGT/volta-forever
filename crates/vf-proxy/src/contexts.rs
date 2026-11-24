@@ -215,11 +215,6 @@ pub fn context_of(module: usize) -> Option<usize> {
     modules().get(&module).map(|record| record.context)
 }
 
-/// The primary context of `device`, as the driver gave it to the program, if it did.
-pub fn primary_of(device: c_int) -> Option<usize> {
-    primary().get(&device).copied()
-}
-
 /// The modules of the primary context of `device`, as `of`, before the driver is asked to release
 /// or reset it.
 pub fn of_primary(device: c_int) -> Modules {

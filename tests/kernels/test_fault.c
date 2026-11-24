@@ -17,7 +17,8 @@
  *       then cuStreamSynchronize; then what cuStreamGetCtx answers for that stream.
  *   test_fault fault-copy
  *       (faults) the fault is first returned by cuMemcpyDtoH (a call that the layer does not route),
- *       then the program destroys its context.
+ *       then by a launch of add_one (which the layer routes: it is reported there), then the program
+ *       destroys its context.
  *   test_fault fault-exit
  *       (faults) the same, and the program exits without destroying its context. (A second context
  *       in the process of a fault cannot be made: on a V100 with driver 580.178.04, cuCtxCreate or
@@ -310,6 +311,8 @@ int main(int argc, char **argv) {
             r = from_device(&value, word, sizeof value);
             printf("copy -> %d\n", r);
             if (!strcmp(mode, "fault-copy")) {
+                // The next call that the layer routes finds it (not the destruction of the context).
+                run("add_one", word, NULL);
                 CUresult (*destroy)(void *) = DRV("cuCtxDestroy_v2");
                 printf("context destroyed -> %d\n", destroy(context));
             }

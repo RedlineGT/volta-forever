@@ -103,6 +103,31 @@ def case(name, proxy):
         out.append(run.api.cuGraphDestroy(graph))
         out.append(run.api.cuStreamDestroy_v2(stream))
         out.append(run.api.cuCtxDestroy_v2(run.context))
+    elif name in ("nofault-release", "nofault-capture-exit"):
+        # The capture of a blocking stream of the primary context, during which the program retains
+        # and releases the primary context (not for the last time) and destroys another context: a
+        # use of the legacy stream of the primary context would invalidate the capture. With
+        # nofault-capture-exit, the program ends while the capture is under way.
+        primary, module, function = c.c_void_p(), c.c_void_p(), c.c_void_p()
+        out.append(run.api.cuDevicePrimaryCtxRetain(c.byref(primary), 0))
+        out.append(run.api.cuCtxSetCurrent(primary))
+        out.append(run.api.cuModuleLoadData(c.byref(module), PTX))
+        out.append(run.api.cuModuleGetFunction(c.byref(function), module, b"add_one"))
+        stream = c.c_void_p()
+        out.append(run.api.cuStreamCreate(c.byref(stream), 0))
+        out.append(run.launch("add_one", stream, grid=1, functions={"add_one": function}))
+        out.append(run.api.cuStreamSynchronize(stream))
+        out.append(run.api.cuStreamBeginCapture_v2(stream, 2))
+        out.append(run.launch("add_one", stream, grid=2, functions={"add_one": function}))
+        again = c.c_void_p()
+        out.append(run.api.cuDevicePrimaryCtxRetain(c.byref(again), 0))
+        out.append(run.api.cuDevicePrimaryCtxRelease_v2(0))
+        out.append(run.api.cuCtxDestroy_v2(run.context))
+        out.append(run.launch("add_one", stream, grid=3, functions={"add_one": function}))
+        if name == "nofault-release":
+            graph = c.c_void_p()
+            out.append(run.api.cuStreamEndCapture(stream, c.byref(graph)))
+            out.append(run.api.cuDevicePrimaryCtxRelease_v2(0))
     elif name == "streams":
         first, second = run.stream(), run.stream()
         out.append(run.launch("add_one", first, grid=1))
@@ -259,12 +284,16 @@ def case(name, proxy):
         out.append(run.launch("write_null", grid=2))
         out.append(run.launch("add_one", grid=3))
         out.append(run.api.cuCtxSynchronize())
-    elif name in ("copy", "exit"):
+    elif name in ("copy", "copy-destroyed", "exit"):
         out.append(run.launch("add_one", grid=1))
         out.append(run.launch("write_null", grid=2))
-        # A copy is not routed through the layer: the fault is found later.
+        # A copy is not routed through the layer: the fault is found at the next call that is (here
+        # a launch), or at exit; not when the context is destroyed (the layer does not ask the
+        # driver then).
         out.append(run.copy())
         if name == "copy":
+            out.append(run.launch("add_one", grid=3))
+        if name == "copy-destroyed":
             out.append(run.api.cuCtxDestroy_v2(run.context))
     print("results", " ".join(map(str, out)), flush=True)
 
@@ -299,8 +328,17 @@ def checks(name, log, summary, results):
                results[10:12] == ["cuStreamSynchronize:driver", "cuLaunchKernel:layer"])
         expect("nothing waited for but the program's one stream synchronisation", results[12] == "1")
         return found
+    if name == "copy-destroyed":
+        expect("nothing is said: the layer does not ask the driver before a context is destroyed",
+               not faults and "faulted" not in summary and results == ["0", "0", "700", "0"])
+        return found
     if name == "nofault-graph":
         expect("no fault is said, and every call returned 0", not faults and results == ["0"] * 15)
+        return found
+    if name in ("nofault-release", "nofault-capture-exit"):
+        expect("no fault is said", not faults)
+        expect("the capture was not invalidated: every call returned 0, its end too",
+               results == ["0"] * (15 if name == "nofault-release" else 13))
         return found
     if name == "exact-capture":
         expect("no fault is said", not faults)
@@ -382,9 +420,8 @@ def checks(name, log, summary, results):
                "the synchronisation of the stream after a launch (VF_PROFILE) returned 700" in head)
         expect("write_null alone: the profile's wait after add_one covered it", names == ["write_null"])
     elif name == "copy":
-        expect("found before the context was destroyed",
-               "cuStreamQuery, asked by the layer before the context was destroyed returned 700" in head)
-        expect("the copy met it first", results[2] == "700")
+        expect("found at the next launch", "cuLaunchKernel returned 700" in head)
+        expect("the copy met it first", results[2:] == ["700", "700"])
         expect("both launches", names == ["write_null", "add_one"])
     elif name == "exit":
         expect("found at exit", "cuStreamQuery, asked by the layer at exit returned 700" in head)
@@ -404,11 +441,12 @@ def main():
         subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-Bsymbolic", "-o", mock, str(here / "fault_mock_driver.c")],
                        check=True)
         cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("nofault-graph", {}),
-                 ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}), ("contexts", {}), ("context-gone", {}),
-                 ("own-stream", {}), ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
+                 ("nofault-release", {}), ("nofault-capture-exit", {}), ("exact", {"VF_FAULT_TRACE": "1"}),
+                 ("streams", {}), ("contexts", {}), ("context-gone", {}), ("own-stream", {}),
+                 ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
-                 ("copy", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
+                 ("copy", {}), ("copy-destroyed", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"}),
                  # The report off: as without it, exact mode too; only the exact value turns it off.

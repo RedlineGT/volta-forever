@@ -361,9 +361,13 @@ What the layer cannot say:
 - in which order the launches of two threads were made between the same two synchronisations:
   each thread's are in their order.
 - a fault that only a call that the layer does not route met (a copy, an allocation, which go
-  straight to NVIDIA's driver) is found when the program destroys the context or releases the
-  primary context, or at exit, by one query of the context's stream that does not wait; a program
-  that ends without exiting (killed, `_exit`) is not told.
+  straight to NVIDIA's driver) is found at the next call that the layer routes (a launch, a
+  synchronisation, a query, a load), or at exit, by one query of the null stream of each context
+  the layer knows to be alive, which does not wait; not when the program destroys the context or
+  releases the primary context first (the layer asks the driver nothing then: a query of the null
+  stream while another stream of the context is captured would invalidate that capture), nor at
+  exit while a capture is under way in the process, nor in a program that ends without exiting
+  (killed, `_exit`).
 - with `VF_ADAPT=0` and `VF_FIT=0`, the launches that a program makes through the entry points the
   driver gives it (the CUDA runtime's) go straight to the driver, unless `VF_FAULT_TRACE=1` is
   set: none of them is known. A synchronisation of an event bounds nothing (which stream an event

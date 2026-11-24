@@ -752,7 +752,7 @@ rm -rf "$cache_dir"
 # launched after kernels that run: the layer names it among the kernels launched in the context since
 # its last synchronisation that succeeded, and not those before; alone under VF_FAULT_TRACE=1; as a
 # node of a CUDA graph that faulted; and when only a copy, which the layer does not route, met the
-# fault, before the context is destroyed and at exit. The report at exit (VF_SUMMARY) says it too.
+# fault, at the next launch and at exit. The report at exit (VF_SUMMARY) says it too.
 # EACH OF THE FIVE STOPS THE GPU'S CONTEXT ON PURPOSE and adds lines with "Xid" to the kernel's log
 # (one to three each), each in a process of its own (after a fault no other context of the process
 # runs): they run only with VF_TEST_FAULTS=1 (exactly), never by default. The control, the same
@@ -794,7 +794,8 @@ if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
         "^\[volta-forever\]     write_null \(grid 1x1x1, block 32x1x1\): $named"
     fault fault-copy fault-copy \
         "^copy -> 700$" \
-        "a kernel faulted on the GPU: cuStreamQuery, asked by the layer before the context was destroyed returned 700" \
+        "^launch add_one -> 700$" \
+        "a kernel faulted on the GPU: cuLaunchKernel returned 700" \
         "^\[volta-forever\]   write_null \(cuLaunchKernel"
     fault fault-exit fault-exit \
         "^copy -> 700$" \

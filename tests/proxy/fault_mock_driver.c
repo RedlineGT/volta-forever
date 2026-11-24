@@ -256,7 +256,7 @@ CUresult cuStreamGetCaptureInfo_v2(void *stream, int *status, uint64_t *id, void
 // whose capture it invalidates.
 static CUresult legacy_use(uintptr_t context) {
     int invalid = 0;
-    for (uintptr_t h = 0x50010; h < next_stream; h += 0x10) {
+    for (uintptr_t h = 0x50010; h <= next_stream; h += 0x10) {
         int s = slot(h);
         if (capturing[s] && stream_blocking[s] && stream_context[s] == context) {
             invalidated[s] = 1;
