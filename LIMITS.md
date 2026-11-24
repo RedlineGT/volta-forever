@@ -598,7 +598,9 @@ off whatever it is set to. What changes for a program, by type:
   came, as when places are held by helpers that do not give them up (stopped by a debugger or a
   freezer, also after their program died, or stuck in a compilation after their program died until
   their own alarm, a minute after `VF_TRITON_TC_TIMEOUT`), it says so once, waits for none again,
-  and compiles with one helper of its own without a place when none is free, that kernel included.
+  and compiles with one helper of its own without a place when none is free, that kernel included
+  (and the kernels of its other threads that waited with it, which then wait for that helper as
+  for a busy helper of the process).
 - Every wait has a bound: a request is taken in 30 s, an answer comes in `VF_TRITON_TC_TIMEOUT`
   seconds (the time during which the program itself was stopped not counted), the first helper's
   import of Triton is waited for `VF_TRITON_TC_START` seconds once (then each kernel goes to 7.5,

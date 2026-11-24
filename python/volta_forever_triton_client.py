@@ -965,7 +965,8 @@ def _take():
     free slot of this host. While the slots are taken, this process holds the lock "waiting"
     shared, which tells the idle helpers of the user's other processes to give theirs up, for
     VF_TRITON_TC_WAIT seconds once in its life: when no slot came, it waits for none again, and
-    starts ALONE helper without a slot when none is free (said once). Where the slots are not
+    starts ALONE helper without a slot when none is free (said once); its other threads that waited
+    with that one then wait for a helper of the process, that one included. Where the slots are not
     counted (_no_cap), its helpers start without one. _NoSlot when the helpers of this process are
     all busy for VF_TRITON_TC_WAIT seconds. It may still be starting."""
     import fcntl
@@ -975,6 +976,9 @@ def _take():
     end = time.monotonic() + wait
     waiting = slot = None
     pause = 0.02
+    # (Whether this kernel may wait for a place: until this process gives the places up, which
+    # another of its threads may do while this one waits with it.)
+    placing = not _state.get("alone")
     try:
         with pool.cond:
             while True:
@@ -1017,6 +1021,17 @@ def _take():
                             if not isinstance(e, BlockingIOError):   # (not a helper that looks at it alone)
                                 _no_cap("waiting-%s: %s" % (_host(), e.strerror or e))
                                 break
+                if placing and _state.get("alone"):
+                    # (Another thread of this process, which waited for a place with this one, found
+                    # none and gave the places up: this kernel now waits for a helper of this process,
+                    # the one without a place included, as a kernel of a process whose helpers are busy
+                    # does, VF_TRITON_TC_WAIT seconds.)
+                    placing = False
+                    end = time.monotonic() + wait
+                    if waiting is not None:
+                        pool.held.pop(waiting, None)
+                        os.close(waiting)
+                        waiting = None
                 left = end - time.monotonic()
                 if left <= 0:
                     if alive < _jobs() and not _state.get("alone"):

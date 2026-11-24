@@ -1888,6 +1888,54 @@ class Decisions(Base):
         r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16"), dot("i8")], e)
         self.assertEqual(self.last(r), ["cubin sm_80"] * 2, r.stderr)
 
+    def test_threads_that_wait_for_a_place_together(self):
+        # The places all taken without end, and four threads of one process that compile at once, as
+        # PyTorch Inductor's main process precompiles its choices: they wait for a place together,
+        # one wait of VF_TRITON_TC_WAIT seconds (said once); then the process's helper without a
+        # place, started by one of them, compiles the four kernels one after the other (each of the
+        # others waits for it as for a busy helper of its process), and none is left to Triton's
+        # own stages.
+        holder = textwrap.dedent("""
+            import sys, threading, time
+            from triton.backends.nvidia import compiler as c
+            for t in sys.argv[1:]:
+                threading.Thread(target=lambda t=t: c.compile(t), daemon=True).start()
+            time.sleep(60)
+            """)
+        e = self.env(PYTHONPATH=str(self.standin), VF_TRITON_TC_JOBS="2", VF_TRITON_TC_WAIT="2",
+                     VF_TRITON_TC_TIMEOUT="60", TRITON_STANDIN_SLEEP="0.5")
+        p = subprocess.Popen([str(self.vf), sys.executable, "-c", holder, dot("f16", "HANG80\n"),
+                              dot("bf16", "HANG80\n")], env=e, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            end = time.monotonic() + 20
+            while time.monotonic() < end and len([h for h in helpers() if self.environ(h).count(str(self.root).encode())]) < 2:
+                time.sleep(0.05)
+            code = textwrap.dedent("""
+                import json, sys, threading, time
+                from triton.backends.nvidia import compiler as c
+                v = sys.modules["volta_forever_triton"]
+                out, most = [], [0]
+                def watch():
+                    while True:
+                        most[0] = max(most[0], len(v.client()._the_pool().helpers))
+                        time.sleep(0.01)
+                t = time.monotonic()
+                ts = [threading.Thread(target=lambda x=x: out.append(c.compile(x)[0].decode()[:11])) for x in sys.argv[1:]]
+                [x.start() for x in ts]
+                threading.Thread(target=watch, daemon=True).start()
+                [x.join() for x in ts]
+                print(json.dumps([out, round(time.monotonic() - t, 1), most[0], len(v._state.get("not_kept", ()))]))
+                """)
+            r = self.run_vf([sys.executable, "-c", code] + [dot("f16", "SLEEP80 // %d\n" % i) for i in range(4)], e)
+            out, took, most, not_kept = self.last(r)
+            self.assertEqual((out, most, not_kept), (["cubin sm_80"] * 4, 1, 0), r.stderr)
+            self.assertLess(took, 2 + 4 * 0.5 + 2.5)   # (one wait for a place, then the four one after the other)
+            self.assertEqual(r.stderr.count("no place for a helper of this host was free in 2 s"), 1, r.stderr)
+            self.assertNotIn("not kept", r.stderr)
+        finally:
+            p.kill()
+            p.wait()
+
     def test_places_that_cannot_be_counted(self):
         # A lock file of the places that cannot be opened or locked for another reason than another
         # holder (flock failing with ENOSYS, as on Lustre without its flock option, or ENOLCK, as on

@@ -293,7 +293,7 @@ Run the last two with `python3 tests/launcher/install.py` and `python3 tests/lau
 
 ### Tests of `VF_TRITON_TC` (`tests/python/`)
 
-No GPU needed. `python3 tests/python/triton_tc.py` (86 cases, 79 without a Triton; the layer
+No GPU needed. `python3 tests/python/triton_tc.py` (87 cases, 80 without a Triton; the layer
 built, for the marker of its `libcuda.so.1`; python3 3.9 or later with `venv`; a short `TMPDIR`,
 for the socket of `multiprocessing`'s forkserver) runs the launcher on an installation of the
 archive's layout made for the test, with a stand-in for the offline tool and a stand-in for Triton
@@ -320,7 +320,8 @@ helper runs of the program (`-I -S`, its environment, `sys.path`, working direct
 descriptors, no bytecode where the program writes none); its temporary files (in the temporary
 directory where Triton writes, removed, nothing of the places' directory removed; a FIFO or a link
 where the cubin is, its directory renamed and replaced during a compilation); the places of the
-helpers (2 places for 6 processes, places held without end: one wait per process, an idle helper
+helpers (2 places for 6 processes, places held without end: one wait per process, also for its
+threads that wait together, which then share its helper without a place, an idle helper
 that gives its place up, 100 processes at once, lock files that cannot be used: no wait, the
 directory of Triton's cache when the first eligible kernel is compiled, that directory replaced by
 a link after it was opened); a Triton changed on disk under the program; a subreaper program, an
