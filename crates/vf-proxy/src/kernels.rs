@@ -438,17 +438,59 @@ pub struct Refusal {
 }
 
 /// Refused kernels of which the program used a handle: the refusal is explained once.
-static GUARDED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static GUARDED: LazyLock<Mutex<Guarded>> = LazyLock::new(|| Mutex::new(Guarded::default()));
+
+/// The names of the refused kernels whose use was explained, at most `KEPT_KERNELS` of them.
+#[derive(Default)]
+struct Guarded {
+    said: HashSet<String>,
+    /// Refused kernels were used beyond those kept.
+    beyond: bool,
+}
+
+/// What to say of the use of a refused kernel.
+#[derive(Debug, PartialEq, Eq)]
+enum Note {
+    /// Nothing: it was said, or it comes beyond those kept and that was said.
+    Nothing,
+    /// Its refusal: the first use of a kernel of its name.
+    First,
+    /// That the uses of further refused kernels are not said: more than `KEPT_KERNELS` were.
+    Beyond,
+}
+
+impl Guarded {
+    /// A handle to the refused kernel `name` was used: what to say. (The use is refused whatever
+    /// this says: only the line depends on it.)
+    fn note(&mut self, name: &str) -> Note {
+        if self.said.contains(name) {
+            return Note::Nothing;
+        }
+        if self.said.len() >= KEPT_KERNELS {
+            return match std::mem::replace(&mut self.beyond, true) {
+                false => Note::Beyond,
+                true => Note::Nothing,
+            };
+        }
+        self.said.insert(name.to_string());
+        Note::First
+    }
+}
 
 impl Refusal {
     /// Say, the first time for this kernel, that `call` with a handle to it is refused.
     pub fn explain(&self, call: &str) {
-        if !GUARDED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(self.name.clone())
-        {
-            return;
+        match GUARDED.lock().unwrap_or_else(|e| e.into_inner()).note(&self.name) {
+            Note::Nothing => return,
+            Note::Beyond => {
+                log::warn(format_args!(
+                    "further refused kernels whose handles the program uses are not said: more than {KEPT_KERNELS} \
+                     were (each use is still refused, error {})",
+                    crate::guard::REFUSED
+                ));
+                return;
+            }
+            Note::First => {}
         }
         let name = &self.name;
         let through = if self.function == self.name {
@@ -730,6 +772,22 @@ mod tests {
         let mut silent = Explained::default();
         assert_eq!(silent.refused("k", "k", &why(1), 0, true), Explain::First);
         assert_eq!(silent.refused("k", "k", &why(2), 0, true), Explain::Nothing);
+    }
+
+    #[test]
+    fn what_is_kept_of_the_refused_uses_said_is_bounded() {
+        let mut guarded = Guarded::default();
+        let notes: Vec<Note> = (0..KEPT_KERNELS + 100)
+            .map(|n| guarded.note(&format!("k{n}")))
+            .collect();
+        assert_eq!(guarded.said.len(), KEPT_KERNELS);
+        assert_eq!(notes.iter().filter(|n| **n == Note::First).count(), KEPT_KERNELS);
+        assert_eq!(notes.iter().filter(|n| **n == Note::Beyond).count(), 1);
+        assert_eq!(notes[KEPT_KERNELS], Note::Beyond);
+        // A kernel kept is still known as said; one beyond is not said, nor kept.
+        assert_eq!(guarded.note("k0"), Note::Nothing);
+        assert_eq!(guarded.note("another"), Note::Nothing);
+        assert_eq!(guarded.said.len(), KEPT_KERNELS);
     }
 
     #[test]
