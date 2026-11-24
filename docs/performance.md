@@ -483,8 +483,9 @@ What the switch costs besides (the build machine and one V100, 2026-11-24):
   layer's `sitecustomize`, which installs an import hook. In the layout of an installed archive,
   whose `python/` keeps no bytecode (its `__pycache__` is a file, so that nothing is ever written
   into the installation), Python compiles `sitecustomize` at each start: `python3 -c pass` (vLLM's
-  environment, Python 3.12, the best of 30 alternated runs, 2026-11-24) took 3.0 ms more than
-  without it (3.6 ms before `sitecustomize` was made shorter), of which about 1.2 ms is Python's
+  environment, Python 3.12, the best of 30 alternated runs, 2026-11-24) took 3.2 ms more than
+  without it (3.0 in another such measure; 3.6 ms before `sitecustomize` was made shorter), of
+  which about 1.2 ms is Python's
   first compilation in a process, whatever its size (a Python that starts from bytecode alone
   compiles nothing). Bytecode shipped for the supported Pythons would need each of them when the
   archive is made, or a `__pycache__` that no one may write, which an upgrade could not remove,
@@ -492,8 +493,9 @@ What the switch costs besides (the build machine and one V100, 2026-11-24):
   `PYTHONPATH`: nothing.
 - **Each process that imports Triton.** The hook reads `volta_forever_triton.py` (the patch and
   the rules) when Triton is imported, compiled from its source (6.2 ms to compile): `import triton`
-  took 8 to 11 ms more than without the switch (vLLM's environment on a network disk, the best of 30
-  alternated runs, 2026-11-24). How a process starts and asks its helpers
+  took 6.5 ms more than without the switch (vLLM's environment on a network disk, the best of 30
+  alternated runs, 2026-11-24; 8 to 11 ms in an earlier measure of the same kind). How a process
+  starts and asks its helpers
   (`volta_forever_triton_client.py`, 6.4 ms to compile) is read at its first kernel that may be
   compiled for sm_80, and the helper's own code only by the helper: a process that compiles no such
   kernel (vLLM's front end, most of Inductor's processes) does not read them.
@@ -513,35 +515,40 @@ What the switch costs besides (the build machine and one V100, 2026-11-24):
   the layer's and the driver's): later runs take what the first one compiled. It is paid once per
   kernel and per cache.
 - **torch.compile with max-autotune** (Inductor's Triton templates, 32 compile workers, four float16
-  products, every cache new, Triton's on the network disk as in the measures of the shared service
-  before, the layer's in memory; 2026-11-24, one V100 of a machine of 80 processors, so 8 places),
-  in 8 runs in two jobs, off,on,on,off and on,off,off,on: off 52.8 to 56.7 s (median 53.2), on 61.5
-  to 66.9 s (median 62.6, 17.6 % more; 16.7 and 18.1 % for the two jobs), the same results (largest
-  error 4.2e-4 relative, off and on). At most 8 helpers at once, 35 started in each run (8 by the
-  main process, which precompiles Inductor's choices in threads, 27 by 27 of the 32 workers), 1.15
-  to 1.22 GB of resident sizes in all at their largest (329 to 347 MB of proportional set size: the
-  pages of Triton's library that they share counted once); none left after. Of the time on, the
-  first product's precompilation takes 15.2 s against 10.5 off (the helpers start), the second's 7.2
-  to 9.2 s against 11.6 to 15.8 (sm_80 kernels compile faster), and Inductor's benchmarking of the
-  second 12.2 s against 3.3: the first launch of an sm_80 kernel has the driver compile its PTX
-  (about 0.45 s each), the cost of any first run with the switch. With Triton's cache, and so the
-  helpers' temporary files and locks, in memory (`/dev/shm`) instead, off,on,on,off: off 54.3 and
-  54.7 s, on 59.0 and 60.6 s (9.7 % more), 310 to 314 MB: on a network disk, each compilation's
-  files (its PTX, the cubin that `ptxas` writes, the tool's) and the locks of the places cost about
-  7 points more, where Triton alone writes its temporary files in `TMPDIR`. In the same session, the
-  shared compile service of before (its tree as it was, the same measure, 8 runs in two jobs): off
-  54.4 to 58.3 s (median 57.1), on 61.5 to 63.9 s (median 62.0: 8.5 % more than its own runs off;
-  9.0 and 10.7 % for its two jobs), 9 processes of it at most, 893 to 978 MB of resident sizes in
-  all (186 to 204 MB proportional). The runs with the switch took the same time either way (medians
-  62.6 and 62.0 s); the runs without it of the helpers' jobs were the faster ones (52.8 to 58.3 s
-  for the 8): against all 8 off runs with the cache on the network disk (median 55.6 s), 12.6 % more
-  with the helpers, 11.5 % with the service. The helpers hold more memory than the service's
-  children, which were copies of one process and shared its pages. Before a helper stopped reading
-  all of `libtriton.so` at its start (`triton_key()`, 0.4 s each) and gave its place up after 1 s,
-  the same 8 runs were at 36 % more (72 to 80 s on). The layer's cache does not shorten a first run;
-  a run after it takes the driver's cache (`~/.nv/ComputeCache`) and Triton's: the cost is that of a
-  first run. Compiling the sm_70 code ahead in a helper would need either a CUDA context in it (a
-  GPU held by a process made to hold none) or another compiler than the driver's: not done.
+  products, every cache new, the layer's in memory; 2026-11-24, one V100 of a machine of 80
+  processors, so 8 places), in six jobs of two sessions (the author's three and a review's three,
+  each alternating off and on: off,on,on,off or on,off,off,on), 12 runs off and 12 on: the same
+  results (largest error 4.2e-4 relative, off and on), and on 6 to 18 % longer than off within a
+  job (5.9, 9.7, 10.5, 15.7, 16.7 and 18.1 %, from the medians of each job's runs). Pooled: with
+  Triton's cache on the network disk (8 and 8 runs), off median 54.95 s, on 61.9 s, 12.6 % more;
+  with it in memory (`/dev/shm`, 4 and 4), off 52.05 s, on 58.9 s, 13.2 % more: about 13 %, the same
+  either way (the network disk adds 3 to 4 s to off and to on alike). The spread from one job to
+  another is in the runs without the switch: their second product's precompilation takes about
+  11.5 s or about 16.3 s, in every session, and the jobs whose off runs fell mostly in the fast mode
+  gave 16 to 18 %, those whose off runs fell mostly in the slow one 6 to 10.5 %. Where the time
+  goes (Inductor's own figures, the same in every job): the first product's precompilation takes
+  14.6 to 15.4 s on against 10.4 to 10.7 off, 4 to 5 s more, the starts of the helpers (34 to 35 in
+  each run, 8 by the main process, which precompiles Inductor's choices in threads, 27 by 27 of the
+  32 workers, at most 8 at once); Inductor's benchmarking of the second product 11.8 to 12.2 s
+  against 3.1 to 3.3, about 8.8 s more: the first launch of an sm_80 kernel has the driver compile
+  its PTX (about 0.45 s each), which any compilation for sm_80 pays, whatever compiles it; and the
+  second product's precompilation 6.2 to 11.0 s on against 11.4 to 16.7 off, sm_80 kernels
+  compiling faster. No kernel fell back to 7.5 in any run. At most 8 helpers at once, 1.09 to 1.22
+  GB of resident sizes in all at their largest (296 to 348 MB of proportional set size: the pages
+  of Triton's library that they share counted once); none left after. The helpers' temporary
+  files in the temporary directory (`/dev/shm`) instead of Triton's cache directory on the network
+  disk took the same time in the same job (61.3 and 62.0 s against 59.9 and 61.6), and are where
+  they are now. In the first session, the shared compile service of before (its tree as it was,
+  the same measure, 8 runs in two jobs): off 54.4 to 58.3 s (median 57.1), on 61.5 to 63.9 s
+  (median 62.0: 8.5 % more than its own runs off), within the same spread; 9 processes of it at
+  most, 893 to 978 MB of resident sizes in all (186 to 204 MB proportional): the helpers hold more
+  memory than the service's children, which were copies of one process and shared its pages.
+  Before a helper stopped reading all of `libtriton.so` at its start (`triton_key()`, 0.4 s each)
+  and gave its place up after 1 s, the same 8 runs were at 36 % more (72 to 80 s on). The layer's
+  cache does not shorten a first run; a run after it takes the driver's cache
+  (`~/.nv/ComputeCache`) and Triton's: the cost is that of a first run. Compiling the sm_70 code
+  ahead in a helper would need either a CUDA context in it (a GPU held by a process made to hold
+  none) or another compiler than the driver's: not done.
 - **vLLM's engine started with every cache new** (`tests/gpu/vllm.sh`, stage c, 4 of its 36
   Triton kernels compiled for sm_80; the layer's cache in memory, new for each run), in two jobs:
   off,on,on,off and on,off,off,on: off 114.3 to 131.2 s (median 118.7; the engine made in 83.9 to

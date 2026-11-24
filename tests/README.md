@@ -307,7 +307,7 @@ replaced by a hook, several CTAs, an unknown size of shared memory; the skinny p
 of the sm_80 compilation (an error, a crash or a hang of the compiler in a helper, a helper killed
 or stopped from outside, one killed while its `ptxas` runs, a helper that cannot import Triton,
 imports it slowly or never, one that ends on its own as a request reaches it, an executable that
-is not the interpreter, a Triton cache directory that cannot be used, another Triton in the
+is not the interpreter, another Triton in the
 helper, too much shared memory, a cubin without its PTX, a kernel that the tool refuses or makes
 trap) leaves the kernel to Triton, and what Triton's cache keeps of it; the helpers of a process
 tree (threads, a `fork()` once the program has helpers, processes it starts, `multiprocessing`'s
@@ -315,11 +315,15 @@ workers, a helper started by a thread that ended, a `fork()` while another threa
 module's lock) and their end (idle, with the program killed during a compilation and its `ptxas`,
 when the program ends during one, by its own bound when it cannot see its program end); what a
 helper runs of the program (`-I -S`, its environment, `sys.path`, working directory, session,
-descriptors); its temporary files (in Triton's cache directory, removed, those left by helpers of
-this host that no longer run removed, the temporary directory when none can be made there; a
-FIFO or a link where the cubin is, its directory renamed and replaced during a compilation); the
-places of the helpers (2 places for 6 processes, no free place, an idle helper that gives its place
-up, 100 processes at once); what a request may ask (each value: `ptxas` options, libraries, an IR,
+descriptors, no bytecode where the program writes none); its temporary files (in the temporary
+directory where Triton writes, removed, nothing of the places' directory removed; a FIFO or a link
+where the cubin is, its directory renamed and replaced during a compilation); the places of the
+helpers (2 places for 6 processes, places held without end: one wait per process, an idle helper
+that gives its place up, 100 processes at once, lock files that cannot be used: no wait, the
+directory of Triton's cache when the first eligible kernel is compiled, that directory replaced by
+a link after it was opened); a Triton changed on disk under the program; a subreaper program, an
+`exec()`, a `fork()` after the program closed its descriptors, an abort tried again once, much
+written before a crash, no process that can be started; what a request may ask (each value: `ptxas` options, libraries, an IR,
 plain values without a line end, a path of 7 MB, JSON nested too deep, a message over 64 MiB) and
 what an answer must be (not an ELF, for another SM, a kept PTX that is not the answer's, a changed
 metadata); the bounds of each wait (a stopped helper, the program stopped during a compilation, a

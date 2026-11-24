@@ -540,37 +540,73 @@ off whatever it is set to. What changes for a program, by type:
   compiled for 7.5, as without the switch; the line `Triton kernel NAME: compiled for sm_75: WHY`
   (`VF_LOG_LEVEL=2`) says so. The sm_80 compilation runs in a **helper**, a child process of the
   program's that compiles one kernel at a time, so that an error of LLVM or MLIR that ends it does
-  not take the program down: a helper ended by SIGSEGV, SIGABRT, SIGBUS, SIGILL or SIGFPE, a
-  compilation that does not end in `VF_TRITON_TC_TIMEOUT` seconds, and an exception of Triton's
-  compiler leave that kernel at 7.5, and Triton's cache keeps it so (`ptxas` that crashes too). A
-  helper ended from outside (SIGKILL as by the out-of-memory killer, SIGTERM, SIGINT or SIGHUP) or
-  stopped from outside past the time-out (SIGSTOP, a debugger, a frozen control group), `ptxas`
-  ended so, or failing on a full disk or quota, no place for a helper in `VF_TRITON_TC_WAIT`
-  seconds, the tool that did not run: the kernel is compiled for 7.5 this time and nothing is kept
-  in Triton's cache. What Triton's compiler wrote then is written at `VF_LOG_LEVEL=3`.
+  not take the program down: a helper ended by SIGSEGV, SIGILL or SIGFPE, a compilation that does
+  not end in `VF_TRITON_TC_TIMEOUT` seconds, and an exception of Triton's compiler leave that kernel
+  at 7.5, and Triton's cache keeps it so (`ptxas` that crashes too). A helper ended by SIGABRT or
+  SIGBUS, which a lack of resources gives too (LLVM aborts when an allocation fails, at `RLIMIT_AS`
+  or with memory overcommit off; a library truncated under the helper by a reinstall gives SIGBUS),
+  has the kernel compiled again at once in a new helper, once (said at `VF_LOG_LEVEL=2`): a second
+  such end is the kernel's, so that a kernel whose compilation aborts every time is compiled twice,
+  once per cache. A helper ended from outside (SIGKILL as by the out-of-memory killer, SIGTERM,
+  SIGINT or SIGHUP) or stopped from outside past the time-out (SIGSTOP, a debugger, a frozen
+  control group), `ptxas` ended so, or failing on a full disk or quota, no helper of the process
+  free in `VF_TRITON_TC_WAIT` seconds, the tool that did not run: the kernel is compiled for 7.5
+  this time and nothing is kept in Triton's cache. What Triton's compiler wrote then is written at
+  `VF_LOG_LEVEL=3` (the last 20,000 bytes of it, for a helper that crashed).
 - **What a helper is, and how long it lives.** A process starts one at its first kernel that may be
   compiled for sm_80, and more, up to `VF_TRITON_TC_JOBS`, when its threads compile at once (an
   Inductor process that precompiles its choices in threads); each is about 105 MB resident, 150 MB
-  while it compiles. A helper ends with its process (`PR_SET_PDEATHSIG`, and the end of its socket),
-  after `VF_TRITON_TC_IDLE` seconds (10) with nothing to do, and after half a second with nothing to
-  do while a process of the user waits for a place: a server after its warm-up keeps none, and a
-  kernel compiled later, at a request that needs a new kernel, starts one again (about 0.6 s). It is
-  waited for by a thread of the program (the wait of its pid alone: no other child of the program is
-  taken), so that it leaves no zombie. The user's helpers on one host are `VF_TRITON_TC_JOBS` at
-  most, all programs together, each holding one of that many lock files in the directory below from
-  its start to its end; PyTorch Inductor's compile workers included, `torch.compile` with
-  max-autotune and 32 workers then holds at most that many helpers (`docs/performance.md`). A child
-  made by `fork()` does not use its parent's helpers (it closes its copies of their sockets and
-  starts its own when it needs one); `spawn` and `forkserver` workers are new processes.
-- No wait for a helper is without a bound: a request is taken in 30 s, an answer comes in
-  `VF_TRITON_TC_TIMEOUT` seconds (the time during which the program itself was stopped not
-  counted), the first helper's import of Triton is waited for `VF_TRITON_TC_START` seconds once
-  (then each kernel goes to 7.5, not kept, until it is ready, said once; an import that does not
-  end ends the helper after `VF_TRITON_TC_TIMEOUT` seconds), a place for a helper
-  `VF_TRITON_TC_WAIT` seconds. A program with no descriptor left gets that kernel at 7.5, not
-  kept, and a program that closes its descriptors (the helper's socket among them) gets a new
-  helper at its next kernel; the layer never closes a descriptor that is no longer its own. It
-  waits with `poll`, for any number of descriptors.
+  while it compiles, and counts against the memory limit of the program's control group. A helper
+  ends with its process (`PR_SET_PDEATHSIG`, and the end of its socket), after `VF_TRITON_TC_IDLE`
+  seconds (10) with nothing to do, and after half a second with nothing to do while a process of
+  the user waits for a place: a server after its warm-up keeps none, and a kernel compiled later,
+  at a request that needs a new kernel, starts one again (about 0.6 s). Before it ends it kills
+  what it still runs and reaps its own children. A thread of the program waits for it (the wait of
+  its pid alone: the layer takes no other child of the program), and then reaps what of its group a
+  program that is a child subreaper inherits (Python as PID 1 of a container is given the `ptxas`
+  of a helper killed while it ran; not on PyPy, which has no `waitid`). A child made by `fork()`
+  does not use its parent's helpers (it closes its copies of their sockets and starts its own when
+  it needs one); `spawn` and `forkserver` workers are new processes.
+- **A helper is a child of the program.** A program that waits for any child (`os.wait()`,
+  `waitpid(-1)`, a `SIGCHLD` handler that reaps every child, a supervisor that counts its children)
+  can be given a helper's pid and status in place of one of its own; Python's `subprocess`,
+  `multiprocessing`, `concurrent.futures` and asyncio's child watchers wait by pid, and are not
+  affected. A program that ignores `SIGCHLD` or reaps every child itself takes the helper's status
+  from the layer, which then compiles that kernel for 7.5 and keeps nothing (a crash is compiled
+  twice, never kept wrongly). A program that replaces itself with `exec()` while a helper lives
+  does not pass the helper's socket on: the helper ends at once (one that compiles, when that
+  compilation ends) and stays a zombie of the new program, which does not know it, until that
+  program waits for any child or ends.
+- **The places.** The user's helpers on one host are `VF_TRITON_TC_JOBS` at most, all programs
+  together, each holding one of that many lock files (`flock`) from its start to its end; PyTorch
+  Inductor's compile workers included, `torch.compile` with max-autotune and 32 workers then holds
+  at most that many helpers (`docs/performance.md`). The lock files are in `volta-forever-EUID` of
+  Triton's cache directory as Triton finds it when the process compiles its first kernel that may
+  be compiled for sm_80: with PyTorch's Inductor and `TRITON_CACHE_DIR` unset, Inductor's own
+  cache's `triton/0`, which Inductor sets before it compiles anything (processes whose Triton
+  caches differ count their places apart). The cap is a best effort: where a lock file cannot be
+  opened or locked for another reason than another holder (a file system whose locks do not work,
+  as Lustre without its `flock` option or NFSv3 without a lock manager; a directory that cannot be
+  written, that is not one, or a link), the process does not count places (said once, at
+  `VF_LOG_LEVEL=2`), and its helpers start without one, `VF_TRITON_TC_JOBS` of its own at most;
+  no kernel waits. A process waits for a place `VF_TRITON_TC_WAIT` seconds (60) once in its life
+  (meanwhile an idle helper of another process gives its place up after half a second): when none
+  came, as when places are held by helpers that do not give them up (stopped by a debugger or a
+  freezer, also after their program died, or stuck in a compilation after their program died until
+  their own alarm, a minute after `VF_TRITON_TC_TIMEOUT`), it says so once, waits for none again,
+  and compiles with one helper of its own without a place when none is free, that kernel included.
+- Every wait has a bound: a request is taken in 30 s, an answer comes in `VF_TRITON_TC_TIMEOUT`
+  seconds (the time during which the program itself was stopped not counted), the first helper's
+  import of Triton is waited for `VF_TRITON_TC_START` seconds once (then each kernel goes to 7.5,
+  not kept, until it is ready, said once; an import that does not end ends the helper after
+  `VF_TRITON_TC_TIMEOUT` seconds), a place `VF_TRITON_TC_WAIT` seconds once in a process (above),
+  and a kernel whose process has all its helpers busy `VF_TRITON_TC_WAIT` seconds (then it goes to
+  7.5, not kept). A program with no descriptor left, or that can start no process (`RLIMIT_NPROC`,
+  a pids control group), gets that kernel at 7.5, not kept, said once in the process, and its next
+  kernels try again; a program that closes its descriptors (the helper's socket among them) gets a
+  new helper at its next kernel. The layer closes no descriptor that is no longer its own, also in
+  a child made by `fork()`: each is kept with what it is (device and inode) and closed only while
+  it still is that. It waits with `poll`, for any number of descriptors.
 - Triton's cache, and PyTorch Inductor's caches of compiled graphs and autotuning, keep what was
   made with the switch apart from what was made without it.
 
@@ -623,21 +659,28 @@ What it does not cover:
   does not read it, nor one whose program sets `PYTHONPATH` without the launcher's directory.
 - **A helper runs the program's interpreter**, with `-I -S`: no `PYTHON*` setting, no user site, no
   `sitecustomize`, no `.pth` file, nothing of the program's `sys.path` but the directory that holds
-  its Triton, after the standard library (a Triton that the program found through an import hook,
-  as some editable installations give, is found there too); the process checks that the Triton it
-  imported is the program's (its directory and version) and uses it only then. Its
+  its Triton, after the standard library (a Triton of an editable installation whose import hook
+  finds `triton` elsewhere is found there only when the package and its `_C` are below the
+  directory that holds `triton/`; otherwise the helper's import fails, and the process compiles as
+  without the switch, said once); `-B` when the program writes no bytecode. The process checks that
+  the Triton it imported is the program's (its directory and version, and the device, inode, size
+  and time of its library, `libtriton`, and of its NVIDIA backend's module, as they were when the
+  program imported Triton: a Triton reinstalled or edited in place under a running program, with
+  the same version, is not taken, said once) and uses it only then. Its
   environment is not the program's: the variables that a compilation reads (Triton's `TRITON_*`
   but those of its caches and dumps, `MLIR_*`, `LLVM_*`, `NVPTX_*`, `PTXAS_*`, `DISABLE_*`, the
-  layer's `VF_*`) and `PATH`, `HOME`, `USER`, the locale, `TMPDIR`, `LD_LIBRARY_PATH`; no other (no
+  layer's `VF_*`) and `PATH`, `HOME`, `USER`, the locale, `LD_LIBRARY_PATH`, and `TMPDIR` the
+  program's temporary directory (below); no other (no
   secret of the program's, no `LD_PRELOAD` or `LD_AUDIT`). Its working directory is `/`, it has its
   own session and process group, and of the program's descriptors only its socket and its two
   locks; it is started only with the interpreter that runs the process (a frozen application, or
   one whose `sys.executable` is not that interpreter, does not use the switch, said once). A process
   that cannot use a helper at all (its Triton cannot be imported there, or its import does not
-  end) says so once and then compiles as without the switch: its kernels' keys lose the mark, and
+  end, or its files changed, or the helper's temporary directory cannot be made) says so once and then compiles as without the switch: its kernels' keys lose the mark, and
   Triton's cache keeps them as it does without the switch, but for the first eligible kernel,
   whose key had it (compiled for 7.5, not kept); what does not depend on a kernel (the
-  interpreter, the directory below) is decided before any key has the mark.
+  interpreter) is decided before any key has the mark, and the places' directory turns nothing off
+  (above).
 - **What a helper compiles**: what its process sends it, a TTIR and Triton's options, each value
   checked: `ptx_options` (`PTXAS_OPTIONS`, or a kernel's) only of the options that Triton itself
   gives `ptxas` (`-v`, `-lineinfo`, `--fmad`, `--opt-level N`, `--regAllocOptLevel=N`, `-g`,
@@ -646,18 +689,22 @@ What it does not cover:
   IR given in place of a stage, no instrumentation; every other value a number or a short plain
   text; 64 MiB a request. A kernel whose options are not such is compiled for 7.5, said once.
 - **Its temporary files, and whom it trusts.** A helper writes Triton's PTX, the cubin that
-  `ptxas` writes and the tool's files in a directory of its own (mode 0700) made in
-  `volta-forever-EUID` (mode 0700) of Triton's cache directory (`TRITON_CACHE_DIR`, else
-  `~/.triton/cache`), and reads the cubin through that directory's descriptor, not following a
-  link and only from a regular file; when no directory can be made there, in the temporary
-  directory, where Triton's own compilation writes the same files. The locks of its places are
-  there too. Whoever may write Triton's cache directory, or rename what is in it or above it, can
-  already give the program kernels of their choice through Triton's cache, without the layer: the
-  switch trusts no directory beyond the one that Triton itself trusts, and no other process can
-  reach a helper (its socket has no path). Nothing more is asked of these directories than
-  Triton asks of its own (not their owner: a network file system may give root's files to another
-  uid); a `volta-forever-EUID` that is not a directory (a link) turns the switch off for the
-  process, said once.
+  `ptxas` writes and the tool's files in a directory of its own (mode 0700, `mkdtemp`) in the
+  temporary directory where Triton's own compilation in the program writes the same files
+  (Python's `tempfile.gettempdir()`: `TMPDIR`, else `TEMP` or `TMP`, else `/tmp`), and reads the
+  cubin through that directory's descriptor, not following a link and only from a regular file:
+  the exposure of these files is Triton's own. It removes that directory when it ends, the
+  program's waiter after a crash; that of a helper killed with its program (both by SIGKILL) is
+  left to the system's cleaning of temporary files, as Triton's own files of such a run are.
+  `volta-forever-EUID` (mode 0700) of Triton's cache directory holds the lock files of the places
+  alone: opened once without following a link, then used by its descriptor (a link or another
+  directory put at its path afterwards is not followed); nothing else is made there, and nothing
+  there is removed. Whoever may write Triton's cache directory, or rename what is in it or above
+  it, can already give the program kernels of their choice through Triton's cache, without the
+  layer; with the lock files they can keep places taken (a process then waits once) or have the
+  places not counted, and nothing more. No other process can reach a helper (its socket has no
+  path). Nothing more is asked of these directories than Triton asks of its own (not their owner:
+  a network file system may give root's files to another uid).
 - **What a process takes from its helper.** Only an answer to the request it sent (the digest of
   what it asked, given back) whose cubin is one for sm_80 (ELF, machine, SM, at most 64 MiB) that
   keeps its PTX, the PTX it keeps being the answer's (compared line by line without comments,
@@ -682,16 +729,18 @@ What it does not cover:
   switch off.
 - A Python started through the launcher with the switch on runs the layer's `sitecustomize` at
   its start, compiled each time in an installation of the archive (whose `python/` keeps no
-  bytecode, so that nothing is written into it): about 3 ms more per start; a process that imports
-  Triton compiles `volta_forever_triton.py` too, about 8 ms more, and one that compiles a kernel
-  for sm_80 the client of its helpers, about 7 ms more, and starts a helper (about 0.6 s, of CPU
-  time beside the program's; more from a cold disk) (`docs/performance.md`).
+  bytecode, so that nothing is written into it): about 3.2 ms more per start; a process that
+  imports Triton compiles `volta_forever_triton.py` too, about 6.5 ms more, and one that compiles a
+  kernel for sm_80 the client of its helpers, about 7 ms more, and starts a helper (about 0.6 s, of
+  CPU time beside the program's; more from a cold disk) (`docs/performance.md`).
 - The first run after the switch is turned on, or off, compiles again every Triton kernel
   (and Inductor's graphs) that the caches have only from the other way; they keep both. A first
-  run with the switch costs more than one without it (helpers start, and the driver compiles the
-  PTX of each sm_80 kernel at its first launch): 17.6 % on a cold `torch.compile` with max-autotune
-  whose Triton cache is on a network disk, 9.7 % with it in memory; later runs take the caches
-  (`docs/performance.md`).
+  run with the switch costs more than one without it: a cold `torch.compile` with max-autotune took
+  6 to 18 % longer in single jobs, about 13 % over the pooled runs (12 and 12, in six jobs of two
+  sessions; the same with Triton's cache on a network disk and in memory), of which about 8.8 s is
+  the driver compiling the PTX of each sm_80 kernel at its first launch (any compilation for sm_80
+  pays it, and the driver's cache keeps what it compiled) and 4 to 5 s the starts of the helpers;
+  later runs take the caches (`docs/performance.md`).
 - The rule that leaves skinny products to 7.5 (`SLOWER`) was fitted to one sweep on one V100 SXM2:
   cells near its line (0.97 of off) measured on either side of it in another sweep (the method's
   noise), vLLM's AWQ product of 5 rows stays at 0.95, and other V100s (PCIe, other clocks) and the
