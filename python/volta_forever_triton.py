@@ -531,14 +531,17 @@ def _replace_stages(backend, stages, options, allowed):
             why = eligible(ttir, allowed)
             if why is None:
                 svc = client()
+                said = False
                 try:
                     result, why, transient = svc.compile80_isolated(backend, ttir, metadata, options)
                 except svc.HelperFailed as e:
                     # A crash or a time out of the kernel's compilation: Triton's own stages, kept in
-                    # its cache (not tried again); a helper that could not start: not kept.
+                    # its cache (not tried again), said at the default level; a helper that could not
+                    # start: not kept.
                     result, why, transient = None, e.why, not e.kernel
                     if e.kernel:
                         say("Triton kernel %s: compiled for sm_75: %s" % (name, why))
+                        said = True
                 if transient and getattr(_keys, "marked", True):
                     _not_kept(metadata)
                 if result is not None:
@@ -556,7 +559,7 @@ def _replace_stages(backend, stages, options, allowed):
                     # no slot is free, that was said once: each kernel's line is for VF_LOG_LEVEL=2.)
                     say("Triton kernel %s: compiled for sm_75, not kept in Triton's cache: %s" % (name, why),
                         level=2 if _state.get("broken") or _state.get("quiet") else 1)
-                else:
+                elif not said:
                     say("Triton kernel %s: compiled for sm_75: %s" % (name, why), level=2)
             else:
                 say("Triton kernel %s: compiled for sm_75: %s" % (name, why), level=3)

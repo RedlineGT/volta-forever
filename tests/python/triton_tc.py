@@ -794,7 +794,8 @@ class Decisions(Base):
     def test_failures_leave_the_kernel_to_triton(self):
         r = self.compile(dot("f16", "RAISE80\n"))
         self.assertTarget(r, 75)
-        self.assertIn("compiled for sm_75: an error of its sm_80 compilation: RuntimeError: PassManager::run failed", r[4])
+        self.assertEqual(r[4].count("compiled for sm_75: an error of its sm_80 compilation: RuntimeError: PassManager::run "
+                                    "failed"), 1, r[4])
         self.assertEqual(r[1]["shared"], 3 * 1024)  # the metadata of Triton's stages alone
         r = self.compile(dot("f16", "NOPTX\n"))
         self.assertTarget(r, 75)
@@ -1103,9 +1104,19 @@ class Decisions(Base):
         self.assertTarget(r, 75)
         self.assertIn("its sm_80 compilation did not end in 3 s", r[4])
         self.assertLess(took, 12)
-        left = [p for p in os.listdir("/proc") if p.isdigit() and self.cmdline(p)[:2] == [b"sleep", b"41.25"]
-                and str(self.root).encode() in self.environ(int(p))]
-        self.assertEqual(left, [])
+        self.assertEqual(self.ptxas_left(), [])
+
+    def ptxas_left(self, within=5.0):
+        """The stand-in's ptxas (sleep 41.25) of this test's helpers that still run, once a kill of
+        their group has had the time to end them (SIGKILL ends a process when it is next scheduled,
+        which a loaded machine may delay)."""
+        end = time.monotonic() + within
+        while True:
+            left = [p for p in os.listdir("/proc") if p.isdigit() and self.cmdline(p)[:2] == [b"sleep", b"41.25"]
+                    and str(self.root).encode() in self.environ(int(p))]
+            if not left or time.monotonic() > end:
+                return left
+            time.sleep(0.05)
 
     def test_a_helper_killed_while_its_ptxas_runs(self):
         # A helper killed while ptxas runs (which Triton starts with close_fds=False): ptxas holds none
@@ -1116,9 +1127,7 @@ class Decisions(Base):
         self.assertTarget(r, 75)
         self.assertIn("not kept in Triton's cache: its sm_80 compilation was ended from outside (signal 9)", r[4])
         self.assertLess(time.monotonic() - t, 10)
-        left = [p for p in os.listdir("/proc") if p.isdigit() and self.cmdline(p)[:2] == [b"sleep", b"41.25"]
-                and str(self.root).encode() in self.environ(int(p))]
-        self.assertEqual(left, [])
+        self.assertEqual(self.ptxas_left(), [])
 
     def test_how_a_compilation_ended(self):
         # A crash of the compiler (SIGSEGV, SIGBUS, as SIGABRT above) is the kernel's: Triton's own
@@ -1129,7 +1138,8 @@ class Decisions(Base):
             r = self.compile(dot("f16", name + "80\n"))
             self.assertTarget(r, 75)
             if kept:
-                self.assertIn("compiled for sm_75: its sm_80 compilation ended its process (%s)" % name, r[4])
+                self.assertEqual(r[4].count("compiled for sm_75: its sm_80 compilation ended its process (%s)" % name), 1,
+                                 r[4])   # (said once, at the default level)
                 self.assertNotIn("not kept", r[4])
             else:
                 number = {"SIGKILL": 9, "SIGTERM": 15}[name]
