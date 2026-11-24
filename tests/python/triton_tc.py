@@ -1659,6 +1659,16 @@ class Decisions(Base):
             self.assertTrue(self.gone_path(work), work)
             self.assertEqual(sorted(p.name for p in own.iterdir() if not p.name.startswith(("slot-", "waiting-"))),
                              ["%s-%s-left" % (host, dead)])
+        # The temporary directory as Python's tempfile finds it in the program, where Triton's own
+        # compilation writes: TMP when TMPDIR is not set, or what the program set tempfile.tempdir to.
+        other = self.root / "tmp-other"
+        other.mkdir(exist_ok=True)
+        code = "import sys, tempfile\ngiven = sys.argv.pop()\nif given != '-':\n    tempfile.tempdir = given\n" + COMPILE
+        for unset, given in ((True, "-"), (False, str(other))):
+            r = self.run_vf([sys.executable, "-c", code, dot("f16", "PTXFILE // 3\n"), given],
+                            dict({k: v for k, v in e.items() if k != "TMPDIR"}, TMP=str(other)) if unset else e)
+            self.assertEqual(self.last(r), ["cubin sm_80"], r.stderr)
+            self.assertEqual(os.path.dirname(os.path.dirname(seen.read_text())), str(other), seen.read_text())
 
     def gone_path(self, path, within=5.0):
         end = time.monotonic() + within

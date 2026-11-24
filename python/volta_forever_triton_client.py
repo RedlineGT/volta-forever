@@ -391,9 +391,15 @@ HELPER_ENV_LEFT = ("TRITON_CACHE_DIR", "TRITON_HOME", "TRITON_DUMP_DIR", "TRITON
 
 
 def _helper_env():
+    """The environment of a helper: those variables of the program's, VF_TRITON_TC=0, and TMPDIR the
+    temporary directory where Triton's own compilation in the program writes its files (Python's
+    tempfile.gettempdir(): TMPDIR, TEMP or TMP, else /tmp, or what the program set it to), where
+    the helper makes its own directory."""
+    import tempfile
     env = {k: v for k, v in os.environ.items()
            if (k in HELPER_ENV or k.startswith(HELPER_ENV_PREFIXES)) and k not in HELPER_ENV_LEFT}
     env["VF_TRITON_TC"] = "0"
+    env["TMPDIR"] = tempfile.gettempdir()
     return env
 
 
