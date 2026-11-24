@@ -1143,6 +1143,7 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
             let refused = report.iter().find(|(n, _)| n == &name).and_then(|(_, r)| r.clone());
             FunctionReport {
                 name,
+                paired: refused.is_none() && results.get(&si).is_some_and(|tr| tr.paired),
                 refused,
                 before,
                 after: e.sections[si].data.len() / 16,

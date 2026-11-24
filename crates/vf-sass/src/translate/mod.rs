@@ -276,6 +276,10 @@ pub struct FunctionReport {
     /// The instructions it has now: more where sequences stand for instructions sm_70 lacks, where
     /// uniform values are copied for the instructions that read them late, where waits were added.
     pub after: usize,
+    /// Whether its translation computes tensor-core products two at a time on whole rows
+    /// (`docs/pairs.md`); what a program is told after a fault in it (`VF_PAIRS=0` and `VF_SAFE=1`
+    /// turn them off).
+    pub paired: bool,
 }
 
 /// The result of translating a cubin.
@@ -355,6 +359,8 @@ struct TransResult {
     frame_bytes: u32,
     /// Its lines of `MAP.lives`, without the name of the function.
     lives: Vec<(i64, i64, &'static str, Vec<u64>)>,
+    /// Products made two at a time on whole rows (a plan with sites).
+    paired: bool,
 }
 
 /// A relocation on a section of code: the section of relocations it is in and where in it, the

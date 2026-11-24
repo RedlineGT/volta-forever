@@ -1306,3 +1306,28 @@ fn a_kernel_whose_required_block_no_translation_fits_is_refused() {
         Ok(66)
     );
 }
+
+#[test]
+fn the_report_says_which_functions_compute_their_products_in_pairs() {
+    let original = include_bytes!("../../../../tests/kernels/k_pairs.135.sm75.cubin");
+    let paired = |pairs| {
+        let opts = Options {
+            pairs,
+            ..Options::default()
+        };
+        let result = translate_with_options(original, false, &opts).unwrap();
+        let names: Vec<String> = result.report.iter().map(|f| f.name.clone()).collect();
+        let paired: Vec<String> = result
+            .report
+            .iter()
+            .filter(|f| f.paired)
+            .map(|f| f.name.clone())
+            .collect();
+        (names, paired)
+    };
+    let (names, with_pairs) = paired(true);
+    assert!(!with_pairs.is_empty(), "{names:?}");
+    assert!(with_pairs.iter().all(|name| names.contains(name)));
+    // VF_PAIRS=0 (and safe mode, which sets it so in machine code): each product by itself.
+    assert_eq!(paired(false).1, Vec::<String>::new());
+}

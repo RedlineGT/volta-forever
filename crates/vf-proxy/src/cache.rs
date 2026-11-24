@@ -54,7 +54,7 @@ use crate::{generated, log};
 /// Magic at the start of every cached file.
 const FILE_MAGIC: [u8; 4] = *b"S70C";
 /// Format version; bump to invalidate all entries when the on-disk layout changes.
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 /// File header: magic(4) + format_version(4) + key(16) + content_len(4) + checksum(8) = 36.
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
@@ -657,6 +657,7 @@ fn encode_translation(adapted: &vf_adapt::Adapted) -> Option<Vec<u8>> {
         emulated,
         over_budget,
         stubs,
+        paired,
     } = &adapted.outcome
     else {
         return None;
@@ -690,6 +691,10 @@ fn encode_translation(adapted: &vf_adapt::Adapted) -> Option<Vec<u8>> {
         for kernel in list {
             put_str(&mut buf, kernel);
         }
+    }
+    put(&mut buf, paired.len());
+    for name in paired {
+        put_str(&mut buf, name);
     }
     buf.extend_from_slice(image);
     Some(buf)
@@ -755,6 +760,10 @@ fn decode_translation(data: &[u8]) -> Option<vf_adapt::Adapted> {
             list.push(read_str(&mut pos)?);
         }
     }
+    let mut paired = Vec::new();
+    for _ in 0..read(&mut pos)? {
+        paired.push(read_str(&mut pos)?);
+    }
     Some(vf_adapt::Adapted {
         outcome: vf_adapt::Outcome::Translated {
             entries,
@@ -764,6 +773,7 @@ fn decode_translation(data: &[u8]) -> Option<vf_adapt::Adapted> {
             emulated,
             over_budget,
             stubs,
+            paired,
         },
         image: Some(data.get(pos..)?.to_vec()),
     })
@@ -904,6 +914,7 @@ mod tests {
                     trap_only: vec!["no_code".to_string()],
                     empty: vec!["noop".to_string(), "probe".to_string()],
                 },
+                paired: vec!["block_sum".to_string()],
             },
             image: Some(vec![0x7f, b'E', b'L', b'F', 1, 2, 3]),
         };

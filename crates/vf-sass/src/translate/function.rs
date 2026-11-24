@@ -543,6 +543,7 @@ pub(super) fn translate_function(
         moved: Vec::new(),
         frame_bytes,
         lives,
+        paired: q.is_some_and(|plan| !plan.sites.is_empty()),
     })
 }
 

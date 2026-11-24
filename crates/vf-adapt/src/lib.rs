@@ -309,6 +309,9 @@ pub enum Outcome {
         over_budget: bool,
         /// The kernels without code in the machine code that was translated (`Stubs`).
         stubs: Stubs,
+        /// The functions whose translation computes tensor-core products two at a time on whole
+        /// rows (`docs/pairs.md`; with `VF_PAIRS=0` or `VF_SAFE=1`, each is computed by itself).
+        paired: Vec<String>,
     },
     /// Machine code for `from_sm` that the translator could not read: left as is.
     NotTranslated { from_sm: u32, reason: String },
@@ -364,6 +367,7 @@ struct Translation {
     emulated: Vec<Emulated>,
     over_budget: bool,
     stubs: Stubs,
+    paired: Vec<String>,
 }
 
 impl Translation {
@@ -707,6 +711,12 @@ impl Policy {
         let stubs = Stubs::of_cubin(cubin, sm).without(&refused);
         Ok(Translation {
             over_budget: translation_exceeds_budget(cubin, &translated.bytes),
+            paired: translated
+                .report
+                .iter()
+                .filter(|function| function.paired)
+                .map(|function| function.name.clone())
+                .collect(),
             cubin: translated.bytes,
             functions: translated.report.len(),
             refused,
@@ -748,6 +758,7 @@ impl Policy {
                         emulated: translation.emulated,
                         over_budget: translation.over_budget,
                         stubs: translation.stubs,
+                        paired: translation.paired,
                     },
                     image: Some(translation.cubin),
                 },
@@ -843,6 +854,7 @@ impl Policy {
         let (mut translated, mut functions, mut refused, mut emulated) = (0, 0, Vec::new(), Vec::new());
         let mut over_budget = false;
         let mut found = Stubs::default();
+        let mut paired = Vec::new();
         let mut all_refused = source == 75 && self.translate == Translate::WithoutPtx;
         for entry in &fat.entries {
             if entry.kind() != KIND_ELF || entry.sm() != source {
@@ -878,6 +890,7 @@ impl Policy {
                     refused.extend(stubs);
                     emulated.extend(translation.emulated);
                     found.extend(translation.stubs);
+                    paired.extend(translation.paired);
                 }
                 Err(reason) => {
                     return Ok(Some(Adapted::unchanged(Outcome::NotTranslated {
@@ -904,6 +917,7 @@ impl Policy {
                 emulated,
                 over_budget,
                 stubs,
+                paired,
             },
             image: Some(fatbin::build(&entries)),
         }))
@@ -1490,6 +1504,7 @@ mod tests {
             emulated: vec![added("warp_sum", 1), added("block_sum", 3)],
             over_budget: false,
             stubs: Stubs::default(),
+            paired: vec![],
         }
     }
 
