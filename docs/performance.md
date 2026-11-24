@@ -564,10 +564,12 @@ with the switches off (the losses by 0.0042 at most), since its products differ 
 
 ### The rules of speed
 
-The tensor-core path serves a product only where it was measured faster than cuBLAS 12.9. Three static rules
-of shape, decided before the gate on k, leave the rest to 12.9: each gives its reason in the exit report, and a
-control of the test builds removes it (`VF_BF16_CONTROL`), with which the rule's tests fail (`bf16-rules`,
-`tests/forward/bf16.sh`). Speeds are 12.9's time over the path's:
+The tensor-core path serves only shapes where it was not measured slower than cuBLAS 12.9 on operands that convert
+exactly; a product whose input has many failing columns can still be slower (the exception, below). Three static
+rules of shape, decided before the gate on k, leave the other shapes to 12.9, and with them some at which the path
+was faster, since no bound of shape follows 12.9's waves (what each rule costs per model: below): each gives its
+reason in the exit report, and a control of the test builds removes it (`VF_BF16_CONTROL`), with which the rule's
+tests fail (`bf16-rules`, `tests/forward/bf16.sh`). Speeds are 12.9's time over the path's:
 
 | Rule | Products left to 12.9 | Reason in the exit report | Measured on the side it leaves to 12.9 | Measured on the side it serves | Control |
 |---|---|---|---|---|---|
