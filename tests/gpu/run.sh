@@ -748,6 +748,61 @@ else
 fi
 rm -rf "$cache_dir"
 
+# A kernel that faults on purpose (tests/kernels/test_fault.c: a write through a null pointer),
+# launched after kernels that run: the layer names it among the kernels launched in the context since
+# its last synchronisation that succeeded, and not those before; alone under VF_FAULT_TRACE=1; as a
+# node of a CUDA graph that faulted; and when only a copy, which the layer does not route, met the
+# fault, before the context is destroyed and at exit. The report at exit (VF_SUMMARY) says it too.
+# EACH OF THE FIVE STOPS THE GPU'S CONTEXT ON PURPOSE and adds lines with "Xid" to the kernel's log
+# (one to three each), each in a process of its own (after a fault no other context of the process
+# runs): they run only with VF_TEST_FAULTS=1 (exactly), never by default. The control, the same
+# kernels without the one that faults, runs always: nothing is said, at exit either.
+[ -x "$out/bin/test_fault" ] && [ "$out/bin/test_fault" -nt "$G/test_fault.c" ] || gcc -O2 -Wall -o "$out/bin/test_fault" "$G/test_fault.c" -ldl || exit 2
+fault() {  # fault NAME MODE EXPECTED...
+    local name=$1 mode=$2 before after; shift 2
+    log=$out/logs/$name.log
+    rm -f "$out/logs/$name.summary".*
+    before=$(xids)
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_SUMMARY=$out/logs/$name.summary "$out/bin/test_fault" "$mode" >"$log" 2>&1
+    after=$(xids)
+    cat "$out/logs/$name.summary".* >>"$log" 2>/dev/null
+    echo "lines with Xid in the kernel's log: $before before, $after after ($(date -u +%T))" >>"$log"
+    check "$name" "$@"
+}
+fault fault-none nofault "^NO FAULT$"
+if grep -q "faulted" "$log"; then
+    echo "FAIL  fault-none-silent: a fault was said where none was ($log)"; failed=1
+else
+    echo "PASS  fault-none-silent"
+fi
+if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
+    named="PTX for sm_75 retargeted by the layer; the image given to the driver: [0-9]+ bytes, XXH64 [0-9a-f]{16}; the program's image: cuModuleLoadData of [0-9]+ bytes"
+    fault fault-candidates fault \
+        "a kernel faulted on the GPU: (cuCtxSynchronize|cuLaunchKernel) returned 700 \(CUDA_ERROR_ILLEGAL_ADDRESS\)" \
+        "the kernel is one of the [23] launched in this context since its last synchronisation that succeeded" \
+        "^\[volta-forever\]   write_null \(cuLaunchKernel, grid 1x1x1, block 32x1x1, the null stream\): $named" \
+        "VF_FAULT_TRACE=1 synchronises every launch" \
+        "^\[volta-forever\] a kernel faulted: .* returned 700 .*the candidates, the last launched first: (add_one, )?write_null, add_one$"
+    VF_FAULT_TRACE=1 fault fault-exact fault \
+        "kernel write_null faulted on the GPU: the synchronisation of the stream after cuLaunchKernel \(VF_FAULT_TRACE=1\) returned 700" \
+        "^launch write_null -> 700$" \
+        "^\[volta-forever\] a kernel faulted: .*; the kernel: write_null$"
+    fault fault-graph fault-graph \
+        "a kernel faulted on the GPU: cuStreamSynchronize returned 700" \
+        "^after the fault: cuStreamGetCtx -> " \
+        "a CUDA graph \(cuGraphLaunch, stream 0x[0-9a-f]+\): its kernels ran without passing through the layer; it was made of 3 kernel nodes, of 2 kernels" \
+        "^\[volta-forever\]     write_null \(grid 1x1x1, block 32x1x1\): $named"
+    fault fault-copy fault-copy \
+        "^copy -> 700$" \
+        "a kernel faulted on the GPU: cuStreamQuery, asked by the layer before the context was destroyed returned 700" \
+        "^\[volta-forever\]   write_null \(cuLaunchKernel"
+    fault fault-exit fault-exit \
+        "^copy -> 700$" \
+        "a kernel faulted on the GPU: cuStreamQuery, asked by the layer at exit returned 700" \
+        "^\[volta-forever\]   write_null \(cuLaunchKernel" \
+        "^\[volta-forever\] a kernel faulted: cuStreamQuery, asked by the layer at exit returned 700 .*: add_one, write_null, add_one$"
+fi
+
 # The guard and nocode cases above pass their check of the kernel's log where it cannot be read
 # (dmesg needs privileges that the user may not have): said once, at the end, so that it is seen.
 [ -z "$xid_unchecked" ] || echo "Xid lines could not be checked (dmesg not readable)"

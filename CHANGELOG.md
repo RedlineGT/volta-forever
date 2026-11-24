@@ -9,6 +9,7 @@
 ### Tests
 
 - `tests/proxy/fault.py` (in the CI): what the layer says after a fault, against a stand-in for the driver that shows a fault as NVIDIA's driver does. `tests/kernels/test_fault.c`: its `probe-*` modes recorded what NVIDIA's driver answers to each call after a fault (`crates/vf-proxy/src/fault.rs`), its `rate` mode measures launches per second (`docs/performance.md`).
+- The `fault-*` cases of `tests/gpu/run.sh`: a kernel that writes through a null pointer on purpose, through the layer, run only with `VF_TEST_FAULTS=1` (each adds lines with "Xid" to the kernel's log); by default only the control runs, after which nothing is said.
 
 ## 0.1.5 (2026-11-24)
 

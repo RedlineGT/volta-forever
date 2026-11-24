@@ -203,6 +203,14 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 (NVIDIA's or the layer's), with and without a module with a refused kernel loaded; its header
 says how to build and run it.
 
+`run.sh` ends with what the layer says after a kernel faults (`tests/kernels/test_fault.c`). By
+default only the control runs: the same kernels without the one that faults, after which nothing
+is said (`fault-none`, `fault-none-silent`). The five cases in which a kernel writes through a null
+pointer on purpose (`fault-candidates`, `fault-exact` under `VF_FAULT_TRACE=1`, `fault-graph`,
+`fault-copy`, `fault-exit`) end their CUDA context and add one to three lines with "Xid" to the
+kernel's log each: they run only with `VF_TEST_FAULTS=1` (exactly), which no release check and no
+suite sets, and each log says how many such lines the kernel's log had before and after the case.
+
 The whole Triton corpus (3,516 cases; `triton_corpus.py` says how cases are made and checked) is
 run by hand, the reference on any machine and the GPU part on the V100, in as many processes as
 wanted (`--shard I/N`; a case that stops its process is counted as a CRASH and the next process
