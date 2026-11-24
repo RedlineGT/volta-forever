@@ -213,7 +213,7 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 | `torch-bench.sh` | 89 PyTorch operations (speed) | PyTorch with sm_70 code | 12 min | both PyTorch wheels |
 | `llamacpp.sh` | llama.cpp, official build | the CPU | 2 min | `scripts/fetch-all.sh demos` |
 | `llamacpp-bench.sh` | llama.cpp (speed) | native sm_70 build | 10 min | demos, native build |
-| `llamacpp-ops.sh` | llama.cpp's backend test | native sm_70 build (`perf`) or the CPU (`test`) | 6 to 20 min | demos, native build, sources |
+| `llamacpp-ops.sh` | llama.cpp's backend test; with `test` and `layer-only`, also the cases that run through the layer only (a flash-attention case that native sm_70 builds abort on, faulting the GPU: never run natively) | native sm_70 build (`perf`) or the CPU (`test`, `layer-only`) | 6 to 20 min | demos, native build, sources |
 | `llamacpp-nvfp4.sh` | llama.cpp with NVFP4 weights | the CPU, native build | depends on the model | demos, native build, an NVFP4 GGUF model |
 | `vllm.sh` | vLLM's engine and server | the CPU (greedy) | 10 min | vLLM 0.34.0, PyTorch, model, Python headers |
 | `sglang.sh` | SGLang's engine and server | the CPU (greedy) | 10 min | SGLang 0.5.23, PyTorch, model, Python headers |

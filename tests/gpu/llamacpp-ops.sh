@@ -8,7 +8,10 @@
 #                   proxy compares with the native time, and leaves one line per case in
 #                   $out/logs/ops-<operation>.txt (microseconds through the proxy, natively, ratio).
 #   test            compares every case with the CPU backend; prints the counts of OK and FAIL. A
-#                   program that stops before the end (a kernel refused, a fault) fails.
+#                   program that stops before the end (a kernel refused, a fault) fails. Then the
+#                   cases run through the layer only (below), each by itself.
+#   layer-only      those cases alone.
+# Both run through the proxy only: no case of the test mode is run natively.
 # OPERATION defaults to FLASH_ATTN_EXT and MUL_MAT. GPU is the PCI-order index (default 0). Timings are
 # only meaningful on an idle GPU. The first run compiles every kernel variant the cases use (minutes).
 # To compare two versions of the proxy: $VF_PROXY is the directory of the libcuda.so.1 to use (default:
@@ -44,19 +47,40 @@ proxy() { (cd "$B" && LD_LIBRARY_PATH=$proxy_dir:$W/dist/forward:$B:$D/cudart/cu
 natively() { (cd "$native" && LD_LIBRARY_PATH=$native:$T "$out/tbo/test-backend-ops.native" "$@"); }
 echo "GPU $gpu before the runs (utilisation, memory used): $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader -i "$gpu")"
 failed=0
+# judge WHAT LOG STATUS [CASES]: the verdict of a run of the test mode through the proxy, whose output
+# is in LOG and which ended with STATUS: every case like the CPU backend, at least one (exactly CASES
+# when it is given), and the program ended by itself.
+judge() {
+    local what=$1 log=$2 status=$3 cases ok bad verdict stopped=
+    # (The lines of the cases only, "  OPERATION(PARAMETERS): ... OK" or "... FAIL", the colours
+    # taken away: not "  Backend CUDA0: OK", the last "OK", nor any other line with the word.)
+    cases=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -a '^  [A-Za-z0-9_][A-Za-z0-9_]*(.*): .*\(OK\|FAIL\)$')
+    ok=$(printf '%s\n' "$cases" | grep -c 'OK$') bad=$(printf '%s\n' "$cases" | grep -c 'FAIL$')
+    if [ "$ok" -gt 0 ] && [ "$bad" = 0 ] && [ "$status" = 0 ] && { [ -z "${4:-}" ] || [ "$ok" = "$4" ]; }; then
+        verdict=PASS
+    else
+        verdict=FAIL; failed=1
+    fi
+    [ "$status" = 0 ] || [ "$bad" != 0 ] || stopped=", then the program stopped (status $status): $(grep -a -m1 "cannot run on this GPU\|CUDA error" "$log" | cut -c1-200)"
+    echo "$verdict  $what through the proxy: $ok cases like the CPU backend, $bad not$stopped ($log)"
+}
+# Cases run through the layer only, in the test mode after the operations and in the layer-only mode
+# alone, each by itself (OPERATION, then a regular expression of its parameters that one case
+# matches), and never on the native side:
+# - FLASH_ATTN_EXT of head size 128, 8 query heads to a KV head, 4 rows, 5,003 positions of f16 K and
+#   V (an outside tester's report, issue #4 of the project, "Test 5"). Native sm_70 builds of
+#   llama.cpp abort on it ("flash_attn_ext_f16 has no device code compatible with CUDA arch 700":
+#   upstream llama.cpp issue 31555) and fault the GPU (Xid 43): IT MUST NOT BE RUN NATIVELY. Told
+#   7.5, ggml takes another kernel there, which the layer runs, and the case is the CPU's.
+layer_only=(
+    'FLASH_ATTN_EXT hsk=128,hsv=128,nh=1,nr23=\[8,1\],kv=5003,nb=4,mask=1,sinks=0,max_bias=0\.000000,logit_softcap=0\.000000,prec=f32,type_K=f16,type_V=f16,permute=\[0,1,2,3\],kv_view=1,v_is_view_of_k=0,n_kv_max=512,'
+)
+[ "$mode" = layer-only ] && set --
 for operation in "$@"; do
     log=$out/logs/ops-$operation$tag
     if [ "$mode" = test ]; then
         proxy test -o "$operation" -b CUDA0 >"$log-test-proxy.log" 2>&1
-        status=$?
-        # (The lines of the cases only, "  OPERATION(PARAMETERS): ... OK" or "... FAIL", the colours
-        # taken away: not "  Backend CUDA0: OK", the last "OK", nor any other line with the word.)
-        cases=$(sed 's/\x1b\[[0-9;]*m//g' "$log-test-proxy.log" | grep -a '^  [A-Za-z0-9_][A-Za-z0-9_]*(.*): .*\(OK\|FAIL\)$')
-        ok=$(printf '%s\n' "$cases" | grep -c 'OK$') bad=$(printf '%s\n' "$cases" | grep -c 'FAIL$')
-        if [ "$ok" -gt 0 ] && [ "$bad" = 0 ] && [ "$status" = 0 ]; then verdict=PASS; else verdict=FAIL; failed=1; fi
-        stopped=
-        [ "$status" = 0 ] || [ "$bad" != 0 ] || stopped=", then the program stopped (status $status): $(grep -a -m1 "cannot run on this GPU\|CUDA error" "$log-test-proxy.log" | cut -c1-200)"
-        echo "$verdict  $operation through the proxy: $ok cases like the CPU backend, $bad not$stopped ($log-test-proxy.log)"
+        judge "$operation" "$log-test-proxy.log" $?
         continue
     fi
     native_log=$out/logs/ops-$operation-perf-native.log
@@ -86,4 +110,14 @@ for operation in "$@"; do
         echo "$operation: $(grep -c " us/run" "$log-perf-proxy.log") cases timed through the proxy ($log-perf-proxy.log), no native timing to compare with"
     fi
 done
+if [ "$mode" = test ] || [ "$mode" = layer-only ]; then
+    n=0
+    for pinned in "${layer_only[@]}"; do
+        n=$((n + 1))
+        log=$out/logs/ops-layer-only-$n$tag-test-proxy.log
+        proxy test -o "${pinned%% *}" -p "${pinned#* }" -b CUDA0 >"$log" 2>&1
+        status=$? shown=${pinned#* }
+        judge "${pinned%% *}(${shown//\\/}...)" "$log" $status 1
+    done
+fi
 exit $failed
