@@ -502,9 +502,9 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   columns, and a gradient's rows and columns often fail the exact check and go to its generic fallback. Every
   product of four fine-tuning steps (adapters of rank 16 and full fine-tuning, 2,048 and 4,096 tokens, a
   model of hidden size 896), timed in place, each call of a real step waited for: with the rule removed (a
-  test build's control), 19 of the 22 NN and NT products the path would serve ran at 0.24 to 0.90 times
-  12.9's speed (the other three, of 16 rows, at 1.02 to 1.34), and the steps' products together at 0.62 to
-  0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.44 to 3.84 times
+  test build's control), 20 of the 22 NN and NT products the path would serve ran at 0.24 to 0.92 times
+  12.9's speed (the other two, of 16 rows, at 1.01 and 1.35), and the steps' products together at 0.61 to
+  0.84 times; with the rule, at 1.02 to 1.08 times, the TN products it serves at 1.45 to 3.88 times
   (`docs/performance.md`, section 7).
 - **Narrow products of tall matrices go to cuBLAS 12.9**: TN with m >= 8192 is served only with n > 128, and TN with
   m >= 6144 only with k <= 9216 (an output layer over a vocabulary, or a wide MLP's up projection, at a batch of up to
@@ -529,9 +529,9 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   the exact check; the fallback computes them, one fused multiply-add chain over the whole k each, which costs more
   than the path saves from a few hundred columns on. Whether a layer loses depends on its data, which the rule
   cannot see: of the down projections of four models measured on real text (k = 4864 to 12288, n = 32 to 2048),
-  the layer that lost (k = 8960, 53 to 70 % of its columns failing) ran at 1.16 to 1.17 times 12.9's speed at 256
+  the layer that lost (k = 8960, 53 to 70 % of its columns failing) ran at 1.15 to 1.17 times 12.9's speed at 256
   columns and below 1.0 at every n from 384 on (down to 0.62 times; at 320, 0.85 or 1.08 by the choice of
-  columns), while the other down projections of k > 8192 ran at 1.05 to 2.16 times 12.9's speed from 320
+  columns), while the other down projections of k > 8192 ran at 1.05 to 2.15 times 12.9's speed from 320
   columns on; the class goes to 12.9, and with it those gains. No model
   measured has a k between 4864 and 8960; the down projections of k = 4864 kept at least 1.08 times 12.9's speed
   at every n. On four ReLU and GELU models no token vector failed the check.
