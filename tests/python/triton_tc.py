@@ -1476,7 +1476,7 @@ class Decisions(Base):
         # directory that holds the program's Triton, after the standard library; its working
         # directory is /, it has its own session and process group, and of the program's
         # descriptors only its socket (and the locks of its slot and of "waiting"): not a file that
-        # the program left inheritable. Its temporary directory is its own, in Triton's cache.
+        # the program left inheritable. Its temporary directory is its own (mode 0700), in TMPDIR.
         users = self.root / "users-path"
         users.mkdir(exist_ok=True)
         record = self.root / "helper-saw.json"
@@ -1500,52 +1500,56 @@ class Decisions(Base):
         self.assertTrue(any(os.path.isfile(os.path.join(p, "os.py")) for p in saw["path"][:-1]), saw["path"])
         self.assertEqual([k for k in ("LD_PRELOAD", "LD_AUDIT", "PYTHONPATH", "PYTHONWARNINGS", "FOO_SECRET",
                                       "TRITON_CACHE_DIR") if k in saw["env"]], [])
-        # /dev/null; its socket, slot and lock "waiting"; its directory and the file of what it writes
-        # (and the stand-in's record, the listing itself, and what the interpreter keeps open itself:
-        # /dev/urandom for CPython 3.9, its own file for 3.14 and PyPy): nothing of the program's.
+        # /dev/null; its socket, slot and lock "waiting" (in the directory of the user's helpers); its
+        # directory and the file of what it writes (in TMPDIR); and the stand-in's record, the
+        # listing itself, and what the interpreter keeps open itself (/dev/urandom for CPython 3.9,
+        # its own file for 3.14 and PyPy): nothing of the program's.
         python = (os.path.realpath(sys.executable), os.path.dirname(os.path.realpath(sys.executable)) + "/")
+        tmp = str(self.root / "tmp") + "/"
         for x in saw["links"]:
-            self.assertTrue(x in ("/dev/null", "/dev/urandom", str(record)) or x.startswith(str(self.own()) + "/")
+            self.assertTrue(x in ("/dev/null", "/dev/urandom", str(record)) or x.startswith((str(self.own()) + "/", tmp))
                             or x.startswith("/proc/") or x == python[0] or x.startswith(python[1]), (x, saw["links"]))
+        self.assertEqual(sorted(os.path.basename(x).split("-")[0] for x in saw["links"] if x.startswith(str(self.own()))),
+                         ["slot", "waiting"], saw["links"])
         self.assertNotIn(str(self.root / "vf-home/VERSION"), saw["links"])
         self.assertEqual(len([x for x in saw["links"] if "socket:" in x]), 1, saw["links"])
-        self.assertTrue(saw["tmp"].startswith(str(self.own()) + "/"), saw["tmp"])
+        self.assertTrue(saw["tmp"].startswith(tmp), saw["tmp"])
         self.assertEqual(saw["tmpmode"], 0o700)
 
     def test_the_temporary_files(self):
         # Triton's PTX, and the cubin that ptxas writes, are in the helper's own directory (mode 0700)
-        # in the directory of the user's helpers in Triton's cache directory, removed when the helper
-        # ends; a directory that a helper of this host which no longer runs left there is removed by
-        # the next helper (not one of another host). When no directory can be made there, the
-        # temporary directory is used, as by Triton itself.
+        # in the temporary directory (TMPDIR), where Triton's own compilation writes them, removed
+        # when the helper ends. The directory of the user's helpers in Triton's cache directory
+        # holds the lock files of the places alone: nothing else is made there, and nothing that is
+        # there is removed (a directory named as a helper's of this host whose pid is not alive
+        # here, as one of another PID namespace or of another host of the same name would be, is
+        # left as it is). The same when that directory cannot be written.
         import socket
         host = __import__("re").sub(r"[^A-Za-z0-9_.]", "_", socket.gethostname())[:64]
         dead = subprocess.run(["sh", "-c", "echo $$"], capture_output=True, text=True).stdout.strip()
         own = self.own()
         own.mkdir(mode=0o700, parents=True, exist_ok=True)
         (own / ("%s-%s-left" % (host, dead))).mkdir(exist_ok=True)
-        (own / "otherhost-1-kept").mkdir(exist_ok=True)
         seen = self.root / "ptx-path"
         e = self.env(PYTHONPATH=str(self.standin), TRITON_STANDIN_RECORD_TMP=str(seen))
-        r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16", "PTXFILE\n")], e)
-        self.assertEqual(self.last(r), ["cubin sm_80"], r.stderr)
-        work = os.path.dirname(seen.read_text())
-        self.assertEqual(os.path.dirname(work), str(own))
-        self.assertTrue(os.path.basename(work).startswith(host + "-"), work)
-        end = time.monotonic() + 5
-        while os.path.exists(work) and time.monotonic() < end:
+        for extra, mode in (("", 0o700), (" // 2", 0o500)):
+            os.chmod(own, mode)
+            try:
+                r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16", "PTXFILE%s\n" % extra)], e)
+            finally:
+                os.chmod(own, 0o700)
+            self.assertEqual(self.last(r), ["cubin sm_80"], r.stderr)
+            work = os.path.dirname(seen.read_text())
+            self.assertEqual(os.path.dirname(work), str(self.root / "tmp"), work)
+            self.assertTrue(self.gone_path(work), work)
+            self.assertEqual(sorted(p.name for p in own.iterdir() if not p.name.startswith(("slot-", "waiting-"))),
+                             ["%s-%s-left" % (host, dead)])
+
+    def gone_path(self, path, within=5.0):
+        end = time.monotonic() + within
+        while os.path.exists(path) and time.monotonic() < end:
             time.sleep(0.05)
-        self.assertFalse(os.path.exists(work))
-        self.assertFalse((own / ("%s-%s-left" % (host, dead))).exists())
-        self.assertTrue((own / "otherhost-1-kept").exists())
-        self.assertEqual(oct(own.stat().st_mode & 0o777), oct(0o700))
-        os.chmod(own, 0o500)
-        try:
-            r = self.run_vf([sys.executable, "-c", COMPILE, dot("f16", "PTXFILE // 2\n")], e)
-        finally:
-            os.chmod(own, 0o700)
-        self.assertEqual(self.last(r), ["cubin sm_80"], r.stderr)
-        self.assertTrue(seen.read_text().startswith(str(self.root / "tmp") + "/"), seen.read_text())
+        return not os.path.exists(path)
 
     def test_a_cache_directory_that_cannot_be_used(self):
         # Triton's cache directory where the directory of the user's helpers cannot be made, or that

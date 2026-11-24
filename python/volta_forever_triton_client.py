@@ -29,9 +29,8 @@ time, started at the first kernel that needs one:
     them. A kernel that finds no slot in VF_TRITON_TC_WAIT seconds is compiled by Triton's own
     stages, and not kept in Triton's cache;
   - writing its temporary files (Triton's PTX, the cubin that ptxas writes, the tool's) in a
-    directory of its own (mode 0700) in that same directory, which whoever may write already
-    gives the program the kernels of their choice through Triton's cache; or, when it cannot, in
-    the temporary directory, where Triton's own compilation writes them.
+    directory of its own (mode 0700) in the temporary directory, where Triton's own compilation
+    writes them (the directory of the user's helpers holds the lock files alone).
 
 A process waits for each answer VF_TRITON_TC_TIMEOUT seconds at most (a time during which it was
 itself stopped is not counted); the helper is then killed with its group. It takes from it only
@@ -459,8 +458,7 @@ class _Helper(object):
             fds = (theirs.fileno(), slot, waiting)
             here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volta_forever_triton_helper.py")
             self.proc = subprocess.Popen(
-                [_state["python"], "-I", "-S", here, "--helper"] + [str(fd) for fd in fds]
-                + [str(os.getpid()), _state["own"], root],
+                [_state["python"], "-I", "-S", here, "--helper"] + [str(fd) for fd in fds] + [str(os.getpid()), root],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_helper_env(),
                 cwd="/", pass_fds=fds, start_new_session=True)
         except BaseException:
@@ -484,8 +482,9 @@ class _Helper(object):
 
     def _reap(self):
         """The helper's waiter: its status when it ends (the wait of its pid alone), what it wrote,
-        its work directory removed; what its group still runs (ptxas, when the helper was killed)
-        killed before it is reaped (its pid, and so its group's number, still taken)."""
+        its work directory removed (it does so itself when it ends otherwise than by a crash);
+        what its group still runs (ptxas, when the helper was killed) killed before it is reaped
+        (its pid, and so its group's number, still taken)."""
         import signal
         try:
             if hasattr(os, "waitid"):

@@ -2,10 +2,9 @@
 
 Started by that process (volta_forever_triton_client says what a helper is, how long it lives and
 where it writes) as `PYTHON -I -S .../volta_forever_triton_helper.py --helper SOCKET SLOT WAITING
-PARENT DIR ROOT`: the descriptors of its socket, of the lock of its slot and of the lock
-"waiting", the pid of that process, the directory of the user's helpers and the directory that
-holds the program's Triton. The rules of what is compiled for sm_80 are in volta_forever_triton.
-No program reads this file.
+PARENT ROOT`: the descriptors of its socket, of the lock of its slot and of the lock "waiting",
+the pid of that process and the directory that holds the program's Triton. The rules of what is
+compiled for sm_80 are in volta_forever_triton. No program reads this file.
 """
 
 import os
@@ -322,32 +321,14 @@ def _others_wait(fd):
     return False
 
 
-def _alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        pass
-    return True
-
-
-def _work_dir(own):
-    """The directory of this helper's temporary files, made with mode 0700 in the directory of the
-    user's helpers (in Triton's cache directory), else in the temporary directory, where Triton's
-    own compilation writes them. Those that helpers of this host which no longer run left there
-    (a helper killed) are removed."""
-    import shutil
+def _work_dir():
+    """The directory of this helper's temporary files: made with mode 0700 (mkdtemp) in the
+    temporary directory (the program's TMPDIR), where Triton's own compilation writes the same
+    files. The helper removes it when it ends, the program's waiter after a crash; one of a helper
+    killed with its program is left to the system's cleaning of temporary files, as Triton's own
+    files are. No other directory is looked at or removed."""
     import tempfile
-    host = _client._host()
-    try:
-        for name in os.listdir(own):
-            pid = name[len(host) + 1:].split("-", 1)[0] if name.startswith(host + "-") else ""
-            if pid.isdigit() and not _alive(int(pid)):
-                shutil.rmtree(os.path.join(own, name), ignore_errors=True)
-        return tempfile.mkdtemp(prefix="%s-%d-" % (host, os.getpid()), dir=own)
-    except OSError:
-        return tempfile.mkdtemp(prefix="volta-forever-triton-")
+    return tempfile.mkdtemp(prefix="volta-forever-triton-")
 
 
 def _serve(sock, waiting, err):
@@ -392,7 +373,7 @@ def _serve(sock, waiting, err):
         last = time.monotonic()
 
 
-def _main(sock_fd, slot_fd, waiting_fd, parent, own, root):
+def _main(sock_fd, slot_fd, waiting_fd, parent, root):
     import shutil
     import signal
     import socket
@@ -420,7 +401,12 @@ def _main(sock_fd, slot_fd, waiting_fd, parent, own, root):
         return
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, fileno=sock_fd)
     sock.setblocking(False)
-    work = _work_dir(own)
+    try:
+        work = _work_dir()
+    except OSError as e:
+        _client._send(sock, _client._message({"kind": "failed", "why": "its temporary directory could not be made "
+                                                                       "(%s)" % (e.strerror or e)}), SEND)
+        return
     try:
         _work.update(path=work, fd=os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _client._O_CLOEXEC))
         os.environ["TMPDIR"] = tempfile.tempdir = work
@@ -452,5 +438,5 @@ def _main(sock_fd, slot_fd, waiting_fd, parent, own, root):
         shutil.rmtree(work, ignore_errors=True)
 
 
-if __name__ == "__main__" and sys.argv[1:2] == ["--helper"] and len(sys.argv) == 8:
-    _main(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6], sys.argv[7])
+if __name__ == "__main__" and sys.argv[1:2] == ["--helper"] and len(sys.argv) == 7:
+    _main(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6])
