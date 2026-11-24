@@ -21,8 +21,8 @@ import time
 
 PTX = (b".version 7.0\n.target sm_75\n.address_size 64\n"
        b".visible .entry add_one(.param .u64 p)\n{\n ret;\n}\n"
-       b".visible .entry write_null(.param .u64 p)\n{\n ret;\n}\n")
-FAULT = "a kernel faulted on the GPU"
+       b".visible .entry write_null(.param .u64 p)\n{\n ret;\n}\n"
+       b".visible .entry ecc_fail(.param .u64 p)\n{\n ret;\n}\n")
 
 
 class Run:
@@ -37,7 +37,7 @@ class Run:
         assert self.api.cuCtxCreate_v2(c.byref(context), 0, 0) == 0
         assert self.api.cuModuleLoadData(c.byref(module), PTX) == 0
         functions = {}
-        for name in ("add_one", "write_null"):
+        for name in ("add_one", "write_null", "ecc_fail"):
             f = c.c_void_p()
             assert self.api.cuModuleGetFunction(c.byref(f), module, name.encode()) == 0
             functions[name] = f
@@ -253,6 +253,27 @@ def case(name, proxy):
         # A, later: its own synchronisation.
         out.append(run.api.cuCtxSetCurrent(a))
         out.append(run.api.cuCtxSynchronize())
+    elif name == "ecc":
+        # An uncorrectable ECC error (214), as an aged V100's memory reports one: not a kernel's fault.
+        out.append(run.launch("add_one", grid=1))
+        out.append(run.launch("ecc_fail", grid=2))
+        out.append(run.api.cuCtxSynchronize())
+    elif name == "wrapped":
+        # More launches than a thread's record keeps since the last synchronisation: the report at exit
+        # says that launches before those named may be candidates too.
+        out.append(run.launch("write_null", grid=1))
+        for i in range(300):
+            run.launch("add_one", grid=2 + i)
+        out.append(run.api.cuCtxSynchronize())
+    elif name == "unseen":
+        # VF_ADAPT=0 VF_FIT=0: a launch through the driver's own entry, which the layer does not see.
+        pointer = c.c_void_p()
+        assert run.api.cuGetProcAddress(b"cuLaunchKernel", c.byref(pointer), 12000, c.c_uint64(0)) == 0
+        launch = c.CFUNCTYPE(c.c_int, *([c.c_void_p] + [c.c_uint] * 7 + [c.c_void_p] * 3))(pointer.value)
+        word = c.c_uint64(0)
+        args = (c.c_void_p * 1)(c.cast(c.byref(word), c.c_void_p))
+        out.append(launch(run.functions["write_null"], 1, 1, 1, 32, 1, 1, 0, None, args, None))
+        out.append(run.api.cuCtxSynchronize())
     elif name == "exact-done":
         # Exact mode, the fault seen one wait late (MOCK_DELAY=1, as on a GPU where write_null still
         # runs when the next wait returns): write_null is launched while another stream is captured
@@ -401,8 +422,10 @@ def checks(name, log, summary, results):
         expect("lookups of the synchronisations lead to the layer",
                results[10:12] == ["cuStreamSynchronize:layer", "cuLaunchKernel:layer"])
         expect("cuCtxSynchronize met 700", "cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS)" in head)
+        expect("not said to be a kernel's for certain: a copy or a memset may have failed instead",
+               head.startswith("work on the GPU failed:") and "a copy, a memset" in head and "a kernel faulted on" not in log)
         expect("the three launches since the stream's synchronisation, the last first",
-               "one of the 3 launched in this context since its last synchronisation" in head and
+               "3 launches were made in this context since its last synchronisation" in head and
                names == ["add_one", "write_null", "add_one"])
         expect("their grids", re.search(r"add_one \(cuLaunchKernel, grid 5x1x1, block 32x1x1, the null stream\)",
                                         log) is not None and "grid 4x1x1" in log and "grid 2x1x1" not in log)
@@ -411,7 +434,7 @@ def checks(name, log, summary, results):
         expect("the program's image without its digest at level 1",
                f"the program's image: cuModuleLoadData of {len(PTX)} bytes (VF_LOG_LEVEL=2 prints its XXH64" in log)
         expect("how to name it alone", "VF_FAULT_TRACE=1 synchronises every launch" in log)
-        expect("the report at exit", "a kernel faulted: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); "
+        expect("the report at exit", "work on the GPU failed: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); "
                "the candidates, the last launched first: add_one, write_null, add_one" in summary)
     elif name == "exact":
         expect("named alone, with what is not ruled out",
@@ -419,7 +442,7 @@ def checks(name, log, summary, results):
                                "synchronisation of the stream after cuLaunchKernel (VF_FAULT_TRACE=1) returned 700")
                and "(a copy, a memset, a host function) is not ruled out" in head and names == ["write_null"])
         expect("its launch returned the fault", results[5] == "700")
-        expect("the report at exit", "a kernel faulted: the synchronisation of the stream after cuLaunchKernel "
+        expect("the report at exit", "work on the GPU failed: the synchronisation of the stream after cuLaunchKernel "
                "(VF_FAULT_TRACE=1) returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the launch whose synchronisation met "
                "it: write_null (work not seen on its stream before it not ruled out)" in summary)
     elif name == "streams":
@@ -440,10 +463,11 @@ def checks(name, log, summary, results):
                names == ["write_null", "add_one", "add_one"] and all(threads.values()) and
                threads[1].group(1) == threads[3].group(1) != threads[2].group(1))
     elif name == "graph":
-        expect("a graph launch", "the kernel is the one launched in this context since its" in head)
-        expect("its kernel nodes as captured, not as launches",
+        expect("a graph launch", "1 launch was made in this context since its" in head)
+        expect("its kernel nodes as captured, not as launches, with what the layer does not follow",
                re.search(r"a CUDA graph \(cuGraphLaunch, stream 0x[0-9a-f]+\): its kernels ran without passing through "
-                         r"the layer; it was made of 2 kernel nodes, of 2 kernels:", log) is not None and
+                         r"the layer; the layer saw 2 kernel nodes added to it, of 2 kernels \(it does not follow child "
+                         r"graphs, conditional bodies", log) is not None and
                "    add_one (grid 2x1x1, block 32x1x1)" in log and "    write_null (grid 3x1x1, block 32x1x1)" in log)
     elif name == "graph-exact":
         expect("the graph named", head.startswith("the synchronisation right after the launch of a CUDA graph met "
@@ -451,16 +475,32 @@ def checks(name, log, summary, results):
                "    write_null (grid 3x1x1" in log)
         expect("the graph's launch returned the fault", results[7] == "700")
     elif name == "deadlock":
-        count = re.search(r"one of the (\d+) launched", head)
+        count = re.search(r"(\d+) launches were made", head)
         expect("the report ended while contexts were destroyed, and named the launches of the 120 threads",
                results == ["0", "700"] and count is not None and int(count.group(1)) >= 120 * 255)
     elif name == "other-context-stream":
         expect("the fault is A's, which its stream's launch tells: write_null alone, not B's launches",
                "cuStreamSynchronize returned 700" in head and names == ["write_null"])
+    elif name == "ecc":
+        expect("an error of the hardware, said so, not a kernel's fault",
+               head.startswith("the GPU's memory reported an uncorrectable ECC error: cuCtxSynchronize returned 214 "
+                               "(CUDA_ERROR_ECC_UNCORRECTABLE)") and "an error of the hardware, not of a kernel" in head
+               and "faulted" not in log)
+        expect("what ran then is named", names == ["ecc_fail", "add_one"])
+        expect("the report at exit says it as such", summary.count("the GPU's memory reported an uncorrectable ECC "
+                                                                   "error: cuCtxSynchronize returned 214") == 1)
+    elif name == "wrapped":
+        expect("the line and the report at exit say that earlier launches may be candidates",
+               "(and maybe launches made before these, which the layer no longer keeps" in head and
+               "(and maybe launches made before these, which the layer no longer keeps" in summary)
+    elif name == "unseen":
+        expect("no launch known, and nothing asserted of where the kernel was launched",
+               "The layer kept no launch of this context that no synchronisation that succeeded covers" in head
+               and "the kernel was launched where" not in log and "may be what failed" in head)
     elif name == "exact-done":
         expect("the last launch's wait met the fault and it returned it", results == ["0"] * 5 + ["700"])
         expect("not said to be the kernel: the launch not waited for is named with it",
-               "one of the 2" in head and names == ["add_one", "write_null"] and "grid 4x1x1" in log
+               "2 launches were made" in head and names == ["add_one", "write_null"] and "grid 4x1x1" in log
                and "grid 1x1x1" in log and "grid 3x1x1" not in log)
         expect("the launch whose wait met it is said", "whose synchronisation right after it met the fault" in log)
     elif name == "exec-reuse":
@@ -508,7 +548,8 @@ def main():
                  ("nofault-release", {}), ("nofault-capture-exit", {}), ("exact", {"VF_FAULT_TRACE": "1"}),
                  ("streams", {}), ("contexts", {}), ("context-gone", {}),
                  ("other-context-stream", {}), ("other-context-event", {}), ("no-context", {}), ("own-stream", {}),
-                 ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}),
+                 ("own-stream-threads", {"MOCK_DELAY": "1"}), ("threads", {}), ("ecc", {}), ("wrapped", {}),
+                 ("unseen", {"VF_ADAPT": "0", "VF_FIT": "0"}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}),
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("exact-done", {"VF_FAULT_TRACE": "1", "MOCK_DELAY": "1"}),

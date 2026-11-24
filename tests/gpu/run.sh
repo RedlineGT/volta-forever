@@ -770,7 +770,7 @@ fault() {  # fault NAME MODE EXPECTED...
     check "$name" "$@"
 }
 fault fault-none nofault "^NO FAULT$"
-if grep -q "faulted" "$log"; then
+if grep -Eq "can run nothing more|on the GPU failed|faulted" "$log"; then
     echo "FAIL  fault-none-silent: a fault was said where none was ($log)"; failed=1
 else
     echo "PASS  fault-none-silent"
@@ -778,30 +778,30 @@ fi
 if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
     named="PTX for sm_75 retargeted by the layer; the image given to the driver: [0-9]+ bytes, XXH64 [0-9a-f]{16}; the program's image: cuModuleLoadData of [0-9]+ bytes"
     fault fault-candidates fault \
-        "a kernel faulted on the GPU: (cuCtxSynchronize|cuLaunchKernel) returned 700 \(CUDA_ERROR_ILLEGAL_ADDRESS\)" \
-        "the kernel is one of the [23] launched in this context since its last synchronisation that succeeded" \
+        "work on the GPU failed: (cuCtxSynchronize|cuLaunchKernel) returned 700 \(CUDA_ERROR_ILLEGAL_ADDRESS\)" \
+        "[23] launches were made in this context since its last synchronisation that succeeded" \
         "^\[volta-forever\]   write_null \(cuLaunchKernel, grid 1x1x1, block 32x1x1, the null stream\): $named" \
         "VF_FAULT_TRACE=1 synchronises every launch" \
-        "^\[volta-forever\] a kernel faulted: .* returned 700 .*the candidates, the last launched first: (add_one, )?write_null, add_one$"
+        "^\[volta-forever\] work on the GPU failed: .* returned 700 .*the candidates, the last launched first: (add_one, )?write_null, add_one$"
     VF_FAULT_TRACE=1 fault fault-exact fault \
         "the synchronisation right after the launch of write_null met the fault: the synchronisation of the stream after cuLaunchKernel \(VF_FAULT_TRACE=1\) returned 700" \
         "^launch write_null -> 700$" \
-        "^\[volta-forever\] a kernel faulted: .*; the launch whose synchronisation met it: write_null \(work not seen on its stream before it not ruled out\)$"
+        "^\[volta-forever\] work on the GPU failed: .*; the launch whose synchronisation met it: write_null \(work not seen on its stream before it not ruled out\)$"
     fault fault-graph fault-graph \
-        "a kernel faulted on the GPU: cuStreamSynchronize returned 700" \
+        "work on the GPU failed: cuStreamSynchronize returned 700" \
         "^after the fault: cuStreamGetCtx -> " \
-        "a CUDA graph \(cuGraphLaunch, stream 0x[0-9a-f]+\): its kernels ran without passing through the layer; it was made of 3 kernel nodes, of 2 kernels" \
+        "a CUDA graph \(cuGraphLaunch, stream 0x[0-9a-f]+\): its kernels ran without passing through the layer; the layer saw 3 kernel nodes added to it, of 2 kernels" \
         "^\[volta-forever\]     write_null \(grid 1x1x1, block 32x1x1\): $named"
     fault fault-copy fault-copy \
         "^copy -> 700$" \
         "^launch add_one -> 700$" \
-        "a kernel faulted on the GPU: cuLaunchKernel returned 700" \
+        "work on the GPU failed: cuLaunchKernel returned 700" \
         "^\[volta-forever\]   write_null \(cuLaunchKernel"
     fault fault-exit fault-exit \
         "^copy -> 700$" \
-        "a kernel faulted on the GPU: cuStreamQuery, asked by the layer at exit returned 700" \
+        "work on the GPU failed: cuStreamQuery, asked by the layer at exit returned 700" \
         "^\[volta-forever\]   write_null \(cuLaunchKernel" \
-        "^\[volta-forever\] a kernel faulted: cuStreamQuery, asked by the layer at exit returned 700 .*: add_one, write_null, add_one$"
+        "^\[volta-forever\] work on the GPU failed: cuStreamQuery, asked by the layer at exit returned 700 .*: add_one, write_null, add_one$"
 fi
 
 # The guard and nocode cases above pass their check of the kernel's log where it cannot be read

@@ -174,6 +174,24 @@ fn error_name(result: CUresult) -> &'static str {
     }
 }
 
+/// What failed, as the first words of the lines of a fault say it: never that a kernel faulted, as
+/// a copy or a memset (which the layer does not see) may be what failed, and some of these errors
+/// are the hardware's.
+fn what_failed(result: CUresult) -> &'static str {
+    match result {
+        214 => "the GPU's memory reported an uncorrectable ECC error",
+        220 => "an NVLink reported an uncorrectable error",
+        911 => "an external device that the GPU works with reported an error",
+        226 => "the GPU contained an error (an access over NVLink that is not allowed, or an error of the hardware)",
+        _ => "work on the GPU failed",
+    }
+}
+
+/// Whether `result` is an error of the hardware, which no kernel made.
+fn of_hardware(result: CUresult) -> bool {
+    matches!(result, 214 | 220 | 911)
+}
+
 /// The launch functions of the driver, for the lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entry {
@@ -1667,7 +1685,8 @@ fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
     let made = catch_unwind(AssertUnwindSafe(|| report(result, call, context, met)));
     let Ok((lines, summary)) = made else {
         log::error(format_args!(
-            "a kernel faulted ({call} returned {result}); the layer could not say which (internal error)"
+            "{} ({call} returned {result}); the layer could not say what ran (internal error)",
+            what_failed(result)
         ));
         return;
     };
@@ -1820,8 +1839,8 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
             let Some(kernels) = kernels else {
                 names.push("a CUDA graph".to_string());
                 details.push(format!(
-                    "  a CUDA graph ({}, {}{thread}) that the layer did not see made: its kernels ran without passing \
-                     through the layer",
+                    "  a CUDA graph ({}, {}{thread}) whose kernels the layer does not know (it did not see it made, or \
+                     kept too many graphs to keep it): they ran without passing through the layer",
                     launch.entry.name(),
                     stream_text(launch.stream)
                 ));
@@ -1829,8 +1848,9 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
             };
             names.push(format!("a CUDA graph of {} kernel nodes", kernels.nodes));
             details.push(format!(
-                "  a CUDA graph ({}, {}{thread}): its kernels ran without passing through the layer; it was made of \
-                 {} kernel nodes, of {} kernels{}:",
+                "  a CUDA graph ({}, {}{thread}): its kernels ran without passing through the layer; the layer saw {} \
+                 kernel nodes added to it, of {} kernels{} (it does not follow child graphs, conditional bodies, a \
+                 graph changed after it was instantiated nor a clone):",
                 launch.entry.name(),
                 stream_text(launch.stream),
                 kernels.nodes,
@@ -1892,59 +1912,85 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
             found.unkept
         );
     }
+    let what = what_failed(result);
+    let hardware = of_hardware(result);
+    let met_it = if hardware { "met the error" } else { "met the fault" };
+    // What the candidates are: what ran when the hardware failed; else what may have failed, but for
+    // what the layer does not see.
+    let (why, maybe) = if hardware {
+        ("This is an error of the hardware, not of a kernel. ", "")
+    } else {
+        (
+            "",
+            "; if a kernel faulted, it is one of them, unless work that the layer does not see failed (a copy, a \
+             memset, a kernel launched by a kernel)",
+        )
+    };
+    let launches = |count: usize| {
+        if count == 1 {
+            "1 launch was".to_string()
+        } else {
+            format!("{count} launches were")
+        }
+    };
     match found.launches.len() {
         count if found.unknown.is_some() => lines.push(format!(
-            "a kernel faulted on the GPU: {call} returned {error}, in a CUDA context that the layer cannot tell ({}), \
-             which can run nothing more. Faults are reported at a later call than the launch: the launches that no \
-             synchronisation that succeeded covers, in every context, are {count}{also}, the last first:",
-            found.unknown.unwrap_or_default()
+            "{what}: {call} returned {error}, in a CUDA context that the layer cannot tell ({}), which can run nothing \
+             more. {why}Errors are said at a later call than the work that met them: {} made in a context, of any, \
+             that no synchronisation that succeeded covers{also}, the last first{maybe}:",
+            found.unknown.unwrap_or_default(),
+            launches(count)
         )),
         0 => lines.push(format!(
-            "a kernel faulted on the GPU: {call} returned {error}, and this CUDA context can run nothing more. The \
-             layer knows no launch in this context since its last synchronisation that succeeded{also}: the kernel \
-             was launched where the layer does not see it (a CUDA graph it did not see made, a kernel launched by \
-             a kernel, launches left to the driver by VF_ADAPT=0 with VF_FIT=0)"
+            "{what}: {call} returned {error}, and this CUDA context can run nothing more. {why}The layer kept no \
+             launch of this context that no synchronisation that succeeded covers{also}; work that it does not see \
+             may be what failed (a copy, a memset, a kernel launched by a kernel, a CUDA graph it did not see made, \
+             launches left to the driver by VF_ADAPT=0 with VF_FIT=0), or a launch that it did not keep"
         )),
         1 if exact && found.launches[0].kind == GRAPH => lines.push(format!(
-            "the synchronisation right after the launch of a CUDA graph met the fault: {call} returned {error}, and \
+            "the synchronisation right after the launch of a CUDA graph {met_it}: {call} returned {error}, and \
              this CUDA context can run nothing more. The layer knows no other launch in this context that no \
              synchronisation covers{also}; work that it does not see on that stream since the launch before (a copy, \
              a memset, a host function) is not ruled out. The graph's kernels are named only as a whole (run without \
              graphs to name one):"
         )),
         1 if exact => lines.push(format!(
-            "the synchronisation right after the launch of {} met the fault: {call} returned {error}, and this CUDA \
+            "the synchronisation right after the launch of {} {met_it}: {call} returned {error}, and this CUDA \
              context can run nothing more. The layer knows no other launch in this context that no synchronisation \
              covers{also}; work that it does not see on that stream since the launch before (a copy, a memset, a \
              host function) is not ruled out:",
             names[0]
         )),
         count => lines.push(format!(
-            "a kernel faulted on the GPU: {call} returned {error}, and this CUDA context can run nothing more. \
-             Faults are reported at a later call than the launch: the kernel is {} launched in this context since \
-             its last synchronisation that succeeded{also}, the last first:",
-            if count == 1 {
-                "the one".to_string()
-            } else {
-                format!("one of the {count}")
-            }
+            "{what}: {call} returned {error}, and this CUDA context can run nothing more. {why}Errors are said at a \
+             later call than the work that met them: {} made in this context since its last synchronisation that \
+             succeeded{also}, the last first{maybe}:",
+            launches(count)
         )),
     }
     lines.extend(details);
-    if !exact_mode {
+    if !exact_mode && !hardware {
         lines.push(
-            "to name the kernel alone: VF_FAULT_TRACE=1 synchronises every launch right after it (each launch \
-             then waits for its kernel; a CUDA graph is named as a whole); VF_LOG_LEVEL=2 names each image when \
-             it is loaded (its size and XXH64)"
+            "to know more: VF_FAULT_TRACE=1 synchronises every launch right after it (each launch then waits for \
+             its kernel, and the one whose synchronisation meets the fault is named; a CUDA graph is named as a \
+             whole); VF_LOG_LEVEL=2 names each image when it is loaded (its size and XXH64)"
                 .to_string(),
         );
     } else {
         lines.push("VF_LOG_LEVEL=2 names each image when it is loaded (its size and XXH64)".to_string());
     }
+    // (With the caveats of the first line: the report at exit is read alone.)
     let summary = format!(
-        "a kernel faulted: {call} returned {error}; {}: {}{}",
+        "{what}: {call} returned {error}{}; {}: {}{also}{}",
+        if found.unknown.is_some() {
+            ", in a CUDA context that the layer cannot tell"
+        } else {
+            ""
+        },
         if exact {
             "the launch whose synchronisation met it"
+        } else if hardware {
+            "the launches that ran then, the last first"
         } else {
             "the candidates, the last launched first"
         },
@@ -2392,20 +2438,19 @@ mod tests {
         let found = found_in(&all, &covers, 7);
         let (lines, summary) = compose(&found, false, 1, 700, "cuCtxSynchronize");
         assert!(
-            lines[0]
-                .starts_with("a kernel faulted on the GPU: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS)"),
+            lines[0].starts_with("work on the GPU failed: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS)"),
             "{lines:?}"
         );
-        assert!(lines[0].contains("one of the 3 launched in this context since its last synchronisation"));
+        assert!(lines[0].contains("3 launches were made in this context since its last synchronisation"));
         assert!(
             lines[1].starts_with("  add_one (cuLaunchKernel, grid 70000x3x65535, block 1024x1x64, the null stream): ")
         );
         assert!(lines[2].starts_with("  write_null ("), "{lines:?}");
         assert!(lines[3].starts_with("  add_one ("));
-        assert!(lines[4].starts_with("to name the kernel alone: VF_FAULT_TRACE=1"));
+        assert!(lines[4].starts_with("to know more: VF_FAULT_TRACE=1"));
         assert_eq!(
             summary,
-            "a kernel faulted: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the candidates, the last \
+            "work on the GPU failed: cuCtxSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the candidates, the last \
              launched first: add_one, write_null, add_one"
         );
         // Exact mode: the launch whose wait met the fault, alone, is named with what is not ruled out.
@@ -2433,7 +2478,7 @@ mod tests {
         let mut found = found_in(&all, &covers, 7);
         found.met = Some((0, 1));
         let (lines, _) = compose(&found, true, 1, 719, "a synchronisation");
-        assert!(lines[0].contains("one of the 2"), "{lines:?}");
+        assert!(lines[0].contains("2 launches were made"), "{lines:?}");
         assert!(
             lines
                 .iter()
@@ -2444,7 +2489,7 @@ mod tests {
         // Nothing known.
         let (lines, _) = compose(&Found::default(), false, 1, 716, "cuStreamQuery");
         assert!(
-            lines[0].contains("knows no launch in this context since its last synchronisation"),
+            lines[0].contains("kept no launch of this context that no synchronisation that succeeded covers"),
             "{lines:?}"
         );
         // A graph: its kernels as recorded.
@@ -2463,7 +2508,7 @@ mod tests {
             lines[1].starts_with("  a CUDA graph (cuGraphLaunch, stream 0x5000): its kernels ran without passing"),
             "{lines:?}"
         );
-        assert!(lines[1].contains("made of 2 kernel nodes, of 2 kernels:"));
+        assert!(lines[1].contains("the layer saw 2 kernel nodes added to it, of 2 kernels (it does not follow child"));
         assert!(lines[2].starts_with("    add_one (grid 1x1x1, block 32x1x1): "));
         assert!(lines[3].starts_with("    write_null (grid 2x1x1, block 64x1x1): "));
         assert!(summary.ends_with("a CUDA graph of 2 kernel nodes"), "{summary}");

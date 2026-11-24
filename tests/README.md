@@ -429,7 +429,9 @@ a wait for its stream while another is current is said of the stream's context, 
 wait for an event, or with no context current, of a context that the layer cannot tell, with the
 launches of every context, and again of its context later; that with `VF_FAULT_REPORT=0`
 (only that value) nothing is said or waited for and a lookup of a synchronisation leads to the
-driver; and nothing said when nothing faults; and that a capture during which the program retains and releases the primary context and
+driver; and nothing said when nothing faults; that an uncorrectable ECC error (214) is said to be the hardware's, with what ran then; that
+the report at exit keeps the caveats of its line (launches a thread's record no longer holds); that
+with no launch known nothing is said of where the kernel was launched; and that a capture during which the program retains and releases the primary context and
 destroys another context, or at whose end the program exits, is not invalidated. Each case in a
 process of its own; it needs a C compiler. The seventeenth records the calls that reach the driver
 (a recorder between the layer and the stand-ins of `lifecycle.c` and `fault.py`, which exports every

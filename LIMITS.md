@@ -337,11 +337,16 @@ the context, of their stream, the thread's own default stream included, or a `cu
 found their stream idle), the last first, each with its grid, block, stream and thread, what the
 layer made of its image (loaded as the program gave it, PTX retargeted, the PTX kept in a cubin
 retargeted, machine code translated, with its tensor-core products computed in pairs on whole rows
-unless `VF_PAIRS=0` or `VF_SAFE=1` turned them off; compiled alone or with its whole module; set up from the layer's cache; launched from its second
-translation), the size and XXH64 of the image given to the driver, the program's image as the line
+unless `VF_PAIRS=0` or `VF_SAFE=1` turned them off; compiled alone or with its whole module; set up
+from the layer's cache; launched from its second translation), the size and XXH64 of the image given to the driver, the program's image as the line
 of its load named it (its XXH64 from `VF_LOG_LEVEL=2`), and the instructions it runs emulated. The
-report at exit (`VF_SUMMARY`) says it again. `VF_FAULT_TRACE=1` waits for every launch and names the
-kernel that faulted alone, at a cost (`INSTALL.md`).
+report at exit (`VF_SUMMARY`) says it again, with the same caveats. The lines do not say that a
+kernel faulted: a copy or a memset, which the layer does not see, may be what failed; and errors
+214 (an uncorrectable ECC error of the GPU's memory), 220 (of an NVLink) and 911 (of an external
+device) are the hardware's, said as such, with the launches that ran then. A graph's launch is named
+with the kernel nodes the layer saw added to it, and the line says what it does not follow.
+`VF_FAULT_TRACE=1` waits for every launch and names the launch whose synchronisation met the fault,
+at a cost (`INSTALL.md`).
 
 What the layer cannot say:
 
