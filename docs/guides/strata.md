@@ -16,7 +16,7 @@ Strata ships the CUDA runtime and cuBLAS with its engine. The host can run this 
 
 ## 2. VF
 
-Build VF 0.1.4 for the benchmark below. The build fetches its CUDA libraries into the checkout.
+Build VF 0.1.5 for the benchmark below. The build fetches its CUDA libraries into the checkout.
 
 ```sh
 sudo apt update && sudo apt install -y build-essential ca-certificates curl git python3 xz-utils
@@ -70,13 +70,13 @@ VF and the driver keep what they made in their caches (here 7 MB and 15 MB; with
 
 ### Engine 0.1.66 and long prompts
 
-Strata 0.2.20 installs the CUDA 13 engine 0.1.66. When it detects VF, that engine maps the 7.5 that VF reports back to 7.0 (its log says `compute capability 7.0 (volta-forever 0.1.4: remapped from reported 7.5)`), and then runs the prompt chunks that go to the GPU on its int8 expert kernels for Volta (`i8h_kernel`). Its CUDA 13 build has no code for those kernels: their body is a trap, for every architecture of that build (its CUDA 12 build has sm_70 code for them). With VF 0.1.4 the first prompt of a few thousand tokens (4,021 here) stops the GPU: the engine ends with `native_expert_i8/down: unspecified launch failure`, the system log (`dmesg`) gets an Xid 43 line, and the server answers 503 (issue #3). With VF from main the layer refuses that launch, with a line that names the kernel (`kernel ...i8h_kernel... has no code in its image ...: its body is a trap and nothing else; cuLaunchKernel with it is refused (error 218)`), and the engine ends with `native_expert_i8/gu: a PTX JIT compilation failed`, without a GPU fault; the server answers 503 as well. Set `STRATA_I8_SM70=0` in the environment of the launch:
+Strata 0.2.20 installs the CUDA 13 engine 0.1.66. When it detects VF, that engine maps the 7.5 that VF reports back to 7.0 (its log says `compute capability 7.0 (volta-forever 0.1.4: remapped from reported 7.5)`), and then runs the prompt chunks that go to the GPU on its int8 expert kernels for Volta (`i8h_kernel`). Its CUDA 13 build has no code for those kernels: their body is a trap, for every architecture of that build (its CUDA 12 build has sm_70 code for them). With VF 0.1.4 the first prompt of a few thousand tokens (4,021 here) stops the GPU: the engine ends with `native_expert_i8/down: unspecified launch failure`, the system log (`dmesg`) gets an Xid 43 line, and the server answers 503 (issue #3). With VF 0.1.5 the layer refuses that launch, with a line that names the kernel (`kernel ...i8h_kernel... has no code in its image ...: its body is a trap and nothing else; cuLaunchKernel with it is refused (error 218)`), and the engine ends with `native_expert_i8/gu: a PTX JIT compilation failed`, without a GPU fault; the server answers 503 as well. Set `STRATA_I8_SM70=0` in the environment of the launch:
 
 ```sh
 STRATA_I8_SM70=0 CUDA_MODULE_LOADING=LAZY STRATA_CUDA=13 vf strata launch ...
 ```
 
-The engine then still says `every chunk runs 48 of 48 layers on the int8 kernels`, and asks for its other int8 kernels (`i8_kernel`) instead. `STRATA_EXPERT_I8=0`, which the report found, takes the FP16 path, and reads prompts more slowly. Measured on two V100-SXM2-32GB (driver 580.178.04, two Xeon Gold 6133) with the IQ3_S checkpoint and the flags of issue #3 (`--gpu 0,1 --context 64k --parallel 1 --vision off --drafting off --mtp off --tune skip --set prompt-cache=0 --set conversation-cache-mib=0`), VF from main on 2026-11-24: each prompt was read twice in one server, with nothing reused, and 48 tokens generated at temperature zero. The figures are the engine's, for the second read (the first includes the compilation of the kernels that a prompt size uses first).
+The engine then still says `every chunk runs 48 of 48 layers on the int8 kernels`, and asks for its other int8 kernels (`i8_kernel`) instead. `STRATA_EXPERT_I8=0`, which the report found, takes the FP16 path, and reads prompts more slowly. Measured on two V100-SXM2-32GB (driver 580.178.04, two Xeon Gold 6133) with the IQ3_S checkpoint and the flags of issue #3 (`--gpu 0,1 --context 64k --parallel 1 --vision off --drafting off --mtp off --tune skip --set prompt-cache=0 --set conversation-cache-mib=0`), VF from main on 2026-11-24, before 0.1.5: each prompt was read twice in one server, with nothing reused, and 48 tokens generated at temperature zero. The figures are the engine's, for the second read (the first includes the compilation of the kernels that a prompt size uses first).
 
 | Prompt (tokens) | CUDA 12 engine, no VF: read / decode (tokens/s) | CUDA 13 engine with VF, `STRATA_I8_SM70=0` | with VF, `STRATA_EXPERT_I8=0` |
 | ---: | ---: | ---: | ---: |

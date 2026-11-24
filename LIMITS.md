@@ -6,7 +6,7 @@ where it is not from the build of this release. `docs/` says how each figure was
 `docs/validation.md` for what was compared with what, `docs/performance.md` for the timings,
 `docs/emulations.md` for what is computed in place of the instructions that a V100 lacks.
 
-## The limits of 0.1.4 to know first
+## The limits of 0.1.5 to know first
 
 - **Triton's `tl.dot` uses no tensor cores at the default capability.** Told 7.5, which is what
   Triton is told by default in a program with PyTorch, Triton 3.8 multiplies with float32 `fma`:
@@ -21,7 +21,7 @@ where it is not from the build of this release. `docs/` says how each figure was
   compiles gives what Triton's interpreter computes where it computes it (bit for bit, or within
   the error the case states) and what the PTX of the same kernel gives, and the independent
   validator finds no problem in their 4,308 cubins nor in the 334 of this site's runs
-  (2026-11-23, with the translator and the rules of this release). A translation that stored
+  (2026-11-23, with the translator and the rules of 0.1.4). A translation that stored
   wrong values in Triton's fp32 `tl.dot` kernels was fixed in 0.1.3. The kernels that Triton
   makes for other programs, shapes and settings were not looked at (`docs/validation.md`,
   sections 4, 6 and 8).
@@ -32,26 +32,33 @@ where it is not from the build of this release. `docs/` says how each figure was
   cuFFT and cuSOLVER, which ask the driver without that runtime, are told what their own code
   allows, 7.5 for code that runs from sm_75 machine code ([The capability told with
   `VF_CAPABILITY`](#the-capability-told-with-vf_capability)).
-- **A refused kernel that a program obtains without a lookup can still be launched**, and then
-  traps or stops the GPU: the layer refuses a kernel when the program looks it up
-  ([Kernels refused](#kernels-refused)), and has no guard at its launch in this release. Told
-  8.0, cuFFT obtained kernels that exist only as sm_80 machine code, refused, through its own
-  runtime, and launched them: the GPU stopped. At the settings measured it no longer does, since
-  cuFFT is now told 7.5. (Since 0.1.4, on main: such a handle is refused where it is used, at a
-  launch, in a kernel node of a graph and in a question about it; what still traps is in
-  [Kernels refused](#kernels-refused).)
-- **A kernel whose code is a trap and nothing else is launched, and the GPU stops.** A kernel
-  built for some architectures only is emitted for the others with a body that traps. A program
-  that chooses such a kernel for the V100 ends its context (Xid 43): Strata's CUDA 13 engine
-  0.1.66 does, with its default settings, at its first prompt of a few thousand tokens (4,021
-  here) ([its guide](docs/guides/strata.md)).
-  (Since 0.1.4, on main: the launch of such a kernel is refused with 218 and a line that names it;
-  [Kernels refused](#kernels-refused).)
-- **The bf16 cuBLAS variants are opt-in, and not finished.** `VF_CUBLAS_BF16_SKINNY=1` and
-  `VF_CUBLAS_BF16_TC=1` are off by default. The tensor-core path's results are not cuBLAS 12.9's
-  bits, and it makes bf16 training slower; there is no safe mode and no gate on k yet ([The bf16
-  cuBLAS variants](#the-bf16-cublas-variants)). (Since 0.1.4, on main: the tensor-core path takes
-  products with k from 1024 to 16384 only, and `VF_SAFE=1` turns it off.)
+- **A refused kernel that a program obtains without a lookup is refused where it is used, and
+  some uses still trap.** The layer refuses a kernel when the program looks it up; a handle that
+  the program holds all the same (cuFFT enumerates the functions of its modules through a private
+  table of the driver) is refused at a launch, in a kernel node of a graph made or changed with
+  it, and in a question about it or a setting of it: error 218, and a line names the kernel. What
+  still traps: a kernel launched by another kernel (dynamic parallelism), a function reached by an
+  indirect call or through a call into another linker input, and a launch through a private
+  interface of the driver ([Kernels refused](#kernels-refused)).
+- **A kernel whose code is a trap and nothing else is given, and its launch refused.** A kernel
+  built for some architectures only is emitted for the others with a body that traps; launched,
+  it would end the context (Xid 43). Such a kernel of PTX that the layer retargets or of sm_75
+  machine code that it translates is given at the lookup, as NVIDIA's driver gives it, but every
+  launch of it and a kernel node of a graph with it return 218, and a line names the kernel and
+  its image: a program that chooses such a kernel for the V100 stops at that error, without a GPU
+  fault. Strata's CUDA 13 engine 0.1.66 does, with its default settings, at its first prompt of a
+  few thousand tokens (4,021 here); its guide says which setting avoids it ([its
+  guide](docs/guides/strata.md)). Not recognised: such a kernel in an input of the driver's
+  linker (`cuLinkAddData`) or of nvJitLink, which traps as without the layer, and code that an
+  image has for sm_70, which is loaded as it is. A kernel whose body is empty is not refused:
+  launched, it does nothing and returns no error, as without the layer; `VF_LOG_LEVEL=2` counts
+  them in each image adapted ([Kernels refused](#kernels-refused)).
+- **The bf16 cuBLAS variants are opt-in.** `VF_CUBLAS_BF16_SKINNY=1` and `VF_CUBLAS_BF16_TC=1`
+  are off by default. The tensor-core path's results are not cuBLAS 12.9's bits, it makes bf16
+  training slower, and it takes products with k from 1024 to 16384 only: a model whose layers
+  have fewer than 1024 in-features gets it only on its wider layers, and the gains measured on
+  real programs were measured before that gate. `VF_SAFE=1` turns it off ([The bf16 cuBLAS
+  variants](#the-bf16-cublas-variants)).
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
   cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
   NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:

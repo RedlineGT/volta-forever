@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.1.5 (2026-11-24)
 
 ### Fixed
 

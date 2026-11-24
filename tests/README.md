@@ -85,7 +85,7 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 200 cases on main (165 at 0.1.4), including nonconsecutive MMA fragments, a
+  an RTX 5090 say. 200 cases at 0.1.5 (165 at 0.1.4), including nonconsecutive MMA fragments, a
   partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -153,7 +153,7 @@ Where the GPU scripts write:
   cubin is `PASS-PTX`.
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
-  cubins included (at 0.1.4: 491 of 491, the 16 test cubins and PyTorch's 475).
+  cubins included (at 0.1.4 and 0.1.5: 491 of 491, the 16 test cubins and PyTorch's 475).
 - `validate-corpus.sh`: the independent validator finds 0 problems over the corpus (of sm_75
   code: the validator does not read sm_80 code, `docs/validation.md`, section 8).
 - `controls.sh`: the validator objects to translations that are made wrong on purpose (the
@@ -422,7 +422,7 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 451 at 0.1.4); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
+checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
 `log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py` and `nvml_capability.py` of
@@ -574,7 +574,8 @@ scripts/fetch-all.sh denvdis
 The GPU scripts test this tree: `run.sh` and `torch.sh` take the proxy from `VF_PROXY`, but the
 forwarding libraries from this tree's `dist/forward` (the forwarded-runtime cases of `run.sh`, the
 map that `torch.sh` writes), and `launcher.sh` runs this tree's `scripts/vf`, which uses `dist/`.
-So `VF_PROXY=ARCHIVE/lib` alone does not test a release archive. What 0.1.4 was tested with:
+So `VF_PROXY=ARCHIVE/lib` alone does not test a release archive. What 0.1.4 and 0.1.5 were
+tested with (`tests/release-check.sh` prints the commands of a copy of the tree):
 
 - `install.sh` with `VF_INSTALL_BASE=file://DIR` (the archive and `SHA256SUMS`), `VF_PREFIX`,
   `VF_BIN` and `VF_INSTALL_FETCH=0`; then the release's `cuda-12.9.2/lib` given the CUDA 12.9.2
@@ -585,3 +586,4 @@ So `VF_PROXY=ARCHIVE/lib` alone does not test a release archive. What 0.1.4 was 
 - `torch.sh` with `VF_PROXY=REL/lib` and `VF_AUDIT_MAP_FILE` a map whose `libcublas.so.13` and
   `libcublasLt.so.13` are those of `REL/forward` (the 12 entries as in `tests/gpu/env.sh`).
 - `launcher.sh` from a copy in which `vf` is `REL/bin/vf`; and `REL/bin/vf version`.
+- For 0.1.5 also `vllm.sh`, with `VF_PROXY=REL/lib` and the map of `torch.sh`, from the copy.
