@@ -59,7 +59,7 @@ if [ "${1:-}" = --build ]; then
         local dir
         env -u CARGO_TARGET_DIR -u RUSTFLAGS XDG_CACHE_HOME="$tmp/cache" CARGO="$cargo" \
             "$tmp/tree-$1/scripts/build-forwarders.sh" "$tmp/forward-$1" >/dev/null 2>&1
-        dir=$(. "$tmp/tree-$1/scripts/target-dir.sh" && XDG_CACHE_HOME="$tmp/cache" vf_target_dir "$tmp/tree-$1")
+        dir=$(unset CARGO_TARGET_DIR; . "$tmp/tree-$1/scripts/target-dir.sh" && XDG_CACHE_HOME="$tmp/cache" vf_target_dir "$tmp/tree-$1")
         grep -ao "checkout-[ab]" "$dir/release/vf-fwdgen" 2>/dev/null | sort -u | tr '\n' ' '
     }
     first=$(embedded a)
