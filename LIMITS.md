@@ -14,7 +14,7 @@ where it is not from the build of this release. `docs/` says how each figure was
   ([Speed](#speed)). In a program with PyTorch, `VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1` is the
   only way to the tensor cores in this release, and PyTorch's own attention is then refused
   ([The capability told with `VF_CAPABILITY`](#the-capability-told-with-vf_capability)). After
-  0.1.4 (`CHANGELOG.md`, "Unreleased"), `VF_TRITON_TC=1` (opt-in, through the launcher) compiles
+  0.1.5 (`CHANGELOG.md`, "Unreleased"), `VF_TRITON_TC=1` (opt-in, through the launcher) compiles
   Triton's float16, bfloat16 and int8 products for sm_80 while everyone is still told 7.5
   ([Triton's matrix products](#tritons-matrix-products)).
 - **Triton's machine code is validated on a corpus, not kernel by kernel.** Kernels that Triton
@@ -627,13 +627,15 @@ V100 has, and three int8 `scaled_mm`, whose compilation fails); SGLang 87 PASS a
 (27 compiled for sm_80), where without it 83 PASS, 5 PASS-PTX, one MLA decode attention that Triton
 cannot run for 7.5 (102,400 bytes of shared memory) and the MoE router of 128 experts, which 0.1.4
 runs (it passes with the switch and without it). Those runs were made when the compilation ran in a
-compile service shared by the user's processes; with the helpers of a process (2026-11-24, 0.1.5
-with this work, the same Triton and PyTorch): `tests/gpu/triton-tc.sh` 51 PASS,
+compile service shared by the user's processes; with the helpers of a process, as they are now (their
+temporary files in the temporary directory, the places a best effort; 2026-11-24, 0.1.5 with the
+work after it, the same Triton and PyTorch): `tests/gpu/triton-tc.sh` 51 PASS,
 `tests/gpu/triton.sh` 164 PASS, 1 PASS-PTX and 15 without a reference of 180 (13 compiled for
 sm_80), as before, `tests/gpu/vllm.sh` stages b to d PASS (5 of 39 kernels in Triton's cache
-compiled for sm_80), a part of `tests/gpu/torch.sh` (`lib.`, `attention`, `softmax`: 56 of 56); the
-cubins of nine configurations byte for byte those of the same sm_80 compilation in the program's
-process.
+compiled for sm_80), a part of `tests/gpu/torch.sh` (`lib.`, `attention`, `softmax`: 56 of 56),
+`tests/gpu/run.sh` without the switch 202 PASS; the cubins of eleven configurations byte for byte
+those of the same sm_80 compilation in the program's process; `torch.compile` with max-autotune and
+`TRITON_CACHE_DIR` unset: the places in Inductor's own `triton/0`, the kernels compiled for sm_80.
 
 The same kernels timed with CUDA graphs (the launches of a case captured and replayed: the best
 of 7 replays of 20 launches, each after products that raise the GPU's clocks, in four processes

@@ -538,7 +538,14 @@ What the switch costs besides (the build machine and one V100, 2026-11-24):
   of Triton's library that they share counted once); none left after. The helpers' temporary
   files in the temporary directory (`/dev/shm`) instead of Triton's cache directory on the network
   disk took the same time in the same job (61.3 and 62.0 s against 59.9 and 61.6), and are where
-  they are now. In the first session, the shared compile service of before (its tree as it was,
+  they are now. With the helpers as they are now (their temporary files in the temporary directory,
+  `/dev/shm`, the places a best effort, found at the first eligible kernel), the same measure in
+  one job, off,on,on,off, Triton's cache on the network disk: off 57.6 and 52.8 s (one run in each
+  mode of the second precompilation, 16.3 and 11.7 s), on 62.9 and 61.3 s, 12.5 % more from the
+  medians, the first precompilation 15.0 to 15.2 s on against 10.5 off and the second benchmark
+  12.1 to 12.2 s against 3.3; 35 helpers started in each run, at most 8 at once, 1.21 GB of
+  resident sizes in all at their largest, 348 to 350 MB proportional; the same results (largest
+  error 3.6e-4 to 4.3e-4 relative, off and on). In the first session, the shared compile service of before (its tree as it was,
   the same measure, 8 runs in two jobs): off 54.4 to 58.3 s (median 57.1), on 61.5 to 63.9 s
   (median 62.0: 8.5 % more than its own runs off), within the same spread; 9 processes of it at
   most, 893 to 978 MB of resident sizes in all (186 to 204 MB proportional): the helpers hold more
