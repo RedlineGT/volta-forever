@@ -31,6 +31,7 @@ jobs:
           tests/proxy/marker.sh
           tests/proxy/graph_fit.sh
           tests/proxy/lifecycle.sh
+          tests/scripts/target-dir.sh --build
           python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
           python3 tests/proxy/readonly_tables.py dist/lib/libcuda.so.1
           python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1

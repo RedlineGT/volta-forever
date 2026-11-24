@@ -6,7 +6,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:-${TMPDIR:-/tmp}/vf-fwd-stack-test}
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target}
+. "$root/scripts/target-dir.sh"
+CARGO_TARGET_DIR=$(vf_target_dir "$root")
+export CARGO_TARGET_DIR
 cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 
 # The headers and libraries for the mock.

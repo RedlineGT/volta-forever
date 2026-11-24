@@ -3,10 +3,13 @@
 #   dist/lib/libcuda.so.1   the proxy; put this directory first in LD_LIBRARY_PATH
 #   dist/bin/vf-translate   the offline tool (inspect, extract, adapt, translate); the launcher
 #                           scripts/vf has its subcommands and finds it there
-# Build products go to ${CARGO_TARGET_DIR:-~/.cache/volta-forever/target}, outside the tree.
+# Build products go to $CARGO_TARGET_DIR, else to a directory of this checkout's own outside the
+# tree, ~/.cache/volta-forever/target-HASH (scripts/target-dir.sh says why one for each checkout).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target}
+. "$root/scripts/target-dir.sh"
+CARGO_TARGET_DIR=$(vf_target_dir "$root")
+export CARGO_TARGET_DIR
 cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 cd "$root"
 # No path of the build host in the binaries (panic messages, line tables).

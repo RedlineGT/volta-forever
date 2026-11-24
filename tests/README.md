@@ -459,6 +459,7 @@ No GPU needed.
 | Script | What it does | Time | What it needs |
 |---|---|---|---|
 | `nvcc-host.sh` | `scripts/nvcc-host.sh`, through which every script and test that runs nvcc goes: on the machine as it is, nothing added and nothing said where nvcc compiles a probe as it is, and on a newer system (Ubuntu 26.04 for CUDA 12.9.2), what it adds builds a program that calls `rsqrt`, `sinpi` and `cospi`, which prints the right values (said skipped, `newer-system`, on a machine where nvcc compiles the probe as it is); with a C library that declares them as glibc 2.43 does (a `bits/mathcalls.h` of the test's, on any machine), the program does not compile without `scripts/nvcc-host` and does with what the helper adds; with a default host compiler that says it is GCC 99, a `g++-N` of `PATH` is chosen (skipped without one) | seconds | `toolkits/cuda-12.9.2` (and `cuda-13.5.0` when it is there), gcc |
+| `target-dir.sh` | Where the build scripts have cargo build a checkout: two checkouts in two directories of their own (`scripts/target-dir.sh`), each script of a checkout in the same one, `CARGO_TARGET_DIR` when it is set; with `--build` (as the CI and the release check run it), two copies of the tree, the second's `crates/vf-fwdgen/bf16tc/runtime.c` changed and all its files older than the first's outputs, each built by `scripts/build-forwarders.sh`: each generator embeds its own `runtime.c` (with one directory for every checkout, the second had the first's) | seconds | bash, git; cargo and gcc for `--build` |
 
 ### What the CI runs
 

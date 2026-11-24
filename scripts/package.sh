@@ -57,7 +57,8 @@ done
 # The forwarding libraries: every one that the generator makes in a whole run, built, with its
 # generated source beside it and its line in the report. (A run for some of them only,
 # `build-forwarders.sh DIR cublas`, leaves the others as they were or absent.)
-gen=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/volta-forever/target}/release/vf-fwdgen
+. "$root/scripts/target-dir.sh"
+gen=$(vf_target_dir "$root")/release/vf-fwdgen
 [ -x "$gen" ] || { echo "error: $gen not found (run scripts/build-forwarders.sh first)"; exit 2; }
 mapfile -t forwarders < <("$gen" list)
 [ "${#forwarders[@]}" -gt 0 ] || { echo "error: $gen lists no forwarding library (run scripts/build-forwarders.sh first)"; exit 2; }
@@ -95,7 +96,7 @@ oldest_bin="${bins[0]}"
 for f in "${bins[@]}"; do
     [ "$f" -ot "$oldest_bin" ] && oldest_bin="$f"
 done
-for src in "$root/crates" "$root/Cargo.toml" "$root/Cargo.lock" "$root/scripts/build.sh" "$root/scripts/build-forwarders.sh"; do
+for src in "$root/crates" "$root/Cargo.toml" "$root/Cargo.lock" "$root/scripts/build.sh" "$root/scripts/build-forwarders.sh" "$root/scripts/target-dir.sh"; do
     [ -e "$src" ] || continue
     newest_src=$(find "$src" -newer "$oldest_bin" -print -quit 2>/dev/null || true)
     if [ -n "$newest_src" ]; then

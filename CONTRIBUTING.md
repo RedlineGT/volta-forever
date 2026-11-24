@@ -12,7 +12,7 @@ Rust stable (the CI takes the current one; the code needs 1.88 at the least, not
 tested), gcc, python3 3.10 or later, dash. From the checkout:
 
 ```sh
-scripts/build.sh                 # dist/lib, dist/bin (cargo: ~/.cache/volta-forever/target)
+scripts/build.sh                 # dist/lib, dist/bin (cargo: ~/.cache/volta-forever/target-HASH)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

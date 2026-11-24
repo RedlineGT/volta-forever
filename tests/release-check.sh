@@ -115,6 +115,7 @@ step install-syntax sh -c 'dash -n install.sh && bash --posix -n install.sh'
 step install-dash python3 tests/launcher/install.py
 step install-bash env VF_TEST_SHELL=bash python3 tests/launcher/install.py
 step fetch-redist python3 tests/launcher/fetch-redist.py
+step target-dir tests/scripts/target-dir.sh --build
 if [ -d "$W/toolkits/cuda-12.9.2" ]; then
     step jitlink_objects python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
     step bf16-kernels scripts/build-bf16-kernels.sh --check

@@ -31,7 +31,7 @@ The damage, one or two of these per round:
 A mutant on which they differ is kept in the directory `--keep` names, with a line saying how it
 was made. The exit status is 0 when none differs and the translator never ended badly.
 """
-import argparse, collections, multiprocessing, os, random, re, shutil, struct, subprocess, sys, tempfile, traceback
+import argparse, collections, hashlib, multiprocessing, os, random, re, shutil, struct, subprocess, sys, tempfile, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '../../reference'))
@@ -277,8 +277,11 @@ def main():
     ap.add_argument('--tmp', help='directory for temporary files')
     # (The tool: as tests/sass/compare.sh finds it.)
     here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../target')
+    # (Where scripts/build.sh builds this checkout: scripts/target-dir.sh.)
+    checkout = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../..'))
+    own = 'volta-forever/target-' + hashlib.sha256(checkout.encode()).hexdigest()[:12]
     built = os.environ.get('CARGO_TARGET_DIR') or (here if os.access(os.path.join(here, 'release/vf-translate'), os.X_OK) else
-                                                   os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'volta-forever/target'))
+                                                   os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), own))
     ap.add_argument('--tool', default=os.environ.get('VF_TOOL') or os.path.normpath(os.path.join(built, 'release/vf-translate')))
     ap.add_argument('--make-pool', metavar='FILE')
     ap.add_argument('cubins', nargs='+')
