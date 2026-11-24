@@ -752,8 +752,8 @@ rm -rf "$cache_dir"
 # launched after kernels that run: the layer names it among the kernels launched in the context since
 # its last synchronisation that succeeded, and not those before; alone under VF_FAULT_TRACE=1; as a
 # node of a CUDA graph that faulted; and when only a copy, which the layer does not route, met the
-# fault, at the next launch and at exit. The report at exit (VF_SUMMARY) says it too.
-# EACH OF THE FIVE STOPS THE GPU'S CONTEXT ON PURPOSE and adds lines with "Xid" to the kernel's log
+# fault, at the next launch. The report at exit (VF_SUMMARY) says it too.
+# EACH OF THE FOUR STOPS THE GPU'S CONTEXT ON PURPOSE and adds lines with "Xid" to the kernel's log
 # (one to three each), each in a process of its own (after a fault no other context of the process
 # runs): they run only with VF_TEST_FAULTS=1 (exactly), never by default. The control, the same
 # kernels without the one that faults, runs always: nothing is said, at exit either.
@@ -797,11 +797,6 @@ if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
         "^launch add_one -> 700$" \
         "work on the GPU failed: cuLaunchKernel returned 700" \
         "^\[volta-forever\]   write_null \(cuLaunchKernel"
-    fault fault-exit fault-exit \
-        "^copy -> 700$" \
-        "work on the GPU failed: cuStreamQuery, asked by the layer at exit returned 700" \
-        "^\[volta-forever\]   write_null \(cuLaunchKernel" \
-        "^\[volta-forever\] work on the GPU failed: cuStreamQuery, asked by the layer at exit returned 700 .*: add_one, write_null, add_one$"
 fi
 
 # The guard and nocode cases above pass their check of the kernel's log where it cannot be read

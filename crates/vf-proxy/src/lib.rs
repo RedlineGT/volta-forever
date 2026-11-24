@@ -357,18 +357,6 @@ extern "C" fn init() {
     ));
 }
 
-/// A handler of `exit`, registered at the first launch kept (`fault::take_ring`): a fault that only a
-/// call the layer does not route met, in a context still there, is looked for (`fault::at_exit`).
-/// Not from `fini`: the destructors of the libraries run NVIDIA's first (it was loaded after this
-/// one), and its driver no longer answers then; nor registered when this library is loaded: the
-/// handlers that NVIDIA's library registers at `cuInit` would run before it.
-pub(crate) extern "C" fn at_exit() {
-    // (As `fini`: a child made by fork() reports nothing of its parent's.)
-    if std::process::id() == LOADED_IN.load(Relaxed) {
-        fault::at_exit();
-    }
-}
-
 extern "C" fn fini() {
     // A child made by fork() comes here too when it ends with exit(). What it would report is its
     // parent's, counted before the fork; and it has its parent's locks as they were then: one that

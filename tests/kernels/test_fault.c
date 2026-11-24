@@ -19,10 +19,6 @@
  *       (faults) the fault is first returned by cuMemcpyDtoH (a call that the layer does not route),
  *       then by a launch of add_one (which the layer routes: it is reported there), then the program
  *       destroys its context.
- *   test_fault fault-exit
- *       (faults) the same, and the program exits without destroying its context. (A second context
- *       in the process of a fault cannot be made: on a V100 with driver 580.178.04, cuCtxCreate or
- *       the first call in it returned 700, 2026-11-24.)
  *   test_fault nofault
  *       the sequence of `fault` with add_one in place of write_null: nothing faults.
  *   test_fault rate N
@@ -254,7 +250,7 @@ static int rate(long count) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: test_fault probe-null|probe-trap|probe-misaligned|fault|fault-graph|fault-copy|fault-exit|nofault|rate N\n");
+        fprintf(stderr, "usage: test_fault probe-null|probe-trap|probe-misaligned|fault|fault-graph|fault-copy|nofault|rate N\n");
         return 2;
     }
     const char *mode = argv[1];
@@ -279,7 +275,7 @@ int main(int argc, char **argv) {
     stream_synchronize = DRV("cuStreamSynchronize");
     from_device = DRV("cuMemcpyDtoH_v2");
     to_device = DRV("cuMemcpyHtoD_v2");
-    int own_context = !strcmp(mode, "probe-misaligned") || !strcmp(mode, "fault-copy") || !strcmp(mode, "fault-exit");
+    int own_context = !strcmp(mode, "probe-misaligned") || !strcmp(mode, "fault-copy");
     CUresult r = init(0);
     if (!r) r = own_context ? create(&context, 0, 0) : retain(&context, 0);
     if (!r && !own_context) r = set_current(context);
@@ -297,7 +293,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "rate") && argc == 3) return rate(atol(argv[2]));
     if (!strcmp(mode, "fault-graph")) return graph();
     int faults = strcmp(mode, "nofault") != 0;
-    if (!faults || !strcmp(mode, "fault") || !strcmp(mode, "fault-copy") || !strcmp(mode, "fault-exit")) {
+    if (!faults || !strcmp(mode, "fault") || !strcmp(mode, "fault-copy")) {
         run("add_one", word, NULL);
         printf("synchronize -> %d\n", synchronize());
         run("add_one", word, NULL);
@@ -306,16 +302,14 @@ int main(int argc, char **argv) {
         if (faults) run("write_null", 0, NULL);
         else run("add_one", word, NULL);
         run("add_one", word, NULL);
-        if (!strcmp(mode, "fault-copy") || !strcmp(mode, "fault-exit")) {
+        if (!strcmp(mode, "fault-copy")) {
             usleep(200000);
             r = from_device(&value, word, sizeof value);
             printf("copy -> %d\n", r);
-            if (!strcmp(mode, "fault-copy")) {
-                // The next call that the layer routes finds it (not the destruction of the context).
-                run("add_one", word, NULL);
-                CUresult (*destroy)(void *) = DRV("cuCtxDestroy_v2");
-                printf("context destroyed -> %d\n", destroy(context));
-            }
+            // The next call that the layer routes finds it (not the destruction of the context).
+            run("add_one", word, NULL);
+            CUresult (*destroy)(void *) = DRV("cuCtxDestroy_v2");
+            printf("context destroyed -> %d\n", destroy(context));
             return r ? 0 : 1;
         }
         r = synchronize();

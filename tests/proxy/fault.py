@@ -13,6 +13,7 @@ import ctypes as c
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -339,12 +340,30 @@ def case(name, proxy):
         out.append(run.launch("write_null", grid=2))
         out.append(run.launch("add_one", grid=3))
         out.append(run.api.cuCtxSynchronize())
+    elif name in ("sigexit", "sigexit-report"):
+        # exit() called by a handler of a signal (a handler in C: libc's exit itself, given the
+        # signal's number) delivered during a call of the driver that holds a lock of the driver's
+        # (MOCK_SIGNAL=1: the stand-in's cuCtxSynchronize raises SIGUSR1 while it holds the lock that
+        # its cuStreamQuery and cuCtxPushCurrent_v2 take), after launches: the process ends, with
+        # status 10 (SIGUSR1's number). With sigexit-report, after a fault reported: the report at exit
+        # still has it.
+        libc = c.CDLL(None)
+        libc.signal.argtypes = [c.c_int, c.c_void_p]
+        libc.signal.restype = c.c_void_p
+        libc.signal(signal.SIGUSR1, c.cast(libc.exit, c.c_void_p))
+        out.append(run.launch("add_one", grid=1))
+        if name == "sigexit-report":
+            out.append(run.launch("write_null", grid=2))
+            out.append(run.api.cuStreamSynchronize(None))
+        print("results", " ".join(map(str, out)), flush=True)
+        run.api.cuCtxSynchronize()
+        print("not exited", flush=True)
     elif name in ("copy", "copy-destroyed", "exit"):
         out.append(run.launch("add_one", grid=1))
         out.append(run.launch("write_null", grid=2))
         # A copy is not routed through the layer: the fault is found at the next call that is (here
-        # a launch), or at exit; not when the context is destroyed (the layer does not ask the
-        # driver then).
+        # a launch); not when the context is destroyed (the layer does not ask the driver then), nor
+        # at exit (it asks the driver nothing then).
         out.append(run.copy())
         if name == "copy":
             out.append(run.launch("add_one", grid=3))
@@ -386,6 +405,14 @@ def checks(name, log, summary, results):
     if name == "copy-destroyed":
         expect("nothing is said: the layer does not ask the driver before a context is destroyed",
                not faults and "faulted" not in summary and results == ["0", "0", "700", "0"])
+        return found
+    if name == "exit":
+        expect("nothing is said: the layer asks the driver nothing at exit",
+               not faults and "failed" not in summary and results == ["0", "0", "700"])
+        return found
+    if name == "sigexit":
+        expect("the process ended in exit() from the signal handler, and nothing is said",
+               results == ["0"] and not faults)
         return found
     if name == "nofault-graph":
         expect("no fault is said, and every call returned 0", not faults and results == ["0"] * 15)
@@ -527,9 +554,12 @@ def checks(name, log, summary, results):
         expect("found at the next launch", "cuLaunchKernel returned 700" in head)
         expect("the copy met it first", results[2:] == ["700", "700"])
         expect("both launches", names == ["write_null", "add_one"])
-    elif name == "exit":
-        expect("found at exit", "cuStreamQuery, asked by the layer at exit returned 700" in head)
-        expect("the report at exit", "asked by the layer at exit returned 700" in summary)
+    elif name == "sigexit-report":
+        expect("the fault reported, and the process ended in exit() from the signal handler",
+               results == ["0", "0", "700"] and "cuStreamSynchronize returned 700" in head)
+        at_exit = "work on the GPU failed: cuStreamSynchronize returned 700 (CUDA_ERROR_ILLEGAL_ADDRESS); the candidates"
+        expect("the report at exit, made by the handler's exit, has it (the log's and VF_SUMMARY's)",
+               summary.count(at_exit) == 1 and sum(line.startswith(at_exit) for line in lines) == 1)
     return found
 
 
@@ -554,6 +584,7 @@ def main():
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("exact-done", {"VF_FAULT_TRACE": "1", "MOCK_DELAY": "1"}),
                  ("copy", {}), ("copy-destroyed", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
+                 ("sigexit", {"MOCK_SIGNAL": "1"}), ("sigexit-report", {"MOCK_SIGNAL": "1"}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"}),
                  # The report off: as without it, exact mode too; only the exact value turns it off.
@@ -565,13 +596,15 @@ def main():
             env = dict(os.environ, VF_REAL_LIBCUDA=mock, VF_PROXY_CACHE="0", VF_LOG=str(log),
                        VF_SUMMARY=str(summary), **settings)
             env.pop("VF_LOG_LEVEL", None)
+            # (The cases of a signal end in exit(10) from its handler, and at once.)
+            status, limit = (10, 20) if name.startswith("sigexit") else (0, 120)
             try:
                 done = subprocess.run([sys.executable, __file__, proxy, name], env=env, capture_output=True,
-                                      text=True, timeout=120)
+                                      text=True, timeout=limit)
             except subprocess.TimeoutExpired as hung:
                 text_of = lambda s: s.decode(errors="replace") if isinstance(s, bytes) else (s or "")
                 done = subprocess.CompletedProcess(hung.cmd, -9, text_of(hung.stdout), text_of(hung.stderr))
-                print(f"  {name}: still running after 120 s, stopped")
+                print(f"  {name}: still running after {limit} s, stopped")
             results = next((line.split()[1:] for line in done.stdout.splitlines() if line.startswith("results")), [])
             text = log.read_text() if log.exists() else ""
             summaries = list(Path(tmp).glob(f"{name}.summary.*"))
@@ -579,7 +612,8 @@ def main():
             for s in summaries:
                 s.unlink()
             label = name + "".join(f" {k}={v}" for k, v in settings.items())
-            outcome = checks(name, text, report, results) if done.returncode == 0 else [("the case ran", False)]
+            outcome = (checks(name, text, report, results) if done.returncode == status
+                       else [(f"the case ran (status {done.returncode}, {status} expected)", False)])
             for what, ok in outcome:
                 print(f"  {'ok    ' if ok else 'WRONG '} {label}: {what}")
                 failed += not ok

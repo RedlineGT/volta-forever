@@ -369,14 +369,14 @@ What the layer cannot say:
   come free (the line says so of both, with the number of such threads).
 - in which order the launches of two threads were made between the same two synchronisations:
   each thread's are in their order.
-- a fault that only a call that the layer does not route met (a copy, an allocation, which go
-  straight to NVIDIA's driver) is found at the next call that the layer routes (a launch, a
-  synchronisation, a query, a load), or at exit, by one query of the null stream of each context
-  the layer knows to be alive, which does not wait; not when the program destroys the context or
-  releases the primary context first (the layer asks the driver nothing then: a query of the null
-  stream while another stream of the context is captured would invalidate that capture), nor at
-  exit while a capture is under way in the process, nor in a program that ends without exiting
-  (killed, `_exit`).
+- a fault that only calls that the layer does not route met (a copy, a memset, an allocation,
+  which go to NVIDIA's driver without passing through it) is said only when a later call that the
+  layer routes returns the error (a launch, a synchronisation, a query, a load). When none does,
+  the layer does not report it at all: it asks the driver nothing of its own to find one, neither
+  before a context is destroyed or the primary context released, nor at exit. (A query of each
+  context at exit hung a program that called `exit` from a signal handler during a call of the
+  driver, and could ask a context that another thread was destroying.) The report at exit lists
+  the faults that were said.
 - with `VF_ADAPT=0` and `VF_FIT=0`, the launches that a program makes through the entry points the
   driver gives it (the CUDA runtime's) go straight to the driver, unless `VF_FAULT_TRACE=1` is
   set: none of them is known. A synchronisation of an event bounds nothing (which stream an event

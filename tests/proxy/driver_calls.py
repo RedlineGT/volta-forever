@@ -18,15 +18,11 @@ thread by thread, the calls are the same:
 
 - with VF_FAULT_REPORT=0 and with BASE: the very same;
 - with the report on and with VF_FAULT_REPORT=0: the same, but for the calls that the report makes
-  without a fault, each of which is said, which are only these: cuCtxGetCurrent after a
+  without a fault, each of which is said, which are only these two getters: cuCtxGetCurrent after a
   synchronisation of the current context, of its legacy stream or of the thread's own default stream
-  that succeeded (which context's launches it covers); cuStreamGetCaptureInfo_v2 (or its _ptsz form),
-  while a capture is under way in the process, of the stream that the program launched into, or whose
-  capture it ends (whether the launch is a node of a graph); and at exit, when the layer kept launches,
-  for each context it knows to be alive, when no capture is under way, one query of its null stream
-  between a push and a pop of the context (whether a fault was left that only calls the layer does
-  not route met; a stand-in without cuCtxPushCurrent_v2 gets the push alone), after every call of
-  the program's.
+  that succeeded (which context's launches it covers); and cuStreamGetCaptureInfo_v2 (or its _ptsz
+  form), while a capture is under way in the process, of the stream that the program launched into,
+  or whose capture it ends (whether the launch is a node of a graph). Nothing at exit.
 
 Prints one line a case, then PASS or FAIL; exit status 1 on FAIL. Needs gcc and
 tests/kernels/k_fit_test.135.sm75.cubin.
@@ -41,7 +37,6 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 # The calls the report may make without a fault (see above).
 GETTERS = {"cuCtxGetCurrent", "cuStreamGetCaptureInfo_v2", "cuStreamGetCaptureInfo_v2_ptsz"}
-EXIT_PROBE = ["cuCtxPushCurrent_v2", "cuStreamQuery", "cuCtxPopCurrent_v2"]
 
 
 def recorder(stand_in, directory):
@@ -101,23 +96,17 @@ def threads(log):
 
 def extra(with_report, without):
     """What one thread called with the report beyond what it called without (in the same order
-    otherwise): the getters, and the queries of contexts after every other call (at exit), as
-    {name: count} and the number of queries at exit; None when it called anything else, or not in
-    the same order."""
+    otherwise): the getters, as {name: count}; None when it called anything else, or not in the
+    same order."""
     extra, j = {}, 0
-    for i, name in enumerate(with_report):
+    for name in with_report:
         if j < len(without) and name == without[j]:
             j += 1
         elif name in GETTERS:
             extra[name] = extra.get(name, 0) + 1
         else:
-            # At exit: a push of each context (which a stand-in may not have), then the query and the pop.
-            rest, probes = with_report[i:], 0
-            while rest[:1] == EXIT_PROBE[:1]:
-                rest = rest[3:] if rest[:3] == EXIT_PROBE else rest[1:]
-                probes += 1
-            return (extra, probes) if j == len(without) and not rest else None
-    return (extra, 0) if j == len(without) else None
+            return None
+    return extra if j == len(without) else None
 
 
 def main():
@@ -181,11 +170,9 @@ def main():
                     said.append(f"thread {number + 1}: {len(a)} calls with the report, {len(b)} without, "
                                 f"other from call {first + 1}: {a[first:first + 6]} for {b[first:first + 6]}")
                     continue
-                getters, probes = found
-                if getters or probes:
+                if found:
                     said.append(f"thread {number + 1}: with the report, also "
-                                + ", ".join(f"{count} {name}" for name, count in sorted(getters.items()))
-                                + (f"{', ' if getters else ''}{probes} queries of a context at exit" if probes else ""))
+                                + ", ".join(f"{count} {name}" for name, count in sorted(found.items())))
             if base:
                 status_base, at_base = run(which, name, base, {}, "base")
                 if status_base or at_base != off:

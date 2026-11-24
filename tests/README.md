@@ -205,9 +205,9 @@ says how to build and run it.
 
 `run.sh` ends with what the layer says after a kernel faults (`tests/kernels/test_fault.c`). By
 default only the control runs: the same kernels without the one that faults, after which nothing
-is said (`fault-none`, `fault-none-silent`). The five cases in which a kernel writes through a null
+is said (`fault-none`, `fault-none-silent`). The four cases in which a kernel writes through a null
 pointer on purpose (`fault-candidates`, `fault-exact` under `VF_FAULT_TRACE=1`, `fault-graph`,
-`fault-copy`, `fault-exit`) end their CUDA context and add one to three lines with "Xid" to the
+`fault-copy`) end their CUDA context and add one to three lines with "Xid" to the
 kernel's log each: they run only with `VF_TEST_FAULTS=1` (exactly), which no release check and no
 suite sets, and each log says how many such lines the kernel's log had before and after the case.
 
@@ -417,8 +417,11 @@ last first, with what the layer made of each image and its size and digest, and 
 at exit (`VF_SUMMARY`); not those of another context, nor those made before a synchronisation of
 their stream (another stream's, the legacy stream's, the thread's own default stream's), and those
 of every thread, by thread; a CUDA graph's launch with the kernel nodes captured in it; a fault
-that only a copy met, found at the next routed call (a launch) and at exit, and not said when the
-context is destroyed first; under `VF_FAULT_TRACE=1`
+that only a copy met, found at the next routed call (a launch), and not said when the context is
+destroyed first or when the program exits without another routed call (the layer asks the driver
+nothing at exit); that a program whose signal handler calls `exit()` during a call of the driver
+that holds a lock of the driver's ends (with a stand-in that raises the signal while it holds one),
+and that the report at exit made then has the fault reported before; under `VF_FAULT_TRACE=1`
 (only that value) the launch whose synchronisation met the fault named, alone when nothing else
 is uncovered (with a launch made during a capture elsewhere, which was not waited for), with what
 is not ruled out, and its launch returning the error, and
@@ -437,10 +440,10 @@ process of its own; it needs a C compiler. The seventeenth records the calls tha
 (a recorder between the layer and the stand-ins of `lifecycle.c` and `fault.py`, which exports every
 function of NVIDIA's library) in the cases of those two in which nothing faults, with the report of
 faults and with `VF_FAULT_REPORT=0`, and checks that they are the same, thread by thread, but for
-the few that the report makes without a fault, which it names: `cuCtxGetCurrent` after a
-synchronisation that succeeded, `cuStreamGetCaptureInfo_v2` while a capture is under way, and at
-exit one query of each context known to be alive; given a second `libcuda.so.1` (of 0.1.5), that
-the calls with `VF_FAULT_REPORT=0` are the very same as with it. It needs a C compiler.
+the two getters that the report calls without a fault, which it names: `cuCtxGetCurrent` after a
+synchronisation that succeeded, `cuStreamGetCaptureInfo_v2` while a capture is under way (any
+other call fails the test); given a second `libcuda.so.1` (of 0.1.5), that the calls with
+`VF_FAULT_REPORT=0` are the very same as with it. It needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 

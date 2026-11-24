@@ -23,7 +23,13 @@
 // The primary context of each device: made at its first retain, destroyed at its last release or
 // at a reset. With MOCK_EXEC_FIXED set, every instantiated graph gets the same handle (as a driver
 // may give the handle of one destroyed to the next one made).
+//
+// A lock of the driver's own, as NVIDIA's driver takes in its calls: cuStreamQuery,
+// cuCtxPushCurrent_v2 and cuCtxPopCurrent_v2 take it, and with MOCK_SIGNAL set, cuCtxSynchronize
+// raises SIGUSR1 while it holds it (a signal delivered during a call of the driver, whose handler
+// may call exit: what the handlers of exit then ask of the driver waits for ever).
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -58,6 +64,8 @@ static _Atomic int graph_faults[SLOTS];
 
 static _Thread_local uintptr_t stack[16];
 static _Thread_local int depth;
+
+static pthread_mutex_t driver_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uintptr_t current(void) { return depth ? stack[depth - 1] : 0; }
 static int slot(uintptr_t h) { return (int)((h >> 4) % SLOTS); }
@@ -119,15 +127,21 @@ CUresult cuCtxSetCurrent(void *context) {
     return 0;
 }
 CUresult cuCtxPushCurrent_v2(void *context) {
-    if (depth == 16) return 1;
-    stack[depth++] = (uintptr_t)context;
-    return 0;
+    pthread_mutex_lock(&driver_lock);
+    CUresult r = depth == 16 ? 1 : 0;
+    if (!r) stack[depth++] = (uintptr_t)context;
+    pthread_mutex_unlock(&driver_lock);
+    return r;
 }
 CUresult cuCtxPopCurrent_v2(void **context) {
-    if (!depth) return INVALID_CONTEXT;
-    if (context) *context = (void *)stack[depth - 1];
-    --depth;
-    return 0;
+    pthread_mutex_lock(&driver_lock);
+    CUresult r = depth ? 0 : INVALID_CONTEXT;
+    if (!r) {
+        if (context) *context = (void *)stack[depth - 1];
+        --depth;
+    }
+    pthread_mutex_unlock(&driver_lock);
+    return r;
 }
 CUresult cuCtxGetDevice(int *device) {
     if (!current()) return INVALID_CONTEXT;
@@ -312,7 +326,14 @@ CUresult cuLaunchKernel_ptsz(void *f, unsigned gx, unsigned gy, unsigned gz, uns
     return cuLaunchKernel(f, gx, gy, gz, bx, by, bz, shared, stream, params, extra);
 }
 
-CUresult cuCtxSynchronize(void) { return waited(current()); }
+CUresult cuCtxSynchronize(void) {
+    if (getenv("MOCK_SIGNAL")) {
+        pthread_mutex_lock(&driver_lock);
+        raise(SIGUSR1);
+        pthread_mutex_unlock(&driver_lock);
+    }
+    return waited(current());
+}
 CUresult cuStreamSynchronize(void *stream) {
     ++synchronized;
     if ((uintptr_t)stream == 0 || (uintptr_t)stream == 1) {
@@ -323,11 +344,12 @@ CUresult cuStreamSynchronize(void *stream) {
 }
 CUresult cuStreamSynchronize_ptsz(void *stream) { return waited(context_of(stream)); }
 CUresult cuStreamQuery(void *stream) {
-    if ((uintptr_t)stream == 0 || (uintptr_t)stream == 1) {
-        CUresult r = legacy_use(current());
-        if (r) return r;
-    }
-    return waited(context_of(stream));
+    pthread_mutex_lock(&driver_lock);
+    CUresult r = 0;
+    if ((uintptr_t)stream == 0 || (uintptr_t)stream == 1) r = legacy_use(current());
+    if (!r) r = waited(context_of(stream));
+    pthread_mutex_unlock(&driver_lock);
+    return r;
 }
 
 CUresult cuEventCreate(void **event, unsigned flags) {

@@ -34,20 +34,22 @@
 //!   a context, the launches of that context that no synchronisation covers are the candidates: they
 //!   are named in one report at level 0, the last first, with the image of each and what the layer
 //!   made of it (`report`), and again in the report at exit (`summary_lines`). The calls looked at
-//!   are the launches, the synchronisations and queries of streams, events and contexts, the loads
-//!   and unloads of modules, and at exit one query of the null stream of each context known to be
-//!   alive, when no capture is under way (`at_exit`): a fault that only a copy met (not routed:
-//!   copies go straight to NVIDIA's driver) is found there, or at the next call that the layer
-//!   routes; not when the program destroys the context first.
+//!   are the launches, the synchronisations and queries of streams, events and contexts, and the
+//!   loads and unloads of modules. A fault that only calls that the layer does not route met (a
+//!   copy, a memset: they go to NVIDIA's driver without passing through the layer) is reported at
+//!   the next call that the layer routes and that meets it, and not at all when there is none: the
+//!   layer asks the driver nothing at exit. (A query of each context there hung a program that
+//!   called `exit` from a signal handler during a call of the driver, which held a lock of the
+//!   driver's that the query waited for; and it could be made of a context that another thread was
+//!   destroying.)
 //!
 //! Without a fault, the layer makes no call of the driver that the program's calls would not make
-//! (`tests/proxy/driver_calls.py` records them), but these, which change nothing the program sees:
-//! `cuCtxGetCurrent` after a synchronisation of the current context, of its legacy stream or of the
-//! thread's own default stream that succeeded (which context's launches it covers); while a capture
-//! is under way in the process, `cuStreamGetCaptureInfo_v2` of the stream that a launch went into
-//! or whose capture is ended (whether the launch is a node of a graph, `capturing_into`); and, at
-//! exit, the query of each context above. In exact mode (`VF_FAULT_TRACE=1`), the waits after each
-//! launch, by design.
+//! (`tests/proxy/driver_calls.py` records them), but two that only read: `cuCtxGetCurrent` after a
+//! synchronisation of the current context, of its legacy stream or of the thread's own default
+//! stream that succeeded (which context's launches it covers); and, while a capture is under way in
+//! the process, `cuStreamGetCaptureInfo_v2` (or its form for the thread's own stream) of the stream
+//! that a launch went into or whose capture is ended (whether the launch is a node of a graph,
+//! `capturing_into`). In exact mode (`VF_FAULT_TRACE=1`), the waits after each launch, by design.
 //!
 //! The cost of a launch. What a launch keeps is written with plain stores into a ring that its own
 //! thread alone writes (a sequence lock that this thread alone takes, as the guard's slots are
@@ -116,6 +118,21 @@
 //!   (`seen`) runs with none held, and the images, deferred libraries and kernels it asks of
 //!   (`images::origin_text`, `lazy`, `kernels`) take their own locks alone.
 //!
+//! Signals. No path that a handler of exit or of a signal can reach waits for a lock of this file
+//! that a frame of its own thread below it may hold. A program may call `exit` from a signal
+//! handler (common in a handler of SIGINT or SIGTERM, though `exit` is not safe there), which runs
+//! the handlers of exit and the library's `fini`, whose report at exit asks `summary_lines`; or
+//! call the driver there, or a handler of exit that a library registered may (an unload, the
+//! destruction of a context): any entry of this file. Each lock of this file is taken through
+//! `hold`, which counts the locks that the thread holds in a value of the thread's own (`HOLDING`),
+//! from before it takes one to after it lets it go; every entry of this file that takes one looks
+//! at that count first (`reentered`), and does nothing when it is not 0: it keeps nothing, says
+//! nothing, and `summary_lines` gives nothing. Since this file asks nothing outside it while it
+//! holds a lock, only a signal handler can call an entry while its thread holds one. What such a
+//! call would have kept is lost: a synchronisation not kept makes more candidates, never fewer; a
+//! fault not said is said at the next call that meets it. (A launch's record takes no lock, but the
+//! ring of a thread's first launch, `take_ring`.) The layer registers no handler of exit.
+//!
 //! CUDA graphs: a graph's kernels run without passing through the layer. A launch made while its
 //! stream is captured is recorded as a node of the graph being captured, not as a launch, and so is
 //! a kernel node added by hand (`cuGraphAddKernelNode`, `cuGraphAddNode`); an instantiated graph
@@ -124,17 +141,77 @@
 //! otherwise (a child graph, a clone, `cuGraphExecUpdate`, a node's new parameters) is not known.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, fence};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, compiler_fence, fence};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use crate::{REALS, config, idx, log};
 
 type CUresult = c_int;
 const CUDA_SUCCESS: CUresult = 0;
+
+// ---- the locks of this file ----------------------------------------------------------------------
+
+thread_local! {
+    /// How many locks of this file this thread holds (`hold`): counted before one is taken and
+    /// after it is let go, so that a signal handler that interrupts the thread while it holds one
+    /// finds the count above 0 (see "Signals" above).
+    static HOLDING: AtomicU32 = const { AtomicU32::new(0) };
+}
+
+/// A lock of this file, held: counted in `HOLDING` until it is let go.
+struct Held<T: 'static> {
+    guard: ManuallyDrop<MutexGuard<'static, T>>,
+    counted: bool,
+}
+
+impl<T> Deref for Held<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for Held<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for Held<T> {
+    fn drop(&mut self) {
+        // SAFETY: the guard is dropped here only.
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+        // (Only the compiler could move the count before the unlock: a signal handler runs in this
+        // thread, which sees its own stores in their order.)
+        compiler_fence(SeqCst);
+        if self.counted {
+            let _ = HOLDING.try_with(|holding| holding.fetch_sub(1, Relaxed));
+        }
+    }
+}
+
+/// Take `lock`, counted in `HOLDING` from before it is taken.
+fn hold<T>(lock: &'static Mutex<T>) -> Held<T> {
+    let counted = HOLDING.try_with(|holding| holding.fetch_add(1, Relaxed)).is_ok();
+    compiler_fence(SeqCst);
+    Held {
+        guard: ManuallyDrop::new(lock.lock().unwrap_or_else(|e| e.into_inner())),
+        counted,
+    }
+}
+
+/// Whether this thread holds a lock of this file: an entry of this file called now was called by a
+/// signal handler that interrupted the thread while it held one, and does nothing.
+#[inline]
+fn reentered() -> bool {
+    HOLDING.try_with(|holding| holding.load(Relaxed) != 0).unwrap_or(false)
+}
 
 /// Whether the report of faults is on: unless `VF_FAULT_REPORT=0` (exactly), which restores the
 /// layer's forwarding as it is without it: nothing is kept, nothing waited for, nothing said, and
@@ -456,7 +533,7 @@ static RINGS_HELD: Mutex<Vec<&'static Ring>> = Mutex::new(Vec::new());
 static THREADS: AtomicU64 = AtomicU64::new(0);
 /// The threads that launched kernels and found no ring.
 static UNKEPT: AtomicU64 = AtomicU64::new(0);
-/// Whether any launch was kept (`at_exit` asks nothing of a process that launched nothing).
+/// Whether any launch was kept (before, no launch can be of a module that goes, `forget_in`).
 static LAUNCHED: AtomicBool = AtomicBool::new(false);
 /// The value of this thread's ring pointer once the thread has none to keep its launches in.
 const NO_RING: usize = 1;
@@ -501,13 +578,18 @@ fn mine() -> Option<&'static Ring> {
 #[cold]
 #[inline(never)]
 fn take_ring() -> Option<&'static Ring> {
+    // (A launch of a signal handler that interrupted this thread in this file keeps nothing, and
+    // the thread takes its ring at its next launch.)
+    if reentered() {
+        return None;
+    }
     // (Its holder first: a thread that is ending, whose holder cannot be made, takes no ring.)
     if HOLDER.try_with(|_| ()).is_err() {
         let _ = MINE.try_with(|mine| mine.set(NO_RING as *const Ring));
         return None;
     }
     let ring = {
-        let mut rings = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rings = hold(&RINGS_HELD);
         match rings.iter().find(|ring| !ring.held.load(Acquire)) {
             Some(&ring) => Some(ring),
             None if rings.len() < RINGS => {
@@ -529,11 +611,6 @@ fn take_ring() -> Option<&'static Ring> {
     };
     let _ = MINE.try_with(|mine| mine.set(ring));
     LAUNCHED.store(true, Relaxed);
-    // (Registered now, after the driver's own handlers: those of `cuInit` and of the contexts made.)
-    static EXIT_HANDLER: std::sync::Once = std::sync::Once::new();
-    EXIT_HANDLER.call_once(|| unsafe {
-        libc::atexit(crate::at_exit);
-    });
     Some(ring)
 }
 
@@ -642,11 +719,6 @@ struct Covers {
     /// By thread (as the lines number threads) and context: the thread's own default stream. (Not
     /// by ring: a ring whose thread ended is given to another, whose own stream is another.)
     own: HashMap<(u64, u64), u64>,
-    /// The contexts destroyed, and not synchronised since (the first `COVERS_KEPT`).
-    gone: HashSet<u64>,
-    /// The contexts synchronised and not destroyed since (the first `COVERS_KEPT`): alive, as far as
-    /// the layer knows (`live_contexts`).
-    alive: HashSet<u64>,
 }
 
 /// What the synchronisations of a stream's handle cover: spans of epochs, from the first to the
@@ -684,8 +756,8 @@ impl StreamCover {
 static COVERS: LazyLock<Mutex<Covers>> = LazyLock::new(|| Mutex::new(Covers::default()));
 
 /// The record of what the synchronisations that succeeded cover.
-fn record() -> MutexGuard<'static, Covers> {
-    COVERS.lock().unwrap_or_else(|e| e.into_inner())
+fn record() -> Held<Covers> {
+    hold(&*COVERS)
 }
 
 /// Keep `value` for `key` in `map`, the larger of the two; the map is emptied when it is full.
@@ -698,34 +770,19 @@ fn cover<K: std::hash::Hash + Eq>(map: &mut HashMap<K, u64>, key: K, value: u64)
 }
 
 impl Covers {
-    /// A synchronisation that succeeded in `context`: it is alive.
-    fn used(&mut self, context: u64) {
-        self.gone.remove(&context);
-        if self.alive.len() < COVERS_KEPT {
-            self.alive.insert(context);
-        }
-    }
-
     fn context_synchronized(&mut self, context: u64, covers: u64) {
-        self.used(context);
         cover(&mut self.contexts, context, covers);
     }
 
     fn context_gone(&mut self, context: u64, covers: u64) {
         cover(&mut self.contexts, context, covers);
-        self.alive.remove(&context);
-        if self.gone.len() < COVERS_KEPT {
-            self.gone.insert(context);
-        }
     }
 
     fn legacy_synchronized(&mut self, context: u64, covers: u64) {
-        self.used(context);
         cover(&mut self.legacy, context, covers);
     }
 
     fn own_synchronized(&mut self, thread: u64, context: u64, covers: u64) {
-        self.used(context);
         cover(&mut self.own, (thread, context), covers);
     }
 
@@ -837,7 +894,7 @@ pub fn check(result: CUresult, call: &str) {
 /// when the layer knows it, else of the current one.
 #[inline]
 pub fn check_module(result: CUresult, call: &str, module: usize) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     if is_fault(result) {
@@ -883,7 +940,7 @@ pub fn synchronized(result: CUresult, covers: u64, scope: Scope, call: &str) {
 /// says (exact mode, `VF_PROFILE`): when it meets a fault, the report says that this launch's
 /// synchronisation met it (`Found::met`).
 pub fn synchronized_after(result: CUresult, covers: u64, scope: Scope, call: &str, kept: Kept) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     if result != CUDA_SUCCESS {
@@ -935,7 +992,7 @@ pub fn synchronized_after(result: CUresult, covers: u64, scope: Scope, call: &st
 
 /// The program destroys `stream`: a stream made at its handle later is another (`StreamCover`).
 pub fn stream_destroyed(stream: *mut c_void) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     let stream = stream_id(stream, false);
@@ -1001,13 +1058,13 @@ struct Taken {
 
 static TAKEN: LazyLock<Mutex<HashMap<usize, Taken>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn taken_map() -> MutexGuard<'static, HashMap<usize, Taken>> {
-    TAKEN.lock().unwrap_or_else(|e| e.into_inner())
+fn taken_map() -> Held<HashMap<usize, Taken>> {
+    hold(&*TAKEN)
 }
 
 /// The program took `handle` as the kernel `name` of `owner` (a lookup or an enumeration).
 pub fn taken(handle: usize, owner: usize, name: &str) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     if handle == 0 {
@@ -1034,7 +1091,7 @@ pub fn taken(handle: usize, owner: usize, name: &str) {
 /// The program took `function` as the function of the kernel `kernel` (`cuKernelGetFunction`) in
 /// the context where the driver made `module` of its library: the same name.
 pub fn alias(function: usize, kernel: usize, module: Option<usize>) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     let mut map = taken_map();
@@ -1066,8 +1123,8 @@ static FORGOTTEN: LazyLock<Mutex<HashMap<usize, Forgotten>>> = LazyLock::new(|| 
 const FORGOTTEN_PRUNED: usize = 256;
 const FORGOTTEN_KEPT: usize = 2048;
 
-fn forgotten() -> MutexGuard<'static, HashMap<usize, Forgotten>> {
-    FORGOTTEN.lock().unwrap_or_else(|e| e.into_inner())
+fn forgotten() -> Held<HashMap<usize, Forgotten>> {
+    hold(&*FORGOTTEN)
 }
 
 /// What `forget` moved: the names taken from `owner`, and the records of the handles that they
@@ -1089,6 +1146,9 @@ pub fn forget(owner: usize) -> Forgot {
 /// named as before, by the handles the program took (unless another took a handle since), and the
 /// launches kept before are not of a module gone.
 pub fn unforget(forgot: Forgot) {
+    if reentered() {
+        return;
+    }
     let Forgot { gone, at, replaced } = forgot;
     {
         let mut map = taken_map();
@@ -1113,7 +1173,7 @@ pub fn unforget(forgot: Forgot) {
 /// As `forget`, for a module of `context` whose record `contexts` has dropped already (under its
 /// lock: `contexts` is not asked).
 pub fn forget_in(owner: usize, context: Option<usize>) -> Forgot {
-    if !on() {
+    if !on() || reentered() {
         return Forgot {
             gone: Vec::new(),
             at: None,
@@ -1188,7 +1248,7 @@ pub fn forget_in(owner: usize, context: Option<usize>) -> Forgot {
 /// The epoch of the earliest launch that a ring still holds (`None`: none holds any). What went
 /// before it is of no launch kept.
 fn oldest_kept() -> Option<u64> {
-    let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let rings: Vec<&'static Ring> = hold(&RINGS_HELD).clone();
     oldest_of(&rings)
 }
 
@@ -1340,12 +1400,12 @@ impl Execs {
     }
 }
 
-fn graphs() -> MutexGuard<'static, HashMap<usize, GraphKernels>> {
-    GRAPHS.lock().unwrap_or_else(|e| e.into_inner())
+fn graphs() -> Held<HashMap<usize, GraphKernels>> {
+    hold(&*GRAPHS)
 }
 
-fn execs() -> MutexGuard<'static, Execs> {
-    EXECS.lock().unwrap_or_else(|e| e.into_inner())
+fn execs() -> Held<Execs> {
+    hold(&*EXECS)
 }
 
 /// The graph that `stream` is being captured into, if it is.
@@ -1422,7 +1482,7 @@ pub fn capture_ended(was: bool) {
 
 /// A kernel node of `function` was added to `graph`.
 pub fn node_added(graph: usize, function: u64, grid: [u32; 3], block: [u32; 3]) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     if graph == 0 || function == 0 {
@@ -1441,7 +1501,7 @@ pub fn node_added(graph: usize, function: u64, grid: [u32; 3], block: [u32; 3]) 
 
 /// `exec` was instantiated from `graph`: it has what the graph has now.
 pub fn instantiated(result: CUresult, exec: *mut *mut c_void, graph: *mut c_void) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     if result != CUDA_SUCCESS || exec.is_null() {
@@ -1472,7 +1532,7 @@ pub fn instantiated(result: CUresult, exec: *mut *mut c_void, graph: *mut c_void
 
 /// `graph` is destroyed (`cuGraphDestroy`).
 pub fn graph_destroyed(graph: *mut c_void) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     graphs().remove(&(graph as usize));
@@ -1480,7 +1540,7 @@ pub fn graph_destroyed(graph: *mut c_void) {
 
 /// `exec` is destroyed (`cuGraphExecDestroy`).
 pub fn exec_destroyed(exec: *mut c_void) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     let exec = exec as usize;
@@ -1649,8 +1709,8 @@ const SUMMARIES_KEPT: usize = 8;
 /// The most candidates named one by one.
 const NAMED: usize = 8;
 
-fn reported() -> MutexGuard<'static, Vec<u64>> {
-    REPORTED.lock().unwrap_or_else(|e| e.into_inner())
+fn reported() -> Held<Vec<u64>> {
+    hold(&REPORTED)
 }
 
 /// A call returned `result`, an error of a fault, of the context `of`; `met`: it was the
@@ -1658,6 +1718,9 @@ fn reported() -> MutexGuard<'static, Vec<u64>> {
 #[cold]
 #[inline(never)]
 fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
+    if reentered() {
+        return;
+    }
     // Whatever goes wrong in making the report, the program gets what the driver answered.
     let context = match of {
         Of::Stream(stream) => match catch_unwind(|| stream_context(stream)) {
@@ -1696,15 +1759,20 @@ fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
     for line in &lines {
         log::error(format_args!("{line}"));
     }
-    let mut summaries = SUMMARIES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut summaries = hold(&SUMMARIES);
     if summaries.len() < SUMMARIES_KEPT {
         summaries.push(summary);
     }
 }
 
-/// The lines of the report at exit (`report_lines`): the faults seen.
+/// The lines of the report at exit (`report_lines`): the faults reported. None when this thread
+/// holds a lock of this file: the report at exit made in a handler of a signal that interrupted it
+/// there (`exit` called by the handler) leaves them out rather than wait for itself.
 pub fn summary_lines() -> Vec<String> {
-    SUMMARIES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    if reentered() {
+        return Vec::new();
+    }
+    hold(&SUMMARIES).clone()
 }
 
 fn dimensions(d: [u32; 3]) -> String {
@@ -1769,7 +1837,7 @@ fn stream_context(stream: u64) -> Option<u64> {
             .get(&stream)
             .map_or(covers.streams_from, |cover| cover.from)
     };
-    let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let rings: Vec<&'static Ring> = hold(&RINGS_HELD).clone();
     let mut on: Vec<Launch> = rings
         .iter()
         .flat_map(|ring| ring.launches())
@@ -1787,7 +1855,7 @@ fn report(
     context: Result<u64, &'static str>,
     met: Option<(usize, u64)>,
 ) -> (Vec<String>, String) {
-    let rings: Vec<&'static Ring> = RINGS_HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let rings: Vec<&'static Ring> = hold(&RINGS_HELD).clone();
     let launches: Vec<Launch> = rings.iter().flat_map(|ring| ring.launches()).collect();
     let wrapped: Vec<usize> = rings
         .iter()
@@ -2013,56 +2081,12 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
     (lines, summary)
 }
 
-// ---- at exit -------------------------------------------------------------------------------------
-
-/// Ask the driver, at exit, whether `context` faulted, without waiting: a query of its null stream,
-/// which returns the error of a fault when there was one (`cuStreamQuery` returned 700 after a fault
-/// on a V100); reported if so. When the layer saw launches and the fault of the context, if it had
-/// one, was not reported: a fault that only an unrouted call (a copy) met is found here. (Never
-/// while the program runs: a use of the null stream while a stream of the context is captured
-/// invalidates that capture, and a query of a context that another thread destroys meanwhile could
-/// be of another; and not before a context is destroyed: the layer makes no call of the driver that
-/// the program's calls would not make, without a fault, but those of `at_exit` and the few the
-/// record needs, which ask and change nothing: see the header.)
-fn probe_at_exit(context: u64) {
-    if context == 0 || reported().contains(&context) {
-        return;
-    }
-    type Push = unsafe extern "C" fn(*mut c_void) -> CUresult;
-    type Pop = unsafe extern "C" fn(*mut *mut c_void) -> CUresult;
-    type Query = unsafe extern "C" fn(*mut c_void) -> CUresult;
-    // SAFETY: NVIDIA's functions of these C types, or stubs; the context is one the program used and
-    // has not destroyed.
-    let push: Push = unsafe { std::mem::transmute(REALS[idx::cuCtxPushCurrent_v2].load(Relaxed)) };
-    let pop: Pop = unsafe { std::mem::transmute(REALS[idx::cuCtxPopCurrent_v2].load(Relaxed)) };
-    let query: Query = unsafe { std::mem::transmute(REALS[idx::cuStreamQuery].load(Relaxed)) };
-    let pushed = unsafe { push(context as *mut c_void) };
-    if pushed != CUDA_SUCCESS {
-        log::trace(format_args!(
-            "fault: context {context:#x} not asked at exit: cuCtxPushCurrent returned {pushed}"
-        ));
-        return;
-    }
-    let result = unsafe { query(std::ptr::null_mut()) };
-    let mut popped = std::ptr::null_mut();
-    unsafe { pop(&mut popped) };
-    log::trace(format_args!(
-        "fault: context {context:#x} asked at exit: cuStreamQuery returned {result}"
-    ));
-    if is_fault(result) {
-        seen(
-            result,
-            "cuStreamQuery, asked by the layer at exit",
-            Of::Context(context),
-            None,
-        );
-    }
-}
+// ---- contexts ------------------------------------------------------------------------------------
 
 /// `context` was destroyed: a context given its handle later is another, whose fault is its own,
 /// and whose launches are those made after.
 pub fn context_gone(context: usize) {
-    if !on() {
+    if !on() || reentered() {
         return;
     }
     let context = context as u64;
@@ -2070,43 +2094,6 @@ pub fn context_gone(context: usize) {
     REPORTED_ANYWHERE.store(false, Relaxed);
     let epoch = begin();
     record().context_gone(context, epoch);
-}
-
-/// The contexts known to be alive: the `known` ones (`contexts::known`: of the modules loaded, and
-/// the primary contexts held), but for those that the layer saw destroyed and saw no
-/// synchronisation of since (a primary context that was reset is among those, though it stays the
-/// device's), and those that synchronisations were made in and that the layer did not see
-/// destroyed since. (Not from the records of what synchronisations cover: a context destroyed is
-/// kept there too, as covering its launches.)
-fn live_contexts(covers: &Covers, known: &[u64]) -> Vec<u64> {
-    let mut live: Vec<u64> = known
-        .iter()
-        .filter(|context| !covers.gone.contains(context))
-        .chain(covers.alive.iter())
-        .copied()
-        .filter(|&context| context != 0)
-        .collect();
-    live.sort_unstable();
-    live.dedup();
-    live
-}
-
-/// At exit: the contexts known to be alive whose fault was not reported are asked whether they
-/// faulted, when the layer saw launches, and when no capture is under way in the process (a thread
-/// may still be capturing: a query of the null stream would invalidate its capture).
-pub fn at_exit() {
-    if !on() || !LAUNCHED.load(Relaxed) {
-        return;
-    }
-    if CAPTURING.load(Relaxed) != 0 {
-        log::trace(format_args!("fault: no context asked at exit: a capture is under way"));
-        return;
-    }
-    let known: Vec<u64> = crate::contexts::known().into_iter().map(|c| c as u64).collect();
-    let live = live_contexts(&record().clone(), &known);
-    for context in live {
-        probe_at_exit(context);
-    }
 }
 
 #[cfg(test)]
@@ -2304,20 +2291,72 @@ mod tests {
         covers.context_gone(7, 0);
         // A new context given the same handle.
         assert!(found_in(&all, &covers, 7).launches.is_empty());
-        assert_eq!(live_contexts(&covers, &[8]), vec![8]);
-        // (Nor when `contexts` still knows it: a primary context reset is still the device's.)
-        assert_eq!(live_contexts(&covers, &[7, 8]), vec![8]);
         all.extend(launches(1, LEGACY, &[3], 1));
         assert_eq!(whats(&found_in(&all, &covers, 7)), vec![3]);
-        // Synchronised since: alive.
-        covers.legacy_synchronized(7, 1);
-        assert_eq!(live_contexts(&covers, &[8]), vec![7, 8]);
-        // More contexts destroyed than the record of those gone keeps: none of them is alive.
-        for context in 0x1000..0x1000 + 2 * COVERS_KEPT as u64 {
-            covers.context_synchronized(context, 1);
-            covers.context_gone(context, 2);
+    }
+
+    /// Every entry of this file that takes a lock, called as a signal handler would call it.
+    fn every_entry() {
+        let context = std::ptr::without_provenance_mut::<c_void>(0xd7_0000);
+        let stream = std::ptr::without_provenance_mut::<c_void>(0xd5_0000);
+        let function = std::ptr::without_provenance_mut::<c_void>(0xd1_1000);
+        synchronized(CUDA_SUCCESS, begin(), Scope::Named(context), "cuCtxSynchronize_v2");
+        synchronized(
+            CUDA_SUCCESS,
+            begin(),
+            Scope::Stream(stream, false),
+            "cuStreamSynchronize",
+        );
+        synchronized(700, begin(), Scope::Named(context), "cuCtxSynchronize_v2");
+        synchronized(700, begin(), Scope::Stream(stream, false), "cuStreamSynchronize");
+        check_event(700, "cuEventSynchronize");
+        check_module(700, "cuModuleUnload", 0xd1_0000);
+        stream_destroyed(stream);
+        taken(0xd1_1000, 0xd1_0000, "k");
+        alias(0xd1_2000, 0xd1_1000, None);
+        unforget(forget(0xd1_0000));
+        let _ = forget_in(0xd1_0000, Some(0xd7_0000));
+        let _ = launched(function, [1; 3], [1; 3], stream, Entry::LaunchKernel, false);
+        node_added(0xd2_0000, 0xd1_1000, [1; 3], [1; 3]);
+        let mut exec = std::ptr::without_provenance_mut::<c_void>(0xd3_0000);
+        instantiated(CUDA_SUCCESS, &mut exec, std::ptr::without_provenance_mut(0xd2_0000));
+        graph_destroyed(std::ptr::without_provenance_mut(0xd2_0000));
+        exec_destroyed(exec);
+        context_gone(0xd7_0000);
+        assert!(summary_lines().is_empty());
+    }
+
+    #[test]
+    fn an_entry_called_while_its_thread_holds_a_lock_of_this_file_waits_for_none() {
+        // As a handler of a signal that interrupted the thread while it held one of them (and
+        // called exit, which reports at exit, or the driver): each entry returns, and keeps nothing.
+        fn holding<T>(lock: &'static Mutex<T>) {
+            let _held = hold(lock);
+            every_entry();
         }
-        assert_eq!(live_contexts(&covers, &[8]), vec![7, 8]);
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            holding(&*COVERS);
+            holding(&*TAKEN);
+            holding(&*FORGOTTEN);
+            holding(&RINGS_HELD);
+            holding(&*GRAPHS);
+            holding(&*EXECS);
+            holding(&REPORTED);
+            holding(&SUMMARIES);
+            let kept = taken_map().contains_key(&0xd1_1000) || graphs().contains_key(&0xd2_0000);
+            let ring = MINE.with(Cell::get);
+            // Once it holds none, an entry does what it does.
+            taken(0xd1_1000, 0xd1_0000, "k");
+            let _ = done.send((kept, ring.is_null(), taken_map().contains_key(&0xd1_1000)));
+        });
+        let said = wait.recv_timeout(std::time::Duration::from_secs(30));
+        assert_eq!(
+            said,
+            Ok((false, true, true)),
+            "an entry waited for a lock that its own thread held"
+        );
+        forget(0xd1_0000);
     }
 
     #[test]
