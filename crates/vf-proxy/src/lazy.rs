@@ -477,7 +477,7 @@ pub unsafe fn setup_from_cache(
         // Keep an empty Replacement so that images::release works at unload time, and register
         // refused/emulated info as the adaptation path does.
         crate::images::keep(lib_handle, crate::images::Replacement::from_vec(Vec::new()));
-        crate::kernels::describe(lib_handle, refused, emulated);
+        crate::kernels::describe(lib_handle, refused, emulated, true);
     }
     true
 }
@@ -974,6 +974,16 @@ impl Drop for Pinned {
     }
 }
 
+/// The whole module of the deferred library `library`, pinned, when it was loaded (`materialize`);
+/// `None` otherwise: no kernel of the library is then in the driver but those compiled alone.
+pub fn materialized(library: usize) -> Option<Pinned> {
+    let (mutex, _) = &*LAZY_LIBS;
+    let mut libs = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let lazy_lib = libs.get(&library)?;
+    let (id, handle) = (lazy_lib.id, lazy_lib.materialized_handle?);
+    Pinned::of(&mut libs, library, id, handle)
+}
+
 /// `handle`, which `materialize_load` gave for the library of the load `id`, pinned; `Err` when
 /// the library was unloaded meanwhile.
 fn pinned(library: usize, id: u64, handle: usize) -> Result<Pinned, CUresult> {
@@ -1145,7 +1155,7 @@ unsafe fn materialize_load(mut libs: Libs, library: usize, id: u64) -> Result<us
                 crate::images::keep(handle, crate::images::Replacement::from_vec(image));
             }
             // By the handle the program holds: its lookups are answered from there.
-            crate::kernels::describe(library, refused, Vec::new());
+            crate::kernels::describe(library, refused, Vec::new(), true);
             Ok(handle)
         }
         // The library was unloaded meanwhile: what was loaded for it is nobody's.

@@ -457,7 +457,7 @@ in section 1). The ones of the test scripts are in `tests/README.md`; `docs/arch
 | `VF_LAZY` | `1` | `0`: let the driver compile a whole module when it is loaded, not each kernel when the program asks for it (a much longer first run) |
 | `VF_ADAPT` | `1` | `0`: give the driver every image as it is (to see what a program does without the layer's rewriting) |
 | `VF_REAL_LIBCUDA` | auto | Path to NVIDIA's real `libcuda.so.1` when it cannot be found by itself (by default: the library of the loaded kernel module's version in the system's library directories) |
-| `VF_STATS` | `0` | `1`: route every driver function through the layer and print call counts and the most launched kernels at exit |
+| `VF_STATS` | `0` | `1`: route every driver function through the layer and print call counts, the most launched kernels, and how often the refusal of a kernel at its use asked the driver what a handle is and refused a call, at exit |
 | `VF_PROFILE` | off | `FILE`: write a per-kernel profile to `FILE.PID` at exit. Every launch is then synchronised on its stream: a profile is not a benchmark. Each kernel keeps the counts of its first 64 distinct grid, block and shared-memory sizes. Only the process that loaded the layer writes it, and the `VF_STATS` report: a child made by `fork()` (a daemon, a pre-fork worker) writes neither, even when it does all the CUDA work |
 | `VF_TIMING` | `0` | `1`: print the time of each stage for every module and kernel |
 | `VF_TRACE_LAUNCH` | `0` | `1`: route kernel launches through the layer and log those that the driver refuses (kernel, grid, block, shared memory, launch attributes) |

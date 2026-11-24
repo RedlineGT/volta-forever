@@ -130,6 +130,28 @@ named) had not ended after ten minutes, nor that of cuDNN 9.28 (its CUDA 13 buil
 which it had compiled 1,441 kernels one by one (2026-11-23). A later start takes what it can from
 the layer's cache and the driver's (`CUDA_CACHE_PATH`); that was not measured.
 
+A program can hold a handle to a refused kernel without having asked for it: cuFFT enumerates
+the functions of each module it loads through an entry of a private table of the driver
+(`cuGetExportTable`), not by their names, and an enumeration made before the driver's compiler
+refused something of a deferred library still holds what it gave. The function is in the module
+that the driver loaded, made to trap. Such a handle is refused where it is used: a launch
+(`cuLaunchKernel`, `cuLaunchKernelEx` and their forms for the per-thread default stream,
+`cuLaunchCooperativeKernel` and `cuLaunchCooperativeKernelMultiDevice`, the old `cuLaunch`,
+`cuLaunchGrid`, `cuLaunchGridAsync`), a kernel node of a graph made or changed with it, a
+question about it or a setting of it (`cuFuncGetAttribute`, `cuFuncGetParamInfo`, the occupancy
+functions and the like) and `cuKernelGetFunction` return 218, the driver is not called, and a
+line names the kernel and the reason once. What still traps: a kernel launched by another kernel
+(dynamic parallelism), a function reached from a kernel by an indirect call or through a call
+into another linker input (above), a launch through a private interface of the driver (cuFFT
+launches through `cuLaunchKernel`; no other is known).
+
+A kernel can be refused after it was given, though it runs: the layer learns a refusal after it
+gave a kernel only when the driver's compiler refuses a function of a deferred library loaded
+whole, of which the kernel was given compiled alone (the compiler accepted it then: that code holds
+no trap). From then on the kernel is refused at every use, while a kernel node of a graph made with
+it before goes on launching it (a graph is not looked at when it is instantiated or launched): the
+answers are not the same before and after, but nothing that traps is launched.
+
 **PyTorch 2.14.0.** Of the 23,693 functions for sm_75 in the 475 units of machine code of its
 library, 23,664 are translated (99.9 %) and 29 are refused: 10 for a branch through a uniform
 register, 6 for the instruction `I2IP`, 4 for a call whose return address is not given the
@@ -498,8 +520,9 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,2 vf /tmp/vf-peer-copy
   that are replaced for the V100 beside their replacements, and the later card takes its own. A
   kernel refused for the V100 is given in the module that the driver gives for the library in a
   context on the later card, and refused when it is taken from the library (`cuLibraryGetKernel`,
-  which is for every card). A library whose PTX is compiled kernel by kernel (deferred) gives the
-  later card the V100's PTX.
+  which is for every card); a handle to it that the program holds all the same is launched in a
+  context on the later card and refused on the V100. A library whose PTX is compiled kernel by
+  kernel (deferred) gives the later card the V100's PTX.
 - MPS (the Multi-Process Service)
 - Driver 580.196.07 and later drivers of the 580 branch (everything was run with 580.178.04)
 - Windows; ARM

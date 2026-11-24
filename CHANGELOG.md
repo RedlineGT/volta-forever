@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+### Fixed
+
+- A kernel that the layer refuses, of which a program holds a handle that it did not get from a lookup (cuFFT enumerates the functions of each module it loads through a private table of the driver, and so took, told 8.0, a kernel the layer refuses), is refused with error 218 by every launch function, by a kernel node of a graph when it is made or changed, and by the questions and settings that take a function or a kernel, instead of being launched, trapping and ending the context (Xid 43). The layer asks the driver what a handle is once in each generation of its records, which every load and unload begins (`VF_STATS` counts the questions); `LIMITS.md` says what still traps (a kernel launched or called from another kernel) and when a kernel that runs is refused after it was given (the driver's compiler refusing a function of a deferred library loaded whole, after the kernel was given compiled alone; graph nodes made with it before go on launching it).
+
 ## 0.1.4 (2026-11-23)
 
 ### Fixed

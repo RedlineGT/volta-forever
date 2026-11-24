@@ -255,6 +255,7 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         handle,
         std::mem::take(&mut replacement.refused),
         std::mem::take(&mut replacement.emulated),
+        FOR_LIBRARY.get(),
     );
     // For a second translation at launch (`fit`): the original of a translation that has a kernel
     // over its budget. Otherwise nothing: and nothing may be left there under a handle that the

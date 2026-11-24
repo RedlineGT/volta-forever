@@ -8,6 +8,7 @@
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::atomic::Ordering::Relaxed;
 
+use crate::guard;
 use crate::images::{CUDA_ERROR_INVALID_PTX, Replacement};
 use crate::{COUNTS, REALS, callers, config, contexts, fit, idx, images, kernels, lazy, log, own_entry, profile};
 
@@ -197,6 +198,9 @@ unsafe extern "C" fn function_attribute(
     function: *mut c_void,
     caller: usize,
 ) -> CUresult {
+    if !guard::allows(function, "cuFuncGetAttribute") {
+        return guard::REFUSED;
+    }
     let real = real!(cuFuncGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void) -> CUresult);
     let result = unsafe { real(value, attribute, function) };
     // (A function is asked about in its context, as a function is launched there.)
@@ -222,6 +226,9 @@ unsafe extern "C" fn kernel_attribute(
     device: c_int,
     caller: usize,
 ) -> CUresult {
+    if !guard::allows_on(kernel, "cuKernelGetAttribute", device) {
+        return guard::REFUSED;
+    }
     let real = real!(cuKernelGetAttribute: unsafe extern "C" fn(*mut c_int, c_int, *mut c_void, c_int) -> CUresult);
     let result = unsafe { real(value, attribute, kernel, device) };
     unsafe { binary_version(value, attribute, result, caller, || device_needs_adapting(device)) };
@@ -393,7 +400,7 @@ unsafe fn load_adapted(
 /// that card is given the program's code as it is. (A library, `cuLibraryLoadData`, is loaded for
 /// every context of the process, the V100's included: its code is adapted, and a fat binary keeps
 /// the entries of the other cards beside what replaces them, `images::ForLibrary`.)
-fn context_needs_adapting() -> bool {
+pub(crate) fn context_needs_adapting() -> bool {
     let device = real!(cuCtxGetDevice: unsafe extern "C" fn(*mut c_int) -> CUresult);
     let mut ordinal = -1;
     let known = unsafe { device(&mut ordinal) } == CUDA_SUCCESS;
@@ -402,7 +409,7 @@ fn context_needs_adapting() -> bool {
 
 /// Whether `device` is of the architecture this library adapts code for, or the driver does not
 /// say what it is.
-fn device_needs_adapting(device: c_int) -> bool {
+pub(crate) fn device_needs_adapting(device: c_int) -> bool {
     let capability = real!(cuDeviceComputeCapability: unsafe extern "C" fn(*mut c_int, *mut c_int, c_int) -> CUresult);
     let (mut major, mut minor) = (-1, -1);
     let known = unsafe { capability(&mut major, &mut minor, device) } == CUDA_SUCCESS;
@@ -647,6 +654,7 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuModuleUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     // What is kept for the module is forgotten before the driver unloads it: from then on, the
     // driver may give its handle to a load in another thread, whose records are not to be dropped.
@@ -770,6 +778,9 @@ pub unsafe extern "C" fn cuModuleGetSurfRef(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuFuncSetAttribute(function: *mut c_void, attribute: c_int, value: c_int) -> CUresult {
+    if !guard::allows(function, "cuFuncSetAttribute") {
+        return guard::REFUSED;
+    }
     let real = real!(cuFuncSetAttribute: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> CUresult);
     fit::set_attribute(
         function as usize,
@@ -780,6 +791,9 @@ pub unsafe extern "C" fn cuFuncSetAttribute(function: *mut c_void, attribute: c_
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuFuncSetCacheConfig(function: *mut c_void, config: c_int) -> CUresult {
+    if !guard::allows(function, "cuFuncSetCacheConfig") {
+        return guard::REFUSED;
+    }
     let real = real!(cuFuncSetCacheConfig: unsafe extern "C" fn(*mut c_void, c_int) -> CUresult);
     fit::set_attribute(function as usize, fit::Attribute::FunctionCache(config), || unsafe {
         real(function, config)
@@ -794,6 +808,9 @@ pub unsafe extern "C" fn cuKernelSetAttribute(
     kernel: *mut c_void,
     device: c_int,
 ) -> CUresult {
+    if !guard::allows_on(kernel, "cuKernelSetAttribute", device) {
+        return guard::REFUSED;
+    }
     let real = real!(cuKernelSetAttribute: unsafe extern "C" fn(c_int, c_int, *mut c_void, c_int) -> CUresult);
     fit::set_attribute(
         kernel as usize,
@@ -804,6 +821,9 @@ pub unsafe extern "C" fn cuKernelSetAttribute(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuKernelSetCacheConfig(kernel: *mut c_void, config: c_int, device: c_int) -> CUresult {
+    if !guard::allows_on(kernel, "cuKernelSetCacheConfig", device) {
+        return guard::REFUSED;
+    }
     let real = real!(cuKernelSetCacheConfig: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> CUresult);
     fit::set_attribute(
         kernel as usize,
@@ -1149,6 +1169,7 @@ unsafe extern "C" fn library_load_from_file(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     // Check if this is a lazy library: unload its sub-modules and stand-in.
     // (Forgotten before the driver's unload: see `cuModuleUnload`.)
     if lazy::is_lazy(library as usize) {
@@ -1531,7 +1552,7 @@ fn share_on_this_device(module: usize, library: usize) {
     if context_needs_adapting() {
         kernels::share(module, library);
     } else {
-        kernels::forget(module);
+        kernels::not_shared(module);
     }
 }
 
@@ -1629,10 +1650,18 @@ pub unsafe extern "C" fn cuLibraryGetUnifiedFunction(
 }
 
 /// A function obtained from a library kernel can lead back to its module through
-/// cuFuncGetModule, even if the program never calls cuLibraryGetModule.
+/// cuFuncGetModule, even if the program never calls cuLibraryGetModule. The function of a refused
+/// kernel is not given (`guard`: the program has the kernel from elsewhere than a lookup), and NULL
+/// is left in the handle, as at a refused lookup.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel: *mut c_void) -> CUresult {
     type GetHandle = unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult;
+    if !guard::allows(kernel, "cuKernelGetFunction") {
+        if !function.is_null() {
+            unsafe { *function = std::ptr::null_mut() };
+        }
+        return guard::REFUSED;
+    }
     let real = real!(cuKernelGetFunction: GetHandle);
     let result = unsafe { real(function, kernel) };
     if result != CUDA_SUCCESS || function.is_null() {
@@ -1884,10 +1913,12 @@ pub unsafe extern "C" fn cuLinkDestroy(state: *mut c_void) -> CUresult {
     result
 }
 
-// ---- failed launches (diagnostics) -------------------------------------------------------------------
+// ---- launches ----------------------------------------------------------------------------------------
 //
-// These two are only handed to the runtime when `VF_TRACE_LAUNCH=1` (see `TRACE_ONLY` in `lib.rs`);
-// otherwise the runtime calls NVIDIA's functions directly.
+// A launch of a refused kernel is refused (`guard`). The four entries of `cuLaunchKernel` and
+// `cuLaunchKernelEx` also retry a launch refused for its registers (`fit`), and log the launches
+// that the driver refuses (`VF_TRACE_LAUNCH`); they are handed to the runtime unless the layer
+// adapts nothing and none of these is asked for (see `TRACE_ONLY` in `lib.rs`).
 
 /// `CUlaunchConfig`.
 #[repr(C)]
@@ -1968,6 +1999,9 @@ pub unsafe extern "C" fn cuLaunchKernel(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
+    if !guard::allows(function, "cuLaunchKernel") {
+        return guard::REFUSED;
+    }
     let real = real!(cuLaunchKernel: unsafe extern "C" fn(
         *mut c_void, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, *mut c_void, *mut *mut c_void, *mut *mut c_void,
     ) -> CUresult);
@@ -2060,6 +2094,9 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
+    if !guard::allows(function, "cuLaunchKernelEx") {
+        return guard::REFUSED;
+    }
     let real = real!(cuLaunchKernelEx:
         unsafe extern "C" fn(*const LaunchConfig, *mut c_void, *mut *mut c_void, *mut *mut c_void) -> CUresult);
     if config().stats {
@@ -2164,6 +2201,9 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
+    if !guard::allows(function, "cuLaunchKernel_ptsz") {
+        return guard::REFUSED;
+    }
     let real = real!(cuLaunchKernel_ptsz: LaunchKernelFn);
     if config().stats {
         unsafe { count_launch(function) };
@@ -2252,6 +2292,9 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
+    if !guard::allows(function, "cuLaunchKernelEx_ptsz") {
+        return guard::REFUSED;
+    }
     let real = real!(cuLaunchKernelEx_ptsz: LaunchKernelExFn);
     if config().stats {
         unsafe { count_launch(function) };
@@ -2317,6 +2360,528 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
     result
 }
 
+// The other launches: only the refusal of a refused kernel (`guard`).
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLaunch(function: *mut c_void) -> CUresult {
+    if !guard::allows(function, "cuLaunch") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuLaunch: unsafe extern "C" fn(*mut c_void) -> CUresult);
+    unsafe { real(function) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLaunchGrid(function: *mut c_void, width: c_int, height: c_int) -> CUresult {
+    if !guard::allows(function, "cuLaunchGrid") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuLaunchGrid: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> CUresult);
+    unsafe { real(function, width, height) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLaunchGridAsync(
+    function: *mut c_void,
+    width: c_int,
+    height: c_int,
+    stream: *mut c_void,
+) -> CUresult {
+    if !guard::allows(function, "cuLaunchGridAsync") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuLaunchGridAsync: unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_void) -> CUresult);
+    unsafe { real(function, width, height, stream) }
+}
+
+type CooperativeLaunch = unsafe extern "C" fn(
+    *mut c_void,
+    c_uint,
+    c_uint,
+    c_uint,
+    c_uint,
+    c_uint,
+    c_uint,
+    c_uint,
+    *mut c_void,
+    *mut *mut c_void,
+) -> CUresult;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLaunchCooperativeKernel(
+    function: *mut c_void,
+    grid_x: c_uint,
+    grid_y: c_uint,
+    grid_z: c_uint,
+    block_x: c_uint,
+    block_y: c_uint,
+    block_z: c_uint,
+    shared_memory: c_uint,
+    stream: *mut c_void,
+    parameters: *mut *mut c_void,
+) -> CUresult {
+    if !guard::allows(function, "cuLaunchCooperativeKernel") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuLaunchCooperativeKernel: CooperativeLaunch);
+    unsafe {
+        real(
+            function,
+            grid_x,
+            grid_y,
+            grid_z,
+            block_x,
+            block_y,
+            block_z,
+            shared_memory,
+            stream,
+            parameters,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLaunchCooperativeKernel_ptsz(
+    function: *mut c_void,
+    grid_x: c_uint,
+    grid_y: c_uint,
+    grid_z: c_uint,
+    block_x: c_uint,
+    block_y: c_uint,
+    block_z: c_uint,
+    shared_memory: c_uint,
+    stream: *mut c_void,
+    parameters: *mut *mut c_void,
+) -> CUresult {
+    if !guard::allows(function, "cuLaunchCooperativeKernel_ptsz") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuLaunchCooperativeKernel_ptsz: CooperativeLaunch);
+    unsafe {
+        real(
+            function,
+            grid_x,
+            grid_y,
+            grid_z,
+            block_x,
+            block_y,
+            block_z,
+            shared_memory,
+            stream,
+            parameters,
+        )
+    }
+}
+
+/// `CUDA_LAUNCH_PARAMS`.
+#[repr(C)]
+pub struct LaunchParams {
+    function: *mut c_void,
+    grid: [c_uint; 3],
+    block: [c_uint; 3],
+    shared_memory: c_uint,
+    stream: *mut c_void,
+    parameters: *mut *mut c_void,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuLaunchCooperativeKernelMultiDevice(
+    launches: *mut LaunchParams,
+    count: c_uint,
+    flags: c_uint,
+) -> CUresult {
+    if !launches.is_null()
+        && (0..count as usize).any(|i| {
+            !guard::allows(
+                unsafe { (*launches.add(i)).function },
+                "cuLaunchCooperativeKernelMultiDevice",
+            )
+        })
+    {
+        return guard::REFUSED;
+    }
+    let real = real!(cuLaunchCooperativeKernelMultiDevice: unsafe extern "C" fn(*mut LaunchParams, c_uint, c_uint) -> CUresult);
+    unsafe { real(launches, count, flags) }
+}
+
+// ---- graphs: a kernel node is refused for a refused kernel, as its launch -----------------------------------
+//
+// A graph launches its kernels later, where nothing can be refused: a node is refused when it is
+// made or given a refused kernel. (A capture records only what was launched, and a refused kernel
+// is not.)
+
+/// `CUDA_KERNEL_NODE_PARAMS_v1`, the first fields of `_v2` and `_v3`.
+#[repr(C)]
+pub struct KernelNodeParams {
+    function: *mut c_void,
+    grid: [c_uint; 3],
+    block: [c_uint; 3],
+    shared_memory: c_uint,
+    parameters: *mut *mut c_void,
+    extra: *mut *mut c_void,
+}
+
+/// `CUDA_KERNEL_NODE_PARAMS_v2` and `_v3`: also a library's kernel, launched when `function` is null.
+#[repr(C)]
+pub struct KernelNodeParamsV2 {
+    first: KernelNodeParams,
+    kernel: *mut c_void,
+    context: *mut c_void,
+}
+
+/// The start of `CUgraphNodeParams`: the type of the node, then its parameters (a kernel's for
+/// `CU_GRAPH_NODE_TYPE_KERNEL`, 0).
+#[repr(C)]
+pub struct GraphNodeParams {
+    kind: c_int,
+    reserved: [c_int; 3],
+    kernel: KernelNodeParamsV2,
+}
+
+/// Whether a node may be given `params` (`CUDA_KERNEL_NODE_PARAMS_v1`) in `call`.
+///
+/// # Safety
+/// `params` must be null or valid for reads, as for the driver.
+unsafe fn node_allowed(params: *const KernelNodeParams, call: &str) -> bool {
+    params.is_null() || guard::allows(unsafe { (*params).function }, call)
+}
+
+/// Whether a node may be given `params` (`CUDA_KERNEL_NODE_PARAMS_v2` or `_v3`) in `call`.
+///
+/// # Safety
+/// `params` must be null or valid for reads, as for the driver.
+unsafe fn node_allowed_v2(params: *const KernelNodeParamsV2, call: &str) -> bool {
+    if params.is_null() {
+        return true;
+    }
+    let params = unsafe { &*params };
+    if !params.first.function.is_null() {
+        return guard::allows(params.first.function, call);
+    }
+    // A library's kernel runs in the context that the node names, when it names one: on its device.
+    let device_of = real!(cuCtxGetDevice_v2: unsafe extern "C" fn(*mut c_int, *mut c_void) -> CUresult);
+    let mut device = -1;
+    if !params.context.is_null() && unsafe { device_of(&mut device, params.context) } == CUDA_SUCCESS {
+        return guard::allows_on(params.kernel, call, device);
+    }
+    guard::allows(params.kernel, call)
+}
+
+/// Whether a node may be given `params` (`CUgraphNodeParams`) in `call`.
+///
+/// # Safety
+/// `params` must be null or valid for reads, as for the driver.
+unsafe fn graph_node_allowed(params: *const GraphNodeParams, call: &str) -> bool {
+    const KERNEL_NODE: c_int = 0;
+    params.is_null()
+        || unsafe { (*params).kind } != KERNEL_NODE
+        || unsafe { node_allowed_v2(&raw const (*params).kernel, call) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphAddKernelNode(
+    node: *mut *mut c_void,
+    graph: *mut c_void,
+    dependencies: *const *mut c_void,
+    count: usize,
+    params: *const KernelNodeParams,
+) -> CUresult {
+    if !unsafe { node_allowed(params, "cuGraphAddKernelNode") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphAddKernelNode: unsafe extern "C" fn(
+        *mut *mut c_void, *mut c_void, *const *mut c_void, usize, *const KernelNodeParams,
+    ) -> CUresult);
+    unsafe { real(node, graph, dependencies, count, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphAddKernelNode_v2(
+    node: *mut *mut c_void,
+    graph: *mut c_void,
+    dependencies: *const *mut c_void,
+    count: usize,
+    params: *const KernelNodeParamsV2,
+) -> CUresult {
+    if !unsafe { node_allowed_v2(params, "cuGraphAddKernelNode") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphAddKernelNode_v2: unsafe extern "C" fn(
+        *mut *mut c_void, *mut c_void, *const *mut c_void, usize, *const KernelNodeParamsV2,
+    ) -> CUresult);
+    unsafe { real(node, graph, dependencies, count, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphKernelNodeSetParams(node: *mut c_void, params: *const KernelNodeParams) -> CUresult {
+    if !unsafe { node_allowed(params, "cuGraphKernelNodeSetParams") } {
+        return guard::REFUSED;
+    }
+    let real =
+        real!(cuGraphKernelNodeSetParams: unsafe extern "C" fn(*mut c_void, *const KernelNodeParams) -> CUresult);
+    unsafe { real(node, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphKernelNodeSetParams_v2(
+    node: *mut c_void,
+    params: *const KernelNodeParamsV2,
+) -> CUresult {
+    if !unsafe { node_allowed_v2(params, "cuGraphKernelNodeSetParams") } {
+        return guard::REFUSED;
+    }
+    let real =
+        real!(cuGraphKernelNodeSetParams_v2: unsafe extern "C" fn(*mut c_void, *const KernelNodeParamsV2) -> CUresult);
+    unsafe { real(node, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphExecKernelNodeSetParams(
+    exec: *mut c_void,
+    node: *mut c_void,
+    params: *const KernelNodeParams,
+) -> CUresult {
+    if !unsafe { node_allowed(params, "cuGraphExecKernelNodeSetParams") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphExecKernelNodeSetParams:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *const KernelNodeParams) -> CUresult);
+    unsafe { real(exec, node, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphExecKernelNodeSetParams_v2(
+    exec: *mut c_void,
+    node: *mut c_void,
+    params: *const KernelNodeParamsV2,
+) -> CUresult {
+    if !unsafe { node_allowed_v2(params, "cuGraphExecKernelNodeSetParams") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphExecKernelNodeSetParams_v2:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *const KernelNodeParamsV2) -> CUresult);
+    unsafe { real(exec, node, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphAddNode(
+    node: *mut *mut c_void,
+    graph: *mut c_void,
+    dependencies: *const *mut c_void,
+    count: usize,
+    params: *mut GraphNodeParams,
+) -> CUresult {
+    if !unsafe { graph_node_allowed(params, "cuGraphAddNode") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphAddNode: unsafe extern "C" fn(
+        *mut *mut c_void, *mut c_void, *const *mut c_void, usize, *mut GraphNodeParams,
+    ) -> CUresult);
+    unsafe { real(node, graph, dependencies, count, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphAddNode_v2(
+    node: *mut *mut c_void,
+    graph: *mut c_void,
+    dependencies: *const *mut c_void,
+    edges: *const c_void,
+    count: usize,
+    params: *mut GraphNodeParams,
+) -> CUresult {
+    if !unsafe { graph_node_allowed(params, "cuGraphAddNode") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphAddNode_v2: unsafe extern "C" fn(
+        *mut *mut c_void, *mut c_void, *const *mut c_void, *const c_void, usize, *mut GraphNodeParams,
+    ) -> CUresult);
+    unsafe { real(node, graph, dependencies, edges, count, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphNodeSetParams(node: *mut c_void, params: *mut GraphNodeParams) -> CUresult {
+    if !unsafe { graph_node_allowed(params, "cuGraphNodeSetParams") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphNodeSetParams: unsafe extern "C" fn(*mut c_void, *mut GraphNodeParams) -> CUresult);
+    unsafe { real(node, params) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuGraphExecNodeSetParams(
+    exec: *mut c_void,
+    node: *mut c_void,
+    params: *mut GraphNodeParams,
+) -> CUresult {
+    if !unsafe { graph_node_allowed(params, "cuGraphExecNodeSetParams") } {
+        return guard::REFUSED;
+    }
+    let real = real!(cuGraphExecNodeSetParams:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut GraphNodeParams) -> CUresult);
+    unsafe { real(exec, node, params) }
+}
+
+// ---- what is asked about a function: refused for a refused kernel (`guard`) --------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuFuncGetParamInfo(
+    function: *mut c_void,
+    index: usize,
+    offset: *mut usize,
+    size: *mut usize,
+) -> CUresult {
+    if !guard::allows(function, "cuFuncGetParamInfo") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuFuncGetParamInfo: unsafe extern "C" fn(*mut c_void, usize, *mut usize, *mut usize) -> CUresult);
+    unsafe { real(function, index, offset, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuKernelGetParamInfo(
+    kernel: *mut c_void,
+    index: usize,
+    offset: *mut usize,
+    size: *mut usize,
+) -> CUresult {
+    if !guard::allows(kernel, "cuKernelGetParamInfo") {
+        return guard::REFUSED;
+    }
+    let real =
+        real!(cuKernelGetParamInfo: unsafe extern "C" fn(*mut c_void, usize, *mut usize, *mut usize) -> CUresult);
+    unsafe { real(kernel, index, offset, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuFuncLoad(function: *mut c_void) -> CUresult {
+    if !guard::allows(function, "cuFuncLoad") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuFuncLoad: unsafe extern "C" fn(*mut c_void) -> CUresult);
+    unsafe { real(function) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuFuncSetSharedMemConfig(function: *mut c_void, config: c_int) -> CUresult {
+    if !guard::allows(function, "cuFuncSetSharedMemConfig") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuFuncSetSharedMemConfig: unsafe extern "C" fn(*mut c_void, c_int) -> CUresult);
+    unsafe { real(function, config) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyMaxActiveBlocksPerMultiprocessor(
+    blocks: *mut c_int,
+    function: *mut c_void,
+    block_size: c_int,
+    shared_memory: usize,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyMaxActiveBlocksPerMultiprocessor") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyMaxActiveBlocksPerMultiprocessor:
+        unsafe extern "C" fn(*mut c_int, *mut c_void, c_int, usize) -> CUresult);
+    unsafe { real(blocks, function, block_size, shared_memory) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+    blocks: *mut c_int,
+    function: *mut c_void,
+    block_size: c_int,
+    shared_memory: usize,
+    flags: c_uint,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags:
+        unsafe extern "C" fn(*mut c_int, *mut c_void, c_int, usize, c_uint) -> CUresult);
+    unsafe { real(blocks, function, block_size, shared_memory, flags) }
+}
+
+/// `CUoccupancyB2DSize`: the dynamic shared memory of a block of the given size.
+type BlockToShared = Option<unsafe extern "C" fn(c_int) -> usize>;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyMaxPotentialBlockSize(
+    grid: *mut c_int,
+    block: *mut c_int,
+    function: *mut c_void,
+    shared_of: BlockToShared,
+    shared_memory: usize,
+    limit: c_int,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyMaxPotentialBlockSize") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyMaxPotentialBlockSize:
+        unsafe extern "C" fn(*mut c_int, *mut c_int, *mut c_void, BlockToShared, usize, c_int) -> CUresult);
+    unsafe { real(grid, block, function, shared_of, shared_memory, limit) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyMaxPotentialBlockSizeWithFlags(
+    grid: *mut c_int,
+    block: *mut c_int,
+    function: *mut c_void,
+    shared_of: BlockToShared,
+    shared_memory: usize,
+    limit: c_int,
+    flags: c_uint,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyMaxPotentialBlockSizeWithFlags") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyMaxPotentialBlockSizeWithFlags:
+        unsafe extern "C" fn(*mut c_int, *mut c_int, *mut c_void, BlockToShared, usize, c_int, c_uint) -> CUresult);
+    unsafe { real(grid, block, function, shared_of, shared_memory, limit, flags) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyAvailableDynamicSMemPerBlock(
+    shared_memory: *mut usize,
+    function: *mut c_void,
+    blocks: c_int,
+    block_size: c_int,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyAvailableDynamicSMemPerBlock") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyAvailableDynamicSMemPerBlock:
+        unsafe extern "C" fn(*mut usize, *mut c_void, c_int, c_int) -> CUresult);
+    unsafe { real(shared_memory, function, blocks, block_size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyMaxPotentialClusterSize(
+    size: *mut c_int,
+    function: *mut c_void,
+    launch: *const LaunchConfig,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyMaxPotentialClusterSize") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyMaxPotentialClusterSize:
+        unsafe extern "C" fn(*mut c_int, *mut c_void, *const LaunchConfig) -> CUresult);
+    unsafe { real(size, function, launch) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuOccupancyMaxActiveClusters(
+    clusters: *mut c_int,
+    function: *mut c_void,
+    launch: *const LaunchConfig,
+) -> CUresult {
+    if !guard::allows(function, "cuOccupancyMaxActiveClusters") {
+        return guard::REFUSED;
+    }
+    let real = real!(cuOccupancyMaxActiveClusters:
+        unsafe extern "C" fn(*mut c_int, *mut c_void, *const LaunchConfig) -> CUresult);
+    unsafe { real(clusters, function, launch) }
+}
+
 // ---- contexts: the modules of a context go with it ------------------------------------------------------
 
 type ContextDestroy = unsafe extern "C" fn(*mut c_void) -> CUresult;
@@ -2328,7 +2893,53 @@ type PrimaryContext = unsafe extern "C" fn(c_int) -> CUresult;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuCtxDestroy: ContextDestroy);
+    let modules = contexts::of(context as usize);
+    let attaches = contexts::take_attaches(context as usize);
+    let result = unsafe { real(context) };
+    if result == CUDA_SUCCESS {
+        contexts::destroyed(modules);
+    } else {
+        contexts::restore_attaches(context as usize, attaches);
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
+    let real = real!(cuCtxDestroy_v2: ContextDestroy);
+    let modules = contexts::of(context as usize);
+    let attaches = contexts::take_attaches(context as usize);
+    let result = unsafe { real(context) };
+    if result == CUDA_SUCCESS {
+        contexts::destroyed(modules);
+    } else {
+        contexts::restore_attaches(context as usize, attaches);
+    }
+    result
+}
+
+/// An attach to a context takes one more detach before the last, which destroys it (`cuCtxDetach`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxAttach(context: *mut *mut c_void, flags: c_uint) -> CUresult {
+    let real = real!(cuCtxAttach: unsafe extern "C" fn(*mut *mut c_void, c_uint) -> CUresult);
+    let result = unsafe { real(context, flags) };
+    if result == CUDA_SUCCESS && !context.is_null() {
+        contexts::attached(unsafe { *context } as usize);
+    }
+    result
+}
+
+/// The last detach of a context destroys it, as `cuCtxDestroy` does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuCtxDetach(context: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
+    let real = real!(cuCtxDetach: ContextDestroy);
+    if !contexts::last_detach(context as usize) {
+        return unsafe { real(context) };
+    }
     let modules = contexts::of(context as usize);
     let result = unsafe { real(context) };
     if result == CUDA_SUCCESS {
@@ -2337,13 +2948,27 @@ pub unsafe extern "C" fn cuCtxDestroy(context: *mut c_void) -> CUresult {
     result
 }
 
+/// Modules are loaded in a green context through the context that `cuCtxFromGreenCtx` gives for
+/// it, and go with it, as at `cuCtxDestroy`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cuCtxDestroy_v2(context: *mut c_void) -> CUresult {
-    let real = real!(cuCtxDestroy_v2: ContextDestroy);
-    let modules = contexts::of(context as usize);
-    let result = unsafe { real(context) };
+pub unsafe extern "C" fn cuGreenCtxDestroy(green: *mut c_void) -> CUresult {
+    let _ending = kernels::ending();
+    let from_green = real!(cuCtxFromGreenCtx: unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> CUresult);
+    let mut context = std::ptr::null_mut();
+    // (No context: no module loaded in it.)
+    let known = unsafe { from_green(&mut context, green) } == CUDA_SUCCESS && !context.is_null();
+    let modules = contexts::of(if known { context as usize } else { 0 });
+    let attaches = if known {
+        contexts::take_attaches(context as usize)
+    } else {
+        None
+    };
+    let real = real!(cuGreenCtxDestroy: ContextDestroy);
+    let result = unsafe { real(green) };
     if result == CUDA_SUCCESS {
         contexts::destroyed(modules);
+    } else if known {
+        contexts::restore_attaches(context as usize, attaches);
     }
     result
 }
@@ -2375,6 +3000,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRetain(context: *mut *mut c_void, dev
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);
@@ -2387,6 +3013,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease(device: c_int) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxRelease_v2: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);
@@ -2399,6 +3026,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxRelease_v2(device: c_int) -> CUresult
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);
@@ -2411,6 +3039,7 @@ pub unsafe extern "C" fn cuDevicePrimaryCtxReset(device: c_int) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuDevicePrimaryCtxReset_v2(device: c_int) -> CUresult {
+    let _ending = kernels::ending();
     let real = real!(cuDevicePrimaryCtxReset_v2: PrimaryContext);
     let _step = primary_step(device);
     let modules = contexts::of_primary(device);

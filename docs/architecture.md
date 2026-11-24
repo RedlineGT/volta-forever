@@ -94,9 +94,18 @@ A kernel launch passes through an entry of the proxy that calls the driver and l
 at its answer only when that answer is a refusal (section 5).
 
 The private tables behind `cuGetExportTable` are integrity-checked by the runtime (a
-modified copy causes error 103, `cudaErrorSoftwareValidityNotEstablished`), so they
-are forwarded untouched. Code is loaded through the public functions
-(`cuLibraryLoadData`, `cuModuleLoadData` and their variants).
+modified copy causes error 103, `cudaErrorSoftwareValidityNotEstablished`; two of the nine
+that a program with PyTorch and cuFFT asks for, measured on a V100 with driver 580.178.04), so
+they are forwarded untouched. Code is loaded through the public functions
+(`cuLibraryLoadData`, `cuModuleLoadData` and their variants). A library may take the
+functions of a module it loaded from such a table instead of `cuModuleGetFunction`: cuFFT (12.x
+of CUDA 13) loads each of its kernels as a module of one function with `cuModuleLoadData`, and
+enumerates the functions of the module through entry 7 of the table
+`6e163fbe-b958-444d-835c-e182aff1991e` (which it asks for itself, not through its runtime), which
+calls a function of cuFFT for each of them, with the module's context, the module, that function
+and where it stores the handle; it then asks about the function with `cuFuncGetAttribute` and
+launches it with `cuLaunchKernel` (measured on a V100 with driver 580.178.04, 2026-11-23). What
+the layer refuses is refused at those public calls too (section 5).
 
 In a machine that also has a later card, a module loaded into a context on that card
 (`cuModuleLoadData` and its variants, `cuModuleLoad`, `cuLinkAddData`) is given to the
@@ -193,6 +202,21 @@ capability and chooses that code): the CUDA 12.9 libraries would otherwise have 
 later GPUs of hundreds of images compiled at their start. Under lazy loading the runtime asks
 for the module at the first launch of one of its kernels, and goes on without those it is
 refused: the module is given.
+
+A program can hold a handle to a refused kernel all the same: from a private table of the
+driver (above), from an enumeration made before the driver's compiler refused something of a
+deferred library, or from a function the driver made for a library in a context. The function is
+in the driver, made to trap, and launched it ends the context. So a launch, a kernel node of a
+graph, and a question about a function or a setting of it are refused with the same 218 when
+the handle is that of a refused kernel, and the driver is not called
+(`crates/vf-proxy/src/guard.rs`, section 5). The driver says what a handle is
+(`cuKernelGetLibrary`, `cuFuncGetModule`, and the name), which leads to the records of
+refusals; a function of a module the layer does not know, which may be the module the driver made
+for a library in this context, is compared with the function of that library's refused kernel of
+the same name in the current context (when it is not that one, what is concluded is not kept: it
+may be the kernel's function in another context, asked about while that one is not current).
+The refusals of a library that is not deferred hold on the V100 only: in a context on a later
+card the driver runs the library's own code.
 
 Through the driver's linker the same holds: what was refused or emulated in each input of
 `cuLinkAddData` is kept for the link, given at `cuLinkComplete` to the image the link made
@@ -304,12 +328,17 @@ What the proxy keeps of a module (its adapted image, its kernels and their refus
 original kept for a second translation, the second translation) is dropped when the
 program unloads it (`cuModuleUnload`, `cuLibraryUnload`), and when its context goes:
 `cuCtxDestroy`, `cuDevicePrimaryCtxReset`, and the last `cuDevicePrimaryCtxRelease`, by
-both names of each (`crates/vf-proxy/src/contexts.rs`). Nothing is unloaded in the driver
+both names of each, and the last `cuCtxDetach` (an attach, `cuCtxAttach`, takes one detach more)
+(`crates/vf-proxy/src/contexts.rs`). Nothing is unloaded in the driver
 then: it dropped them itself. A library (`cuLibraryLoadData`) is in every context and stays
 until it is unloaded; only the modules that the driver gives for it in a context go with
-that context. A green context destroyed with `cuGreenCtxDestroy` is not seen: its modules are
-forgotten when the driver gives their handles again. An unload waits for a launch from
-the module's second translation and for a setting being given to it.
+that context. A green context is used through the context that `cuCtxFromGreenCtx` gives for
+it, and its modules go at `cuGreenCtxDestroy`. An unload waits for a launch from
+the module's second translation and for a setting being given to it. What the refusal at a
+launch concluded of a handle (section 5) is concluded again from the moment each of these calls
+begins, and `cuGreenCtxDestroy` too, and again after it returns; what is concluded while one is
+under way is not kept: once the driver has freed the handles of its functions, it may give one to
+another function, in another thread, before the call returns.
 
 The reports at exit (`VF_STATS`, `VF_PROFILE`, the summaries of emulated instructions and
 of second translations) are printed by the process that loaded the layer: a child made by
@@ -415,11 +444,67 @@ environment of what it runs, for scripts.
 ### What happens at a launch
 
 Kernel launches (`cuLaunchKernel`, `cuLaunchKernelEx` and their forms for the per-thread
-default stream, `cuLaunchKernel_ptsz` and `cuLaunchKernelEx_ptsz`) go through the proxy when the
-second translation at launch is on (`VF_FIT`, the default) or when statistics, the
-profile or the trace of launches are asked for; otherwise lookups of these
-functions return NVIDIA's own pointers. For a launch that the driver accepts, the
-proxy's entry calls the driver and returns its answer.
+default stream, `cuLaunchKernel_ptsz` and `cuLaunchKernelEx_ptsz`) go through the proxy when it
+adapts code (the default), when the second translation at launch is on (`VF_FIT`, the default),
+or when statistics, the profile or the trace of launches are asked for; with `VF_ADAPT=0
+VF_FIT=0` and none of these, lookups of these functions return NVIDIA's own pointers. For a
+launch that the driver accepts, the proxy's entry calls the driver and returns its answer.
+
+### A launch of a refused kernel
+
+A launch of a kernel that the layer refused, with a handle that the program holds all the same
+(section 3, "What is refused"), returns `CUDA_ERROR_INVALID_PTX` (218), the error of the lookup
+of that kernel, and is not made; a line says why, once for each kernel. The cause is the one of
+the refused lookup, the code of that kernel cannot be made for this GPU, and the program gets the
+same answer; the context stays usable (the next kernel runs). NVIDIA's driver answers
+`CUDA_ERROR_INVALID_HANDLE` (400) to a launch of a handle that is no function (measured with a
+null one), which would tell the program that its handle is wrong.
+The same holds for every launch of the driver's interface (the four above,
+`cuLaunchCooperativeKernel` and its form for the per-thread default stream,
+`cuLaunchCooperativeKernelMultiDevice`, `cuLaunch`, `cuLaunchGrid`, `cuLaunchGridAsync`), for a
+kernel node of a graph made or changed with such a function or kernel (`cuGraphAddKernelNode`,
+`cuGraphKernelNodeSetParams`, `cuGraphExecKernelNodeSetParams`, both versions of each,
+`cuGraphAddNode`, `cuGraphNodeSetParams`, `cuGraphExecNodeSetParams`: a graph launches its
+kernels later, where nothing can be refused; a node that names a library's kernel and a context
+is judged for the device of that context), for what is asked about it or set on it
+(`cuFuncGetAttribute`, `cuFuncSetAttribute`, `cuFuncSetCacheConfig`,
+`cuFuncSetSharedMemConfig`, `cuFuncGetParamInfo`, `cuFuncLoad`, the four of `cuKernel...`, the
+seven occupancy functions), and for `cuKernelGetFunction`, which also leaves NULL in the handle.
+What is not covered: a kernel launched by another kernel, a function reached from a kernel by an
+indirect call or across inputs of a link (it still traps), and a launch through a private table
+of the driver (cuFFT launches with `cuLaunchKernel`).
+
+What a handle is takes calls of the driver and a lock. It is asked once for each handle in each
+generation of the layer's records; what was found allowed is kept in a table read without a lock
+(4,096 sets of four slots, by a hash of the handle; a slot holds the handle and the whole generation
+it was found in, with a version that a writer makes odd). A generation ends whenever the records of
+refusals change, at every load and every unload of a module or a library, and whenever a context
+goes: a load ends one (two when its image has refused or emulated kernels), an unload three (one
+before the driver's call, one when what is known of the module or library goes, one after the call;
+and one more for each kernel of a deferred library compiled alone), a context that goes two and one
+more for each of its modules, and the release of a primary context or a `cuCtxDetach` that is not
+the last two (the layer cannot tell before the call that it is not). So a program that loads code as
+it runs asks again after each load: over the 925 cases of `tests/gpu/torch.sh`, run by one process,
+the driver was asked 1,380 times in 911 generations, for 5,992 launches by `cuLaunchKernel`
+(`VF_STATS`, which says at exit how many times the driver was asked, how many calls were refused and
+how many generations there were). A question costs 1.4 to 2.0 microseconds more than the launch: the
+first launch of each of 2,000 kernels in turn took 3.7 to 4.2 microseconds, against 2.3 without the
+refusal, and the launches of the next turns as much as without it (2.15 to 2.20, `launch_rate
+many-refusing`, two rounds alternated with the build before, 2026-11-23). And while a thread is
+inside a call that ends a module, a library or a context (an unload, a destroy), nothing that is
+concluded is kept: every launch of the other threads asks the driver again for as long as the call
+lasts, each time the cost of a question, about 1.5 microseconds more a launch (an independent review
+measured it). While no module or library has a refused kernel, nothing is asked and a launch costs
+one load of a counter more; otherwise a launch of a handle already seen costs a few loads: the
+counter, the generation, and the slots of its set. Measured on a V100 at the build of these lines
+(2026-11-23, one job, after six runs to warm the GPU's clocks, three rounds alternated;
+`tests/kernels/launch_rate.c`, the median of 2,000 bursts of 64 launches of an empty kernel): one
+`cuLaunchKernel` call took 2.18 to 2.24 microseconds on the CPU through the layer without the
+refusal and 2.18 to 2.19 with it; with a module with a refused kernel loaded, 2.20 to 2.25 without
+(where it changes nothing) and 2.18 to 2.21 with; through NVIDIA's driver alone, 2.19 to 2.21. An
+independent review measured 1.85 to 1.90 on another V100 with and without the refusal, in one job
+after warming the clocks. In a loop of 40,000 small PyTorch operations (60,003 launches; PyTorch's
+libraries have refused kernels), the driver was asked what a handle is 4 times.
 
 ### A second translation for a kernel that does not fit
 
@@ -696,7 +781,8 @@ grow.
 
 ### Diagnostics
 
-`VF_STATS` (call counts and the kernels launched most), `VF_TIMING` (the time of each stage),
+`VF_STATS` (call counts, the kernels launched most, and what the refusal of a kernel at its use
+asked the driver and refused), `VF_TIMING` (the time of each stage),
 `VF_PROFILE` (a profile of each kernel; every launch is synchronised on its stream, so a
 profile is not a benchmark), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
 `VF_TRANSLATE_DUMP` (every cubin given to the translator, for offline validation),

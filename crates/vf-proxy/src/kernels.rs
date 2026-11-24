@@ -4,17 +4,20 @@
 //! - Kernels that must not be given to the program: they are, or call, a function that had to be made
 //!   to trap (an instruction without a sequence for this GPU, or something the driver's compiler
 //!   refused). Launched, such a kernel ends the CUDA context of the program; refused at the lookup, it
-//!   is an error the program can report.
+//!   is an error the program can report. A program can have a handle to one without a lookup (a
+//!   private interface of the driver, an enumeration made before a refusal was known): what the
+//!   driver says of a handle leads back to these records (`verdict`), for `guard`.
 //! - Kernels that run emulated instructions: announced on the console when the program takes them.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::ffi::{CStr, c_char, c_int, c_void};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
 use std::sync::{LazyLock, Mutex};
 
 use vf_adapt::emulation::Announcer;
 use vf_adapt::{Emulated, EmulatedCounts, Refused};
 
-use crate::{config, log, profile};
+use crate::{REALS, config, idx, log, profile};
 
 /// How the code of a module reached the device, as far as the profiler needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,11 +39,21 @@ struct Kernels {
     emulated: HashMap<String, EmulatedCounts>,
     /// For the module of a library: that library, with which it goes away.
     library: Option<usize>,
+    /// The handle is a library's (`cuLibraryLoadData`), not a module's: the driver makes a module
+    /// of it in each context where it is used, whose functions the program may hold.
+    is_library: bool,
     /// How the code of this module reached the device.
     origin: Option<Origin>,
 }
 
 static KNOWN: LazyLock<Mutex<HashMap<usize, Kernels>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The number of modules and libraries known here with a refused kernel: while there is none, no
+/// handle that the program holds can be one of a refused kernel, and `guard` asks nothing.
+static REFUSING: AtomicUsize = AtomicUsize::new(0);
+/// Changed whenever what is known here changes, and whenever a module, a library or a context
+/// goes (after which the driver may give its handles to others): what `guard` concluded of a
+/// handle holds for one generation.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 static ANNOUNCER: Announcer = Announcer::new();
 /// Refused kernels the program already asked for: the refusal is explained once.
 static EXPLAINED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -85,6 +98,62 @@ fn known() -> std::sync::MutexGuard<'static, HashMap<usize, Kernels>> {
     KNOWN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What is known here changed (`known` is the map, under its lock): `REFUSING` is counted again, and
+/// a new generation begins.
+fn changed(known: &HashMap<usize, Kernels>) {
+    REFUSING.store(known.values().filter(|k| !k.refused.is_empty()).count(), SeqCst);
+    new_generation();
+}
+
+/// A new generation begins (`GENERATION`): a module, a library or a context went, or what is known
+/// here changed. (After what it changed.)
+pub fn new_generation() {
+    GENERATION.fetch_add(1, SeqCst);
+}
+
+/// The number of driver calls under way that end a module, a library or a context (`Ending`).
+static ENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// While it lives, a driver call that ends a module, a library or a context is under way: once the
+/// driver has freed the handles of its functions, another thread may be given one of them for
+/// another function before the call returns. A generation begins when it is made, before the
+/// driver's call; what `guard` concludes meanwhile is not kept (`ending`); and a generation begins
+/// again when it is dropped, after the call.
+pub struct Ending(());
+
+/// A driver call that ends a module, a library or a context begins (`Ending`).
+pub fn ending() -> Ending {
+    ENDING.fetch_add(1, SeqCst);
+    new_generation();
+    Ending(())
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        // (The generation first: a conclusion reached while the call was under way, and kept by a
+        // thread that saw no call under way any more, is of the generation that this ends.)
+        new_generation();
+        ENDING.fetch_sub(1, SeqCst);
+    }
+}
+
+/// Whether a driver call that ends a module, a library or a context is under way (`Ending`).
+pub fn ending_now() -> bool {
+    ENDING.load(SeqCst) != 0
+}
+
+/// Whether a module or library known here has a refused kernel.
+#[inline]
+pub fn refusing() -> bool {
+    REFUSING.load(SeqCst) != 0
+}
+
+/// The current generation (`GENERATION`).
+#[inline]
+pub fn generation() -> u64 {
+    GENERATION.load(SeqCst)
+}
+
 /// Module aliases consult their library's current metadata, including compiler
 /// refusals learned after a lazy submodule first exposed a function.
 fn metadata(known: &HashMap<usize, Kernels>, handle: usize) -> Option<&Kernels> {
@@ -95,13 +164,15 @@ fn metadata(known: &HashMap<usize, Kernels>, handle: usize) -> Option<&Kernels> 
     }
 }
 
-/// Record what the adaptation found about the kernels of the image loaded as `handle`.
-pub fn describe(handle: usize, refused: Vec<Refused>, emulated: Vec<Emulated>) {
+/// Record what the adaptation found about the kernels of the image loaded as `handle`, a library's
+/// when `library`.
+pub fn describe(handle: usize, refused: Vec<Refused>, emulated: Vec<Emulated>, library: bool) {
     if refused.is_empty() && emulated.is_empty() {
         return;
     }
     let mut known = known();
     let kernels = known.entry(handle).or_default();
+    kernels.is_library |= library;
     for kernel in refused {
         kernels
             .refused
@@ -111,6 +182,7 @@ pub fn describe(handle: usize, refused: Vec<Refused>, emulated: Vec<Emulated>) {
     for kernel in emulated {
         kernels.emulated.insert(kernel.kernel, kernel.counts);
     }
+    changed(&known);
 }
 
 /// Record the code origin for the image loaded as `handle`.
@@ -124,13 +196,21 @@ pub fn origin(handle: usize) -> Option<Origin> {
     metadata(&known(), handle).and_then(|k| k.origin)
 }
 
-/// `module` is the module of library `library`: the same kernels.
+/// `module` is the module of library `library`: the same kernels. (A runtime may say it at every
+/// launch, through `cuKernelGetFunction`: when it is known already, nothing changes, and no new
+/// generation begins.)
 pub fn share(module: usize, library: usize) {
     let mut known = known();
     if module == library {
         return;
     }
     if known.contains_key(&library) {
+        if known
+            .get(&module)
+            .is_some_and(|kernels| kernels.library == Some(library))
+        {
+            return;
+        }
         known.insert(
             module,
             Kernels {
@@ -138,16 +218,28 @@ pub fn share(module: usize, library: usize) {
                 ..Default::default()
             },
         );
-    } else {
-        // A context can return the former module address for a different
-        // library, including a native one with no recorded refusals.
-        known.remove(&module);
+    } else if known.remove(&module).is_none() {
+        // (A context can return the former module address for a different library, including a
+        // native one with no recorded refusals: what was known of it goes. Here nothing was.)
+        return;
     }
+    changed(&known);
 }
 
 /// The module or library is unloaded.
 pub fn forget(handle: usize) {
     drop(take(handle));
+}
+
+/// `module`, the module of a library in a context on another GPU than this one, has none of the
+/// library's refusals (`share` is for a context on this GPU). A runtime may say it at every launch,
+/// through `cuKernelGetFunction`: when nothing was known of it, nothing changes, and no new
+/// generation begins.
+pub fn not_shared(module: usize) {
+    let mut known = known();
+    if known.remove(&module).is_some() {
+        changed(&known);
+    }
 }
 
 /// What `take` took of a module or library, for `restore`.
@@ -170,6 +262,8 @@ pub fn take(handle: usize) -> Taken {
             taken.push((*at, kernels));
         }
     }
+    // (Also when nothing was known of it: the handles of its functions may be given to others.)
+    changed(&known);
     drop(known);
     if profiling {
         // The handle itself may have had no entry (a module the proxy knew nothing about).
@@ -189,6 +283,7 @@ pub fn restore(taken: Taken) {
     for (handle, kernels) in taken.0 {
         known.entry(handle).or_insert(kernels);
     }
+    changed(&known);
 }
 
 /// Whether enumerations need to filter this module or library.
@@ -230,6 +325,198 @@ pub fn refused(handle: usize, name: &str) -> bool {
         }
     }
     true
+}
+
+/// A refused kernel of which the program holds a handle: its name, the function it needs that
+/// traps, and why.
+pub struct Refusal {
+    name: String,
+    function: String,
+    reason: String,
+}
+
+/// Refused kernels of which the program used a handle: the refusal is explained once.
+static GUARDED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+impl Refusal {
+    /// Say, the first time for this kernel, that `call` with a handle to it is refused.
+    pub fn explain(&self, call: &str) {
+        if !GUARDED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(self.name.clone())
+        {
+            return;
+        }
+        let name = &self.name;
+        let through = if self.function == self.name {
+            String::new()
+        } else {
+            format!(" (in {}, which it calls)", self.function)
+        };
+        log::warn(format_args!(
+            "kernel {name} cannot run on this GPU: {}{through}. The program holds a handle to it, which a lookup by name \
+             refuses, and {call} with it is refused (error {})",
+            self.reason,
+            crate::guard::REFUSED
+        ));
+        if let Some(remedy) = nccl_remedy(name) {
+            log::warn(format_args!("{remedy}"));
+        }
+    }
+}
+
+type GetHandle = unsafe extern "C" fn(*mut *mut c_void, *mut c_void) -> c_int;
+type GetName = unsafe extern "C" fn(*mut *const c_char, *mut c_void) -> c_int;
+type FindKernel = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> c_int;
+
+/// NVIDIA's function `index`, of the C type `T` (not counted: it is the layer that asks).
+///
+/// # Safety
+/// `T` must be the C type of that function.
+unsafe fn driver<T: Copy>(index: usize) -> T {
+    let address = REALS[index].load(Relaxed);
+    // SAFETY: REALS holds NVIDIA's function, or a stub that ignores its arguments.
+    unsafe { std::mem::transmute_copy::<usize, T>(&address) }
+}
+
+/// The name that the driver's `getter` (`cuFuncGetName`, `cuKernelGetName`) gives for `handle`.
+unsafe fn name_by(getter: usize, handle: usize) -> Option<String> {
+    let get: GetName = unsafe { driver(getter) };
+    let mut name: *const c_char = std::ptr::null();
+    if unsafe { get(&mut name, handle as *mut c_void) } != 0 || name.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned())
+}
+
+/// What the driver says `handle` is: a kernel of a library (`cuKernelGetLibrary`; a kernel of a
+/// deferred library is the library the program holds), or a function of a module
+/// (`cuFuncGetModule`), with its name. `None` when it says neither. (The library first: NVIDIA's
+/// driver answers 400 to `cuKernelGetLibrary` for a function, measured on a V100 with driver
+/// 580.178.04; `cuFuncGetName` takes a function only.)
+unsafe fn identify(handle: usize) -> Option<(usize, String)> {
+    let get_library: GetHandle = unsafe { driver(idx::cuKernelGetLibrary) };
+    let mut library = std::ptr::null_mut();
+    if unsafe { get_library(&mut library, handle as *mut c_void) } == 0 && !library.is_null() {
+        let owner = crate::lazy::kernel_library(handle).unwrap_or(library as usize);
+        return unsafe { name_by(idx::cuKernelGetName, handle) }.map(|name| (owner, name));
+    }
+    let get_module: GetHandle = unsafe { driver(idx::cuFuncGetModule) };
+    let mut module = std::ptr::null_mut();
+    if unsafe { get_module(&mut module, handle as *mut c_void) } != 0 || module.is_null() {
+        return None;
+    }
+    unsafe { name_by(idx::cuFuncGetName, handle) }.map(|name| (module as usize, name))
+}
+
+/// Whether `handle` is the kernel `name` of `library` (a library's, in the driver), or its function
+/// in the current context. A deferred library has it only once it was loaded whole.
+unsafe fn of_library(handle: usize, library: usize, name: &str) -> bool {
+    let whole = if crate::lazy::is_lazy(library) {
+        match crate::lazy::materialized(library) {
+            Some(whole) => Some(whole),
+            None => return false,
+        }
+    } else {
+        None
+    };
+    let target = whole.as_ref().map_or(library, |whole| whole.handle);
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    let find: FindKernel = unsafe { driver(idx::cuLibraryGetKernel) };
+    let mut kernel = std::ptr::null_mut();
+    if unsafe { find(&mut kernel, target as *mut c_void, name.as_ptr()) } != 0 || kernel.is_null() {
+        return false;
+    }
+    if kernel as usize == handle {
+        return true;
+    }
+    let function_of: GetHandle = unsafe { driver(idx::cuKernelGetFunction) };
+    let mut function = std::ptr::null_mut();
+    let found = unsafe { function_of(&mut function, kernel) };
+    found == 0 && function as usize == handle
+}
+
+/// What `verdict` says of a handle.
+pub enum Verdict {
+    /// The handle is that of a refused kernel.
+    Refused(Refusal),
+    /// It is not, wherever it is used.
+    Allowed,
+    /// It is not, where it is used now, which another use may not be: so this is not kept.
+    /// - A refused kernel of a library, or its function, used where the GPU is not the one whose
+    ///   code the layer adapts: the driver runs the library's own code there (a library keeps the
+    ///   entries of the other GPUs), as the module of the library in such a context gives the
+    ///   kernel by name. Used on this GPU, it is refused. (Not for a deferred library, whose code is
+    ///   the PTX adapted for this GPU on every GPU.)
+    /// - A function of a module unknown here, named as the refused kernel of a library, that is
+    ///   not that kernel's function in the current context: it may be its function in another
+    ///   context, which the driver is asked about while another context, or none, is current.
+    AllowedHere,
+}
+
+/// What `handle` is: a refused kernel, if it is a function or a kernel whose module or library is
+/// known here with that kernel refused, or a function of a module unknown here that is the module
+/// the driver made in this context for a library with that kernel refused (which the program did
+/// not ask for with `cuLibraryGetModule` or `cuKernelGetFunction`). The refusals of a library that
+/// is not deferred hold where the handle is used on this GPU: on `device`, or in the current
+/// context when `None`.
+///
+/// # Safety
+/// `handle` must be one that the driver accepts for a launch, or that it refuses.
+pub unsafe fn verdict(handle: usize, device: Option<c_int>) -> Verdict {
+    let Some((owner, name)) = (unsafe { identify(handle) }) else {
+        return Verdict::Allowed;
+    };
+    let refusal = |kernels: &Kernels| {
+        kernels.refused.get(&name).map(|(function, reason)| Refusal {
+            name: name.clone(),
+            function: function.clone(),
+            reason: reason.clone(),
+        })
+    };
+    let on_this_gpu = || match device {
+        Some(device) => crate::hooks::device_needs_adapting(device),
+        None => crate::hooks::context_needs_adapting(),
+    };
+    // A refusal of `library`: for the GPU where the handle is used. (The module that the driver
+    // gives for a library in a context is known here only for a context on this GPU.)
+    let of_a_library = |library: usize, refusal: Option<Refusal>| match refusal {
+        Some(_) if !crate::lazy::is_lazy(library) && !on_this_gpu() => Verdict::AllowedHere,
+        Some(refusal) => Verdict::Refused(refusal),
+        None => Verdict::Allowed,
+    };
+    let libraries: Vec<usize> = {
+        let known = known();
+        if let Some(kernels) = metadata(&known, owner) {
+            let found = refusal(kernels);
+            let library_kernel = known.get(&owner).is_some_and(|entry| entry.is_library);
+            drop(known);
+            return match found {
+                Some(found) if library_kernel => of_a_library(owner, Some(found)),
+                Some(found) => Verdict::Refused(found),
+                None => Verdict::Allowed,
+            };
+        }
+        known
+            .iter()
+            .filter(|(_, kernels)| kernels.is_library && kernels.refused.contains_key(&name))
+            .map(|(&library, _)| library)
+            .collect()
+    };
+    if libraries.is_empty() {
+        return Verdict::Allowed;
+    }
+    for &library in &libraries {
+        if unsafe { of_library(handle, library, &name) } {
+            let found = known().get(&library).and_then(refusal);
+            return of_a_library(library, found);
+        }
+    }
+    // (Compared with the function of each library's kernel in the current context only.)
+    Verdict::AllowedHere
 }
 
 /// Kernel `name` of `handle` is given to the program: announce it if it runs emulated instructions.

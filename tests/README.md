@@ -53,8 +53,10 @@ scripts of `tests/sass/`).
   reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
-  (`CUDA_MODULE_LOADING`), and lookup tables asked for by name, answered as NVIDIA's driver
-  answers them, except where the layer refuses one (`tables.py`).
+  (`CUDA_MODULE_LOADING`), a refused kernel launched with a handle taken from NVIDIA's driver
+  itself (218 from every launch function and graph node, and no line more with "Xid" in the
+  kernel's log), and lookup tables asked for by name, answered as NVIDIA's driver answers them,
+  except where the layer refuses one (`tables.py`).
 - `forward.sh`: for each of ten libraries, a program built against CUDA 13.5 calls a few
   functions through the forwarding library and gets the host's result, five of them again under
   `CUDA_MODULE_LOADING=EAGER` (cuBLAS is exercised by `run.sh`, under both loading modes).
@@ -146,6 +148,10 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 
 (Times on one V100 with everything already compiled and in the file cache.)
 
+`tests/kernels/launch_rate.c` measures the time of a kernel launch through a `libcuda.so.1`
+(NVIDIA's or the layer's), with and without a module with a refused kernel loaded; its header
+says how to build and run it.
+
 The whole Triton corpus (3,516 cases; `triton_corpus.py` says how cases are made and checked) is
 run by hand, the reference on any machine and the GPU part on the V100, in as many processes as
 wanted (`--shard I/N`; a case that stops its process is counted as a CRASH and the next process
@@ -225,7 +231,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Eight more host regressions exercise the built libraries directly:
+Ten more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -236,6 +242,8 @@ python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
 python3 tests/proxy/jitlink_objects.py dist/lib/libnvJitLink.so.13 toolkits/cuda-12.9.2
 python3 tests/proxy/jitlink_fork.py dist/lib/libnvJitLink.so.13
 python3 tests/proxy/readonly_tables.py dist/lib/libcuda.so.1
+python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1
+tests/proxy/guard_stress.sh
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -270,7 +278,27 @@ variable that kernels write is given; and that a table
 the program was given first keeps the kernels that read it in the whole module, also one that
 another thread asks for while the whole module is compiled for the table (the stand-in holds that
 compilation). Each case in a
-process of its own, a second time from the proxy cache; it needs a C compiler.
+process of its own, a second time from the proxy cache; it needs a C compiler. The ninth checks,
+with another stand-in that keeps what NVIDIA's driver keeps by handle and that the test also calls
+directly (as a program takes a handle through a private interface of the driver, or from a table
+of `cuGetExportTable` as cuFFT does), that a refused kernel of a module or of a library, and its
+function in a context, is not launched by any launch function, not made a kernel node of a graph
+or given to one, and not asked about (218, and the driver is not called); that the kernel that
+runs beside it is; that the driver is not asked what a handle is while nothing is refused, and
+once only for a handle found allowed, also when the program asks for the function of a kernel
+before each launch; that a handle that the driver gives again after an unload or
+the end of a context (destroyed, or a green context) is taken for what it is now; and that a
+library's refused kernel is launched on a later GPU, unless the library is deferred. Each case in a
+process of its own, with deferred libraries and without, and with `VF_FIT=0`; it needs a C
+compiler. The tenth runs the same refusal under threads, against a stand-in that threads can share
+and that gives the handles of what is gone again, last freed first, to any thread
+(`guard_mt_mock_driver.c`; `guard_stress.c` says what each scenario checks): no refused kernel
+reaches the driver and no kernel that runs is refused while threads load and unload modules, and
+make contexts, take a library's functions in them from the driver and destroy them (or green
+contexts) while the driver gives their handles to the next thread; a function named as a refused
+kernel elsewhere runs. Each scenario in a process of its own, those with threads for
+`VF_GUARD_STRESS_SECONDS` seconds each (default 1, the CI's; a long run takes 60 or more); it needs
+gcc.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -287,7 +315,7 @@ libraries against a mock library.
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
 checks and the unit tests (`cargo test`, 451 at 0.1.4); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
-`link_refusals.py`, `nccl_remedy.py`, `jitlink_fork.py` and `nvml_capability.py` of
+`link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `guard_stress.sh`, `jitlink_fork.py` and `nvml_capability.py` of
 `tests/proxy/`; `tests/forward/stack.sh` and `tests/forward/bf16.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`
 and with `VF_TEST_SHELL=bash`, and `fetch-redist.py`; `tests/sass/compare.sh` on the test

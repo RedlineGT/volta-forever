@@ -4,9 +4,9 @@
 //! the layer kept for them is dropped here, as at an unload. A library is in every context and
 //! stays; the module that the driver gives for it in a context goes with that context.
 //!
-//! The context of a module is the one current when the driver gave the module. A context that
-//! goes without one of these calls (a green context) leaves what the layer kept for its modules
-//! until the driver gives their handles again (`images::keep`).
+//! The context of a module is the one current when the driver gave the module. A green context is
+//! used through the context that `cuCtxFromGreenCtx` gives for it, and its modules go at
+//! `cuGreenCtxDestroy`.
 //!
 //! What is known of the modules of a context is taken before the driver is asked to destroy it
 //! (`of`), and dropped after (`destroyed`): once the driver destroyed it, another thread can be
@@ -40,6 +40,9 @@ static NUMBERS: AtomicU64 = AtomicU64::new(0);
 static MODULES: LazyLock<Mutex<HashMap<usize, Record>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// The primary context of each device, as the driver gave it to the program.
 static PRIMARY: LazyLock<Mutex<HashMap<c_int, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// For each context, the number of times the program attached to it (`cuCtxAttach`): the
+/// detaches that it takes more before the last one, which destroys it (`cuCtxDetach`).
+static ATTACHED: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn modules() -> MutexGuard<'static, HashMap<usize, Record>> {
     MODULES.lock().unwrap_or_else(|e| e.into_inner())
@@ -141,6 +144,50 @@ pub fn destroyed(modules: Modules) {
         crate::fit::forget(module);
         crate::images::dropped(module);
         crate::lazy::forget_module(module);
+    }
+}
+
+/// The program attached to `context` once more (`cuCtxAttach`).
+pub fn attached(context: usize) {
+    *ATTACHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(context)
+        .or_default() += 1;
+}
+
+/// The program detaches from `context` (`cuCtxDetach`): whether that is the last detach, which
+/// destroys it. (An attach is counted off when it is not.)
+pub fn last_detach(context: usize) -> bool {
+    let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
+    match attached.get_mut(&context) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            if *count == 0 {
+                attached.remove(&context);
+            }
+            false
+        }
+        _ => true,
+    }
+}
+
+/// `context` is to be destroyed whatever its attaches (`cuCtxDestroy`, `cuGreenCtxDestroy`): they
+/// are taken away before the driver's call, while no other context can have its address, and given
+/// back to `restore_attaches` if it was not destroyed. (Else the next context at its address would
+/// be taken to need more detaches than it does, and its last one taken for one that is not.)
+pub fn take_attaches(context: usize) -> Option<usize> {
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&context)
+}
+
+/// The driver did not destroy `context`, whose attaches `take_attaches` took: they are counted again.
+pub fn restore_attaches(context: usize, attaches: Option<usize>) {
+    if let Some(attaches) = attaches {
+        ATTACHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(context)
+            .or_insert(attaches);
     }
 }
 

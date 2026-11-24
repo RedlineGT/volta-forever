@@ -556,6 +556,35 @@ refuse refuse-link link "ALL CHECKS PASSED" \
     "kernel refused_by_layer cannot run on this GPU and is not given to the program: barrier.cluster.arrive: no Volta sequence" \
     "emulated in soft: 1 tanh" "1 kernel with emulated instructions was given to the program: 1 tanh"
 
+# A refused kernel of which the program holds a handle that the layer did not give (taken here from
+# NVIDIA's driver itself, as cuFFT takes the functions of its modules from a private table) is not
+# launched: every launch function, a kernel node of a graph and the questions about it return 218,
+# the context still runs a kernel afterwards, and the GPU did not stop (no line more with "Xid" in
+# the kernel's log, where it can be read). Until 2026-11-23 the first launch trapped (Xid 43).
+[ -x "$out/bin/test_guard" ] && [ "$out/bin/test_guard" -nt "$G/test_guard.c" ] || gcc -O2 -Wall -o "$out/bin/test_guard" "$G/test_guard.c" -ldl || exit 2
+xids() { dmesg 2>/dev/null | grep -c Xid; }
+guard() {  # guard NAME INTERFACE
+    local name=$1 interface=$2 before after
+    log=$out/logs/$name.log
+    before=$(xids)
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_guard" "$interface" >"$log" 2>&1
+    after=$(xids)
+    if dmesg >/dev/null 2>&1; then
+        echo "lines with Xid in the kernel's log: $before before, $after after" >>"$log"
+        [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
+    else
+        echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
+    fi
+    check "$name" "ALL CHECKS PASSED" "no Xid line more" \
+        "kernel refused_by_layer cannot run on this GPU: barrier.cluster.arrive: no Volta sequence.*\. The program holds a handle to it, which a lookup by name refuses"
+}
+guard guard-module module
+guard guard-library library
+VF_LAZY=0 guard guard-library-lazy-off library
+# The function of the refused kernel in its context is refused there, also after it was asked
+# about while no context, or another, was current (only questions: nothing that traps is launched).
+VF_LAZY=0 guard guard-contexts contexts
+
 # A kernel whose usual translation takes more registers than a block of 1,024 threads can have is
 # launched from a second translation that keeps to the kernel's own count (`docs/architecture.md`, "Launch"): taken
 # from a module and from a library, with an attribute that the program set on its kernel, in a
