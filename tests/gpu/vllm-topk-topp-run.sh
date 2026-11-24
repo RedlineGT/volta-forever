@@ -58,7 +58,7 @@ for borrow in 1 5; do
     echo "=== Pass with VF_BORROW=$borrow ==="
     proxy_cache=0
     if [ "$no_cache" != 0 ]; then
-        proxy_cache=$(mktemp -d /tmp/vf-cache-XXXXXXXX) || exit 1
+        proxy_cache=$(mktemp -d "${TMPDIR:-/tmp}/vf-cache-XXXXXXXX") || exit 1
         caches+=("$proxy_cache")
     fi
     VF_BORROW=$borrow VF_PROXY_CACHE=$proxy_cache python3 -s "$W/tests/gpu/vllm-topk-topp-test.py" 2>&1

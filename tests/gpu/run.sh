@@ -631,8 +631,9 @@ done
 
 # Proxy cache: a second run with a warm cache must skip adaptation and analysis and give the same
 # results, including the same refused kernels and the same emulation warnings.
-# In a local directory, whose files belong to whoever runs: the proxy refuses a cache that does not.
-cache_dir=/tmp/vf-cache-test-$$
+# In a local directory, whose files belong to whoever runs: the proxy refuses a cache that does not
+# (under $TMPDIR, /tmp when it is not set).
+cache_dir=${TMPDIR:-/tmp}/vf-cache-test-$$
 rm -rf "$cache_dir"
 cache_case() {  # cache_case RUN-NAME EXPECTED...
     local name=$1; shift
