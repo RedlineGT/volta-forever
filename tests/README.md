@@ -391,7 +391,9 @@ step failed, 2 when none failed but one could not run here (what it needs is mis
   (about ten minutes in all with `JOBS=6`, eight of them for `compare.sh`);
 - with `--full`, then the validator over the corpora: `validate-corpus.sh` on `TORCH`,
   `heldout-validate.sh` on `HELDOUT` and `controls.sh` (hours; a step whose corpus is missing is
-  skipped).
+  skipped);
+- last, `executable`: every script that a step or a command of the GPU part runs directly has the
+  mode 100755 in git's index, which is what a checkout gives it.
 
 The GPU part is printed, not run: the commands of `tests/gpu/`, from the tree, with the settings a
 release is checked with (`run.sh` at the default capability and at `VF_CAPABILITY=8.0`;
