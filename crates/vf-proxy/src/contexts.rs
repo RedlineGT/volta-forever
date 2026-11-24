@@ -145,7 +145,7 @@ pub fn destroyed(modules: Modules) {
         // Under the lock: a load that the driver gives this handle to now waits for this to be
         // done before it keeps anything for it (`forget`, `loaded`).
         crate::fit::forget(module);
-        crate::fault::forget_in(module, Some(record.context));
+        let _ = crate::fault::forget_in(module, Some(record.context));
         crate::images::dropped(module);
         crate::lazy::forget_module(module);
     }

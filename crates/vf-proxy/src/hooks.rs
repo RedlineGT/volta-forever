@@ -669,8 +669,9 @@ pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
     let released = images::release(module as usize);
     let result = unsafe { real(module) };
     if result != CUDA_SUCCESS {
-        fault::check(result, "cuModuleUnload");
+        // (Known again first: a fault reported here names its kernels as they still are.)
         images::unload_failed(released);
+        fault::check(result, "cuModuleUnload");
     }
     result
 }

@@ -922,15 +922,49 @@ fn forgotten() -> MutexGuard<'static, HashMap<usize, Forgotten>> {
     FORGOTTEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The module or library `owner` is unloaded, or went with its context: the driver may give the
-/// handles of its kernels to others.
-pub fn forget(owner: usize) {
-    forget_in(owner, None);
+/// What `forget` moved: the names taken from `owner`, and the records of the handles that they
+/// replaced among those kept apart, for `unforget` when the driver does not unload the module.
+pub struct Forgot {
+    gone: Vec<(usize, Taken)>,
+    /// When they were kept apart (`None`: they were not, as no launch was kept).
+    at: Option<u64>,
+    replaced: Vec<(usize, Option<Forgotten>)>,
+}
+
+/// The module or library `owner` is to be unloaded, or went with its context: the driver may give
+/// the handles of its kernels to others. What `unforget` takes to undo it, if the unload fails.
+pub fn forget(owner: usize) -> Forgot {
+    forget_in(owner, None)
+}
+
+/// The driver did not unload the module or library of which `forget` gave `forgot`: its kernels are
+/// named as before, by the handles the program took (unless another took a handle since), and the
+/// launches kept before are not of a module gone.
+pub fn unforget(forgot: Forgot) {
+    let Forgot { gone, at, replaced } = forgot;
+    {
+        let mut map = taken_map();
+        for (handle, taken) in gone {
+            map.entry(handle).or_insert(taken);
+        }
+    }
+    let Some(at) = at else {
+        return;
+    };
+    let mut forgotten = forgotten();
+    for (handle, before) in replaced {
+        if forgotten.get(&handle).is_some_and(|f| f.at == at) {
+            match before {
+                Some(before) => forgotten.insert(handle, before),
+                None => forgotten.remove(&handle),
+            };
+        }
+    }
 }
 
 /// As `forget`, for a module of `context` whose record `contexts` has dropped already (under its
 /// lock: `contexts` is not asked).
-pub fn forget_in(owner: usize, context: Option<usize>) {
+pub fn forget_in(owner: usize, context: Option<usize>) -> Forgot {
     let gone: Vec<(usize, Taken)> = {
         let mut map = taken_map();
         let handles: Vec<usize> = map
@@ -945,13 +979,17 @@ pub fn forget_in(owner: usize, context: Option<usize>) {
     };
     // (Before any launch was kept, no launch can be of what goes.)
     if gone.is_empty() || !LAUNCHED.load(Relaxed) {
-        return;
+        return Forgot {
+            gone,
+            at: None,
+            replaced: Vec::new(),
+        };
     }
     // (The launches kept before found an epoch at most this; those of a kernel given the handle
     // since, a later one.)
     let at = begin();
-    let gone: Vec<(usize, Forgotten)> = gone
-        .into_iter()
+    let kept: Vec<(usize, Forgotten)> = gone
+        .iter()
         .map(|(handle, taken)| {
             let context = match context {
                 Some(context) => Some(context),
@@ -961,11 +999,21 @@ pub fn forget_in(owner: usize, context: Option<usize>) {
                     .or_else(|| crate::contexts::context_of(taken.owner)),
             };
             let context = context.map(|c| c as u64);
-            (handle, Forgotten { taken, context, at })
+            (
+                *handle,
+                Forgotten {
+                    taken: taken.clone(),
+                    context,
+                    at,
+                },
+            )
         })
         .collect();
     let mut forgotten = forgotten();
-    forgotten.extend(gone);
+    let replaced = kept
+        .into_iter()
+        .map(|(handle, record)| (handle, forgotten.insert(handle, record)))
+        .collect();
     if forgotten.len() > FORGOTTEN_PRUNED {
         match oldest_kept() {
             Some(oldest) => forgotten.retain(|_, f| f.at >= oldest),
@@ -974,6 +1022,11 @@ pub fn forget_in(owner: usize, context: Option<usize>) {
         if forgotten.len() > FORGOTTEN_KEPT {
             forgotten.clear();
         }
+    }
+    Forgot {
+        gone,
+        at: Some(at),
+        replaced,
     }
 }
 
@@ -2062,6 +2115,31 @@ mod tests {
         let after = EPOCH.load(SeqCst);
         assert_eq!(identify(0x9200, Some(after)).name.as_deref(), Some("new"));
         assert_eq!(identify(0x9200, Some(before)).name.as_deref(), Some("k"));
+    }
+}
+
+#[cfg(test)]
+mod unload {
+    use super::*;
+
+    #[test]
+    fn a_failed_unload_leaves_the_names_as_they_were() {
+        LAUNCHED.store(true, Relaxed);
+        // The handle 0xc200 was a kernel of a module gone before (kept apart), then given to "k".
+        taken(0xc200, 0xc000, "old");
+        let earlier = EPOCH.load(SeqCst);
+        let _ = forget(0xc000);
+        taken(0xc200, 0xc100, "k");
+        let before = EPOCH.load(SeqCst);
+        let forgot = forget(0xc100);
+        assert!(identify(0xc200, Some(before)).gone);
+        // The driver did not unload it: "k" is named as it is, and the launch before the first
+        // module went is still of that one.
+        unforget(forgot);
+        let now = identify(0xc200, Some(before));
+        assert_eq!((now.name.as_deref(), now.gone), (Some("k"), false));
+        let then = identify(0xc200, Some(earlier));
+        assert_eq!((then.name.as_deref(), then.gone), (Some("old"), true));
     }
 }
 

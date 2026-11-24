@@ -178,6 +178,16 @@ def case(name, proxy):
         out.append(run.api.cuCtxSynchronize())
         stop.set()
         other.join()
+    elif name == "unload-failed":
+        # The unload of a module that fails (here, after the fault, which only a copy met) leaves it
+        # loaded: its kernels are still named as what the layer made of them.
+        module, other = c.c_void_p(), c.c_void_p()
+        assert run.api.cuModuleLoadData(c.byref(module), PTX) == 0
+        assert run.api.cuModuleGetFunction(c.byref(other), module, b"add_one") == 0
+        out.append(run.launch("add_one", grid=1, functions={"add_one": other}))
+        out.append(run.launch("write_null", grid=2))
+        out.append(run.copy())
+        out.append(run.api.cuModuleUnload(module))
     elif name == "profile":
         # VF_PROFILE waits for each launch: its wait that met the fault is the one reported, and its
         # waits that succeeded cover what they waited for.
@@ -273,6 +283,11 @@ def checks(name, log, summary, results):
         count = re.search(r"one of the (\d+) launched", head)
         expect("the report ended while contexts were destroyed, and named the launches of the 120 threads",
                results == ["0", "700"] and count is not None and int(count.group(1)) >= 120 * 255)
+    elif name == "unload-failed":
+        expect("the unload met the fault", results[2:] == ["700", "700"] and "cuModuleUnload returned 700" in head)
+        line = next((line for line in lines if "grid 1x1x1" in line), "")
+        expect("the kernel of the module still loaded is named with its image",
+               "PTX for sm_75 retargeted by the layer" in line and "unloaded since" not in line)
     elif name == "profile":
         expect("the profile's wait after write_null met it",
                "the synchronisation of the stream after a launch (VF_PROFILE) returned 700" in head)
@@ -302,7 +317,7 @@ def main():
         cases = [("deadlock", {}), ("candidates", {}), ("nofault", {}), ("exact", {"VF_FAULT_TRACE": "1"}), ("streams", {}),
                  ("contexts", {}), ("context-gone", {}), ("own-stream", {}), ("threads", {}),
                  ("graph", {}), ("graph-exact", {"VF_FAULT_TRACE": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
-                 ("copy", {}), ("exit", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
+                 ("copy", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"})]
         for name, settings in cases:

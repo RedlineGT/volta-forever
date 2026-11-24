@@ -300,7 +300,7 @@ pub fn loaded_adapted(handle: usize) -> bool {
 /// The driver loaded `replacement` as `handle`: keep it, and what is known of its kernels.
 pub fn keep(handle: usize, mut replacement: Replacement) {
     given(handle);
-    crate::fault::forget(handle);
+    let _ = crate::fault::forget(handle);
     // Context destruction can retire a CUmodule without an explicit unload.
     // The driver's next load starts a new lifetime at the same address. (The context's record
     // first: what `contexts::destroyed` drops for the handle is then dropped before this.)
@@ -348,6 +348,8 @@ pub struct Released {
     kept: Option<Arc<Replacement>>,
     kernels: kernels::Taken,
     context: crate::contexts::Taken,
+    /// The names of its kernels, for the report of a fault (`fault::forget`).
+    names: crate::fault::Forgot,
 }
 
 /// The number of each load of a module or library whose handle the driver gave, by handle: a
@@ -390,7 +392,7 @@ pub fn load_of(handle: usize) -> u64 {
 /// what is taken is given back, for the caller to hold until the driver's unload returned
 /// (`unload_failed` when it failed).
 pub fn release(handle: usize) -> Released {
-    crate::fault::forget(handle);
+    let names = crate::fault::forget(handle);
     let load = load_of(handle);
     // (The context's record first, as in `keep`.)
     let context = crate::contexts::take(handle);
@@ -402,6 +404,7 @@ pub fn release(handle: usize) -> Released {
         kept,
         kernels,
         context,
+        names,
     }
 }
 
@@ -423,11 +426,13 @@ pub fn unload_failed(released: Released) {
         kept,
         kernels,
         context,
+        names,
     } = released;
     if load_of(handle) != load {
         return;
     }
     crate::contexts::restore(context);
+    crate::fault::unforget(names);
     if let Some(kept) = kept {
         KEPT.lock()
             .unwrap_or_else(|e| e.into_inner())
