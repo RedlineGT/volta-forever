@@ -96,6 +96,8 @@ scripts/vf doctor
 cargo test --workspace
 ```
 
+The scripts and tests that compile CUDA sources with the toolkits of `toolkits/` go through `scripts/nvcc-host.sh`. It compiles a probe first and changes nothing when that works. On a system newer than CUDA 12.9.2, such as Ubuntu 26.04 (glibc 2.43, GCC 15), it adds what the compiler needs there: a `g++-N` that the toolkit accepts, and a header of ours that hides the C library's declarations that contradict CUDA 12's. Install `g++-14` there; CUDA 12.9 accepts GCC 14 at the newest.
+
 Run `tests/gpu/run.sh` for the physical V100 suite. Use `scripts/package.sh` to create a release archive. [Test suites](tests/README.md) · [Contributing](CONTRIBUTING.md) · [Machine-code translator](docs/translator.md)
 
 ## Licence

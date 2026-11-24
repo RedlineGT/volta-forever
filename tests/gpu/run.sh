@@ -14,6 +14,7 @@ out=${VF_OUT:-$VF_TEST_ROOT}
 proxy=${VF_PROXY:-$W/dist/lib}
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=${1:-0}
 . "$W/tests/gpu/cache.sh"
+. "$W/scripts/nvcc-host.sh"
 
 mkdir -p "$out/bin" "$out/logs"
 [ -x "$out/bin/drvrun" ] && [ "$out/bin/drvrun" -nt "$G/drvrun.c" ] || gcc -O2 -Wall -o "$out/bin/drvrun" "$G/drvrun.c" -ldl -lm || exit 2
@@ -22,7 +23,7 @@ mkdir -p "$out/bin" "$out/logs"
 [ -x "$out/bin/rt_probe.135.sm75ptx" ] || "$G/build-rt-probe.sh" "$out/bin" >/dev/null || exit 2
 rdc=$out/bin/rdc.135.sm120a
 if [[ ! -x $rdc || $G/rdc_main.cu -nt $rdc || $G/rdc_other.cu -nt $rdc ]]; then
-    "$T/cuda-13.5.0/bin/nvcc" -O2 -rdc=true --cudart=shared \
+    nvcc_host "$T/cuda-13.5.0/bin/nvcc" -O2 -rdc=true --cudart=shared \
         -gencode 'arch=compute_120a,code=[sm_120a,compute_120a]' "$G/rdc_main.cu" "$G/rdc_other.cu" -o "$rdc" || exit 2
 fi
 [ -e "$W/dist/forward/libcublas.so.13" ] || { echo "missing: $W/dist/forward (run scripts/build-forwarders.sh)"; exit 2; }
@@ -410,8 +411,10 @@ mkdir -p "$out/translate"
 mc() {  # mc FILE KERNELS : FILE.cu has KERNELS kernels that the translator takes
     local built=$out/translate/$1
     if ! [ "$built.sm75.cubin" -nt "$G/translate/$1.cu" ]; then
-        "$T/cuda-12.9.2/bin/nvcc" -arch=sm_70 -O3 -cubin -o "$built.sm70.cubin" "$G/translate/$1.cu" 2>/dev/null || exit 2
-        "$T/cuda-13.5.0/bin/nvcc" -arch=sm_75 -O3 -cubin -o "$built.sm75.cubin" "$G/translate/$1.cu" 2>/dev/null || exit 2
+        # (What scripts/nvcc-host.sh adds is said here: the compiles below hide what they write.)
+        nvcc_host_args "$T/cuda-12.9.2/bin/nvcc" && nvcc_host_args "$T/cuda-13.5.0/bin/nvcc"
+        nvcc_host "$T/cuda-12.9.2/bin/nvcc" -arch=sm_70 -O3 -cubin -o "$built.sm70.cubin" "$G/translate/$1.cu" 2>/dev/null || exit 2
+        nvcc_host "$T/cuda-13.5.0/bin/nvcc" -arch=sm_75 -O3 -cubin -o "$built.sm75.cubin" "$G/translate/$1.cu" 2>/dev/null || exit 2
     fi
     log=$out/logs/translated-$1.log
     # The native build against itself first: a kernel whose result depends on the order of its
@@ -529,7 +532,7 @@ VF_LAZY=0 rt lazy-off rt_probe.135.sm75ptx "$T/cuda-13.5.0/lib" "own kernel: 0/6
 # that image's kernels (until 2026-11-23 it did not start: cudaMalloc -> cudaErrorInvalidPtx).
 for v in 12.9.2:129 13.5.0:135; do
     program=$out/bin/rt_refuse.${v#*:}.ptx90
-    [ -x "$program" ] && [ "$program" -nt "$G/rt_refuse.cu" ] || "$T/cuda-${v%%:*}/bin/nvcc" -O2 \
+    [ -x "$program" ] && [ "$program" -nt "$G/rt_refuse.cu" ] || nvcc_host "$T/cuda-${v%%:*}/bin/nvcc" -O2 \
         -gencode arch=compute_90,code=compute_90 "$G/rt_refuse.cu" -o "$program" || exit 2
 done
 ran=("good kernels -> cudaSuccess, value 43" "bad launch -> cudaErrorInvalidPtx" "good after bad -> cudaSuccess, value 42")

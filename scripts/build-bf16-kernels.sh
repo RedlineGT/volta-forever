@@ -18,6 +18,10 @@ check=0
 [ -x "$nvcc" ] || { echo "build-bf16-kernels: no CUDA 12.9.2 compiler at $nvcc" >&2; exit 2; }
 version=$("$nvcc" --version | tail -1)
 case $version in *cuda_12.9.r12.9*) ;; *) echo "build-bf16-kernels: $nvcc is not CUDA 12.9 ($version)" >&2; exit 2 ;; esac
+# What this machine needs to compile with it (scripts/nvcc-host.sh), as NVCC_HOST_ARGS: in front
+# of the flags, and not in the manifest (nothing on most systems).
+. "$root/scripts/nvcc-host.sh"
+nvcc_host_args "$nvcc"
 flags=(-gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -O3 -fmad=false --compress-mode=none -frandom-seed=vf-bf16 -std=c++17)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -28,8 +32,8 @@ if grep -n '^[[:space:]]*#[[:space:]]*include' "$src/kernels.cu" "$src/abi.h" | 
     exit 1
 fi
 # Relative names in a directory of its own: nothing of the checkout's path reaches the output.
-(cd "$work" && "$nvcc" "${flags[@]}" -fatbin -o kernels.fatbin kernels.cu)
-(cd "$work" && "$nvcc" -arch=compute_70 -Wno-deprecated-gpu-targets -O3 -fmad=false -frandom-seed=vf-bf16 -std=c++17 -ptx -o kernels.ptx kernels.cu)
+(cd "$work" && "$nvcc" "${NVCC_HOST_ARGS[@]}" "${flags[@]}" -fatbin -o kernels.fatbin kernels.cu)
+(cd "$work" && "$nvcc" "${NVCC_HOST_ARGS[@]}" -arch=compute_70 -Wno-deprecated-gpu-targets -O3 -fmad=false -frandom-seed=vf-bf16 -std=c++17 -ptx -o kernels.ptx kernels.cu)
 if grep -q '\.extern \.func' "$work/kernels.ptx"; then
     echo "build-bf16-kernels: the PTX calls functions from outside the source:" >&2
     grep '\.extern \.func' "$work/kernels.ptx" >&2

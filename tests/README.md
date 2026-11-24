@@ -437,13 +437,16 @@ python3 -m pip install --target $VF_TEST_ROOT/torch-cu126/site \
 
 ### Native llama.cpp build for sm_70
 
-A build of the same llama.cpp sources for sm_70 with CUDA 12.9.2, for speed comparisons.
+A build of the same llama.cpp sources for sm_70 with CUDA 12.9.2, for speed comparisons. nvcc
+is given what `scripts/nvcc-host.sh` finds that it needs on this machine (nothing on most); the
+toolkit's paths are absolute (CMake 4.2 does not find nvcc from relative ones).
 
 ```sh
+export NVCC_PREPEND_FLAGS="$(scripts/nvcc-host.sh --args toolkits/cuda-12.9.2/bin/nvcc | tr '\n' ' ')"
 cmake -S src/llama.cpp-b12418 -B $VF_TEST_ROOT/llama-b12418-sm70/build -G Ninja \
     -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=70 \
-    -DCUDAToolkit_ROOT=toolkits/cuda-12.9.2 \
-    -DCMAKE_CUDA_COMPILER=toolkits/cuda-12.9.2/bin/nvcc \
+    -DCUDAToolkit_ROOT=$PWD/toolkits/cuda-12.9.2 \
+    -DCMAKE_CUDA_COMPILER=$PWD/toolkits/cuda-12.9.2/bin/nvcc \
     -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=ON \
     -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF \
     -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined

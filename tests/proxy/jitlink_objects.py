@@ -7,6 +7,7 @@ of that cubin keeps.
 Usage: python3 tests/proxy/jitlink_objects.py adapter.so cuda-12.9.2-directory
 """
 import ctypes as c
+import functools
 import os
 from pathlib import Path
 import struct
@@ -15,6 +16,17 @@ import sys
 import tempfile
 
 import refusal_note
+
+
+@functools.cache
+def nvcc_command(toolkit):
+    """The nvcc of TOOLKIT and what this machine needs to compile with it (scripts/nvcc-host.sh:
+    nothing on most systems)."""
+    nvcc = str(toolkit / "bin/nvcc")
+    helper = Path(__file__).resolve().parents[2] / "scripts/nvcc-host.sh"
+    added = subprocess.run(["bash", str(helper), "--args", nvcc], check=True, stdout=subprocess.PIPE,
+                           text=True).stdout.splitlines()
+    return [nvcc, *added]
 
 
 def check(lib, path, kind, memory):
@@ -95,7 +107,7 @@ def refusals(lib, toolkit, work, log):
     reason in the note of the cubin that the link makes (until 2026-11-23 nothing in the cubin
     said it, and the layer gave it to a program that loaded the cubin), which a link of that cubin
     (as a cubin, and in a fat binary) keeps."""
-    nvcc = [toolkit / "bin/nvcc", "-allow-unsupported-compiler", "-Wno-deprecated-gpu-targets"]
+    nvcc = [*nvcc_command(toolkit), "-allow-unsupported-compiler", "-Wno-deprecated-gpu-targets"]
     inputs = []
     for name, source in [("bad", BAD), ("half", BAD + GOOD)]:
         (work / f"{name}.cu").write_text(source)
@@ -210,7 +222,7 @@ if __name__ == "__main__":
         os.environ["VF_LOG"] = str(log)
         log.write_bytes(b"")
         (work / "helper.cu").write_text('extern "C" __device__ void helper() { asm volatile("membar.cta;"); }\n')
-        subprocess.run([toolkit / "bin/nvcc", "-allow-unsupported-compiler", "-arch=sm_70",
+        subprocess.run([*nvcc_command(toolkit), "-allow-unsupported-compiler", "-arch=sm_70",
                         "-dc", "helper.cu", "-o", "helper.o"], cwd=work, check=True)
         subprocess.run(["ar", "rcs", "helper.a", "helper.o"], cwd=work, check=True)
         lib = c.CDLL(adapter)
