@@ -673,8 +673,13 @@ What it does not cover:
   writes none into the program's Triton where the program writes none. The process checks that
   the Triton it imported is the program's (its directory and version, and the device, inode, size
   and time of its library, `libtriton`, and of its NVIDIA backend's module, as they were when the
-  program imported Triton: a Triton reinstalled or edited in place under a running program, with
-  the same version, is not taken, said once) and uses it only then. Its
+  program imported Triton: a Triton reinstalled under a running program with the same version, or
+  whose library or NVIDIA backend's module was edited in place, is not taken, said once) and uses
+  it only then. Its other files are not compared: another of its modules edited in place, as an
+  editable installation allows, is what later helpers import (the libdevice and `ptxas` that it
+  finds are those of the program's own later compilations too); and the two files are recorded a
+  few milliseconds after the program loaded them, as its import ends, so that one replaced in
+  that moment would be taken for the program's. Its
   environment is not the program's: the variables that a compilation reads (Triton's `TRITON_*`
   but those of its caches and dumps, `MLIR_*`, `LLVM_*`, `NVPTX_*`, `PTXAS_*`, `DISABLE_*`, the
   layer's `VF_*`) and `PATH`, `HOME`, `USER`, the locale, `LD_LIBRARY_PATH`, and `TMPDIR` the
