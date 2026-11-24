@@ -966,6 +966,43 @@ class Decisions(Base):
         self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]), ["cubin sm_80"], r.stderr)
         self.assertNotIn("another Triton", r.stderr)
 
+    def test_a_triton_changed_under_the_program(self):
+        # The files of the program's Triton changed on disk while it runs, with the same version
+        # (another build reinstalled: its NVIDIA backend's module replaced; an editable install
+        # edited: its library written in place): the next helper's Triton is not taken (a stat of
+        # each, recorded when the program imported Triton), the kernel is compiled by Triton's own
+        # stages, and the process compiles as without the switch, said once.
+        code = textwrap.dedent("""
+            import json, os, sys, time
+            from triton.backends.nvidia import compiler as c
+            first = c.compile(sys.argv[1])[0].decode()[:24]
+            if sys.argv[3] == "backend":
+                path = c.__file__
+                text = open(path).read().replace('body = ("cubin sm_%d\\\\n" % capability).encode()',
+                                                 'body = ("cubin sm_%d OTHER BUILD\\\\n" % capability).encode()')
+                assert "OTHER BUILD" in text
+                open(path + ".new", "w").write(text)
+                os.replace(path + ".new", path)
+            else:
+                with open(sys.modules["triton._C.libtriton"].__file__, "a") as f:
+                    f.write("# edited\\n")
+            for h in sys.modules["volta_forever_triton"].client()._the_pool().helpers:
+                h.kill()   # (as at its idle time: the next kernel starts another)
+            time.sleep(0.5)
+            print(json.dumps([first, c.compile(sys.argv[2])[0].decode()[:24], c.compile(sys.argv[2])[2]]))
+            """)
+        for what, name in (("backend", "its NVIDIA backend"), ("library", "its library")):
+            other = self.root / ("standin-changed-" + what)
+            if other.exists():
+                shutil.rmtree(other)
+            shutil.copytree(self.standin, other, ignore=shutil.ignore_patterns("__pycache__"))
+            r = self.run_vf([sys.executable, "-c", code, dot("f16"), dot("bf16"), what], self.env(PYTHONPATH=str(other)))
+            first, second, key = self.last(r)
+            self.assertEqual((first, second, key), ("cubin sm_80\n", "cubin sm_75\n", "ptxas-75"), (what, r.stderr))
+            self.assertEqual(r.stderr.count("every kernel of this process is compiled by Triton's own stages: the "
+                                            "program's Triton changed on disk since the program imported it (%s"
+                                            % name), 1, r.stderr)
+
     def test_the_helper_and_the_programs_start(self):
         # A helper runs nothing of the program's start (-I -S): a user's sitecustomize that writes to
         # standard output runs in the program alone, and the helper's answers are not mixed with what

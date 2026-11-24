@@ -792,6 +792,36 @@ def _patch_cache(module):
     cls._volta_forever = True
 
 
+def _triton_files(cls=None):
+    """What the files of this process's Triton with which a helper compiles are: [device, inode,
+    size, modification time in ns] of its library (triton._C.libtriton, the file that Python
+    mapped) and of the module of its NVIDIA backend (CUDABackend's, cls), None for one that cannot
+    be read. Recorded when Triton is imported, and compared with those of a helper's Triton
+    (volta_forever_triton_client._identity): a Triton replaced or changed in place under a running
+    program with the same version (another build reinstalled, an editable install edited, an
+    environment made again) is not taken. Two stat() calls."""
+    if cls is None:
+        try:
+            from triton.backends import backends
+            cls = backends["nvidia"].compiler
+        except Exception:  # noqa: BLE001
+            cls = None
+    paths = (getattr(sys.modules.get("triton._C.libtriton"), "__file__", None),
+             getattr(getattr(cls, "make_cubin", None), "__globals__", {}).get("__file__"))
+    out = []
+    for path in paths:
+        try:
+            st = os.stat(path)
+            out.append([st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns])
+        except (OSError, TypeError, ValueError):
+            out.append(None)
+    return out
+
+
+# The files of _triton_files, as a line names them.
+TRITON_FILES = ("its library (triton._C.libtriton)", "its NVIDIA backend (CUDABackend's module)")
+
+
 def _patch_backend(module):
     """Patch the class CUDABackend of the table of Triton's backends, once."""
     nvidia = getattr(module, "backends", {}).get("nvidia")
@@ -810,6 +840,7 @@ def _patch_backend(module):
         return
     add_stages = cls.add_stages
     backend_hash = cls.hash
+    _state["files"] = _triton_files(cls)
 
     def vf_add_stages(self, stages, options, *rest):
         add_stages(self, stages, options, *rest)

@@ -347,16 +347,32 @@ def _json(value):
 
 def _identity():
     """What a helper's Triton must be: the program's (the interpreter, Triton's directory and its
-    version; not the digest of its files, triton_key(), which reads all of libtriton.so again:
-    0.4 s of each helper's start, for the same directory)."""
+    version, and what its library and its NVIDIA backend are on disk, _core._triton_files: in the
+    program, as they were when it imported Triton; not the digest of its files, triton_key(),
+    which reads all of libtriton.so again: 0.4 s of each helper's start)."""
     with _lock:
         if "identity" in _state:
             return _state["identity"]
     import triton
     ident = {"python": os.path.realpath(sys.executable or "?"),
-             "triton": os.path.realpath(os.path.dirname(triton.__file__)), "version": triton.__version__}
+             "triton": os.path.realpath(os.path.dirname(triton.__file__)), "version": triton.__version__,
+             "files": _state.get("files") or _core._triton_files()}
     with _lock:
         return _state.setdefault("identity", ident)
+
+
+def _identity_problem(theirs):
+    """Why a helper's identity is not the program's, or None."""
+    mine = _identity()
+    if theirs == mine:
+        return None
+    if not isinstance(theirs, dict) or any(theirs.get(k) != mine.get(k) for k in ("python", "triton", "version")):
+        return "its helper imported another Triton than the program's (%s, not %s)" % (
+            str(theirs)[:300], {k: mine.get(k) for k in ("python", "triton", "version")})
+    files = theirs.get("files") if isinstance(theirs.get("files"), list) else []
+    changed = [name for name, a, b in zip(_core.TRITON_FILES, files, mine["files"]) if a != b] or ["its files"]
+    return ("the program's Triton changed on disk since the program imported it (%s: the same version, other "
+            "files); its helper would compile with what is there now" % ", ".join(changed))
 
 
 # --- a helper --------------------------------------------------------------------------------
@@ -773,14 +789,14 @@ class _Helper(object):
             raise HelperFailed("its helper ended at its start (%s)" % why, False)
         if message is None:
             return False
-        if message.get("kind") == "ready" and message.get("identity") == _identity():
+        why = _identity_problem(message.get("identity")) if message.get("kind") == "ready" else None
+        if message.get("kind") == "ready" and why is None:
             work = message.get("work")
             self.ready, self.work = True, work if isinstance(work, str) else None
             return True
         self.kill()
         if message.get("kind") == "ready":
-            raise HelperFailed("its helper imported another Triton than the program's (%s, not %s)"
-                               % (message.get("identity"), _identity()), False)
+            raise HelperFailed(why, False)
         raise HelperFailed("its helper did not start: %s" % str(message.get("why", message.get("kind")))[:300], False)
 
     def ask(self, request, timeout):
