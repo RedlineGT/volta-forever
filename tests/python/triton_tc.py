@@ -1897,6 +1897,65 @@ class Decisions(Base):
         r = self.run_vf([sys.executable, "-c", code, dot("f16"), dot("bf16")], self.env(PYTHONPATH=str(self.standin)))
         self.assertEqual(self.last(r), ["cubin sm_80", "cubin sm_80", True, [False]], r.stderr)
 
+    def test_a_program_that_is_a_subreaper(self):
+        # A program that is a child subreaper (as Python as PID 1 of a container is) inherits the
+        # ptxas of a helper killed while it runs, and of a compilation that does not end in its
+        # time-out (the kill of the helper's group ends them): the helper's waiter reaps them, and
+        # the program is left no zombie (PyPy, without waitid: not done).
+        code = textwrap.dedent("""
+            import ctypes, json, os, sys, time
+            ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)   # PR_SET_CHILD_SUBREAPER
+            from triton.backends.nvidia import compiler as c
+            out = [c.compile(t)[0].decode()[:11] for t in sys.argv[1:]]
+            time.sleep(1.5)
+            zombies = []
+            for p in os.listdir("/proc"):
+                if p.isdigit():
+                    try:
+                        st = open("/proc/%s/stat" % p).read()
+                    except OSError:
+                        continue
+                    name, rest = st.split("(", 1)[1].rsplit(")", 1)
+                    if rest.split()[0] == "Z" and int(rest.split()[1]) == os.getpid():
+                        zombies.append(name)
+            print(json.dumps([out, zombies]))
+            """)
+        r = self.run_vf([sys.executable, "-c", code, dot("f16", "PTXKILLED80\n"), dot("bf16", "PTXAS80\n")],
+                        self.env(PYTHONPATH=str(self.standin), VF_TRITON_TC_TIMEOUT="3"))
+        out, zombies = self.last(r)
+        self.assertEqual(out, ["cubin sm_75"] * 2, r.stderr)
+        if hasattr(os, "waitid"):
+            self.assertEqual(zombies, [], r.stderr)
+
+    def test_a_program_that_execs(self):
+        # A program that replaces itself with exec() while its helper lives: the helper's socket is
+        # not inherited by the new image (close-on-exec), the helper sees its end and ends within a
+        # second (a zombie of the new image, which does not know it, until that waits for any child
+        # or ends).
+        code = textwrap.dedent("""
+            import os, sys
+            from triton.backends.nvidia import compiler as c
+            assert c.compile(sys.argv[1])[0].decode().startswith("cubin sm_80")
+            helper = sys.modules["volta_forever_triton"].client()._the_pool().helpers[0].pid
+            os.execv(sys.executable, [sys.executable, "-I", "-c", '''
+            import json, os, sys, time
+            helper, t = int(sys.argv[1]), time.monotonic()
+            while time.monotonic() - t < 5:
+                try:
+                    st = open("/proc/%d/stat" % helper).read().rsplit(")", 1)[1].split()
+                except OSError:
+                    st = ["gone", None]
+                if st[0] in ("Z", "gone"):
+                    break
+                time.sleep(0.01)
+            print(json.dumps([st[0], st[1] == str(os.getpid()), round(time.monotonic() - t, 2)]))
+            '''.replace("\\n            ", "\\n"), str(helper)])
+            """)
+        r = self.run_vf([sys.executable, "-c", code, dot("f16")], self.env(PYTHONPATH=str(self.standin)))
+        state, parent, took = self.last(r)
+        self.assertEqual((state, parent), ("Z", True), r.stderr)
+        self.assertLess(took, 1.0)
+
     def test_a_fork_after_the_program_closed_its_descriptors(self):
         # A program that closed its descriptors (the layer's lock files of places that were taken
         # among them) and opened its own at their numbers, then forks: in the child, the program's
@@ -2261,6 +2320,34 @@ class Module(Base):
                                                              str(self.root), ()))
         self.assertEqual(h._request_problem(request(num_warps=4096), Options, str(self.root), ()),
                          "numbers of warps, stages or registers out of their ranges")
+
+    def test_a_helper_reaps_its_children(self):
+        # A helper that ends otherwise than killed kills what it still runs (a ptxas left by a
+        # compilation that failed) and reaps its children, a second at most: none is left to its
+        # program or to a subreaper.
+        code = textwrap.dedent("""
+            import importlib.util, json, subprocess, sys, time
+            spec = importlib.util.spec_from_file_location("vft_helper_children", sys.argv[1])
+            h = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(h)
+            kids = [subprocess.Popen(["sleep", "41.25"]).pid for _ in range(2)] + [subprocess.Popen(["true"]).pid]
+            time.sleep(0.3)   # (the last one has ended: a zombie until it is reaped)
+            t = time.monotonic()
+            h._end_children()
+            states = []
+            for pid in kids:
+                try:
+                    states.append(open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[0])
+                except OSError:
+                    states.append("gone")
+            print(json.dumps([states, round(time.monotonic() - t, 1)]))
+            """)
+        r = subprocess.run([sys.executable, "-c", code, str(self.home / "python/volta_forever_triton_helper.py")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertTrue(r.stdout.strip(), r.stderr)
+        states, took = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(states, ["gone"] * 3, r.stderr)
+        self.assertLess(took, 1.5)
 
     def test_a_send_to_a_closed_peer(self):
         # A message sent on a socket whose peer has closed (a helper that ended at its idle time as

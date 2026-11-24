@@ -19,10 +19,13 @@ time, started at the first kernel that needs one:
     other descriptor closed;
   - reached through a socket pair whose descriptor it inherits: no path names it, and no other
     process can reach it;
-  - ended with its program (PR_SET_PDEATHSIG, the end of its socket), when it has had nothing to
-    do for VF_TRITON_TC_IDLE seconds, or for half a second when a process of the user waits for a
-    slot; waited for by a thread of its own (the wait of its pid alone: no other child of the
-    program is taken), so that none is left as a zombie;
+  - ended with its program (PR_SET_PDEATHSIG, the end of its socket: also when the program
+    replaces itself with exec(), whose new image then has it as a child it does not know, a
+    zombie until that image waits for any child or ends), when it has had nothing to do for
+    VF_TRITON_TC_IDLE seconds, or for half a second when a process of the user waits for a slot;
+    waited for by a thread of its own (the wait of its pid alone: no other child of the program is
+    taken by the layer; but the program's own wait for any child, os.wait() or waitpid(-1), may
+    take a helper), which also reaps what of its group a subreaper program inherits (_reap_group);
   - holding a slot (a place) while it lives: one of VF_TRITON_TC_JOBS lock files of this host in
     the directory of the user's helpers in Triton's cache directory (_places), locked with flock;
     so that the user's helpers on a host are that many at most, and their memory with them.
@@ -652,6 +655,27 @@ class _Helper(object):
             # (Ended by a signal or an error before this process read that it was ready, as when its
             # import of Triton does not end: another helper would do the same.)
             _broken("its helper ended at its start (status %s)" % self.status)
+        self._reap_group()
+
+    def _reap_group(self):
+        """What of the helper's group became this process's children, reaped (for a second at
+        most): a program that is a child subreaper (as Python is as PID 1 of a container) is given
+        the ptxas of a helper killed while it ran, which the kill of the group ended. Members of
+        the helper's group alone: a group of another session, which no other process of the
+        program can join, and whose number no other process takes while one of them is left.
+        (PyPy has no waitid: there they are left to the program.)"""
+        import time
+        if not hasattr(os, "waitid"):
+            return
+        end = time.monotonic() + 1.0
+        while True:
+            try:
+                if os.waitid(os.P_PGID, self.pid, os.WEXITED | os.WNOHANG) is None:
+                    if time.monotonic() > end:
+                        return
+                    time.sleep(0.02)
+            except OSError:   # (ECHILD: none, or no more)
+                return
 
     def usable(self):
         """Whether an idle helper can take a request: its socket is still this process's, and the

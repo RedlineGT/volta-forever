@@ -332,6 +332,39 @@ def _work_dir():
     return tempfile.mkdtemp(prefix="volta-forever-triton-")
 
 
+def _end_children():
+    """What this helper still runs (a ptxas left by a compilation that failed) killed, and its
+    children reaped (a second at most), when it ends otherwise than killed: none of them is then
+    left to its program, or to a child subreaper, to reap. (The program's waiter kills what is left
+    of the helper's group after it ends, whatever ended it.)"""
+    import glob
+    import signal
+    import time
+    kids = set()
+    for path in glob.glob("/proc/self/task/*/children"):
+        try:
+            with open(path) as f:
+                kids.update(int(p) for p in f.read().split())
+        except (OSError, ValueError):
+            continue
+    for pid in kids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    end = time.monotonic() + 1.0
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except OSError:   # (ECHILD: none left)
+            return
+        if pid == 0:
+            if not kids or time.monotonic() > end:
+                return
+            time.sleep(0.02)
+        kids.discard(pid)
+
+
 def _serve(sock, waiting, err):
     """Answer the program's requests, one at a time, until its socket ends, the helper has had
     nothing to do for VF_TRITON_TC_IDLE seconds, or for GRACE seconds while a process waits for a
@@ -437,6 +470,7 @@ def _main(sock_fd, slot_fd, waiting_fd, parent, root):
         if hello["kind"] == "ready":
             _serve(sock, waiting_fd, err)
     finally:
+        _end_children()
         shutil.rmtree(work, ignore_errors=True)
 
 
