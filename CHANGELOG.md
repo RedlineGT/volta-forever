@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+### Changed
+
+- The lowering of PTX, the specialization of divisions and the analysis of a module scan and allocate less (pull request #5, by midhatn): one pass with a table in place of 51 searches to tell whether a module needs lowering, early returns where a pass has nothing to rewrite, borrowed names in the analysis of dependencies. The output is the same as before on the corpora compared (13,414 PTX files of NVIDIA's libraries, cuBLAS and cuBLASLt 13.5, Triton and Strata under four sets of options, and 112 fat binaries of Strata). On one CPU, the adaptation of the 60 fat binaries of Strata's CUDA 13 engine 0.1.66 takes 5.0 s instead of 27.9 s, and the lowering of cuBLASLt 13.5's PTX 10.6 s instead of 30.4 s: the first start of a program with empty caches is shorter by as much.
+
 ## 0.1.5 (2026-11-24)
 
 ### Fixed
