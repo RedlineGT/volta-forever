@@ -96,7 +96,8 @@ def child(proxy, library, mode):
         assert not hasattr(c.CDLL(os.environ["VF_REAL_LIBCUDA"]), "vf_summary_add")
         assert add(b"a", b"count", abi=2) == errno.ENOTSUP
         assert add(b"a", b"count", abi=0) == errno.ENOTSUP
-        for name in (b"", b"x" * 65, b"a b", b"a]b", b"a\nb", b"volta-forever", b"VOLTA-FOREVER"):
+        for name in (b"", b"x" * 65, b"a b", b"a]b", b"a\nb", b"volta-forever", b"VOLTA-FOREVER", b"volta-forever_",
+                     b"VOLTA-FOREVER-2", b"volta-forever.so", b"volta-forever+x"):
             assert add(name, b"count") == errno.EINVAL, name
         assert add(b"a", b"no such fill") == errno.EINVAL
         assert add(b"x" * 64, b"count", 7) == 0  # the longest name
@@ -308,14 +309,33 @@ def child(proxy, library, mode):
     raise AssertionError(f"unknown mode {mode}")
 
 
-def wait_for(path, text, seconds=15):
+def wait_for(path, line, seconds=15):
+    """Until the file has a line that begins with `line` (a reader of the file matches at the start of a line)."""
     end = time.time() + seconds
     while time.time() < end:
-        if path.exists() and text in path.read_text(errors="replace"):
+        if path.exists() and "\n" + line in "\n" + path.read_text(errors="replace"):
             return path.read_text()
         time.sleep(0.1)
-    raise AssertionError(f"{path}: no '{text}' after {seconds} s: " + (path.read_text(errors="replace")
-                                                                       if path.exists() else "no file"))
+    raise AssertionError(f"{path}: no line '{line}' after {seconds} s: " + (path.read_text(errors="replace")
+                                                                            if path.exists() else "no file"))
+
+
+def first(text):
+    """The file's first line, the layer's, that says whether the process had exited."""
+    return text.split("\n", 1)[0]
+
+
+def exited(text, pid):
+    return first(text) == f"[volta-forever] report of process {pid}, at its exit"
+
+
+def running(text, pid):
+    return first(text).startswith(f"[volta-forever] report of process {pid}, running for ")
+
+
+def has(text, prefix):
+    """Whether a line of the text begins with prefix."""
+    return any(l.startswith(prefix) for l in text.splitlines())
 
 
 def well_formed(path, names):
@@ -454,7 +474,7 @@ if __name__ == "__main__":
         wait_for(path, "[counter] count 0\n")
         text = well_formed(path, names)
         lines = text.splitlines()
-        assert lines[0].startswith(f"[volta-forever] report of process {p.pid}, running for "), text
+        assert running(text, p.pid), text
         for bad in ("bad", "bad2"):
             mine = of(text, bad)
             assert mine and mine[-1] == "END", mine[-3:]
@@ -471,7 +491,7 @@ if __name__ == "__main__":
         wait_for(path, "[counter] count 1\n")
         assert p.kill() == -signal.SIGKILL
         text = well_formed(path, names)
-        assert "running for" in text and of(text, "counter") == ["count 1"] and "at its exit" not in text, text
+        assert running(text, p.pid) and of(text, "counter") == ["count 1"], text
         print("PASS a fill's lines after the layer's, written again when they change, kept after SIGKILL; fills that"
               " write control bytes and bytes that are not UTF-8 and return more than their buffer leave the file"
               " well formed, read up to the buffer's end")
@@ -490,11 +510,11 @@ if __name__ == "__main__":
         calls = p.line()
         assert calls == ["calls", removed[2]], (calls, removed)
         text = well_formed(path, ["counter"])
-        assert "count 4" not in text and "[counter] " not in text, text
+        assert of(text, "counter, last report") == ["count 3"] and not has(text, "[counter] "), text
         p.send()
         assert p.line() == ["again", "0"]
         wait_for(path, "[counter] count 4\n")
-        assert "last report" not in path.read_text()
+        assert not has(path.read_text(), "[counter, last report] "), path.read_text()
         p.kill()
         print("PASS a removal calls the fill once more and keeps its lines, marked as its last report; nothing is"
               " called after it; the name registered again takes its slot back")
@@ -585,7 +605,7 @@ if __name__ == "__main__":
             assert "cannot start the thread that writes the report" in err, err
             assert out.split() == ["calls", "0"], out
             text = well_formed(Path(f"{summary}.{p.pid}"), ["counter"])
-            assert "at its exit" in text and of(text, "counter") == ["count 7"], text
+            assert exited(text, p.pid) and of(text, "counter") == ["count 7"], text
             print("PASS a registration without the thread (it could not be started) is written at exit")
 
         # Fills that break the contract. One that never returns: a fork from another thread does not wait for it
@@ -600,7 +620,7 @@ if __name__ == "__main__":
         out, err = p.finish(30)
         took = time.time() - t0
         text = well_formed(Path(f"{summary}.{p.pid}"), ["hang"])
-        assert text.startswith(f"[volta-forever] report of process {p.pid}, at its exit\n") and took < 10, (took, text)
+        assert exited(text, p.pid) and took < 10, (took, text)
         assert ("\n[volta-forever] the lines of other libraries are not in this last write: one of their functions had "
                 "not returned 2 s after the exit began\n") in text and "\n[hang] " not in text, text
         # One that forks at each write: no deadlock (the fork's handlers do not wait for the fill's own lock).
@@ -612,8 +632,7 @@ if __name__ == "__main__":
         p.finish()
         text = well_formed(Path(f"{summary}.{p.pid}"), ["forks"])
         forked = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("[forks] forked ")]
-        assert text.startswith(f"[volta-forever] report of process {p.pid}, at its exit\n") and forked and \
-            forked[0] >= 3, text
+        assert exited(text, p.pid) and forked and forked[0] >= 3, text
         # One that calls exit(3): the process ends with that status, and the last write is made, without the other
         # libraries' lines (this thread was in one of their functions), and says so.
         p = start("exits", **on)
@@ -621,7 +640,7 @@ if __name__ == "__main__":
         status, out, err = p.end()
         assert status == 3 and "still alive" not in out, (status, out, err)
         text = well_formed(Path(f"{summary}.{p.pid}"), ["exits"])
-        assert text.startswith(f"[volta-forever] report of process {p.pid}, at its exit\n"), text
+        assert exited(text, p.pid), text
         assert ("\n[volta-forever] the lines of other libraries are not in this last write: the process exited from "
                 "one of their functions\n") in text, text
         print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here), the"
@@ -644,7 +663,7 @@ if __name__ == "__main__":
             assert after in (before, before + 1), end
             library_first = after == before + 1  # its removal came before the last write, and called the fill
             mark = "[counter, last report] " if library_first else "[counter] "
-            assert "at its exit" in text.splitlines()[0] and f"\n{mark}count 7\n" in text, (mode, end, text)
+            assert exited(text, p.pid) and f"\n{mark}count 7\n" in text, (mode, end, text)
             orders.append(library_first)
         assert sorted(orders) == [False, True], f"both cases ran the destructors in one order: {orders}"
         print(f"PASS at exit, in both orders of the destructors (the {'library' if orders[0] else 'layer'}'s first"
@@ -672,7 +691,7 @@ if __name__ == "__main__":
         text, err = unloaded("dlclose", "unloaded")
         assert "removed at its end: calls before" in err and of(text, "counter, last report") == ["count 2"], text
         text, err = unloaded("dlclose-pinned", "loaded")
-        assert of(text, "counter") == ["count 3"] and "last report" not in text, text
+        assert of(text, "counter") == ["count 3"] and not has(text, "[counter, last report] "), text
         print("PASS a library unloaded while the thread runs removes itself: its last report stays and the process"
               " lives on; pinned, it stays loaded and its lines are written as they change")
         # Control: without its removal, the thread calls into the library that is gone.

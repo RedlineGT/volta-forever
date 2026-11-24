@@ -598,9 +598,10 @@ the fallback is not reached.
 The twentieth checks the lines that another library puts in
 `VF_SUMMARY`'s file through the layer's `vf_summary_add` and `vf_summary_remove`, with the stand-in of
 the thirteenth and a library of the test's (`summary_fill.c`) whose functions give its lines: the
-return codes, the four slots and a name that takes its slot back, the functions found on the layer's
-handle and not on the driver's; a library's lines after the layer's, with its name in front, written
-again when they change and kept after SIGKILL; functions that fill their whole buffer with control
+return codes (a name that begins with `volta-forever`, in any case, refused), the four slots and a
+name that takes its slot back, the functions found on the layer's handle and not on the driver's; a
+library's lines after the layer's, with its name in front, written again when they change and kept
+after SIGKILL, every check of the file made on whole lines from their start; functions that fill their whole buffer with control
 bytes, bytes that are not UTF-8 and valid UTF-8 between them, and return more than its size, leave
 the file valid UTF-8 without control characters, each line with a known prefix, the text read up to
 the buffer's end and no further; a removal that waits for the call under way (of 300 ms), calls the

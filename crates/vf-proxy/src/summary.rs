@@ -185,7 +185,7 @@ fn not_filling() {
 /// is copied. After the last write (at exit), nothing is done and 0 returned. Returns 0, or:
 /// - `ENOTSUP`: `abi` is not 1, the number of this interface;
 /// - `EINVAL`: `name` or `fill` is null, or `name` is not 1 to 64 ASCII letters, digits, `.`, `_`,
-///   `+` and `-`, or is `volta-forever` (the layer's own, in any case);
+///   `+` and `-`, or begins with `volta-forever` (the layer's own, in any case);
 /// - `EEXIST`: `fill` with this `ctx` is registered under another name, or `name` with another `fill`
 ///   or `ctx` (a name registered again takes its slot back once its library was removed);
 /// - `ENOSPC`: 4 other names are registered (a removed library's name keeps its slot);
@@ -323,12 +323,19 @@ unsafe fn name_of(name: *const c_char) -> Option<String> {
     valid_name(&bytes).then(|| String::from_utf8(bytes).ok()).flatten()
 }
 
-/// 1 to 64 ASCII letters, digits, `.`, `_`, `+` and `-`, and not the layer's own name in any case:
-/// what goes between the brackets in front of a line of the file, where a reader tells whose it is.
+/// The layer's own name, at the start of its lines: no library's name begins with it.
+const LAYER: &[u8] = b"volta-forever";
+
+/// 1 to 64 ASCII letters, digits, `.`, `_`, `+` and `-`, not beginning with the layer's own name in any
+/// case: what goes between the brackets in front of a line of the file, where a reader tells whose it is
+/// (`volta-forever_` or `VOLTA-FOREVER-2` would pass for the layer's with a reader that matches less
+/// than the whole of its prefix).
 fn valid_name(name: &[u8]) -> bool {
     (1..=NAME_MAX).contains(&name.len())
         && name.iter().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(b))
-        && !name.eq_ignore_ascii_case(b"volta-forever")
+        && !name
+            .get(..LAYER.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(LAYER))
 }
 
 /// `name` registered in `slots` with `fill` and `ctx`: in the slot of that name when there is one (its
@@ -656,7 +663,15 @@ mod tests {
 
     #[test]
     fn a_name_is_what_can_go_between_the_brackets_of_a_line() {
-        for name in ["libvf_cublas_bf16.so", "a", "A-b_c.d+e", &"x".repeat(64)] {
+        for name in [
+            "libvf_cublas_bf16.so",
+            "a",
+            "A-b_c.d+e",
+            &"x".repeat(64),
+            "volta",
+            "voltaforever",
+            "x-volta-forever",
+        ] {
             assert!(valid_name(name.as_bytes()), "{name}");
         }
         for name in [
@@ -668,6 +683,16 @@ mod tests {
             "volta-forever",
             "Volta-Forever",
             &"x".repeat(65),
+        ] {
+            assert!(!valid_name(name.as_bytes()), "{name:?}");
+        }
+        // Nor a name that begins with the layer's, in any case.
+        for name in [
+            "volta-forever_",
+            "VOLTA-FOREVER-2",
+            "volta-forever.so",
+            "volta-forever+x",
+            "Volta-forevers",
         ] {
             assert!(!valid_name(name.as_bytes()), "{name:?}");
         }
