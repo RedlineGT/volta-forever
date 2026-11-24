@@ -254,6 +254,25 @@ def case(name, proxy):
         # A, later: its own synchronisation.
         out.append(run.api.cuCtxSetCurrent(a))
         out.append(run.api.cuCtxSynchronize())
+    elif name == "event-again":
+        # Faults of six contexts, each met first by a wait for an event (of a context that the layer
+        # cannot tell): the first is said, and each later one with a launch made since is said again,
+        # 4 times at most; one met again with no launch since is not. Then a context is destroyed:
+        # the next is said.
+        contexts = []
+        for i in range(7):
+            if i == 6:
+                out.append(run.api.cuCtxDestroy_v2(contexts[0]))
+            context, functions = run.new_context()
+            contexts.append(context)
+            stream, event = run.stream(), c.c_void_p()
+            assert run.api.cuEventCreate(c.byref(event), 0) == 0
+            out.append(run.launch("add_one", stream, grid=10 * i + 1, functions=functions))
+            out.append(run.launch("write_null", stream, grid=10 * i + 2, functions=functions))
+            out.append(run.api.cuEventRecord(event, stream))
+            out.append(run.api.cuEventSynchronize(event))
+            if i == 0:
+                out.append(run.api.cuEventQuery(event))
     elif name == "ecc":
         # An uncorrectable ECC error (214), as an aged V100's memory reports one: not a kernel's fault.
         out.append(run.launch("add_one", grid=1))
@@ -426,6 +445,20 @@ def checks(name, log, summary, results):
         expect("no fault is said", not faults)
         expect("not waited for during a capture, waited for after", results == ["0", "0", "0", "0", "0", "1"])
         return found
+    if name == "event-again":
+        heads = [lines[i] for i in faults]
+        grids = [sorted(int(g) for g in re.findall(r"grid (\d+)x1x1", "\n".join(lines[i:j])))
+                 for i, j in zip(faults, faults[1:] + [len(lines)])]
+        expect("each fault met by a wait for an event, of a context the layer cannot tell",
+               results == (["0", "0", "0", "700", "700"] + ["0", "0", "0", "700"] * 5 + ["0"] +
+                           ["0", "0", "0", "700"]) and
+               all("in a CUDA context that the layer cannot tell" in head for head in heads))
+        expect("said once, then 4 times again with the launches made since, not a sixth time; then again "
+               "after a context was destroyed", len(faults) == 6 and
+               ["said again" in head for head in heads] == [False, True, True, True, True, False])
+        expect("each with the write_null of the context that faulted last",
+               [g[-1] if g else 0 for g in grids[:5]] == [2, 12, 22, 32, 42] and 62 in grids[5:6][0])
+        return found
     if name in ("other-context-event", "no-context"):
         # The context is not known at the wait: said so, with the launches of every context, and no
         # context taken as reported; A's own synchronisation then names A's.
@@ -508,6 +541,25 @@ def checks(name, log, summary, results):
     elif name == "other-context-stream":
         expect("the fault is A's, which its stream's launch tells: write_null alone, not B's launches",
                "cuStreamSynchronize returned 700" in head and names == ["write_null"])
+    elif name == "event-again":
+        # Faults of six contexts, each met first by a wait for an event (of a context that the layer
+        # cannot tell): the first is said, and each later one with a launch made since is said again,
+        # 4 times at most; one met again with no launch since is not. Then a context is destroyed:
+        # the next is said.
+        contexts = []
+        for i in range(7):
+            if i == 6:
+                out.append(run.api.cuCtxDestroy_v2(contexts[0]))
+            context, functions = run.new_context()
+            contexts.append(context)
+            stream, event = run.stream(), c.c_void_p()
+            assert run.api.cuEventCreate(c.byref(event), 0) == 0
+            out.append(run.launch("add_one", stream, grid=10 * i + 1, functions=functions))
+            out.append(run.launch("write_null", stream, grid=10 * i + 2, functions=functions))
+            out.append(run.api.cuEventRecord(event, stream))
+            out.append(run.api.cuEventSynchronize(event))
+            if i == 0:
+                out.append(run.api.cuEventQuery(event))
     elif name == "ecc":
         expect("an error of the hardware, said so, not a kernel's fault",
                head.startswith("the GPU's memory reported an uncorrectable ECC error: cuCtxSynchronize returned 214 "
@@ -584,7 +636,7 @@ def main():
                  ("exec-reuse", {"MOCK_EXEC_FIXED": "1"}), ("exact-capture", {"VF_FAULT_TRACE": "1"}),
                  ("exact-done", {"VF_FAULT_TRACE": "1", "MOCK_DELAY": "1"}),
                  ("copy", {}), ("copy-destroyed", {}), ("exit", {}), ("unload-failed", {}), ("profile", {"VF_PROFILE": str(Path(tmp) / "profile")}),
-                 ("sigexit", {"MOCK_SIGNAL": "1"}), ("sigexit-report", {"MOCK_SIGNAL": "1"}),
+                 ("sigexit", {"MOCK_SIGNAL": "1"}), ("sigexit-report", {"MOCK_SIGNAL": "1"}), ("event-again", {}),
                  # Exact mode needs the exact value.
                  ("candidates", {"VF_FAULT_TRACE": "true"}),
                  # The report off: as without it, exact mode too; only the exact value turns it off.

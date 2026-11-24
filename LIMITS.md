@@ -383,7 +383,11 @@ What the layer cannot say:
   was recorded in is not known), and a fault that a wait for an event meets first, or a call made
   with no context current, is said of a context that the layer cannot tell: the launches of every
   context are named, each with its context, and the fault is said again, of its context, at the
-  first call that meets it there. The context of a stream's synchronisation or query that meets a
+  first call that meets it there. Faults of a context that the layer cannot tell are said once
+  until a context is destroyed, and again only when a later one has candidates launched since the
+  reports before read them, at most 4 times more in a process: a fault of another context met the
+  same way with no launch since, or after those 4, is said only at a call that meets it in its own
+  context. The context of a stream's synchronisation or query that meets a
   fault is that of the launches kept on the stream; on a stream with none of a context the layer
   knows, it cannot be told either. A kernel of a library launched by its own handle runs in whatever
   context is current: it is a candidate in every context (in a process of several, the line says

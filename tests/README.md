@@ -430,7 +430,9 @@ destroys contexts that have modules (120 threads' launches looked up meanwhile);
 `VF_PROFILE` are the program's synchronisations for the report; that a fault of a context met by
 a wait for its stream while another is current is said of the stream's context, and one met by a
 wait for an event, or with no context current, of a context that the layer cannot tell, with the
-launches of every context, and again of its context later; that with `VF_FAULT_REPORT=0`
+launches of every context, and again of its context later; that faults of six contexts, each met
+first by a wait for an event, are said once and then again for each one with launches made since,
+four times at most, and once more after a context is destroyed; that with `VF_FAULT_REPORT=0`
 (only that value) nothing is said or waited for and a lookup of a synchronisation leads to the
 driver; and nothing said when nothing faults; that an uncorrectable ECC error (214) is said to be the hardware's, with what ran then; that
 the report at exit keeps the caveats of its line (launches a thread's record no longer holds); that

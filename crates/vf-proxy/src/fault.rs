@@ -19,7 +19,8 @@
 //! context of the launches kept on that stream (a launch runs in its stream's context); a wait for
 //! an event, or a call with no context current, is of a context that the layer cannot tell, and its
 //! report names the launches of every context, each with its own, and takes no context for
-//! reported.
+//! reported: such a fault is reported once until a context is destroyed, and again when it has a
+//! candidate launched since (`Anywhere`), at most `ANYWHERE_AGAIN` times in the process.
 //!
 //! What the layer can say then is which kernels were launched in that context and not seen to end,
 //! and what it did to each:
@@ -111,7 +112,7 @@
 //!   `contexts` (`context_of`, `known`) while it holds a lock of its own: the record is copied out
 //!   and the lock let go first (`identify`, `forget_in`).
 //! - `TAKEN` → `FORGOTTEN` → `RINGS_HELD`: never the other way.
-//! - `COVERS`, `GRAPHS`, `EXECS`, `REPORTED` and `SUMMARIES` are each taken alone: no other lock is
+//! - `COVERS`, `GRAPHS`, `EXECS`, `REPORTED`, `ANYWHERE` and `SUMMARIES` are each taken alone: no other lock is
 //!   taken under them, and they are not taken under another (a value is copied out of one before
 //!   the next is taken).
 //! - No lock is held across a call of the driver, nor across a line written to the log; the report
@@ -1616,6 +1617,8 @@ struct Found {
     /// The fault was met by the synchronisation that the layer made right after this launch (its
     /// ring and number: exact mode, `VF_PROFILE`).
     met: Option<(usize, u64)>,
+    /// Of a context that the layer cannot tell, reported again (`Anywhere`).
+    again: bool,
 }
 
 /// The candidates among `launches` (of every ring, in any order) for a fault in `context`: those
@@ -1700,9 +1703,58 @@ fn sorted(found: &mut Found, launches: &[Launch], wrapped: &[usize], context_cov
 
 /// The contexts whose fault was reported.
 static REPORTED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-/// Whether a fault of a context that the layer could not tell was reported (once, until a context
-/// is destroyed): no context is taken as reported then.
-static REPORTED_ANYWHERE: AtomicBool = AtomicBool::new(false);
+/// The faults of a context that the layer could not tell (no context is taken as reported then):
+/// one is reported once until a context is destroyed, and again when it has a candidate launched
+/// since the reports before read their launches (a fault of another context, met the same way), at
+/// most `ANYWHERE_AGAIN` times in the process.
+#[derive(Default)]
+struct Anywhere {
+    /// Whether one was reported since a context was last destroyed.
+    said: bool,
+    /// The number of the last launch of each ring that those reports read.
+    read: HashMap<usize, u64>,
+    /// The reports made again so far.
+    again: usize,
+}
+
+static ANYWHERE: LazyLock<Mutex<Anywhere>> = LazyLock::new(|| Mutex::new(Anywhere::default()));
+const ANYWHERE_AGAIN: usize = 4;
+
+fn anywhere() -> Held<Anywhere> {
+    hold(&*ANYWHERE)
+}
+
+impl Anywhere {
+    /// Whether a fault of a context that the layer cannot tell, whose candidates are `found` (the
+    /// rings held up to `read` then), is reported: the first since a context was destroyed, or one
+    /// with a candidate launched after those that the reports before read, while fewer than
+    /// `ANYWHERE_AGAIN` were made again; `Some(true)` for one made again.
+    fn said(&mut self, found: &Found, read: &HashMap<usize, u64>) -> Option<bool> {
+        let again = self.said;
+        if again {
+            let new = found
+                .launches
+                .iter()
+                .any(|launch| self.read.get(&launch.ring).is_none_or(|&last| launch.number > last));
+            if !new || self.again >= ANYWHERE_AGAIN {
+                return None;
+            }
+            self.again += 1;
+        }
+        self.said = true;
+        for (&ring, &last) in read {
+            let kept = self.read.entry(ring).or_insert(last);
+            *kept = (*kept).max(last);
+        }
+        Some(again)
+    }
+
+    /// A context was destroyed: the next fault of a context that the layer cannot tell is reported.
+    fn context_gone(&mut self) {
+        self.said = false;
+        self.read.clear();
+    }
+}
 /// The lines of the report at exit: one for each fault reported (at most `SUMMARIES_KEPT`).
 static SUMMARIES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 const SUMMARIES_KEPT: usize = 8;
@@ -1738,7 +1790,9 @@ fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
             reported.push(context);
         }
         _ => {
-            if REPORTED_ANYWHERE.swap(true, Relaxed) {
+            // (Whether it is reported is known once its candidates are: `Anywhere::said`.)
+            let anywhere = anywhere();
+            if anywhere.said && anywhere.again >= ANYWHERE_AGAIN {
                 return;
             }
         }
@@ -1748,12 +1802,21 @@ fn seen(result: CUresult, call: &str, of: Of, met: Option<(usize, u64)>) {
         Of::Unknown(why) => Err(why),
         Of::Stream(_) => Err("a stream on which the layer kept no launch of a context it knows"),
     };
-    let made = catch_unwind(AssertUnwindSafe(|| report(result, call, context, met)));
-    let Ok((lines, summary)) = made else {
+    let made = catch_unwind(AssertUnwindSafe(|| {
+        let (mut found, read, contexts) = gather(context, met);
+        if context.is_err() {
+            found.again = anywhere().said(&found, &read)?;
+        }
+        Some(compose(&found, config().fault_trace, contexts, result, call))
+    }));
+    let Ok(made) = made else {
         log::error(format_args!(
             "{} ({call} returned {result}); the layer could not say what ran (internal error)",
             what_failed(result)
         ));
+        return;
+    };
+    let Some((lines, summary)) = made else {
         return;
     };
     for line in &lines {
@@ -1847,14 +1910,10 @@ fn stream_context(stream: u64) -> Option<u64> {
     on.iter().find_map(launch_context)
 }
 
-/// The report of a fault of `context` (or of a context that the layer cannot tell, and why): its
-/// lines, and its line at exit.
-fn report(
-    result: CUresult,
-    call: &str,
-    context: Result<u64, &'static str>,
-    met: Option<(usize, u64)>,
-) -> (Vec<String>, String) {
+/// What the layer finds of a fault of `context` (or of a context that the layer cannot tell, and
+/// why): the candidates, the number of the last launch that each ring held then, and the number of
+/// contexts it knows.
+fn gather(context: Result<u64, &'static str>, met: Option<(usize, u64)>) -> (Found, HashMap<usize, u64>, usize) {
     let rings: Vec<&'static Ring> = hold(&RINGS_HELD).clone();
     let launches: Vec<Launch> = rings.iter().flat_map(|ring| ring.launches()).collect();
     let wrapped: Vec<usize> = rings
@@ -1862,6 +1921,11 @@ fn report(
         .filter(|ring| ring.wrapped())
         .map(|ring| ring.index)
         .collect();
+    let mut read: HashMap<usize, u64> = HashMap::new();
+    for launch in &launches {
+        let last = read.entry(launch.ring).or_insert(launch.number);
+        *last = (*last).max(launch.number);
+    }
     let covers = record().clone();
     let known: Vec<u64> = crate::contexts::known().into_iter().map(|c| c as u64).collect();
     let contexts = known.len();
@@ -1871,7 +1935,7 @@ fn report(
     };
     found.unkept = UNKEPT.load(Relaxed);
     found.met = met;
-    compose(&found, config().fault_trace, contexts, result, call)
+    (found, read, contexts)
 }
 
 /// The report of a fault that `call` met, from what was `found`, in exact mode or not, in a process
@@ -2007,9 +2071,14 @@ fn compose(found: &Found, exact_mode: bool, contexts: usize, result: CUresult, c
     match found.launches.len() {
         count if found.unknown.is_some() => lines.push(format!(
             "{what}: {call} returned {error}, in a CUDA context that the layer cannot tell ({}), which can run nothing \
-             more. {why}Errors are said at a later call than the work that met them: {} made in a context, of any, \
+             more{}. {why}Errors are said at a later call than the work that met them: {} made in a context, of any, \
              that no synchronisation that succeeded covers{also}, the last first{maybe}:",
             found.unknown.unwrap_or_default(),
+            if found.again {
+                " (said again: launches were made since such a fault was said)"
+            } else {
+                ""
+            },
             launches(count)
         )),
         0 => lines.push(format!(
@@ -2091,7 +2160,7 @@ pub fn context_gone(context: usize) {
     }
     let context = context as u64;
     reported().retain(|&c| c != context);
-    REPORTED_ANYWHERE.store(false, Relaxed);
+    anywhere().context_gone();
     let epoch = begin();
     record().context_gone(context, epoch);
 }
@@ -2343,6 +2412,7 @@ mod tests {
             holding(&*GRAPHS);
             holding(&*EXECS);
             holding(&REPORTED);
+            holding(&*ANYWHERE);
             holding(&SUMMARIES);
             let kept = taken_map().contains_key(&0xd1_1000) || graphs().contains_key(&0xd2_0000);
             let ring = MINE.with(Cell::get);
@@ -2391,6 +2461,44 @@ mod tests {
         let (lines, _) = compose(&found, false, 2, 700, "cuEventSynchronize");
         assert!(
             lines[0].contains("in a CUDA context that the layer cannot tell (why)"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_fault_of_a_context_not_known_is_said_again_for_launches_made_since() {
+        let mut anywhere = Anywhere::default();
+        let found = |numbers: &[u64]| Found {
+            launches: numbers.iter().map(|&n| launch(0, n, LEGACY, 1, 0)).collect(),
+            unknown: Some("why"),
+            ..Found::default()
+        };
+        assert_eq!(anywhere.said(&found(&[0, 1]), &HashMap::from([(0, 1)])), Some(false));
+        // Met again with no launch since (a ring that held more then is not one launched since).
+        assert_eq!(anywhere.said(&found(&[0, 1]), &HashMap::from([(0, 1), (1, 7)])), None);
+        assert_eq!(anywhere.said(&found(&[1]), &HashMap::from([(0, 1)])), None);
+        // A launch made since (another context's fault): said again, up to the limit.
+        for n in 0..ANYWHERE_AGAIN as u64 {
+            assert_eq!(
+                anywhere.said(&found(&[1, 2 + n]), &HashMap::from([(0, 2 + n)])),
+                Some(true)
+            );
+        }
+        let later = 2 + ANYWHERE_AGAIN as u64;
+        assert_eq!(anywhere.said(&found(&[later]), &HashMap::from([(0, later)])), None);
+        // A context destroyed: the next one is said, the limit of those said again stays.
+        anywhere.context_gone();
+        assert_eq!(anywhere.said(&found(&[1]), &HashMap::from([(0, later)])), Some(false));
+        assert_eq!(
+            anywhere.said(&found(&[later + 1]), &HashMap::from([(0, later + 1)])),
+            None
+        );
+        // The line says it was said again.
+        let mut again = found(&[1]);
+        again.again = true;
+        let (lines, _) = compose(&again, false, 2, 700, "cuEventSynchronize");
+        assert!(
+            lines[0].contains("can run nothing more (said again: launches were made since such a fault was said)"),
             "{lines:?}"
         );
     }
