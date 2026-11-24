@@ -717,6 +717,34 @@ bits depend on the other columns' data. A rule of shape would take the layer's a
 shape, no failing column: 1.33 to 2.46). From `VF_LOG_LEVEL=2` the exit report counts the calls with more than a
 quarter of their rows or columns failing.
 
+**Failing columns at long k.** The exception is one real layer, but the cost it shows is its data's, and at long k it
+is larger: the fallback adds one chain over the whole k for each element of a failing column. Measured in review, on
+synthetic operands (a failing column made by one element at 2^-40; this series' release runtime of the rules by
+class, every point served; 12.9 and the path alternated in one process, 12 s of warm-up, 3 rounds of 8 event-timed
+calls), the speed against 12.9 (the median of the rounds):
+
+| Shape (TN m x n x k) | Class | Every column converting | 30 % failing | 60 % failing |
+|---|---|---:|---:|---:|
+| 4,096 x 256 x 12,288 (the 9B hybrid's down projection) | served remainder | 1.39 | 0.83 | 0.74 |
+| 4,096 x 128 x 12,288 | served remainder | | | 0.77 |
+| 5,120 x 256 x 13,824 (hidden 5,120, MLP 13,824) | served remainder | 0.98 | 0.67 | 0.55 |
+| 5,120 x 128 x 13,824 | served remainder | | | 0.70 |
+| 2,560 x 256 x 9,216 (the 4B hybrid's down projection) | served remainder | | | 0.84 |
+| 1,536 x 256 x 8,960 (the 1.5B model's down projection) | served remainder | | | 1.18 |
+| 4,096 x 320 x 4,096 (the exception's shape) | served remainder | 1.45 | 0.85 | |
+| 6,144 x 128 x 16,384 (hidden 6,144, MLP 16,384) | long products of many rows (to 12.9) | 1.19 | 0.70 | 0.61 |
+| 7,168 x 128 x 12,288 | long products of many rows (to 12.9) | 1.07 | 0.66 | 0.52 |
+| 6,656 x 192 x 13,824 | long products of many rows (to 12.9) | 0.94 | 0.65 | 0.53 |
+
+Where the path's margin with converting inputs is wide (2.2 to 2.6 times 12.9's speed at 1,536 x 256 x 8,960) it
+stays faster with 60 % of the columns failing; where it is moderate (0.94 to 1.4), 30 % failing takes it to 0.65 to
+0.89 and 60 % to 0.51 to 0.85: down to about half of 12.9's speed. The real layers measured at long k had few failing
+columns: at most 2 % of the 9B hybrid's down projections' (k = 12,288), 3 % of the 4B hybrid's (k = 9,216); the
+1.5B model's one layer with 53 to 70 % (k = 8,960) is in the wide classes, which go to 12.9 from 257 columns. So
+the floor of 0.90 holds for the products measured, not for every product of a served class: a program whose inputs
+fail the check at long k can run below it, and from `VF_LOG_LEVEL=2` the exit report counts its calls with more
+than a quarter of their rows or columns failing (in review it counted each of the 338 synthetic calls).
+
 What each rule costs and keeps, per model, from the same runs: the path measured on every TN
 product of its gate (a test build with the tall and wide rules removed by their controls, which leave the path's
 computation as it is) against 12.9 in separate processes, 3 rounds, and a product that a rule leaves to 12.9 counted

@@ -54,12 +54,12 @@ where it is not from the build of this release. `docs/` says how each figure was
   launched, it does nothing and returns no error, as without the layer; `VF_LOG_LEVEL=2` counts
   them in each image adapted ([Kernels refused](#kernels-refused)).
 - **The bf16 cuBLAS variants are opt-in.** `VF_CUBLAS_BF16_SKINNY=1` and `VF_CUBLAS_BF16_TC=1`
-  are off by default. The tensor-core path's results are not cuBLAS 12.9's bits, it makes bf16
-  training slower, and it takes products with k from 1024 to 16384 only: a model whose layers
-  have fewer than 1024 in-features gets it only on its wider layers, and the gains measured on
-  real programs were measured before that gate. `VF_SAFE=1` turns it off ([The bf16 cuBLAS
-  variants](#the-bf16-cublas-variants)). (Since 0.1.5, on main: the tensor-core path takes TN
-  products only, and a bf16 fine-tuning step ran at 1.02 to 1.07 times its speed without it.)
+  are off by default. The tensor-core path's results are not cuBLAS 12.9's bits, and it takes TN
+  products with k from 1024 to 16384 only, but for the classes of shapes that its rules of speed
+  leave to 12.9: a model whose layers have fewer than 1024 in-features gets it only on its wider
+  layers. A bf16 fine-tuning step ran at 1.02 to 1.07 times its speed without it, its backward
+  products going to 12.9 (0.1.5 served them too, and made such a step slower). `VF_SAFE=1` turns
+  it off ([The bf16 cuBLAS variants](#the-bf16-cublas-variants)).
 - **Under eager loading (`CUDA_MODULE_LOADING=EAGER`), PyTorch takes very long to start.**
   cuBLAS, cuBLASLt, cuSPARSE, cuSOLVER, cuFFT, cuRAND and cuDNN 9.10 start under it, as on
   NVIDIA's driver, but every image that a runtime registered is adapted and compiled at the start:
@@ -559,15 +559,26 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   of their rows or of their columns, and the share of the calls' elements that the fallback computed;
   `VF_PROFILE` gives the fallback kernel's own time (`vf_bf16_fallback_tn`).
 - **A served product can run below cuBLAS 12.9's speed**, whatever the rules of speed above. They serve a class of
-  shapes when, over every layer and n measured in it, its median speed was 1.10 times 12.9's or more and its
-  slowest 0.90 or more, and no model measured had its products' summed time above 12.9's at any n
-  (`docs/performance.md`, section 7, "The rules of speed", gives each class): a product of a served class can be
-  slower than 12.9, down to the criterion's floor of 0.90 times its speed (the slowest measured in the served
-  classes: 0.95 times, in a sweep of the tall rule's tier of 65 to 128 columns). On the real operands of the eight models
-  measured, every product the rules serve ran at 1.04 times 12.9's speed or more but in one layer, the one case
-  measured below the floor, which depends on the data, not on the shape (its own row in the class table; its
-  model's summed step stays at 1.49 times 12.9's speed or more at every n measured with it served): a product
-  whose input has a quarter or more of its columns failing the exact check, near the top of one of 12.9's waves.
+  shapes when it has real members and, over every layer and n measured in it, its median speed was 1.10 times
+  12.9's or more and its slowest 0.90 or more, and no model measured had its products' summed time above 12.9's at
+  any n (`docs/performance.md`, section 7, "The rules of speed", gives each class). That floor holds for the
+  products measured, not for every product of a served class: on the real operands of the eight models measured
+  every product the rules serve ran at 1.04 times 12.9's speed or more but in one layer, and on the sweeps of the
+  served classes at 0.95 or more. What takes a product below it is its data, not its shape: an input with many
+  columns failing the exact check, which the fallback computes, one fused multiply-add chain over the whole k for
+  each element of a failing column. At long k such a product can run well below the floor, down to about half of
+  12.9's speed: on synthetic operands with 30 and 60 % of their input's columns failing (measured in review; 12.9
+  and the path alternated in one process, 3 rounds; a failing column made by one element at 2^-40), served shapes
+  ran at 0.83 and 0.74 times 12.9's speed (TN 4096 x 256 x 12288, the 9B hybrid's down projection's shape), 0.67
+  and 0.55 (TN 5120 x 256 x 13824), 0.77 and 0.70 at 128 columns with 60 % failing, and the 4B hybrid's 2560 x 256
+  x 9216 at 0.84 with 60 %; where the path's margin with converting inputs is wide it stayed faster (the 1.5B
+  model's 1536 x 256 x 8960, 1.18 with 60 %). The real layers measured at long k had few failing columns (at most
+  2 % in the 9B hybrid's down projections, 3 % in the 4B hybrid's; the 1.5B model's layer with 53 to 70 %, of k =
+  8960, is in the wide classes and goes to 12.9 from 257 columns), and the report at exit counts the calls with
+  more than a quarter of their rows or columns failing (above; in review it counted each of the 338 synthetic
+  calls). The one real layer measured below the floor is the documented exception, its own row in the class table
+  (its model's summed step stays at 1.488 times 12.9's speed or more at every n measured with it served): a
+  product whose input has a quarter or more of its columns failing, near the top of one of 12.9's waves.
   12.9 computes a bf16 product in tiles of 64 x 64, four per SM, 320 at a time on a V100:
   its time is flat over ranges of n and jumps where one more of its tiles lands on the busiest SM (at m =
   4096: at n = 129, 193, and 321, where its second wave begins). The tensor-core path's own time grows
