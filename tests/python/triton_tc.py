@@ -226,6 +226,12 @@ STANDIN = {
                     time.sleep(3600)
                 if "SLEEP80" in mod.text and capability == 80:
                     time.sleep(float(os.environ.get("TRITON_STANDIN_SLEEP", "2")))
+                if "LOUD80" in mod.text and capability == 80:
+                    # (A compiler that wrote 512 MiB, as MLIR_ENABLE_DUMP may: a sparse file, then a crash.)
+                    os.lseek(2, 512 << 20, os.SEEK_SET)
+                    os.write(2, b"the end of what the compiler wrote\\n")
+                    os.kill(os.getpid(), signal.SIGSEGV)
+                    time.sleep(10)
                 if "PTXKILLED80" in mod.text and capability == 80:
                     # (Killed from outside while "ptxas", which inherits its descriptors, runs.)
                     import subprocess
@@ -953,6 +959,25 @@ class Decisions(Base):
             self.assertIn("compiled for sm_75: an error of its sm_80 compilation: RuntimeError: PassManager::run failed "
                           "(VF_LOG_LEVEL=3 shows what the compiler wrote)", r.stderr)
             self.assertEqual("please share the reproducer" in r.stderr, level == "3", r.stderr)
+
+    def test_much_written_before_a_crash(self):
+        # A helper that wrote 512 MiB before it crashed (MLIR_ENABLE_DUMP, which the helper is given,
+        # writes every pass's IR): its waiter reads the last 20,000 bytes of it alone, from its end,
+        # for the line of VF_LOG_LEVEL=3.
+        code = textwrap.dedent("""
+            import json, resource, sys
+            from triton.backends.nvidia import compiler as c
+            before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            out = c.compile(sys.argv[1])[0].decode()[:11]
+            print(json.dumps([out, (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) // 1024]))
+            """)
+        r = self.run_vf([sys.executable, "-c", code, dot("f16", "LOUD80\n")],
+                        self.env(PYTHONPATH=str(self.standin), VF_LOG_LEVEL="3"))
+        out, grown = self.last(r)
+        self.assertEqual(out, "cubin sm_75", r.stderr[-2000:])
+        self.assertLess(grown, 200, "MB")
+        self.assertIn("the end of what the compiler wrote", r.stderr)
+        self.assertIn("compiled for sm_75: its sm_80 compilation ended its process (SIGSEGV)", r.stderr)
 
     def test_the_helpers_triton_is_the_programs(self):
         # A program whose sys.path, after it imported Triton, names another Triton first: its helper

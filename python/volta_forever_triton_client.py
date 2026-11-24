@@ -587,6 +587,33 @@ def _stopped(pgid):
         return False
 
 
+def _tail(path, size):
+    """The last size bytes of a file, as text, read from its end (a compiler that wrote much, as
+    with MLIR_ENABLE_DUMP, is not read whole), without following a link or waiting on a FIFO; ""
+    when it cannot be read."""
+    import stat
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC)
+    except OSError:
+        return ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return ""
+        os.lseek(fd, max(0, st.st_size - size), os.SEEK_SET)
+        data = b""
+        while len(data) < size:
+            chunk = os.read(fd, size - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return data.decode("utf-8", "replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
 class _Helper(object):
     """A helper of this process: its socket, its process, the work directory it said; ready (it
     imported the program's Triton), busy (a thread of this process uses it), lost (not to be used
@@ -669,11 +696,7 @@ class _Helper(object):
         except Exception:  # noqa: BLE001 (a program that reaps every child itself: no status)
             pass
         if self.work:
-            try:
-                with open(os.path.join(self.work, "stderr"), "rb") as f:
-                    self.written = f.read()[-20000:].decode("utf-8", "replace")
-            except OSError:
-                pass
+            self.written = _tail(os.path.join(self.work, "stderr"), 20000)
             import shutil
             shutil.rmtree(self.work, ignore_errors=True)
         with self.pool.cond:
