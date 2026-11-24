@@ -106,6 +106,16 @@ fn extract(path: &str, dir: &str, only_sm: Option<u32>) -> Result<(), String> {
     Ok(())
 }
 
+/// The kernels without code (`vf_adapt::Stubs`): what the layer does with each.
+fn print_stubs(stubs: &vf_adapt::Stubs) {
+    for kernel in &stubs.trap_only {
+        println!("  without code (a trap): {kernel}: given at a lookup, its launch is refused");
+    }
+    for kernel in &stubs.empty {
+        println!("  empty: {kernel}");
+    }
+}
+
 fn adapt(input: &str, output: &str) -> Result<(), String> {
     let bytes = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
     let policy = Policy::default().with_environment();
@@ -127,6 +137,7 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
             trapped,
             refused,
             emulated,
+            stubs,
         } => {
             println!(
                 "{input}: PTX for sm_{from_sm} retargeted to sm_{} ({entries} modules, {tensor_rewritten} \
@@ -146,6 +157,7 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
             for kernel in emulated {
                 println!("  emulated in kernel: {}: {}", kernel.kernel, kernel.counts.summary());
             }
+            print_stubs(stubs);
         }
         Outcome::Translated {
             entries,
@@ -153,6 +165,7 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
             functions,
             refused,
             emulated,
+            stubs,
             ..
         } => {
             println!(
@@ -165,6 +178,7 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
             for kernel in refused {
                 println!("  refused: {}: {}", kernel.kernel, kernel.reason);
             }
+            print_stubs(stubs);
         }
         Outcome::NotTranslated { from_sm, reason } => {
             return Err(format!(

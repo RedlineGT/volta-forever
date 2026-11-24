@@ -12,6 +12,7 @@ pub mod emulated;
 pub mod lower;
 pub mod refused;
 pub mod scan;
+pub mod stubs;
 
 pub use emulated::{Emulated, EmulatedCounts, count_emulated};
 pub use refused::{

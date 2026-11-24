@@ -997,6 +997,7 @@ unsafe extern "C" fn library_load_data(
                 adapted_data,
                 replacement.refused(),
                 replacement.emulated(),
+                replacement.trap_only(),
                 jit_options,
                 jit_values,
                 jit_count,
@@ -1999,7 +2000,7 @@ pub unsafe extern "C" fn cuLaunchKernel(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchKernel") {
+    if !guard::allows_run(function, "cuLaunchKernel") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchKernel: unsafe extern "C" fn(
@@ -2094,7 +2095,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchKernelEx") {
+    if !guard::allows_run(function, "cuLaunchKernelEx") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchKernelEx:
@@ -2201,7 +2202,7 @@ pub unsafe extern "C" fn cuLaunchKernel_ptsz(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchKernel_ptsz") {
+    if !guard::allows_run(function, "cuLaunchKernel_ptsz") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchKernel_ptsz: LaunchKernelFn);
@@ -2292,7 +2293,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
     parameters: *mut *mut c_void,
     extra: *mut *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchKernelEx_ptsz") {
+    if !guard::allows_run(function, "cuLaunchKernelEx_ptsz") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchKernelEx_ptsz: LaunchKernelExFn);
@@ -2364,7 +2365,7 @@ pub unsafe extern "C" fn cuLaunchKernelEx_ptsz(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLaunch(function: *mut c_void) -> CUresult {
-    if !guard::allows(function, "cuLaunch") {
+    if !guard::allows_run(function, "cuLaunch") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunch: unsafe extern "C" fn(*mut c_void) -> CUresult);
@@ -2373,7 +2374,7 @@ pub unsafe extern "C" fn cuLaunch(function: *mut c_void) -> CUresult {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLaunchGrid(function: *mut c_void, width: c_int, height: c_int) -> CUresult {
-    if !guard::allows(function, "cuLaunchGrid") {
+    if !guard::allows_run(function, "cuLaunchGrid") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchGrid: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> CUresult);
@@ -2387,7 +2388,7 @@ pub unsafe extern "C" fn cuLaunchGridAsync(
     height: c_int,
     stream: *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchGridAsync") {
+    if !guard::allows_run(function, "cuLaunchGridAsync") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchGridAsync: unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_void) -> CUresult);
@@ -2420,7 +2421,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel(
     stream: *mut c_void,
     parameters: *mut *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchCooperativeKernel") {
+    if !guard::allows_run(function, "cuLaunchCooperativeKernel") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchCooperativeKernel: CooperativeLaunch);
@@ -2453,7 +2454,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernel_ptsz(
     stream: *mut c_void,
     parameters: *mut *mut c_void,
 ) -> CUresult {
-    if !guard::allows(function, "cuLaunchCooperativeKernel_ptsz") {
+    if !guard::allows_run(function, "cuLaunchCooperativeKernel_ptsz") {
         return guard::REFUSED;
     }
     let real = real!(cuLaunchCooperativeKernel_ptsz: CooperativeLaunch);
@@ -2492,7 +2493,7 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernelMultiDevice(
 ) -> CUresult {
     if !launches.is_null()
         && (0..count as usize).any(|i| {
-            !guard::allows(
+            !guard::allows_run(
                 unsafe { (*launches.add(i)).function },
                 "cuLaunchCooperativeKernelMultiDevice",
             )
@@ -2507,8 +2508,8 @@ pub unsafe extern "C" fn cuLaunchCooperativeKernelMultiDevice(
 // ---- graphs: a kernel node is refused for a refused kernel, as its launch -----------------------------------
 //
 // A graph launches its kernels later, where nothing can be refused: a node is refused when it is
-// made or given a refused kernel. (A capture records only what was launched, and a refused kernel
-// is not.)
+// made or given a refused kernel, or a kernel without code. (A capture records only what was
+// launched, and such a kernel is not.)
 
 /// `CUDA_KERNEL_NODE_PARAMS_v1`, the first fields of `_v2` and `_v3`.
 #[repr(C)]
@@ -2543,7 +2544,7 @@ pub struct GraphNodeParams {
 /// # Safety
 /// `params` must be null or valid for reads, as for the driver.
 unsafe fn node_allowed(params: *const KernelNodeParams, call: &str) -> bool {
-    params.is_null() || guard::allows(unsafe { (*params).function }, call)
+    params.is_null() || guard::allows_run(unsafe { (*params).function }, call)
 }
 
 /// Whether a node may be given `params` (`CUDA_KERNEL_NODE_PARAMS_v2` or `_v3`) in `call`.
@@ -2556,15 +2557,15 @@ unsafe fn node_allowed_v2(params: *const KernelNodeParamsV2, call: &str) -> bool
     }
     let params = unsafe { &*params };
     if !params.first.function.is_null() {
-        return guard::allows(params.first.function, call);
+        return guard::allows_run(params.first.function, call);
     }
     // A library's kernel runs in the context that the node names, when it names one: on its device.
     let device_of = real!(cuCtxGetDevice_v2: unsafe extern "C" fn(*mut c_int, *mut c_void) -> CUresult);
     let mut device = -1;
     if !params.context.is_null() && unsafe { device_of(&mut device, params.context) } == CUDA_SUCCESS {
-        return guard::allows_on(params.kernel, call, device);
+        return guard::allows_run_on(params.kernel, call, device);
     }
-    guard::allows(params.kernel, call)
+    guard::allows_run(params.kernel, call)
 }
 
 /// Whether a node may be given `params` (`CUgraphNodeParams`) in `call`.

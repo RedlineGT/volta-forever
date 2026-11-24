@@ -18,6 +18,12 @@
 //! known of refusals changes and whenever a module, a library or a context goes, after which the
 //! driver may give a handle to another function. While no module or library known to the layer
 //! has a refused kernel, nothing is asked: a launch then costs one more load of a counter.
+//!
+//! A kernel without code (its code in the image is a trap and nothing else, `vf_adapt::Stubs`) is
+//! given at a lookup, as NVIDIA's driver gives it, and may be asked about (`allows`): what the
+//! driver answers of it is true. A call that would run it (`allows_run`: a launch, a kernel node of
+//! a graph) is refused, with a line that names it and its image: launched, its trap would end the
+//! context, on this GPU as on any other.
 
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicU64, Ordering::Acquire, Ordering::Relaxed, Ordering::Release, fence};
@@ -142,21 +148,35 @@ pub fn summary() -> String {
 }
 
 /// Whether `call` (the name of the driver's function, for the log) may be made with `handle`, a
-/// function or a kernel, in the current context: not when it is one of a refused kernel, which is
-/// then said once.
+/// function or a kernel, in the current context, when the call asks about it or sets something of
+/// it: not when it is one of a refused kernel, which is then said once.
 #[inline]
 pub fn allows(handle: *mut c_void, call: &str) -> bool {
-    allows_where(handle, call, None)
+    allows_where(handle, call, None, false)
 }
 
 /// `allows`, for a call about a library's kernel on `device` (`cuKernelGetAttribute` and the like).
 #[inline]
 pub fn allows_on(handle: *mut c_void, call: &str, device: c_int) -> bool {
-    allows_where(handle, call, Some(device))
+    allows_where(handle, call, Some(device), false)
+}
+
+/// `allows`, for a call that would run the kernel (a launch, a kernel node of a graph): not either
+/// when it is a kernel without code, which is then said once.
+#[inline]
+pub fn allows_run(handle: *mut c_void, call: &str) -> bool {
+    allows_where(handle, call, None, true)
+}
+
+/// `allows_run`, for a kernel node of a graph that names a library's kernel and the context of
+/// `device`.
+#[inline]
+pub fn allows_run_on(handle: *mut c_void, call: &str, device: c_int) -> bool {
+    allows_where(handle, call, Some(device), true)
 }
 
 #[inline]
-fn allows_where(handle: *mut c_void, call: &str, device: Option<c_int>) -> bool {
+fn allows_where(handle: *mut c_void, call: &str, device: Option<c_int>, run: bool) -> bool {
     if !kernels::refusing() {
         return true;
     }
@@ -165,13 +185,13 @@ fn allows_where(handle: *mut c_void, call: &str, device: Option<c_int>) -> bool 
     if handle == 0 || set(handle).holds(handle as u64, generation) {
         return true;
     }
-    decide(handle, generation, call, device)
+    decide(handle, generation, call, device, run)
 }
 
 /// `allows`, for a handle not found allowed in this generation: what the driver says it is.
 #[cold]
 #[inline(never)]
-fn decide(handle: usize, generation: u64, call: &str, device: Option<c_int>) -> bool {
+fn decide(handle: usize, generation: u64, call: &str, device: Option<c_int>, run: bool) -> bool {
     QUESTIONS.fetch_add(1, Relaxed);
     // SAFETY: the program passes the handle to a call of the driver, which accepts it or refuses
     // it; the layer asks the driver about it the same way.
@@ -179,6 +199,13 @@ fn decide(handle: usize, generation: u64, call: &str, device: Option<c_int>) -> 
         kernels::Verdict::Refused(refusal) => {
             REFUSALS.fetch_add(1, Relaxed);
             refusal.explain(call);
+            false
+        }
+        // (Not kept as allowed: a launch of the same handle must be refused.)
+        kernels::Verdict::NoCode(_) if !run => true,
+        kernels::Verdict::NoCode(no_code) => {
+            REFUSALS.fetch_add(1, Relaxed);
+            no_code.explain(call);
             false
         }
         kernels::Verdict::Allowed => {

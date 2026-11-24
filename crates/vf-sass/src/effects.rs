@@ -131,6 +131,69 @@ pub fn kernel_effects(cubin: &[u8]) -> Result<Vec<(String, Effect)>, String> {
     Ok(kernels)
 }
 
+/// What ptxas writes for `trap` on sm_70 and sm_75, `BPT.TRAP 0x1`, and for the end of a kernel,
+/// `EXIT`, without their guard (bits 12 to 15) and the bits that schedule them (105 and up).
+const BPT_TRAP: u128 = 0x0000000000300000_000000040000095c;
+const EXIT: u128 = 0x0000000003800000_000000000000094d;
+/// `MOV R1, c[0x0][0x28]`, unguarded: the stack pointer that a function sets first, so scheduled.
+const SET_STACK: u128 = 0x0000000000000f00_00000a0000017a02;
+/// The bits of an instruction that say what it does, and those of its guard.
+const OPERATION: u128 = (1 << 105) - 1;
+const GUARD: u128 = 0xf << 12;
+/// The guard that holds always (`PT`), and the one that never does (`!PT`).
+const ALWAYS: u128 = 0x7 << 12;
+const NEVER: u128 = 0xf << 12;
+
+/// The kernels of a cubin whose code does nothing but trap, or nothing at all, at entry.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EntryStubs {
+    /// The first instruction that runs is an unguarded `BPT.TRAP`: what a kernel built without code
+    /// for this architecture is (CUDA's `__trap()` alone). Launched, it ends the context.
+    pub trap_only: Vec<String>,
+    /// The first instruction that runs is an unguarded `EXIT`: launched, it does nothing.
+    pub empty: Vec<String>,
+}
+
+/// The kernels of `cubin` (machine code for sm_70 or sm_75, whose encodings these are) that trap or
+/// end at entry (`EntryStubs`): before the first instruction that runs there are only the setting of
+/// the stack pointer and instructions guarded by `!PT`, which never run (ptxas puts one in each
+/// kernel for sm_70). Strict: a trap behind anything else is code.
+pub fn entry_stubs(cubin: &[u8]) -> Result<EntryStubs, String> {
+    let elf = Elf::parse(cubin)?;
+    let mut found = EntryStubs::default();
+    for symbol in elf.symbols()? {
+        if symbol.info & 0xf != STT_FUNC || symbol.other & STO_ENTRY == 0 {
+            continue;
+        }
+        let Some(section) = elf.sections.get(symbol.shndx as usize) else {
+            continue;
+        };
+        let start = usize::try_from(symbol.value).unwrap_or(usize::MAX);
+        let Some(code) = section.data.get(start..) else {
+            continue;
+        };
+        let first = code
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|bytes| u128::from_le_bytes(*bytes) & OPERATION)
+            .find(|&word| word & GUARD != NEVER && word != SET_STACK);
+        match first {
+            Some(word) if word & GUARD == ALWAYS && word & !GUARD == BPT_TRAP => {
+                found.trap_only.push(symbol.name.clone())
+            }
+            Some(word) if word & GUARD == ALWAYS && word & !GUARD == EXIT => found.empty.push(symbol.name.clone()),
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// `entry_stubs(cubin)`'s kernels that trap at entry.
+pub fn trap_at_entry(cubin: &[u8]) -> Result<Vec<String>, String> {
+    entry_stubs(cubin).map(|found| found.trap_only)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +215,43 @@ mod tests {
         let mut found = kernel_effects(&cubin(sm)).unwrap();
         found.sort_by(|a, b| a.0.cmp(&b.0));
         found
+    }
+
+    /// `tests/kernels/k_nocode.cu`, for sm_75 (CUDA 13.5) and sm_70 (CUDA 12.9).
+    const NOCODE_75: &[u8] = include_bytes!("../../../tests/kernels/k_nocode.135.sm75.cubin");
+    const NOCODE_70: &[u8] = include_bytes!("../../../tests/kernels/k_nocode.129.sm70.cubin");
+
+    #[test]
+    fn a_kernel_whose_code_is_a_trap_at_entry_is_found_and_no_other() {
+        // For sm_75: the stack pointer, then the trap. For sm_70: the same with an instruction guarded
+        // by !PT between them. `trap_if` traps behind a test, `store_then_trap` after a store, `empty`
+        // does nothing: none is a trap at entry.
+        for cubin in [NOCODE_75, NOCODE_70] {
+            let found = entry_stubs(cubin).unwrap();
+            assert_eq!(found.trap_only, ["no_code"]);
+            assert_eq!(found.empty, ["empty"]);
+        }
+        assert!(trap_at_entry(&cubin(75)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_trap_under_a_guard_is_code() {
+        // The trap of no_code given the guard P0: it traps only when P0 holds.
+        let mut elf = Elf::parse(NOCODE_75).unwrap();
+        let symbols = elf.symbols().unwrap();
+        let no_code = symbols.iter().find(|s| s.name == "no_code").unwrap();
+        let section = &mut elf.sections[no_code.shndx as usize];
+        let at = section
+            .data
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .position(|bytes| u128::from_le_bytes(*bytes) & OPERATION & !GUARD == BPT_TRAP)
+            .unwrap();
+        let word = u128::from_le_bytes(section.data[16 * at..16 * at + 16].try_into().unwrap());
+        // (P0 is predicate 0: the guard bits all clear.)
+        section.data[16 * at..16 * at + 16].copy_from_slice(&(word & !GUARD).to_le_bytes());
+        assert!(trap_at_entry(&elf.write()).unwrap().is_empty());
     }
 
     #[test]

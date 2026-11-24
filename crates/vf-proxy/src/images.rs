@@ -52,6 +52,12 @@ pub struct Replacement {
     prelinked: Option<PrelinkedObjects>,
     refused: Vec<Refused>,
     emulated: Vec<Emulated>,
+    /// Kernels whose code is a trap and nothing else (`vf_adapt::Stubs::trap_only`): given at a
+    /// lookup, their launch is refused (`guard`).
+    trap_only: Vec<String>,
+    /// The size and digest of the image that the program gave, when it has such kernels: what the
+    /// line that refuses a launch of one names it by.
+    program_image: Option<(usize, u64)>,
     /// How the code reached the device, for the profiler.
     pub origin: Option<kernels::Origin>,
     /// For a second translation at launch (`fit`): the cubin that this is the translation of, when
@@ -89,6 +95,8 @@ impl Replacement {
             prelinked: None,
             refused: Vec::new(),
             emulated: Vec::new(),
+            trap_only: Vec::new(),
+            program_image: None,
             origin: None,
             original_image: None,
             shown: None,
@@ -112,6 +120,11 @@ impl Replacement {
         &self.emulated
     }
 
+    /// Kernels whose code is a trap and nothing else.
+    pub fn trap_only(&self) -> &[String] {
+        &self.trap_only
+    }
+
     /// The image to load after the driver's compiler refused functions of this one, as its `log`
     /// says, and those functions. See `vf_adapt::Policy::without_refused`.
     pub fn without_refused(&self, log: &str) -> Option<(Replacement, Vec<RefusedFunction>)> {
@@ -122,6 +135,8 @@ impl Replacement {
         let mut next = Replacement::new(retry.image, self.wrapper.as_deref().copied());
         next.refused = self.refused.iter().cloned().chain(retry.kernels).collect();
         next.emulated = self.emulated.clone();
+        next.trap_only = self.trap_only.clone();
+        next.program_image = self.program_image;
         next.origin = self.origin;
         next.original_image = self.original_image.clone();
         next.shown = self.shown.clone();
@@ -218,6 +233,8 @@ impl Replacement {
         let mut loaded = Replacement::new(image, None);
         loaded.refused = self.refused.into_iter().chain(refused).collect();
         loaded.emulated = self.emulated;
+        loaded.trap_only = self.trap_only;
+        loaded.program_image = self.program_image;
         loaded.origin = self.origin;
         loaded.original_image = self.original_image;
         loaded.shown = self.shown;
@@ -275,11 +292,20 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
     {
         kernels::set_origin(handle, origin);
     }
+    let image = replacement
+        .program_image
+        .unwrap_or_else(|| (replacement.data.len(), replacement.identity()));
     kernels::describe(
         handle,
         replacement.shown.take(),
         std::mem::take(&mut replacement.refused),
         std::mem::take(&mut replacement.emulated),
+        FOR_LIBRARY.get(),
+    );
+    kernels::without_code(
+        handle,
+        std::mem::take(&mut replacement.trap_only),
+        image,
         FOR_LIBRARY.get(),
     );
     // For a second translation at launch (`fit`): the original of a translation that has a kernel
@@ -619,6 +645,36 @@ fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
     found
 }
 
+/// At log level 2: the kernels the image holds without code (`vf_adapt::Stubs`), which are not
+/// refused at a lookup. What is said of an empty one is a fact, not a judgement: some kernels are
+/// meant to do nothing.
+fn report_stubs(who: &dyn Display, stubs: &vf_adapt::Stubs) {
+    if !log::at_level(2) {
+        return;
+    }
+    let few = |names: &[String]| {
+        let mut listed = names.iter().take(3).map(String::as_str).collect::<Vec<_>>().join(", ");
+        if names.len() > 3 {
+            listed += ", ...";
+        }
+        listed
+    };
+    if !stubs.trap_only.is_empty() {
+        log::info(format_args!(
+            "{who}: {} kernels have a body that is a trap and nothing else in this image (no code for any GPU it              serves): given if the program asks for them, refused if it launches them ({})",
+            stubs.trap_only.len(),
+            few(&stubs.trap_only)
+        ));
+    }
+    if !stubs.empty.is_empty() {
+        log::info(format_args!(
+            "{who}: {} kernels have an empty body in this image: launched, they do nothing ({})",
+            stubs.empty.len(),
+            few(&stubs.empty)
+        ));
+    }
+}
+
 fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
     match outcome {
         Outcome::Native => log::trace(format_args!("{who}: {what} with code for this GPU")),
@@ -631,6 +687,7 @@ fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
             trapped,
             refused,
             emulated: _,
+            stubs,
         } => {
             let device = config().policy.device_sm;
             let mut changes = format!("{entries} {}", if *entries == 1 { "module" } else { "modules" });
@@ -653,12 +710,14 @@ fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
                     refused.len()
                 ));
             }
+            report_stubs(who, stubs);
         }
         Outcome::Translated {
             entries,
             from_sm,
             functions,
             refused,
+            stubs,
             ..
         } => {
             let device = config().policy.device_sm;
@@ -681,6 +740,7 @@ fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
                     first.reason
                 ));
             }
+            report_stubs(who, stubs);
         }
         Outcome::NotTranslated { from_sm, reason } => log::warn(format_args!(
             "{who}: {what} with machine code for sm_{from_sm} that could not be read ({reason}); loaded as is"
@@ -811,11 +871,22 @@ fn finish(
         // as it is stored, not the fat binary around it.
         replacement.original_image = policy().kept_for_second(original);
     }
-    if let Outcome::Retargeted { refused, emulated, .. } | Outcome::Translated { refused, emulated, .. } =
-        adapted.outcome
+    if let Outcome::Retargeted {
+        refused,
+        emulated,
+        stubs,
+        ..
+    }
+    | Outcome::Translated {
+        refused,
+        emulated,
+        stubs,
+        ..
+    } = adapted.outcome
     {
         replacement.refused = refused;
         replacement.emulated = emulated;
+        replacement.trap_only = stubs.trap_only;
     }
     Some(replacement)
 }
@@ -927,6 +998,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     let mut objects = Vec::new();
     let mut refused = Vec::new();
     let mut emulated = Vec::new();
+    let mut trap_only = Vec::new();
     let mut origin = None;
     let mut object_traps = Vec::new();
     let mut check_external_calls = false;
@@ -971,6 +1043,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
                 origin = origin.or(replaced.origin);
                 refused.extend(replaced.refused);
                 emulated.extend(replaced.emulated);
+                trap_only.extend(replaced.trap_only);
                 objects.push(replaced.data);
             }
             None => objects.push(source.into()),
@@ -1020,6 +1093,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     });
     result.refused = refused;
     result.emulated = emulated;
+    result.trap_only = trap_only;
     result.origin = Some(origin);
     Some(result)
 }
@@ -1273,6 +1347,10 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
         };
         let mut replacement = unsafe { adapt_unguarded(&named, ptr, len) }?;
         replacement.shown = named.shown();
+        if !replacement.trap_only.is_empty() {
+            // SAFETY: what `adapt` was given.
+            replacement.program_image = unsafe { image_extent(ptr, len) }.map(|image| (image.len(), xxh64(image)));
+        }
         Some(replacement)
     })
 }
