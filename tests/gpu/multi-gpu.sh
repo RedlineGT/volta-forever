@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # One-process multi-GPU concurrency test: concurrent module/library load, concurrent graph
 # capture/replay, and cross-device cuMemcpyPeerAsync pipeline against native sm_70 cubin, VF
 # retargeted PTX, and VF translated cubin under both LAZY and EAGER module loading modes.
@@ -6,6 +6,7 @@ set -eu
 
 W=$(cd "$(dirname "$0")/../.." && pwd)
 . "$W/tests/gpu/env.sh"
+vf_clear_settings
 
 PROXY=${VF_PROXY:-$W/dist/lib}
 OUT=${VF_OUT:-$VF_TEST_ROOT}/multi-gpu
@@ -13,7 +14,8 @@ BIN=$OUT/multi-gpu
 CACHE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vf-multi-gpu-cache.XXXXXX")
 trap 'rm -rf -- "$CACHE_ROOT"' EXIT
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$OUT/cuda-cache"
+export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-$OUT/cuda-cache}
 ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -Werror "$W/tests/gpu/multi-gpu.c" -pthread -ldl -o "$BIN"
 
 run_case() {
@@ -36,7 +38,7 @@ run_case() {
 rc=0
 run_case native-sm70 "$BIN" "$W/tests/kernels/k_basic.128.sm70.cubin" || rc=$?
 if [ "$rc" -eq 77 ]; then
-    exit 0
+    exit 2
 fi
 
 rm -rf "$CACHE_ROOT/ptx-lazy" "$CACHE_ROOT/ptx-eager" "$CACHE_ROOT/cubin-lazy" "$CACHE_ROOT/cubin-eager"
