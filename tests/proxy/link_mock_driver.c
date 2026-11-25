@@ -4,9 +4,9 @@
 // driver destroys a link or unloads a module, once the handle is free (`while_freed`), is done
 // there; the next module loaded can be given a handle chosen by the test (`next_module`). An unload
 // fails with 201 while `unload_fails` is set, a link destroy with 400 while `destroy_fails` is.
-// With MOCK_LOAD_SLEEP=SECONDS in the environment, a module load says when it begins and ends on
-// standard error and takes that long between, as the driver's compilation of a large image does
-// (reported_traps.py: what the layer says comes before it).
+// With MOCK_LOAD_SLEEP=SECONDS in the environment, a module load and a link's completion say when
+// they begin and end on standard error and take that long between, as the driver's compilation of a
+// large image does (reported_traps.py: what the layer says comes before it).
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <stdint.h>
@@ -38,6 +38,12 @@ int cuLinkAddData_v2(void *state, int type, void *data, size_t size, const char 
     return 0;
 }
 int cuLinkComplete(void *state, void **image, size_t *size) {
+    const char *slow = getenv("MOCK_LOAD_SLEEP");
+    if (slow) {
+        fprintf(stderr, "mock: cuLinkComplete begins\n");
+        usleep((useconds_t)(atof(slow) * 1e6));
+        fprintf(stderr, "mock: cuLinkComplete returns\n");
+    }
     *image = (void *)linked;
     if (size) *size = linked_size;
     return 0;

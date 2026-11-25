@@ -120,6 +120,18 @@ def child(proxy, mock, mode):
         for _ in range(2):
             assert api.cuModuleLoadData(c.byref(handle), image) == 0
             print(api.cuModuleGetFunction(c.byref(function), handle, name), flush=True)
+    elif mode == "large-link":
+        # The program links the large PTX itself: the driver compiles it in cuLinkComplete.
+        output = CUBIN.read_bytes()
+        linked = c.create_string_buffer(output, len(output))
+        c.c_void_p.in_dll(backend, "linked").value = c.addressof(linked)
+        c.c_size_t.in_dll(backend, "linked_size").value = len(output)
+        state, image, size = c.c_void_p(), c.c_void_p(), c.c_size_t()
+        ptx = module(NCCL, 17 << 20)
+        assert api.cuLinkCreate_v2(0, None, None, c.byref(state)) == 0
+        assert api.cuLinkAddData_v2(state, 1, ptx, len(ptx), b"large.ptx", 0, None, None) == 0
+        assert api.cuLinkComplete(state, c.byref(image), c.byref(size)) == 0
+        print(0, flush=True)
     elif mode == "linked":
         output = CUBIN.read_bytes()
         linked = c.create_string_buffer(output, len(output))
@@ -193,6 +205,12 @@ def check(proxy, mock):
         assert done.stdout.split() == ["0", "0"], (mode, done.stdout)
         assert (REMEDY in err) == (mode == "large-nccl"), (mode, err[:3000])
         print(f"PASS a large image ({mode}): said before the driver's load, once")
+    # Linked by the program: the line comes before the driver's link completes (it compiles there).
+    done = run(proxy, mock, "large-link", MOCK_LOAD_SLEEP="1")
+    err = done.stderr
+    assert err.count(LARGE) == 1 and REMEDY in err, err[:3000]
+    assert err.index(LARGE) < err.index("mock: cuLinkComplete begins"), err[:3000]
+    print("PASS a large image linked by the program: said before the driver's link completes")
 
     # What the driver's link knew of its input reaches the image that it made, given as the
     # relocatable fat binary of a wrapper.

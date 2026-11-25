@@ -606,8 +606,9 @@ instruction is given with a reported trap, said in one line for its image (the k
 level 2) and without the line about NCCL's CUDA 12 build, when no GPU of the process can take part
 in multicast; refused (218, with that line) when the second GPU can, when the driver does not
 answer the attribute, with `VF_REPORTED_TRAPS=0`, and in both loads of a process where the first
-question failed; that before the stand-in's slow load of a module of 17 MiB the layer says, once,
-what the driver compiles (naming NCCL's CUDA 12 build for NCCL's kernels only); and that a cubin
+question failed; that before the stand-in's slow load of a module of 17 MiB, and before its slow
+completion of a link of such PTX by the program, the layer says, once, what the driver compiles
+(naming NCCL's CUDA 12 build for NCCL's kernels only); and that a cubin
 that the driver's linker made from such PTX, given as the relocatable fat binary of a wrapper, has
 its kernel said. It needs a C compiler.
 
