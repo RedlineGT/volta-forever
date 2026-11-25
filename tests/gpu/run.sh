@@ -750,8 +750,9 @@ nocode nocode-cubin-library "$G/k_nocode.135.sm75.cubin" library
 # Instructions that need a multicast address (multimem.*), which no GPU of a process of V100s can
 # have, are replaced by a reported trap (tests/kernels/test_reported.c): a kernel that calls through
 # a table a function that holds one, one that holds one behind a test of a flag (as NCCL's step
-# counters are read), and one that holds nothing else are given, and the first two compute right on
-# their paths; each is said once at the default level. The same call that may reach
+# counters are read), one with two under a guard, run with the guard false, and one that holds
+# nothing else are given, and the first three compute right on their paths; one line says them for
+# their image at the default level. A module with comments before its header loads and runs. The same call that may reach
 # barrier.cluster.arrive, which a program can really execute, is still refused, and so are the
 # first ones with VF_REPORTED_TRAPS=0 (until 0.1.4 they were all refused: the CUDA 13 build of NCCL
 # could not run its collectives). No case reaches a trap; what the driver says of multicast is read
@@ -773,7 +774,7 @@ reported() {  # reported NAME MODE EXPECTED...
     check "$name" "ALL CHECKS PASSED" "no Xid line more" "$@"
 }
 # (One line for each image at the default level; each kernel from VF_LOG_LEVEL=2.)
-given_with=("(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes: 3 kernels are given with instructions that cannot run on this GPU replaced by reported traps \(at most 1 in what one kernel may reach; multimem\.ld_reduce\.acquire\.sys\.global\.min\.u32, multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32, multimem\.st\.global\.b32\): pick, polled, stored\. Such an instruction needs a multicast address"
+given_with=("(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes: 4 kernels are given with instructions that cannot run on this GPU replaced by reported traps \(at most 2 in what one kernel may reach; multimem\.ld_reduce\.acquire\.sys\.global\.min\.u32, multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32, multimem\.st\.global\.b32\): pick, polled, stored and 1 more\. Such an instruction needs a multicast address"
     "(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes: 1 kernel is given with instructions that cannot run on this GPU replaced by reported traps \(at most 1 in what one kernel may reach; multimem\.st\.global\.b32\): stored\."
     "kernel pick cannot run on this GPU and is not given to the program: .*barrier\.cluster\.arrive: no Volta sequence")
 reported reported-library library "${given_with[@]}"

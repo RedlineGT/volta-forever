@@ -21,6 +21,8 @@
  *   - polled: multimem.ld_reduce behind a test of a flag that the program passes, as NCCL's step
  *     counters are read (0: a plain load);
  *   - stored: a kernel whose only work is multimem.st, given (never launched here);
+ *   - guarded: multimem.ld_reduce of a word and of four floats under a guard (not behind a branch),
+ *     run with the guard false: the instructions under it do nothing, the others run;
  *   - plain: nothing of later GPUs (a control of the module).
  * A third module has comments before its header (a block comment, a line comment that names
  * `.version`, a blank line), `stored` and `plain`: it loads, and plain runs.
@@ -124,6 +126,28 @@ static const char module_reported[] =
     "    ld.param.u64 %rd1, [out];\n"
     "    ld.param.u32 %r1, [value];\n"
     "    multimem.st.global.b32 [%rd1], %r1;\n"
+    "    ret;\n"
+    "}\n"
+    /* guarded(out, flag): the multimem instructions under a guard (not behind a branch), of a word and
+     * of four floats; flag 0: out += 2 + 1000. */
+    ".visible .entry guarded(.param .u64 out, .param .u32 flag)\n"
+    "{\n"
+    "    .reg .u64 %rd<3>;\n"
+    "    .reg .u32 %r<5>;\n"
+    "    .reg .f32 %f<5>;\n"
+    "    .reg .pred %p<2>;\n"
+    "    ld.param.u64 %rd1, [out];\n"
+    "    ld.param.u32 %r1, [flag];\n"
+    "    cvta.to.global.u64 %rd2, %rd1;\n"
+    "    setp.ne.u32 %p1, %r1, 0;\n"
+    "    @%p1 multimem.ld_reduce.relaxed.sys.global.add.u32 %r2, [%rd1];\n"
+    "    @!%p1 ld.global.u32 %r2, [%rd2];\n"
+    "    @%p1 multimem.ld_reduce.relaxed.sys.global.add.v4.f32 {%f1, %f2, %f3, %f4}, [%rd1];\n"
+    "    @!%p1 mov.f32 %f1, 0f40000000;\n"
+    "    cvt.rzi.u32.f32 %r3, %f1;\n"
+    "    add.u32 %r4, %r2, %r3;\n"
+    "    add.u32 %r4, %r4, 1000;\n"
+    "    st.global.u32 [%rd2], %r4;\n"
     "    ret;\n"
     "}\n"
     ".visible .entry plain(.param .u64 out)\n"
@@ -351,12 +375,16 @@ int main(int argc, char **argv) {
             refused("pick");
             refused("polled");
             refused("stored");
+            refused("guarded");
         } else {
             which = 0;
             check("pick through twice: 2 x 21 = 42", run("pick", 21, pick_args) == 42);
             check("pick again: 2 x 50 = 100", run("pick", 50, pick_args) == 100);
             flag = 0;
             check("polled without the flag: 1000 + 5", run("polled", 5, polled_args) == 1005);
+            /* Its guards false: the instructions under them do nothing, the others run. (A lowering
+             * that dropped the guard of a reported trap would stop the kernel here.) */
+            check("guarded without the flag: 1000 + 2 + 5", run("guarded", 5, polled_args) == 1007);
             given("stored");
         }
         check("plain(35) is still 42", run("plain", 35, plain_args) == 42);
