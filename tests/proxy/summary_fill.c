@@ -11,7 +11,9 @@
 //   segv     once armed, on a thread other than the main one (the layer's): writes through a null pointer
 //   slowexit (fill_add_page) once armed, on a thread other than the main one: sleeps 3 s; then gives the number
 //            on the page that its ctx points to
-//   forkret  once armed, the first time: forks, and its child returns from the fill (fill_child: its pid)
+//   forkret  once armed, the first time: forks, and its child returns from the fill (fill_child: its pid);
+//            fill_say_at_exit leaves a line in the C library's buffer of a file and adds an exit handler that
+//            says in which process it runs
 //   page     (fill_add_pageread) its ctx a page of its own, holding 42: gives "page 42"
 //   stall    once armed, on a thread other than the main one, the first time: has stall.c (preloaded) stall the
 //            next getpid of that thread, the layer's, which is in its look at whether it runs in a child, after
@@ -185,6 +187,18 @@ static size_t fill_forkret(char *buf, size_t cap, void *ctx)
     return n < 0 ? 0 : (size_t)n;
 }
 int fill_child(void) { return atomic_load(&child_pid); }
+/* For the forkret case: a line left in the C library's buffer of a stream on the file at PATH (written when the
+ * buffer is, at the exit of each process that has it, through the one file offset that they share), and an exit
+ * handler that says in which process it runs. */
+static FILE *buffered;
+static void say_exit(void) { fprintf(stderr, "fill library: exit handler in process %d\n", (int)getpid()); }
+int fill_say_at_exit(const char *path)
+{
+    buffered = fopen(path, "w");
+    if (!buffered || setvbuf(buffered, NULL, _IOFBF, 4096)) return -1;
+    fprintf(buffered, "a line in the C library's buffer of process %d\n", (int)getpid());
+    return atexit(say_exit);
+}
 static long *readpage;
 static size_t fill_pageread(char *buf, size_t cap, void *ctx)
 {

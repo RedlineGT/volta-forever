@@ -626,7 +626,9 @@ after it in the slots is not called; a removal's own call of the function, stall
 the last write by `stall.c`, the destructor's removal of the same function then returning `EBUSY`; the
 layer's thread stalled between its announcement of a call and the call, the same); a function that forks
 on the layer's thread, its child returning
-from it: the child ends and writes no file; the layer's thread blocking every signal but those
+from it: the child ends at once and writes no file, nothing of the program's running there (its exit
+handler runs in the parent only, and a line left in a buffer of the C library is written once); the
+layer's thread blocking every signal but those
 of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
 the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
 writes and holds the lock, in which both functions do nothing, nothing is called, and which end and

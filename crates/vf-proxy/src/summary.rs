@@ -544,9 +544,8 @@ pub fn start() {
 
 /// The thread: the report, written again whenever it changed (the lines of other libraries included).
 /// The other libraries' lines are read first, with `FILLS` held, then the layer's report, with `LOCK`.
-/// In a child made by `fork()` in a `fill` (only there does this thread go on in a child) that then
-/// returned, the thread ends there, writing nothing (the child ends with it, the thread being its only
-/// one).
+/// In a child made by `fork()` in a `fill` that then returned (only there does this thread go on in a
+/// child), the child ends at once, writing nothing (`end_child`).
 fn rewrite() {
     let Some(settings) = SETTINGS.get() else {
         return;
@@ -554,7 +553,10 @@ fn rewrite() {
     let mut last = None;
     loop {
         std::thread::sleep(settings.interval);
-        if FINISHED.load(SeqCst) || !crate::loaded_here() {
+        if !crate::loaded_here() {
+            end_child();
+        }
+        if FINISHED.load(SeqCst) {
             return;
         }
         let others = {
@@ -562,7 +564,7 @@ fn rewrite() {
             libraries_lines(&FINISHED)
         };
         if !crate::loaded_here() {
-            return;
+            end_child();
         }
         let _locked = LOCK.take();
         if FINISHED.load(SeqCst) {
@@ -593,7 +595,7 @@ pub fn finish(report: &[String]) {
         Err("one of their functions had not returned 2 s after the exit began")
     };
     if !crate::loaded_here() {
-        return; // in a child made by fork() in a fill, which then returned: the child writes no file
+        end_child(); // made by fork() in a fill of this last write, which then returned
     }
     FINISHED.store(true, SeqCst);
     let _locked = LOCK.take();
@@ -605,6 +607,18 @@ pub fn finish(report: &[String]) {
         )),
     }
     write(settings, &lines, true);
+}
+
+/// The end of a child that a `fill` made by forking, on the layer's thread or in the last write, and then
+/// returned from: the layer's code goes on in such a child only. It is a copy of the process in the
+/// middle of a call, and it ends here at once (`_exit`), writing nothing and running nothing more of
+/// the program's: neither its exit handlers nor its destructors, which belong to the process that
+/// loaded the layer (they would flush its buffers a second time, or wait for a lock that a thread the
+/// child does not have held when the fill forked). A `fill` that forks in a removal returns, in the
+/// child, to the library that called the removal, which goes on as it does.
+fn end_child() -> ! {
+    // SAFETY: ends this process at once; nothing is given back.
+    unsafe { libc::_exit(0) }
 }
 
 /// The layer's lines of the file, after its first.

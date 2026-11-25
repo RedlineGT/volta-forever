@@ -75,7 +75,7 @@ def load(path, mode=os.RTLD_LOCAL):
         f.restype = c.c_longlong
     lib.fill_slow_start.argtypes = lib.fill_slow_end.argtypes = [c.c_int]
     lib.fill_at_exit.argtypes = [c.c_char_p, c.c_long]
-    lib.fill_add_page.argtypes = lib.fill_add_pageread.argtypes = [c.c_char_p]
+    lib.fill_add_page.argtypes = lib.fill_add_pageread.argtypes = lib.fill_say_at_exit.argtypes = [c.c_char_p]
     return lib
 
 
@@ -254,6 +254,7 @@ def child(proxy, library, mode):
 
     if mode == "forkret":  # a fill that forks, its child returning from it into the layer's thread
         assert add(b"forkret", b"forkret") == 0
+        assert lib.fill_say_at_exit(os.environ["FILL_BUFFERED"].encode()) == 0
         lib.fill_arm(1)
         end = time.time() + 15
         while not lib.fill_child() and time.time() < end:
@@ -755,14 +756,17 @@ if __name__ == "__main__":
         assert exited(text, p.pid) and ("\n[volta-forever] the lines of other libraries are not in this last write: "
                                         "one of their functions had not returned 2 s after the exit began\n") in text, text
         # One that forks on the layer's thread, its child returning from it (and so into the layer's thread, the
-        # child's only one): the thread ends there, the child with it, and it writes no file.
-        p = start("forkret", **on)
+        # child's only one): the child ends there at once, writing no file and running nothing of the program's, its
+        # exit handlers and the C library's buffers being the parent's (a line left in a buffer before the fork is
+        # written once, by the parent; the exit handler runs in the parent only).
+        buffered = tmp / "buffered"
+        p = start("forkret", FILL_BUFFERED=str(buffered), **on)
         p.line()
         child = p.line()
         assert child[0] == "child" and int(child[1]) > 0, child
         kid = int(child[1])
         assert p.line() == ["exiting"]
-        p.finish()
+        out, err = p.finish()
 
         def state(pid):
             try:
@@ -777,6 +781,10 @@ if __name__ == "__main__":
         if ended not in ("gone", "Z"):
             os.kill(kid, signal.SIGKILL)  # the fill's child of this test's own process
         assert ended in ("gone", "Z") and not left.exists(), (ended, left.read_text() if left.exists() else "no file")
+        handlers = [l for l in err.splitlines() if l.startswith("fill library: exit handler in process ")]
+        assert handlers == [f"fill library: exit handler in process {p.pid}"] and \
+            buffered.read_text() == f"a line in the C library's buffer of process {p.pid}\n", \
+            (handlers, buffered.read_text())
         # A removal whose own call of the fill, once more, stalls 3 s after it looked at whether the last write is
         # made (stall.c, in its calloc of the buffer: a thread preempted there), while the exit begins: the last
         # write gives up waiting, and the library's destructor, removing the same fill, gets EBUSY, the call being
