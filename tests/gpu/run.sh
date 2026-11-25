@@ -773,9 +773,10 @@ reported() {  # reported NAME MODE EXPECTED...
     fi
     check "$name" "ALL CHECKS PASSED" "no Xid line more" "$@"
 }
-# (One line for each image at the default level; each kernel from VF_LOG_LEVEL=2.)
-given_with=("(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes: 4 kernels are given with instructions that cannot run on this GPU replaced by reported traps \(at most 2 in what one kernel may reach; multimem\.ld_reduce\.acquire\.sys\.global\.min\.u32, multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32, multimem\.st\.global\.b32\): pick, polled, stored and 1 more\. Such an instruction needs a multicast address"
-    "(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes: 1 kernel is given with instructions that cannot run on this GPU replaced by reported traps \(at most 1 in what one kernel may reach; multimem\.st\.global\.b32\): stored\."
+# (One line for each image at the default level, which names it by the call, its size and the file
+# of the caller; each kernel from VF_LOG_LEVEL=2.)
+given_with=("(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes in [^ ]*/test_reported: 4 kernels are given with instructions that cannot run on this GPU replaced by reported traps \(at most 2 in what one kernel may reach; multimem\.ld_reduce\.acquire\.sys\.global\.min\.u32, multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32, multimem\.st\.global\.b32\): pick, polled, stored and 1 more\. Such an instruction needs a multicast address"
+    "(cuLibraryLoadData|cuModuleLoadData) of [0-9]+ bytes in [^ ]*/test_reported: 1 kernel is given with instructions that cannot run on this GPU replaced by reported traps \(at most 1 in what one kernel may reach; multimem\.st\.global\.b32\): stored\."
     "kernel pick cannot run on this GPU and is not given to the program: .*barrier\.cluster\.arrive: no Volta sequence")
 reported reported-library library "${given_with[@]}"
 reported reported-module module "${given_with[@]}"
