@@ -469,9 +469,9 @@ impl Policy {
     /// where an image has PTX (`Translate`). `VF_PAIRS=0`: compute every tensor-core product by
     /// itself, in machine code (`pairs`) and in program text (`lowering.pairs`). `VF_SAFE=1`: what
     /// these ask for whose results are not bit-identical to the default's is not used, nor the pairs
-    /// of machine code (`make_safe`). `VF_REPORTED_TRAPS=0`: no instruction is replaced by a
-    /// reported trap (`lowering.reported_traps`): the functions that hold one trap, and their kernels
-    /// are refused.
+    /// of machine code (`make_safe`). `VF_REPORTED_TRAPS=0` (that value only: any other leaves it
+    /// on): no instruction is replaced by a reported trap (`lowering.reported_traps`): the functions
+    /// that hold one trap, and their kernels are refused.
     pub fn with_environment(self) -> Policy {
         self.with_environment_said().0
     }
@@ -510,7 +510,9 @@ impl Policy {
     /// itself: `docs/pairs.md`, section 13), `borrow`, `lowering.aligned_rows` and
     /// `lowering.reported_traps` (a reported trap computes nothing: where a refusal would not have
     /// given the kernel, it stops the kernel if it is ever reached, and every path that does not
-    /// reach it runs the program's own instructions).
+    /// reach it runs the program's own instructions; turning it off would refuse NCCL's collectives,
+    /// and safe mode could then not say whether a difference of a run on several GPUs comes from
+    /// the layer).
     pub fn make_safe(&mut self) -> Vec<&'static str> {
         use vf_ptx::lower::{Bf16Column, Bf16Row};
         let mut turned_off = Vec::new();
