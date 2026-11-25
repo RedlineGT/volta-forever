@@ -865,6 +865,18 @@ for how in native layer; do
         DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_reported" multicast >"$log" 2>&1; fi
     check "multicast-$how" "^GPU 0: CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED -> 0, value 0$" "^cuMulticastCreate -> [1-9][0-9]*$"
 done
+# A program without a multimem instruction, whose image the layer adapts (the driver is asked then),
+# hears nothing of multicast at the default level; the driver's answer is said from VF_LOG_LEVEL=2.
+log=$out/logs/multicast-quiet.log
+DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/drvrun" "$G/k_basic.135.sm75.ptx" >"$log" 2>&1
+if grep -q "multicast" "$log"; then
+    echo "    a line of multicast at the default level"; echo "FAIL  multicast-quiet (output: $log)"; failed=1
+else
+    check multicast-quiet "${all7[@]}"
+fi
+log=$out/logs/multicast-said.log
+DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=2 "$out/bin/drvrun" "$G/k_basic.135.sm75.ptx" >"$log" 2>&1
+check multicast-said "no GPU of this process can take part in multicast \([0-9]+ asked\): instructions that need a multicast address are replaced by reported traps" "${all7[@]}"
 
 # A kernel whose usual translation takes more registers than a block of 1,024 threads can have is
 # launched from a second translation that keeps to the kernel's own count (`docs/architecture.md`, "Launch"): taken

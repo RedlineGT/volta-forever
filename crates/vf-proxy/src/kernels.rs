@@ -736,6 +736,7 @@ pub fn refused(handle: usize, name: &str) -> bool {
             log::warn(format_args!(
                 "kernel {name} cannot run on this GPU and is not given to the program: {reason}{through}"
             ));
+            say_multicast_refusal(reason);
             if let Some(remedy) = nccl_remedy(name) {
                 log::warn(format_args!("{remedy}"));
             }
@@ -746,6 +747,7 @@ pub fn refused(handle: usize, name: &str) -> bool {
                 "kernel {name} cannot run on this GPU and is not given to the program: {reason}{through} (another \
                  kernel of this name{which})"
             ));
+            say_multicast_refusal(reason);
         }
         Explain::Beyond => log::warn(format_args!(
             "further refused kernels are not said: more than {KEPT_KERNELS} were (each is still refused)"
@@ -756,6 +758,32 @@ pub fn refused(handle: usize, name: &str) -> bool {
         )),
     }
     true
+}
+
+/// Whether a kernel refused for `reason` is refused for an instruction that reported traps replace
+/// (`vf_ptx::lower::reported_trap_form`: the form that the reason names first).
+fn for_multicast(reason: &str) -> bool {
+    reason
+        .split(':')
+        .next()
+        .is_some_and(|form| vf_ptx::lower::reported_trap_form(form.trim()))
+}
+
+static MULTICAST_REFUSAL_SAID: AtomicBool = AtomicBool::new(false);
+
+/// After the first refusal said of a kernel for an instruction of multicast memory, at level 1: why
+/// it was not given with a reported trap, where the driver's answer is the cause
+/// (`images::multicast_refusal`; from level 2 that was said when the driver was asked). Once in the
+/// process; nothing for a program that holds no such kernel, nor with `VF_REPORTED_TRAPS=0`.
+fn say_multicast_refusal(reason: &str) {
+    if log::at_level(2) || !for_multicast(reason) {
+        return;
+    }
+    if let Some(why) = images::multicast_refusal()
+        && !MULTICAST_REFUSAL_SAID.swap(true, Relaxed)
+    {
+        log::warn(format_args!("{why}"));
+    }
 }
 
 /// A refused kernel of which the program holds a handle: its name, the function it needs that
@@ -1321,6 +1349,20 @@ mod tests {
             nccl_remedy("_Z39ncclDevKernel_AllReduce_Sum_f32_RING_LL24ncclDevKernelArgsStorageILm4096EE"),
             None
         );
+    }
+
+    #[test]
+    fn a_refusal_for_a_multimem_instruction_is_told_apart() {
+        // As the lowering gives the reasons (`tests/gpu/run.sh`, case reported-off).
+        assert!(for_multicast(
+            "multimem.ld_reduce.acquire.sys.global.min.u32: no Volta sequence for this form"
+        ));
+        assert!(for_multicast("multimem.st.global.b32: no Volta sequence for this form"));
+        assert!(!for_multicast(
+            "barrier.cluster.arrive: no Volta sequence for this form"
+        ));
+        assert!(!for_multicast("machine code that is not translated: multimem"));
+        assert!(!for_multicast(""));
     }
 
     #[test]

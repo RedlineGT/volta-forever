@@ -85,7 +85,7 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 227 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
+  an RTX 5090 say. 229 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
   partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -135,7 +135,9 @@ Where the GPU scripts write:
   a module, a library and with `VF_LAZY=0`, and in a module with comments before its header, while the same call that may reach
   `barrier.cluster.arrive` is refused, and with `VF_REPORTED_TRAPS=0` all of them are, with the same
   check of the kernel's log; and what the driver answers about multicast, without the layer and
-  through it (`multicast-*`: the attribute is 0, `cuMulticastCreate` an error).
+  through it (`multicast-*`: the attribute is 0, `cuMulticastCreate` an error), and what the layer
+  says of it to a program without a multimem instruction (`multicast-quiet`: nothing at the default
+  level; `multicast-said`: the answer at `VF_LOG_LEVEL=2`).
 - `nccl.sh [cuda13|cuda12] [--bench]`: NCCL's collectives through PyTorch on the first two V100s
   visible, one process for each (`nccl-collectives.py`): all-reduce (sum in int32, int64,
   float64, float32, float16 and bfloat16, max and min in those but int64), broadcast, all-gather, reduce-scatter, reduce,
@@ -694,7 +696,9 @@ instruction is given with a reported trap, said in one line for its image (the k
 level 2) and without the line about NCCL's CUDA 12 build, when no GPU of the process can take part
 in multicast; refused (218, with that line) when the second GPU can, when the driver does not
 answer the attribute, with `VF_REPORTED_TRAPS=0`, and in both loads of a process where the first
-question failed; that before the stand-in's slow load of a module of 17 MiB, and before its slow
+question failed; that the driver's answer is said from level 2, and at the default level only once
+after a refusal that it causes (nothing for a kernel given, nor for a program without a multimem
+instruction, whatever the answer); that before the stand-in's slow load of a module of 17 MiB, and before its slow
 completion of a link of such PTX by the program, the layer says, once, what the driver compiles
 (naming NCCL's CUDA 12 build for NCCL's kernels only); and that a cubin
 that the driver's linker made from such PTX, given as the relocatable fat binary of a wrapper, has
@@ -724,7 +728,7 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 537, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 538, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,

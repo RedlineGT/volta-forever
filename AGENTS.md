@@ -60,7 +60,9 @@ Steps, in this order:
      reached, the kernel stops with `CUDA_ERROR_ASSERT` (710) and a line of the driver that starts
      with `volta-forever:` and names the function; report that as a bug of the layer, with the
      line. `IMAGE: the driver now compiles the N MB of PTX ...` says that a first start will take
-     minutes (the CUDA 13 NCCL: about 15 in each process).
+     minutes (the CUDA 13 NCCL: about 15 in each process). Where such kernels are refused instead
+     because of a GPU of the process that can take part in multicast, or because the driver did not
+     answer, the line after the first refusal says which.
    - a line about what a library `is told` is the compute capability that caller sees.
    `VF_LOG_LEVEL=2` prints which images were adapted and what each caller is told.
 5. **Libraries.** `vf fetch --all` downloads the CUDA 12.9 libraries VF forwards to and includes

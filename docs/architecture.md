@@ -224,7 +224,8 @@ about 15 minutes). The question to the driver is asked once in the process, at t
 layer adapts or keys for its cache, and its answer, a failure too, is kept for the process
 (`images::without_multicast`): the key and the adaptation agree. Where any GPU of the process can
 take part in multicast, or the answer cannot be had, or with `VF_REPORTED_TRAPS=0`, those functions
-trap and their kernels are refused as above. The strings of the traps go after the module's header
+trap and their kernels are refused as above. The answer is said from level 2; at level 1 only where
+it refuses a kernel, once, after the first such refusal (`kernels::say_multicast_refusal`). The strings of the traps go after the module's header
 (`vf_ptx::trap_strings_at`), whatever comments come before it. NCCL's CUDA 13 build holds such instructions in nearly every
 function of its collectives, behind tests of flags that only its multicast transport sets.
 

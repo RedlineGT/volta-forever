@@ -991,6 +991,25 @@ fn without_multicast() -> bool {
     *ANSWER.get_or_init(ask_multicast)
 }
 
+/// Why the kernels that may reach a multimem instruction are refused in this process, not given
+/// with reported traps, when the driver's answer is the cause: a GPU that can take part in
+/// multicast, or no answer (`ask_multicast`, which says it from level 2). `None` before the driver
+/// was asked, when no GPU can, and with `VF_REPORTED_TRAPS=0` (the question is not asked).
+pub fn multicast_refusal() -> Option<&'static str> {
+    MULTICAST_REFUSAL.get().map(String::as_str)
+}
+
+static MULTICAST_REFUSAL: OnceLock<String> = OnceLock::new();
+
+/// The driver's answer is that the kernels that may reach a multimem instruction are refused,
+/// `why`: said from level 2 (every program would see it at level 1, whether it holds such a kernel
+/// or not), and kept for the first of them refused (`multicast_refusal`).
+fn refusing_multicast(why: String) -> bool {
+    log::info(format_args!("{why}"));
+    let _ = MULTICAST_REFUSAL.set(why);
+    false
+}
+
 /// What `without_multicast` keeps: the driver's answer for every device.
 fn ask_multicast() -> bool {
     type Count = unsafe extern "C" fn(*mut c_int) -> c_int;
@@ -1009,11 +1028,11 @@ fn ask_multicast() -> bool {
     };
     let mut devices = 0;
     if unsafe { count(&mut devices) } != 0 || devices <= 0 {
-        log::info(format_args!(
+        return refusing_multicast(
             "the driver did not say how many GPUs the process has: the kernels that may reach a multimem \
              instruction are refused, not given with reported traps"
-        ));
-        return false;
+                .to_string(),
+        );
     }
     let mut with = Vec::new();
     for ordinal in 0..devices {
@@ -1021,34 +1040,29 @@ fn ask_multicast() -> bool {
         if unsafe { get(&mut device, ordinal) } != 0
             || unsafe { attribute(&mut supported, MULTICAST_SUPPORTED, device) } != 0
         {
-            log::info(format_args!(
+            return refusing_multicast(format!(
                 "the driver did not say whether GPU {ordinal} can take part in multicast: the kernels that may \
                  reach a multimem instruction are refused, not given with reported traps"
             ));
-            return false;
         }
         if supported != 0 {
             with.push(ordinal.to_string());
         }
     }
-    let answer = with.is_empty();
-    {
-        if answer {
-            log::info(format_args!(
-                "no GPU of this process can take part in multicast ({devices} asked): instructions that need a \
-                 multicast address are replaced by reported traps"
-            ));
-        } else {
-            // (Said at level 2: on such a machine every program would see it at level 1. A kernel
-            // refused for it says why where the program asks for it.)
-            log::info(format_args!(
-                "GPU {} of this process can take part in multicast (CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED): the \
-                 kernels that may reach a multimem instruction are refused, not given with reported traps",
-                with.join(", ")
-            ));
-        }
+    if !with.is_empty() {
+        return refusing_multicast(format!(
+            "GPU {} of this process can take part in multicast (CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED): the \
+             kernels that may reach a multimem instruction are refused, not given with reported traps",
+            with.join(", ")
+        ));
     }
-    answer
+    // (From level 2 as well: at level 1, the line of each image given with reported traps says why,
+    // and a program without such an image hears nothing of multicast.)
+    log::info(format_args!(
+        "no GPU of this process can take part in multicast ({devices} asked): instructions that need a \
+         multicast address are replaced by reported traps"
+    ));
+    true
 }
 
 thread_local! {
