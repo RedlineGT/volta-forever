@@ -702,21 +702,31 @@ fn can_report_traps(text: &[u8], functions: &[Function]) -> bool {
     declared_before
 }
 
-/// Where the strings of the reported traps go (`trap_strings`): at the start of the line after the
+/// Where the strings of the reported traps go (`trap_strings`): at the start of a line after the
 /// `.address_size` directive, found as `retarget` finds the header, in the text with its comments
-/// blanked (a directive in a comment is not one). The header is then whole before them, whatever
-/// comes before it: a block comment, line comments, blank lines (until 2026-11-25 they went where
-/// `deps::find_header_end_pub` said, which does not pass a block comment: a module that began with
-/// one had its declarations before `.version`, and the driver refused it whole). `None` when a
-/// block comment begins after the directive on its line (the next line is then inside it), when
-/// nothing follows that line, or when the text is not UTF-8.
+/// blanked (a directive in a comment is not one), and after the blank lines and line comments that
+/// follow it there (`deps::find_header_end_pub`), where they went before. The header is then whole
+/// before them, whatever comes before it: a block comment, line comments, blank lines. (Until
+/// 2026-11-25 they went where `find_header_end_pub` alone said, which does not pass a block
+/// comment: a module that began with one had its declarations before `.version`, and the driver
+/// refused it whole. Every other module keeps the bytes it had: the driver's cache of what it
+/// compiled stays good.) `None` when a block comment begins after the directive on its line (the
+/// next line is then inside it), when nothing follows that line, or when the text is not UTF-8.
 fn trap_strings_at(text: &[u8]) -> Option<usize> {
     let code = scan::blank_comments(std::str::from_utf8(text).ok()?);
     let arg = directive(code.as_bytes(), b".address_size")?;
     if contains(&text[arg.clone()], b"/*") || arg.end >= text.len() {
         return None;
     }
-    Some(arg.end + 1)
+    let first = functions(text)
+        .first()
+        .map_or(text.len(), |function| function.name.start);
+    let header_end = deps::find_header_end_pub(text).min(first);
+    let before = text[..header_end]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |at| at + 1);
+    Some(before.max(arg.end + 1))
 }
 
 /// Whether the module `text` declares or defines `__assertfail`.
@@ -1546,6 +1556,20 @@ mod tests {
                 "{name}: {major}.{minor} sm_{target}"
             );
         }
+        // A module as nvcc writes it, its line comments after the header: the strings after them, where
+        // they were before (the driver's cache of the compiled module stays good).
+        let nvcc = MULTICAST.replacen(
+            ".address_size 64\n",
+            ".address_size 64\n\n// .globl dispatch\n// .globl stores\n",
+            1,
+        );
+        let (lowered, _) = lower_to_volta_with(nvcc.as_bytes(), reporting());
+        let lowered = String::from_utf8(lowered).unwrap();
+        assert!(
+            lowered.contains("// .globl stores\n\n.extern .func __assertfail"),
+            "{}",
+            &lowered[..300]
+        );
         // A block comment that begins after the directive and goes on: not changed so.
         let open = MULTICAST.replacen(
             ".address_size 64",
