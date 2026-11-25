@@ -617,8 +617,9 @@ function once more, keeps its lines marked as its last report, and calls nothing
 that calls the layer back, refused, not left waiting; functions that break the contract: one that never
 returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then is made
 without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` (the
-process ends with that status, its last write made); the layer's thread blocking every signal (its
-`SigBlk`), the thread that loaded the layer keeping its mask; children made by `fork()` while the thread
+process ends with that status, its last write made); the layer's thread blocking every signal but those
+of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
+the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
 writes and holds the lock, in which both functions do nothing, nothing is called, and which end and
 write nothing; without `VF_SUMMARY` no thread and no call, and without the thread (it cannot be
 started under `RLIMIT_NPROC`) the lines at exit; at exit, the library loaded after the layer called

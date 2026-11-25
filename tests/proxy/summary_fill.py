@@ -21,7 +21,9 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
   thread holds the lock, which the child then has held for ever: both functions return ECHILD there at once;
-- the layer's thread blocks every signal, and the thread that loaded the layer keeps its mask;
+- the layer's thread blocks every signal but those of a fault (SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS),
+  and the thread that loaded the layer keeps its mask; a fill that faults on the layer's thread, in a process
+  under Python's faulthandler: the handler says so before the process ends by SIGSEGV;
 - without VF_SUMMARY: no thread and no call; without the thread (it could not be started): the lines at exit;
 - at exit, in both orders of the destructors (the library loaded after the layer and before it; with glibc 2.39
   the destructors run in the order of loading, and the two cases must show both orders): when the layer's comes
@@ -205,6 +207,15 @@ def child(proxy, library, mode):
         name = lambda t: open(f"/proc/self/task/{t}/comm").read().strip()
         mine = [t for t in tasks if name(t) == "vf-summary"]
         say("masks", hex(mask), hex(blocked(os.getpid())), *(hex(blocked(t)) for t in mine))
+        return
+
+    if mode == "segv":  # a fault on the layer's thread, under Python's crash handler
+        import faulthandler
+        faulthandler.enable()
+        assert add(b"segv", b"segv") == 0
+        lib.fill_arm(1)
+        time.sleep(10)  # the thread's next write faults first
+        say("still alive")
         return
 
     if mode in ("hang", "forks", "exits"):  # fills that break the contract
@@ -570,19 +581,27 @@ if __name__ == "__main__":
         print("PASS a child made without fork()'s handlers while the thread held the lock (held for ever in it): add"
               " and remove return ECHILD at once")
 
-        # The layer's thread blocks every signal; the thread that loaded the layer keeps its own mask.
+        # The layer's thread blocks every signal but those of a fault; the thread that loaded the layer keeps its
+        # own mask. A fault on the layer's thread reaches the program's crash handler (Python's faulthandler): with
+        # SIGSEGV blocked there, the kernel would end the process with the handler reset, and nothing said.
         p = start("signals", **on)
         p.line()
         masks = p.line()
         p.finish()
         assert masks[0] == "masks" and len(masks) == 4, masks
         before, after, thread = (int(m, 16) for m in masks[1:])
-        wanted = sum(1 << (n - 1) for n in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
-                                            signal.SIGPIPE, signal.SIGALRM, signal.SIGTERM, signal.SIGCHLD,
-                                            signal.SIGRTMIN))
-        assert thread & wanted == wanted and after == before, masks
-        print(f"PASS the layer's thread blocks every signal (its SigBlk {masks[3]}), the thread that loaded the layer"
-              f" keeps its mask ({masks[2]})")
+        bits = lambda *signals: sum(1 << (n - 1) for n in signals)
+        wanted = bits(signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGPIPE,
+                      signal.SIGALRM, signal.SIGTERM, signal.SIGCHLD, signal.SIGRTMIN)
+        faults = bits(signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE, signal.SIGILL, signal.SIGTRAP, signal.SIGSYS)
+        assert thread & wanted == wanted and thread & faults == 0 and after == before, masks
+        p = start("segv", **on)
+        p.line()
+        status, out, err = p.end()
+        assert status == -signal.SIGSEGV and "Fatal Python error: Segmentation fault" in err and \
+            "still alive" not in out, (status, out, err[-2000:])
+        print(f"PASS the layer's thread blocks every signal but those of a fault (its SigBlk {masks[3]}), the thread"
+              f" that loaded the layer keeps its mask ({masks[2]}); a fault there reaches the program's crash handler")
 
         # Without VF_SUMMARY: no thread, no call.
         p = start("unset")

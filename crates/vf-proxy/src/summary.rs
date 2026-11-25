@@ -433,6 +433,16 @@ fn libraries_lines(finished: &AtomicBool) -> Vec<String> {
 
 // ---- the file ---------------------------------------------------------------------------------------
 
+/// The signals that the kernel sends to a thread that faults, which the layer's thread does not block.
+const FAULTS: [c_int; 6] = [
+    libc::SIGSEGV,
+    libc::SIGBUS,
+    libc::SIGFPE,
+    libc::SIGILL,
+    libc::SIGTRAP,
+    libc::SIGSYS,
+];
+
 /// Start writing the report, if `VF_SUMMARY` asks for it (when the library is loaded).
 pub fn start() {
     let Some(path) = std::env::var("VF_SUMMARY").ok().filter(|p| !p.is_empty() && p != "0") else {
@@ -453,15 +463,20 @@ pub fn start() {
     }
     // SAFETY: the handlers only lock and unlock `LOCK`.
     unsafe { libc::pthread_atfork(Some(lock), Some(unlock), Some(unlock)) };
-    // The thread blocks every signal (a thread starts with the mask of the one that makes it): no handler
-    // of the program's runs there, where the layer's locks are held and other libraries' code runs (one
-    // that called exit() there would wait for ever for a lock of its own thread), and a program that takes
-    // its signals with sigwait() gets them all.
+    // The thread blocks every signal but those of a fault (a thread starts with the mask of the one that
+    // makes it): no handler of the program's runs there, where the layer's locks are held and other
+    // libraries' code runs (one that called exit() there would wait for ever for a lock of its own thread),
+    // and a program that takes its signals with sigwait() gets them all. The signals of a fault are the
+    // kernel's to the thread that faults: blocked, they end the process with the handler reset, and the
+    // program's crash handler (Python's faulthandler, say) never runs.
     // SAFETY: two signal sets to fill and to keep.
     let (mut every, mut kept): (libc::sigset_t, libc::sigset_t) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
     // SAFETY: valid signal sets; this thread's mask, given back right after.
     unsafe {
         libc::sigfillset(&mut every);
+        for fault in FAULTS {
+            libc::sigdelset(&mut every, fault);
+        }
         libc::pthread_sigmask(libc::SIG_BLOCK, &every, &mut kept);
     }
     let spawned = std::thread::Builder::new().name("vf-summary".into()).spawn(rewrite);

@@ -8,6 +8,7 @@
 //   reenter  calls vf_summary_add and vf_summary_remove from inside, says what they returned
 //   empty    nothing
 //   hang, forks, exits  once armed (fill_arm): never returns; forks (its child ends at once); calls exit(3)
+//   segv     once armed, on a thread other than the main one (the layer's): writes through a null pointer
 // Each counts its calls. Its destructor, when fill_at_exit asked for it, takes back what it registered
 // (as a library removes itself before it goes) and says on standard error how many times its fills
 // were called before and after, and what vf_summary_remove returned; with FILL_NO_REMOVE=1 it does not
@@ -129,6 +130,18 @@ static size_t fill_exits(char *buf, size_t cap, void *ctx)
     int n = snprintf(buf, cap, "exits not armed\n");
     return n < 0 ? 0 : (size_t)n;
 }
+static int is_main(void) { return syscall(SYS_gettid) == getpid(); }
+static size_t fill_segv(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed) && !is_main()) {
+        atomic_store(&in_fill, 1);
+        *(volatile int *)NULL = 1;
+    }
+    int n = snprintf(buf, cap, "segv not armed\n");
+    return n < 0 ? 0 : (size_t)n;
+}
 void fill_arm(int on) { atomic_store(&armed, on); }
 int fill_entered(void) { return atomic_load(&in_fill); }
 
@@ -142,6 +155,7 @@ static fill_fn kind(const char *k)
     if (!strcmp(k, "hang")) return fill_hang;
     if (!strcmp(k, "forks")) return fill_forks;
     if (!strcmp(k, "exits")) return fill_exits;
+    if (!strcmp(k, "segv")) return fill_segv;
     return NULL;
 }
 
