@@ -155,8 +155,22 @@ Where the GPU scripts write:
   bits, the step's TN products, the output layer one column more and at 128 columns, the wide down
   projection at the wide rule's n and the long product at the long-k bound or one step of m under it
   served; with each rule removed by a control, it fails, and a bound that the runtime does not report
-  is a failed check, not a crash: `VF_RULES_NO_BOUND=5`, a control); with
-  `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
+  is a failed check, not a crash: `VF_RULES_NO_BOUND=5`, a control); the runtime's counts in the
+  layer's `VF_SUMMARY` file (`bf16-summary.c`, whose child process opens the layer and the variant
+  with `dlopen` in the order of its case: killed with SIGKILL after its calls, its file holds the lines
+  that the runtime's fill gives, with the counts of the calls made; at exit with the layer loaded first,
+  the lines given live to the layer's last write, and with the runtime loaded first, its last report
+  kept, both the lines of the exit report; children made by `fork()` that do nothing with the layer and
+  write nothing; the variant and every reference to the runtime given back by `dlclose` while the layer's
+  thread writes, the runtime staying, pinned; and its controls: no registration, no `VF_SUMMARY`, the
+  runtime not pinned, unloaded with its last report kept, neither pinned nor removed, the child ending
+  by SIGSEGV, and a child that does not end, before it loads anything or instead of exiting
+  (`VF_BF16_SUMMARY_HANG=start`, `exit`), whose process group is killed at the case's limit with no
+  process of it left; no wait of it is unbounded, the child running in a process group of its own and
+  the case ending within `VF_BF16_SUMMARY_LIMIT`, 240 s by default, its checks of the file made on lines
+  from their start); every case with a time limit, 900 s (`bf16-summary`'s 300 s), past which
+  timeout(1) ends it and it fails; with `VF_BF16_SANITIZE` set, under compute-sanitizer, without a
+  time limit. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the
   documented host times, fallback cost and same-sign error, and `bf16-layout-cost.c` the one behind the
@@ -166,8 +180,15 @@ Where the GPU scripts write:
   their runtime against stand-ins for the driver and cuBLAS that record every call (H1-H7, H9 of
   the design review), the paths' rule as a table of shapes across its boundaries in n, m k and k, with
   the products of a fine-tuning step, the tall rule's edges and the classes it serves (rows that hold
-  whatever the gate is),
-  each control making its test fail.
+  whatever the gate is), the runtime's lines in the layer's `VF_SUMMARY` file (mode `summary`: under a
+  stand-in that has the layer's `vf_summary_add`, `stub_cuda.c` built with `-DSTUB_LAYER`, the runtime
+  registers its fill once, at its first handle, which gives the exit report's lines with the counts as
+  they are, and at the runtime's end what the exit report printed; under the plain stand-in nothing is
+  registered, and the exit report prints the lines in the text of before, which a test build's control,
+  `report-format`, changes; mode `summary-refused`: the stand-in refusing the registration with a code,
+  `STUB_LAYER_ADD`, the runtime is not registered, serves its calls, and says so once at
+  `VF_LOG_LEVEL=2` with the code, not for `ECHILD` and not at level 1), each control making its test
+  fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL
@@ -401,7 +422,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version; and that the library names no path of the crates as the build host keeps them (`/.cargo/registry/`, `CARGO_HOME`'s when it is set) | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Nineteen more host regressions exercise the built libraries directly:
+Twenty more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -423,6 +444,7 @@ python3 tests/proxy/fault.py dist/lib/libcuda.so.1
 python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
 python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
 python3 tests/proxy/parallel_threads.py dist/lib/libcuda.so.1
+python3 tests/proxy/summary_fill.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -581,6 +603,31 @@ with `VF_THREADS=4` under `RLIMIT_NPROC=1` (this part is skipped, without a line
 retarget it and give its kernel, with no internal error and nothing loaded as is (what the driver is
 given is not compared). It needs a C compiler; run as root, `RLIMIT_NPROC` refuses no thread, and
 the fallback is not reached.
+The twentieth checks the lines that another library puts in
+`VF_SUMMARY`'s file through the layer's `vf_summary_add` and `vf_summary_remove`, with the stand-in of
+the thirteenth and a library of the test's (`summary_fill.c`) whose functions give its lines: the
+return codes (a name that begins with `volta-forever`, in any case, refused), the four slots and a
+name that takes its slot back, the functions found on the layer's handle and not on the driver's; a
+library's lines after the layer's, with its name in front, written again when they change and kept
+after SIGKILL, every check of the file made on whole lines from their start; functions that fill their whole buffer with control
+bytes, bytes that are not UTF-8 and valid UTF-8 between them, and return more than its size, leave
+the file valid UTF-8 without control characters, each line with a known prefix, the text read up to
+the buffer's end and no further; a removal that waits for the call under way (of 300 ms), calls the
+function once more, keeps its lines marked as its last report, and calls nothing after; a function
+that calls the layer back, refused, not left waiting; functions that break the contract: one that never
+returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then is made
+without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` (the
+process ends with that status, its last write made); the layer's thread blocking every signal (its
+`SigBlk`), the thread that loaded the layer keeping its mask; children made by `fork()` while the thread
+writes and holds the lock, in which both functions do nothing, nothing is called, and which end and
+write nothing; without `VF_SUMMARY` no thread and no call, and without the thread (it cannot be
+started under `RLIMIT_NPROC`) the lines at exit; at exit, the library loaded after the layer called
+by the layer's last write and its removal after it calling nothing, loaded before it removed first
+with its last report written; a library unloaded by `dlclose` while the thread runs, which removes
+itself in its destructor (its last report stays, the process lives on), and one pinned, which stays,
+its lines written as they change; and, the control, one unloaded without removing itself, into which
+the thread calls (the process ends by SIGSEGV). Each case in a process of its own, killed with its
+children when a wait of the test passes 60 s; it needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -606,11 +653,11 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 513, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 519, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
-`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py`,
+`log_lines.py`, `summary_file.py`, `summary_fill.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py`,
 `parallel_threads.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `tests/scripts/kernel-log.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/python/triton_tc.py` (without a Triton);

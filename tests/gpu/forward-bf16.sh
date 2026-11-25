@@ -39,20 +39,30 @@ build() {  # build NAME [FLAGS...] : compile tests/gpu/forward/NAME.c against th
         -L"$T13/lib" -Wl,-rpath-link,"$T13/lib" -L"$proxy" -lcublas -lcublasLt -lcudart -l:libcuda.so.1 -ldl -lm -lpthread ||
         { echo "FAIL  build of $name"; failed=1; return 1; }
 }
+# A case's time limit, in seconds: past it, timeout(1) ends the case's program (SIGTERM, then SIGKILL 10 s later),
+# which ends the processes it made (bf16-summary kills its child's process group; bf16-default's children end within
+# 20 s by themselves), and the case fails. In the foreground, so that a Ctrl-C still reaches the case. None under
+# compute-sanitizer, which can be many times slower.
+limit=900
 run() {  # run NAME DIR [ENV...] : run with the variants of DIR first in the library path; output in $log
-    local name=$1 dir=$2; shift 2
+    local name=$1 dir=$2 t=$limit start=$SECONDS; shift 2
     log=$out/logs/forward-$name.log
     if [ -n "${VF_BF16_SANITIZE:-}" ]; then
         # NVIDIA's compute-sanitizer (12.9.2), without the proxy: the runtime's kernels and cuBLAS
         # 12.9's are sm_70 machine code, which the sanitizer checks as they are.
-        env LD_LIBRARY_PATH="$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 "$@" \
+        t=0
+        timeout --foreground -k 10 $t env LD_LIBRARY_PATH="$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 \
+            VF_LOG_LEVEL=2 "$@" \
             "$T12/compute-sanitizer/compute-sanitizer" --tool "$VF_BF16_SANITIZE" --leak-check no --error-exitcode 99 \
             "$out/bin/$name" >"$log" 2>&1
     else
-        env LD_LIBRARY_PATH="$proxy:$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 "$@" \
-            "$out/bin/$name" >"$log" 2>&1
+        timeout --foreground -k 10 $t env LD_LIBRARY_PATH="$proxy:$dir:$fwd:$T12/lib:$T13/lib" VF_CUBLAS_BF16_TC=1 \
+            VF_LOG_LEVEL=2 "$@" "$out/bin/$name" >"$log" 2>&1
     fi
     status=$?
+    if [ "$t" != 0 ] && [ $((SECONDS - start)) -ge "$t" ]; then
+        echo "FAIL  $name: ended by its time limit of $t s (exit status $status)" >>"$log"
+    fi
     cat "$log"
 }
 verdict() {  # verdict NAME : PASS when the program printed "ok NAME" and exited with 0
@@ -236,5 +246,54 @@ fi
 # The skinny path alone: what it forwards to 12.9 rather than serve (the tensor-core path off).
 if want bf16-paths-skinny; then
     build bf16-paths && { run bf16-paths "$test_dir" VF_CUBLAS_BF16_TC=0 VF_CUBLAS_BF16_SKINNY=1; verdict bf16-paths; }
+fi
+# The runtime's counts in the layer's VF_SUMMARY file (bf16-summary.c, built without CUDA's libraries: its child opens
+# them, in the order of its case): a process killed with SIGKILL; at exit, the layer loaded first and the runtime
+# loaded first; children made by fork(); the variant, then every reference to the runtime, given back by dlclose
+# while the layer's thread writes. Each control must make its case fail there (by itself, exit status 1, not by the
+# time limit): the registration off (summary-off), no VF_SUMMARY, the runtime not pinned (no-pin: unloaded, its
+# removal keeps its last report and the process lives), neither pinned nor removed (no-pin,no-remove: the layer's
+# thread calls into the unloaded runtime), and a child that does not end, before it loads anything or instead of
+# exiting (VF_BF16_SUMMARY_HANG=start, exit: the program's own limit, here 20 and 30 s, kills its process group, and no
+# process of it is left). A case of bf16-summary ends within its own limit, 240 s by default, and 20 s more at most to
+# kill its child; this script's limit for it is 300 s.
+if want bf16-summary; then
+    limit=300
+    if gcc -O2 -Wall -Wno-deprecated-declarations -I"$T13/include" -o "$out/bin/bf16-summary" "$src/bf16-summary.c" -ldl; then
+        for c in killed order-layer order-runtime fork dlclose; do
+            run bf16-summary "$test_dir" VF_BF16_SUMMARY_CASE=$c
+            cp "$log" "$out/logs/forward-bf16-summary-$c.log"
+            if [ "$status" = 0 ] && grep -qx "ok bf16-summary $c" "$log"; then echo "PASS  bf16-summary $c"
+            else echo "FAIL  bf16-summary $c (exit status $status; $out/logs/forward-bf16-summary-$c.log)"; failed=1; fi
+        done
+        # The two load orders must have shown both orders of the destructors at exit.
+        first=$(grep -h "^at exit, the .* destructor came first" "$out"/logs/forward-bf16-summary-order-{layer,runtime}.log | sort -u | wc -l)
+        if [ "$first" = 2 ]; then echo "PASS  bf16-summary: both orders of the destructors at exit, the layer's first and the runtime's first"
+        else echo "FAIL  bf16-summary: the two load orders did not show both orders of the destructors at exit"; failed=1; fi
+        # CASE SETTINGS CHECK: the case with SETTINGS (one or more, separated by spaces) must fail at CHECK (the
+        # beginning of a FAIL line's message).
+        for c in "killed|VF_BF16_CONTROL=summary-off|the file's lines of the runtime are" \
+                 "killed|VF_BF16_SUMMARY_NO_FILE=1|no file " \
+                 "order-runtime|VF_BF16_CONTROL=summary-off|order-runtime: the file's lines of the runtime" \
+                 "dlclose|VF_BF16_CONTROL=no-pin|the runtime was unloaded (not pinned)" \
+                 "dlclose|VF_BF16_CONTROL=no-pin,no-remove|the child ended by signal 11" \
+                 "order-layer|VF_BF16_SUMMARY_HANG=start VF_BF16_SUMMARY_LIMIT=20|the child did not end (its exit;" \
+                 "order-layer|VF_BF16_SUMMARY_HANG=exit VF_BF16_SUMMARY_LIMIT=30|the child did not end (its exit;"; do
+            IFS='|' read -r case setting check <<< "$c"
+            read -r -a settings <<< "$setting"
+            run bf16-summary "$test_dir" VF_BF16_SUMMARY_CASE="$case" "${settings[@]}" >/dev/null
+            name=forward-bf16-summary-$case-${settings[0]#VF_BF16_}
+            name=${name//=/-}
+            cp "$log" "$out/logs/$name.log"
+            if [ "$status" = 1 ] && grep "^FAIL " "$log" | grep -qF -- "$check" &&
+                ! grep -q "^FAIL  .*\(were left\|had not ended\|time limit\)" "$log" &&
+                { [ "$setting" != VF_BF16_CONTROL=no-pin ] || ! grep -q "ended by signal" "$log"; }; then
+                echo "PASS  bf16-summary control $case $setting (failed at: $check)"
+            else echo "FAIL  bf16-summary control $case $setting: not failed at \"$check\" ($out/logs/$name.log)"; failed=1; fi
+        done
+    else
+        echo "FAIL  build of bf16-summary"; failed=1
+    fi
+    limit=900
 fi
 exit $failed

@@ -474,7 +474,9 @@ A program that wants to know what is really there can ask the layer itself
 (`crates/vf-proxy/src/marker.rs`): `libcuda.so.1` has the functions
 `volta_forever_version()` (the layer's version, a C string) and `volta_forever_abi()`
 (the number of this interface, 1) only when it is the layer's, so that `dlsym` finds
-them or does not. The symbols identify the proxy loaded in this process. On a V100,
+them or does not. The symbols identify the proxy loaded in this process. (Two more functions of
+the layer's own, `vf_summary_add` and `vf_summary_remove`, let a library put lines in the report of
+`VF_SUMMARY`: section 7.) On a V100,
 a program can prefer its native Volta kernels, including PTX for `sm_70` that the
 driver compiles directly. The
 launcher sets `VOLTA_FOREVER` (the version) and `VOLTA_FOREVER_HOME` in the
@@ -781,7 +783,9 @@ when one of the three files is missing; without the launcher the variables do no
   for the calling thread (`cuThreadExchangeStreamCaptureMode`), so that it cannot invalidate a capture
   of that thread or another's in global mode.
 - **Statistics** are counted on the host, and said at exit with `VF_LOG_LEVEL=2`: per entry point,
-  the calls each path served and the forwarded ones by reason.
+  the calls each path served and the forwarded ones by reason. Under the layer they are also in
+  `VF_SUMMARY`'s file while the process runs, at every log level (section 7, "The summary's lines of
+  other libraries").
 
 ### The audit library
 
@@ -904,7 +908,109 @@ profile is not a benchmark, and the first synchronisation that returns an error 
 with the kernel it followed: a kernel that faults is named), `VF_TRACE_LAUNCH` (the launches that the driver refuses),
 `VF_FAULT_TRACE` (every launch waited for, to name a kernel that faults alone),
 `VF_TRANSLATE_DUMP` (every cubin given to the translator, for offline validation),
-`VF_BORROW_SAY` (what the translator borrowed), `VF_REAL_LIBCUDA` (where NVIDIA's library is).
+`VF_BORROW_SAY` (what the translator borrowed), `VF_REAL_LIBCUDA` (where NVIDIA's library is),
+`VF_SUMMARY` (the report at exit written to a file while the process runs, with the lines that other
+libraries give it: below).
+
+### The summary's lines of other libraries
+
+`VF_SUMMARY=FILE` writes the report at exit to `FILE.PID` and rewrites it while the process runs
+(`INSTALL.md`), so that a process killed without exiting keeps it. Another library can put lines of its
+own in that file, after the layer's, through two functions of `libcuda.so.1` that are the layer's own,
+not NVIDIA's (`crates/vf-proxy/src/summary.rs`; like `volta_forever_version`, `dlsym` finds them in the
+layer's library only):
+
+```c
+int vf_summary_add(unsigned abi, const char *name, size_t (*fill)(char *buf, size_t cap, void *ctx), void *ctx);
+int vf_summary_remove(size_t (*fill)(char *buf, size_t cap, void *ctx), void *ctx);
+```
+
+- **The interface.** `abi` is 1, the number of this interface: another number is refused, so that a library
+  built for a later one is not misread. `name` is copied (the library that gave it may go): 1 to 64 ASCII
+  letters, digits, `.`, `_`, `+` and `-`, not beginning with `volta-forever` in any case (`volta-forever_` or
+  `VOLTA-FOREVER-2` would pass for the layer's with a reader that matches less than the whole prefix). Four
+  names at most. A removed library's name keeps its slot, which the name registered again takes back; while a
+  library is registered, its name is refused to another `fill` or `ctx`, which would take its lines out of
+  the file.
+- **The lines.** Each write of the file calls each `fill`, one after the other, with a buffer of 4096 bytes,
+  under a lock of theirs (not the lock of the file, which the handlers of `pthread_atfork` take: a `fork()`
+  waits for no library's code). `fill` writes at most `cap` bytes of text and returns how many it wrote; a
+  return above `cap` is taken as `cap`. Of its text, bytes that are not UTF-8 are dropped, and so are the
+  characters by which a reader could take a piece of a line for a line of its own or see it in another
+  order: the control characters other than the newline, the line and paragraph separators (U+2028 and
+  U+2029, at which Python's `splitlines` cuts) and the controls of bidirectional text. Each line that is left
+  is written with `[NAME] ` in front, which no line of the layer's (`[volta-forever] `) has: a reader tells
+  whose lines they are by the start of each line, as it must read the file (a library's text can hold
+  anything after its prefix, `[volta-forever]` among it). The text counts in whether the report changed, the
+  file being written again only when it did.
+- **What `fill` may do.** Read the library's own counters, write text, and return at once: every other
+  library's `fill` and every removal wait for it, and so does the exit (below). No lock, no allocation, no
+  call of the driver; it must not block, sleep or wait for another thread (one that waits for the `fill`s'
+  lock, in `vf_summary_add` or `vf_summary_remove`, would wait for it in turn: `EDEADLK` covers only the
+  thread that is in the `fill`), and must not fork, exit, call `pthread_exit` or `longjmp` out of it, or
+  throw: an unwinding through the layer's frames (a C++ exception, `pthread_exit`'s) aborts the process.
+  What the layer does about one that does not keep to this: the last write at exit waits 2 s at most for the
+  calls under way (the layer's thread's or a removal's), then is made without the other libraries' lines,
+  and says so on a line of its own (`[volta-forever] the lines of other libraries are not in this last
+  write: one of their functions had not returned 2 s after the exit began`); its own calls, once it has the
+  lock, are as bounded as the `fill`s are. A `fill` that calls `exit()` gets the status it gave and a last
+  write without those lines (`... the process exited from one of their functions`); a `fork()` from another
+  thread does not wait for a `fill`, nor does one from a `fill`. The two functions are not
+  async-signal-safe: a signal handler must not call them.
+- **What the functions return**, errno's values: 0; `ENOTSUP`, `abi` is not 1; `EINVAL`, `fill` or `name` is
+  null, or `name` is not a name as above; `EEXIST`, this `fill` with this `ctx` is registered under another
+  name, or this name with another `fill` or `ctx`; `ENOSPC`, four other names are registered; `ENOENT`,
+  `vf_summary_remove` of what is not registered; `ECHILD`, the process is a child made by `fork()` of the one
+  that loaded the layer, and nothing is done; `EDEADLK`, called from a `fill` by the thread that is in it,
+  which holds the `fill`s' lock; `EIO`, an internal error of the layer. Once the layer's last write (at exit)
+  is made, both return 0 at once and do nothing.
+- **Lifetime.** A call into a library that is gone would end the process. `vf_summary_remove` takes the lock
+  that each write holds while it calls the `fill`s, so it waits for the calls under way, all of that write's
+  (every library's, one after the other), and `fill` is not called after it returns: a library removes
+  itself in its destructor, and keeps the layer loaded until then (it does not close the handle it found the
+  functions with). While the file is still to be written, in the process that loaded the layer, the removal
+  calls `fill` once more, and the layer keeps what it gives (as bounded as any `fill`'s text): the library's
+  last report, written in its place from then on with `[NAME, last report] ` in front, so that kept lines
+  are told from live ones. Once the layer's last write is made, a removal calls nothing, and nothing more is
+  written.
+- **Exit.** The layer's last write (its destructor) and the destructor of a library that removes itself both
+  run in `_dl_fini`, in the order in which the two libraries were loaded (glibc 2.39 runs the destructors of
+  libraries that do not depend on each other in the order of their loading). The library's first (it was
+  loaded before the layer) loses nothing: its removal calls `fill` once more, and the layer's last write holds
+  that last report. The layer's first (the library was loaded after it): its last write calls `fill` live, and
+  the removal after it calls nothing; all that is lost is what the library counts after that write, which
+  only the destructors that run after the layer's can make it count. The last write waits 2 s at most for the
+  calls of `fill`s under way, as above.
+- **Fork, signals.** A child made by `fork()` writes no file, as for the layer's own report: both functions
+  do nothing there (`ECHILD`), take no lock, and no `fill` is called in it; a `fork()` waits for the layer's
+  own part of a write (its report and the file), never for a `fill`. A `fill` is called by the layer's
+  thread, by the thread that exits for the last write, and once by a removal. The layer's thread blocks
+  every signal, so that no handler of the program's runs where the layer's locks are held and other
+  libraries' code runs, and a program that takes its signals with `sigwait()` gets them all; the layer has
+  no handler of a signal, and calls a `fill` from a handler only when the program calls `exit()` from one.
+- Without `VF_SUMMARY` there is no thread and no call of a `fill`; a registration is kept and does nothing.
+  The registrations do not depend on the thread: one made before it writes is in its first write, and
+  without a thread (it could not be started) the last write at exit has them.
+
+The runtime of the bf16 cuBLAS variants registers this way (`crates/vf-fwdgen/bf16tc/runtime.c`,
+`summary_fill`). When it binds the driver, at its first handle, it looks the two functions up on the handle of
+the `libcuda.so.1` it opened (a program may load the layer with `RTLD_LOCAL`, which `RTLD_DEFAULT` would miss)
+and registers when they are there; NVIDIA's library has neither, and the exit report is then all there is, as
+before. Not in a constructor: the runtime can be loaded before the driver, in a program whose first CUDA call
+is cuBLAS's (cuBLAS 12.9 then loads the driver), and its last report is then the one kept at exit; under
+PyTorch, or in a program that opens the driver first, it is loaded after the layer, whose last write calls its
+`fill`. It pins itself first (`RTLD_NODELETE`: a `dlclose` does not unload it) and removes itself in its
+destructor all the same. A refusal of the layer's (`vf_summary_add` returning an error: four other names, say)
+is said once at `VF_LOG_LEVEL=2`, with its code, but `ECHILD` (in a child made by `fork()`, where the layer
+writes no file); the exit report holds the counts all the same. Its `fill` gives the exit report's line of
+each entry point, at every log level, as the exit report prints it at `VF_LOG_LEVEL=2` (one formatter for
+both, which writes its numbers itself and calls nothing of the C library but `memcpy` and `strlen`). The
+counters of the tensor-core path's fallback are on the GPU and are read at exit only, no call of the driver
+being added: while the process runs the `fill` says so, and once the exit report has read them (from
+`VF_LOG_LEVEL=2`) it gives the exit report's line about them. That read comes after the driver's own
+teardown at exit when the runtime was loaded before the driver (an exit handler registered before the
+driver's runs after it), and the exit report and the file then say that the counters could not be read.
+Verify mode's counts, on the GPU too, are said at exit on standard error.
 
 ### Audit and nvJitLink
 

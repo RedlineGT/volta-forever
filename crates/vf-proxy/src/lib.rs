@@ -58,7 +58,7 @@
 //!   bit-identical to the default's are not used, nor the pairs of products of machine code
 //!   (`vf_adapt::Policy::make_safe`), said once at level 1;
 //! - `VF_SUMMARY=FILE`: the report at exit also written to `FILE.PID`, and rewritten while the
-//!   process runs (`summary`).
+//!   process runs, with the lines that other libraries give (`summary`: `vf_summary_add`).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -92,6 +92,13 @@ pub static REALS: [AtomicUsize; NSYM] = [const { AtomicUsize::new(0) }; NSYM];
 pub static COUNTS: [AtomicUsize; NSYM] = [const { AtomicUsize::new(0) }; NSYM];
 /// The process that the library was loaded in, whose reports `fini` prints.
 static LOADED_IN: AtomicU32 = AtomicU32::new(0);
+
+/// Whether this is the process that loaded the library, not a child that it made with `fork()` (also
+/// before `init`, when no process is recorded yet).
+pub(crate) fn loaded_here() -> bool {
+    let loaded = LOADED_IN.load(Relaxed);
+    loaded == 0 || loaded == std::process::id()
+}
 
 const CUDA_ERROR_NOT_INITIALIZED: i32 = 3;
 const CUDA_ERROR_NOT_SUPPORTED: i32 = 801;

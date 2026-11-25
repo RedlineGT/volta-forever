@@ -13,6 +13,8 @@
  *                          tensor-core path's pool and cuBLASLt handle at its first call, in relaxed mode
  *   host_test inject STEP  a failure injected at STEP (VF_BF16_INJECT): forwarded, or status 13
  *   host_test noruntime    the runtime missing: forwarded, said once, no abort (H9)
+ *   host_test summary      the layer's summary (VF_SUMMARY): the fill that the runtime registers with a
+ *                          libcuda.so.1 that has vf_summary_add, and nothing registered with one that has not
  * Prints "ok <mode>" when every check passes. */
 #define _GNU_SOURCE
 #include "stub.h"
@@ -416,6 +418,156 @@ static void stats_mode(void)
     stub_fail("cuCtxPushCurrent_v2", 1);
     CHECK(fc && fc(out, 4) == 0, "stats: the counters of a context that could not be made current were read");
     /* at exit, the report's line (tests/forward/bf16.sh checks it): 2 calls, 5, 2, 777 of 393216 elements */
+}
+
+/* ---- the layer's summary (VF_SUMMARY), with VF_CUBLAS_BF16_TC=1 and VF_LOG_LEVEL=2, under a libcuda.so.1 that has
+ * the layer's vf_summary_add (the stand-in built with -DSTUB_LAYER) or not (the plain one). With the layer's functions,
+ * the runtime registers its fill once, at its first handle, with the interface number 1 and its name, and the fill
+ * gives the exit report's line of each entry point called, with the counts as they are, then that the fallback's
+ * counters are read at exit only; without them, nothing is registered. Prints "expect: LINE" for each line that the
+ * exit report must print, made here as the exit report made them before the summary (snprintf, its format):
+ * tests/forward/bf16.sh compares them with what the exit report prints, and with what the stand-in layer gets from
+ * the fill when the runtime removes it at its end. ---- */
+static const char *const summary_reasons[R_N] = {[R_TYPES] = "not bf16 with fp32 accumulation", [R_SHAPE] = "shape"};
+static int summary_line(int api, const char *name, char *line, size_t cap)
+{
+    unsigned long long c[6 + R_N];
+    memset(c, 0, sizeof c);
+    line[0] = 0;
+    if (!rt_counters || rt_counters(api, c, 6 + R_N) != 6 + R_N || !c[0]) return 0;
+    int n = snprintf(line, cap, "%s: %llu calls, %llu with bf16 operands; skinny path %llu, tensor-core path %llu"
+                     " (%llu in graph captures), failed after writing %llu; forwarded:",
+                     name, c[0], c[4 + R_N], c[1], c[2], c[5 + R_N], c[3]);
+    for (int r = 0; r < R_N && n > 0 && n < (int)cap; ++r) {
+        if (!c[4 + r]) continue;
+        CHECK(summary_reasons[r], "summary: a call forwarded for reason %d, which this test does not make", r);
+        n += snprintf(line + n, cap - (size_t)n, " %s %llu,", summary_reasons[r] ? summary_reasons[r] : "?", c[4 + r]);
+    }
+    if (strlen(line) > 511) line[511] = 0; /* what the runtime's say() prints of a line */
+    return 1;
+}
+
+static void summary_mode(void)
+{
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    int (*rt_summary)(unsigned long long *, int) = NULL;
+    size_t (*rt_text)(char *, size_t) = NULL;
+    int (*fc)(unsigned long long *, int) = NULL;
+    if (rt) {
+        *(void **)&rt_summary = dlsym(rt, "vf_bf16_test_summary");
+        *(void **)&rt_text = dlsym(rt, "vf_bf16_test_summary_text");
+        *(void **)&fc = dlsym(rt, "vf_bf16_test_fallback_counters");
+    }
+    int (*layer_state)(unsigned *, char *, size_t) = NULL;
+    size_t (*layer_fill)(char *, size_t) = NULL;
+    *(void **)&layer_state = dlsym(RTLD_DEFAULT, "stub_layer_state");
+    *(void **)&layer_fill = dlsym(RTLD_DEFAULT, "stub_layer_fill");
+    if (!fc || !rt_counters) {
+        CHECK(0, "summary: not the test build of the runtime");
+        return;
+    }
+    /* (A runtime without the summary goes on: its exit report is compared all the same.) */
+    unsigned long long st[2] = {0, 0};
+    CHECK(rt_summary && rt_text, "summary: the runtime has no summary (vf_bf16_test_summary)");
+    if (rt_summary) rt_summary(st, 2);
+    unsigned abi = 0;
+    char name[80] = "";
+    const int adds = layer_state ? layer_state(&abi, name, sizeof name) : 0;
+    if (layer_state)
+        CHECK(adds == 1 && abi == 1 && !strcmp(name, "libvf_cublas_bf16.so") && st[0] == 1,
+              "summary: the runtime did not register once with the layer, with the interface number 1 and its name "
+              "(%d registrations, interface %u, name %s; registered: %llu)", adds, abi, name, st[0]);
+    else
+        CHECK(st[0] == 0, "summary: the runtime registered with a libcuda.so.1 that has no vf_summary_add");
+    /* Two entry points: the tensor-core path twice, the skinny path, two calls forwarded; one cuBLASLt call that the
+     * skinny path serves. */
+    G g = gemm(1, 0, 1536, 128, 4096);
+    call(&g);
+    call(&g);
+    g = gemm(1, 0, 1536, 16, 1536);
+    call(&g);
+    g = gemm(1, 0, 1536, 128, 4096);
+    g.at = CUDA_R_16F;
+    call(&g);
+    g = gemm(1, 0, 1536, 512, 8);
+    call(&g);
+    cublasLtHandle_t lt;
+    v.LtCreate(&lt);
+    cublasLtMatmulDesc_t d;
+    cublasLtMatrixLayout_t la, lb, lc;
+    v.DescCreate(&d, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    const int32_t tb = CUBLAS_OP_T;
+    v.DescSet(d, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof tb);
+    v.LayoutCreate(&la, CUDA_R_16BF, 1536, 1920, 1536);
+    v.LayoutCreate(&lb, CUDA_R_16BF, 8, 1920, 8);
+    v.LayoutCreate(&lc, CUDA_R_32F, 1536, 8, 1536);
+    const float one = 1.0f, zero = 0.0f;
+    v.LtMatmul(lt, d, &one, DEV(1), la, DEV(2), lb, &zero, DEV(3), lc, DEV(3), lc, NULL, NULL, 0, S1);
+    v.LayoutDestroy(la);
+    v.LayoutDestroy(lb);
+    v.LayoutDestroy(lc);
+    v.DescDestroy(d);
+    take();
+    char gemm_line[1024], lt_line[1024], expect[4096], text[4096];
+    CHECK(summary_line(API_GEMMEX, "cublasGemmEx", gemm_line, sizeof gemm_line) &&
+              summary_line(API_LT, "cublasLtMatmul", lt_line, sizeof lt_line),
+          "summary: no counts of cublasGemmEx or of cublasLtMatmul");
+    snprintf(expect, sizeof expect, "%s\n%s\ntensor-core path: the fallback's counters are on the GPU, read at exit only "
+             "(and said then from VF_LOG_LEVEL=2)\n", gemm_line, lt_line);
+    /* The fill's text, as the layer's thread gets it (without the layer, through the test build's export). */
+    size_t n = layer_fill ? layer_fill(text, sizeof text) : rt_text ? rt_text(text, sizeof text) : 0;
+    CHECK(n == strlen(expect) && !memcmp(text, expect, n), "summary: the fill gives\n%.*s\nnot\n%s", (int)n, text,
+          expect);
+    /* The counts as they are: one call more. */
+    g = gemm(1, 0, 1536, 128, 4096);
+    call(&g);
+    take();
+    summary_line(API_GEMMEX, "cublasGemmEx", gemm_line, sizeof gemm_line);
+    n = layer_fill ? layer_fill(text, sizeof text) : rt_text ? rt_text(text, sizeof text) : 0;
+    CHECK(n > strlen(gemm_line) && !memcmp(text, gemm_line, strlen(gemm_line)) && text[strlen(gemm_line)] == '\n',
+          "summary: after one call more, the fill gives\n%.*s\nnot first\n%s", (int)n, text, gemm_line);
+    /* What the exit report must print: the stand-in's copy of the fallback's counters returns 5, 2 and 777. */
+    const unsigned long long counters[3] = {5, 2, 777};
+    stub_set_dtoh(counters, 3);
+    unsigned long long out[4] = {0, 0, 0, 0}, c[6 + R_N];
+    CHECK(fc(out, 4) == 4, "summary: the fallback's counters not read");
+    take();
+    unsigned long long tc = 0;
+    for (int a = API_GEMMEX; a <= API_LT; ++a)
+        if (rt_counters(a, c, 6 + R_N) == 6 + R_N) tc += c[2];
+    printf("expect: %s\nexpect: %s\n", gemm_line, lt_line);
+    printf("expect: tensor-core path: of its %llu calls, %llu had rows or columns that failed the exact check, %llu of "
+           "them more than a quarter of their rows or of their columns (such products can run below cuBLAS 12.9's "
+           "speed: LIMITS.md); the fallback computed %llu of their %llu elements (%.2f %%)\n",
+           tc, out[0], out[1], out[2], out[3], out[3] ? 100.0 * (double)out[2] / (double)out[3] : 0.0);
+}
+
+/* ---- the layer refusing the registration (the stand-in layer, STUB_LAYER_ADD=CODE): the runtime asked once, is not
+ * registered, and goes on, its calls served; tests/forward/bf16.sh reads what it said of the refusal. ---- */
+static void summary_refused_mode(void)
+{
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    int (*rt_summary)(unsigned long long *, int) = NULL;
+    int (*layer_state)(unsigned *, char *, size_t) = NULL;
+    if (rt) *(void **)&rt_summary = dlsym(rt, "vf_bf16_test_summary");
+    *(void **)&layer_state = dlsym(RTLD_DEFAULT, "stub_layer_state");
+    if (!rt_summary || !layer_state) {
+        CHECK(0, "summary-refused: not the test build of the runtime under the stand-in layer");
+        return;
+    }
+    G g = gemm(1, 0, 1536, 128, 4096);
+    take();
+    const cublasStatus_t served = call(&g);
+    take();
+    CHECK(served == 0 && count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1,
+          "summary-refused: the call was not served");
+    unsigned long long st[2] = {9, 9};
+    rt_summary(st, 2);
+    unsigned abi = 0;
+    char name[80] = "";
+    const int adds = layer_state(&abi, name, sizeof name);
+    CHECK(adds == 1 && st[0] == 0, "summary-refused: %d calls of vf_summary_add, not 1; registered: %llu, not 0", adds,
+          st[0]);
 }
 
 /* ---- verify mode (VF_CUBLAS_BF16_VERIFY=1, with the skinny path): every call the skinny path serves is also made
@@ -1411,6 +1563,10 @@ int main(int argc, char **argv)
         verify_mode(getenv("VF_CUBLAS_BF16_VERIFY") && !strcmp(getenv("VF_CUBLAS_BF16_VERIFY"), "1"));
     } else if (!strcmp(mode, "verify-threads")) { /* VF_CUBLAS_BF16_SKINNY=1, VF_CUBLAS_BF16_VERIFY=1 */
         verify_threads_mode();
+    } else if (!strcmp(mode, "summary")) { /* VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2; with the stand-in layer or not */
+        summary_mode();
+    } else if (!strcmp(mode, "summary-refused")) { /* VF_CUBLAS_BF16_TC=1; the stand-in layer, STUB_LAYER_ADD=CODE */
+        summary_refused_mode();
     } else if (!strcmp(mode, "noruntime")) {
         G g = gemm(0, 1, 1536, 8, 1920);
         take();

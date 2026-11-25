@@ -18,11 +18,15 @@ CARGO_TARGET_DIR=$(vf_target_dir "$root")
 export CARGO_TARGET_DIR
 cargo=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 rm -rf "$out"
-mkdir -p "$out/old/lib" "$out/old/include" "$out/new/lib" "$out/new/include" "$out/test" "$out/noruntime" "$out/abort"
+mkdir -p "$out/old/lib" "$out/old/include" "$out/new/lib" "$out/new/include" "$out/test" "$out/noruntime" "$out/abort" \
+    "$out/layer"
 cc=(gcc -O2 -g0 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Werror -fPIC -I"$src")
 
 echo "building the stand-ins and the mock libraries..."
 "${cc[@]}" -shared -fvisibility=hidden -Wl,-soname,libcuda.so.1 -o "$out/old/lib/libcuda.so.1" "$src/stub_cuda.c" -lpthread || exit 1
+# The same stand-in with the layer's vf_summary_add and vf_summary_remove (the mode summary).
+"${cc[@]}" -shared -fvisibility=hidden -DSTUB_LAYER -Wl,-soname,libcuda.so.1 -o "$out/layer/libcuda.so.1" "$src/stub_cuda.c" \
+    -lpthread || exit 1
 for v in 12 13; do
     dir=$out/old/lib; [ $v = 13 ] && dir=$out/new/lib
     "${cc[@]}" -shared -fvisibility=hidden -Wl,-soname,libcublas.so.$v -o "$dir/libcublas.so.$v" "$src/stub_cublas.c" \
@@ -68,7 +72,7 @@ run() {  # run NAME DIR ENV... -- ARGS... : the test program with LD_LIBRARY_PAT
     shift
     log=$out/$name.log
     env -u VF_CUBLAS_BF16_TC -u VF_CUBLAS_BF16_SKINNY -u VF_SAFE -u VF_BF16_CONTROL -u VF_BF16_INJECT -u STUB_CUBLAS_VERSION \
-        -u VF_BF16_TC_MIN_K \
+        -u VF_BF16_TC_MIN_K -u STUB_LAYER_ADD \
         LD_LIBRARY_PATH="$out/old/lib" "${envs[@]}" "$out/host_test" "$dir" "$@" >"$log" 2>&1
     status=$?
 }
@@ -163,6 +167,65 @@ else
     echo "FAIL  H9: status $status, said $said times ($log)"; failed=1
 fi
 
+# The layer's summary (VF_SUMMARY): under the stand-in that has the layer's vf_summary_add, the runtime registers its fill
+# once, at its first handle, and the fill gives the exit report's line of each entry point with the counts as they are;
+# at the runtime's end, its removal gets what the exit report printed (report() at exit before it). Under the plain
+# stand-in, nothing is registered, and the exit report prints the same lines, as it made them before the summary.
+summary_lines() {  # summary_lines LAYER : PASS when the mode summary printed ok and the exit report what it expects
+    local expect said last n
+    expect=$(sed -n 's/^expect: //p' "$log")
+    n=$(printf '%s\n' "$expect" | grep -c .)
+    # Every line of the runtime but the one that it prints when it starts: the exit report's, and nothing else.
+    said=$(sed -n 's/^\[volta-forever\] libvf_cublas_bf16\.so: //p' "$log" | grep -v '^bf16 products served by ')
+    last=$(sed -n 's/^stub layer: last report: //p' "$log")
+    [ "$1" = 1 ] || last=$expect
+    [ "$status" = 0 ] && grep -q '^ok ' "$log" && [ "$n" = 3 ] && [ "$said" = "$expect" ] && [ "$last" = "$expect" ] &&
+        { [ "$1" = 1 ] || ! grep -q '^stub layer:' "$log"; }
+}
+run summary-layer "$out/test" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 LD_LIBRARY_PATH="$out/layer:$out/old/lib" -- summary
+if summary_lines 1; then
+    echo "PASS  the layer's summary: the runtime registers its fill once, at its first handle; it gives the exit report's lines with the counts as they are, and at the runtime's end what the exit report printed"
+else
+    echo "FAIL  the layer's summary, with the layer's functions (status $status, $log)"; failed=1
+fi
+run summary-nolayer "$out/test" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 -- summary
+if summary_lines 0; then
+    echo "PASS  the layer's summary, without the layer's functions: nothing registered, the exit report's lines as they were before the summary"
+else
+    echo "FAIL  the layer's summary, without the layer's functions (status $status, $log)"; failed=1
+fi
+# The layer refusing the registration (the stand-in's vf_summary_add returning STUB_LAYER_ADD): the runtime asked once,
+# is not registered, and goes on; at VF_LOG_LEVEL=2 it says so once, with the code, but not for ECHILD (a child made by
+# fork(), where the layer writes no file), and not below level 2.
+refusal() {  # refusal CODE LEVEL SAID [TEXT] : the mode summary-refused said ok, with SAID lines of the runtime about
+             # the refusal, TEXT in one of them
+    run summary-refused-$1-$2 "$out/test" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=$2 STUB_LAYER_ADD=$1 \
+        LD_LIBRARY_PATH="$out/layer:$out/old/lib" -- summary-refused
+    [ "$status" = 0 ] && grep -q '^ok ' "$log" && ! grep -q '^stub layer:' "$log" &&
+        [ "$(grep -c '^\[volta-forever\] libvf_cublas_bf16\.so: vf_summary_add returned ' "$log")" = "$3" ] &&
+        { [ -z "${4:-}" ] || grep -qF -- "$4" "$log"; } || refused="$refused $log"
+}
+refused=
+refusal 28 2 1 "vf_summary_add returned 28 (ENOSPC): the layer's VF_SUMMARY file will not hold this library's lines"
+refusal 17 2 1 "vf_summary_add returned 17 (EEXIST)"
+refusal 10 2 0  # ECHILD
+refusal 28 1 0  # below level 2
+if [ -z "$refused" ]; then
+    echo "PASS  the layer refusing the registration: the runtime is not registered and serves its calls; at VF_LOG_LEVEL=2 it says so once, with the code (ENOSPC, EEXIST), not for ECHILD, not at level 1"
+else
+    echo "FAIL  the layer refusing the registration:$refused"; failed=1
+fi
+# The controls of the summary exist in test builds only: the release runtime does not hold their names.
+rel=0
+for name in summary-off no-pin no-remove report-format VF_BF16_SUMMARY_SAY vf_bf16_test_summary; do
+    rel=$((rel + $(grep -c -a -F "$name" "$out/forward/bf16tc/libvf_cublas_bf16.so")))
+done
+if [ "$rel" = 0 ] && grep -q -a -F summary-off "$out/test/libvf_cublas_bf16.so"; then
+    echo "PASS  the release runtime holds none of the names of the summary's controls (the test build does)"
+else
+    echo "FAIL  the summary's controls: $rel of their names in the release runtime"; failed=1
+fi
+
 echo "controls (each must make its test fail, at the check it breaks):"
 control() {  # control NAME MODE CHECK ENV... : run the test MODE with VF_BF16_CONTROL=NAME and ENV; it must fail at CHECK
     local name=$1 mode=$2 check=$3; shift 3
@@ -198,6 +261,16 @@ control verify-skip-129 verify "verify: not the skinny kernel, then 12.9's cubla
 control verify-text-each verify "verify: the same call again made its signature's text again" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1
 control verify-unlocked verify-threads "verify, two threads on one stream: a call's launches came between another's" VF_CUBLAS_BF16_SKINNY=1 VF_CUBLAS_BF16_VERIFY=1
 control setup-not-relaxed lazy "lazy: the first skinny call did not load the module alone, in relaxed capture mode" VF_CUBLAS_BF16_TC=1
+control summary-off summary "summary: the runtime did not register once with the layer" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 \
+    LD_LIBRARY_PATH="$out/layer:$out/old/lib"
+# The exit report's lines in another text than before (one word changed): the mode summary must fail at the fill's
+# text, and its lines must differ from those expected, without the layer.
+run control-report-format "$out/test" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=2 VF_BF16_CONTROL=report-format -- summary
+if [ "$status" != 0 ] && grep '^FAIL ' "$log" | grep -qF "summary: the fill gives" && ! summary_lines 0; then
+    echo "PASS  control report-format (failed at: summary: the fill gives; the exit report's lines not those expected)"
+else
+    echo "FAIL  control report-format: the summary's lines did not fail ($log)"; failed=1
+fi
 # The tensor-core path's gate moved to 512 (test builds): the rule's table must fail at its k boundary; and the
 # test runtime given to the release-gate mode, where the variable is read, must make it fail.
 run control-tc-min-k "$out/test" VF_CUBLAS_BF16_TC=1 VF_BF16_TC_MIN_K=512 -- rule

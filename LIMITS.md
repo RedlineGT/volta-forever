@@ -1028,7 +1028,11 @@ What `VF_CUBLAS_BF16_TC=1` and `VF_CUBLAS_BF16_SKINNY=1` change is in `INSTALL.m
   before the gate on k, which sends 9728 x 896 to 12.9). From `VF_LOG_LEVEL=2` the report at exit says
   how many tensor-core calls had rows or columns failing the check, how many of them more than a quarter
   of their rows or of their columns, and the share of the calls' elements that the fallback computed;
-  `VF_PROFILE` gives the fallback kernel's own time (`vf_bf16_fallback_tn`).
+  `VF_PROFILE` gives the fallback kernel's own time (`vf_bf16_fallback_tn`). These three counts are kept on
+  the GPU and read at exit only: `VF_SUMMARY`'s file, which a process killed without exiting leaves, has the
+  counts of each entry point but not them, and says so. In a program whose first CUDA call is cuBLAS's (the
+  variants' runtime then loaded before the driver), the report at exit comes after the driver's own teardown
+  and says that they could not be read.
 - **A served product can run below cuBLAS 12.9's speed**, whatever the rules of speed above. They serve a class of
   shapes when it has real members and, over every layer and n measured in it, its median speed was 1.10 times
   12.9's or more and its slowest 0.90 or more, and no model measured had its products' summed time above 12.9's at

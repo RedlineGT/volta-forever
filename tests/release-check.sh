@@ -105,6 +105,7 @@ if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step safe_mode python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
     step log_lines python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
     step summary_file python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
+    step summary_fill python3 tests/proxy/summary_fill.py dist/lib/libcuda.so.1
     step nocode_launch python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
     step profile_failure python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
     step ptx_version python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
