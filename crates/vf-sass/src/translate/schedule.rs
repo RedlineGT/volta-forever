@@ -101,6 +101,12 @@ pub(super) fn schedule(items: &mut Vec<Item>, targets: &[u64]) -> Result<(), Ref
                             }
                             items[k].word |= 1u128 << (WAIT + ((wr_word >> WRITE_BARRIER) & 7) as u32);
                         }
+                        // (A result of double precision is not read earlier than Volta's own
+                        // code reads one, whatever is waited for: `distance::waited`.)
+                        let wd = items[wi].d.as_ref().unwrap();
+                        if let Some(floor) = crate::distance::waited(letter, role, wd, d.kind) {
+                            need = need.max(wt + floor as i32 - t);
+                        }
                         continue;
                     }
                     let wd = items[wi].d.as_ref().unwrap();

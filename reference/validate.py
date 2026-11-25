@@ -72,6 +72,11 @@ them), with the translator's tables only for what kind an instruction is and wha
 - a register that a memory instruction reads as data (what a store stores, what a shuffle
   exchanges) is not written by arithmetic after it, in straight-line code, before a barrier or a
   wait for a scoreboard that it or a later memory instruction names (`data_overwritten`).
+- a result of double precision (what DADD, DMUL, DFMA or DSETP writes) is read, in straight-line
+  code, no earlier than Volta's own code reads one, whether or not a scoreboard announces it and
+  the reader waits: 8 cycles later by an instruction of the same pipe (double or half
+  precision), 9 by any other, and a predicate of DSETP 15 as a guard or by a branch
+  (`double_read_early`; code for sm_80 has 6 and 14, docs/validation.md, section 8).
 Not checked: that an instruction comes late enough after one of the translation whose result it
 reads and that names no scoreboard (the translator's table of distances is taken on trust).
 
@@ -2156,6 +2161,47 @@ def data_overwritten(mc, code):
             if y.kind.startswith('MIO'):
                 boards |= {(words[j] >> WRITE_BARRIER) & 7, (words[j] >> READ_BARRIER) & 7} - {7}
     return out, followed, complement
+
+
+# What Volta's own code keeps between an instruction of double precision and a reader of its
+# result (docs/validation.md, section 8): written here, not taken from the translator.
+DOUBLE = ('DADD', 'DMUL', 'DFMA', 'DSETP')
+DOUBLE_PIPE, DOUBLE_OTHER, DOUBLE_GUARD = 8, 9, 15
+
+
+def double_read_early(mc, code):
+    """What does not hold of the readers of results of double precision: (offset, what) for each,
+    and how many readers were looked at. From each DADD, DMUL, DFMA or DSETP, in straight-line
+    code, to the instructions that read what it wrote, until something writes it again: each
+    comes as many cycles later as native sm_70 code keeps (never fewer in 54,085 pairs of
+    NVIDIA's own code for sm_70, with a scoreboard or without; sm_80 code keeps fewer, and its
+    translation must not)."""
+    words = [int.from_bytes(code[i:i + 16], 'little') for i in range(0, len(code) - 15, 16)]
+    decoded = [mc.decode(70, w) for w in words]
+    out, looked = [], 0
+    for k, d in enumerate(decoded):
+        if d is None or d.mnemonic not in DOUBLE:
+            continue
+        written = set(d.writes)
+        distance = 0
+        for j in range(k + 1, len(words)):
+            distance += (words[j - 1] >> USCHED) & 15
+            y = decoded[j]
+            if y is None or distance >= DOUBLE_GUARD:
+                break
+            for letter, register, role in y.reads:
+                if (letter, register) not in written:
+                    continue
+                looked += 1
+                need = (DOUBLE_GUARD if letter == 'P' and (role == 'guard' or y.kind == 'BRU')
+                        else DOUBLE_PIPE if y.kind == 'FMALITE' else DOUBLE_OTHER)
+                if distance < need:
+                    out.append((16 * j, 'reads %s%d %d cycles after the %s at 0x%x wrote it: Volta\'s own code never reads a result of double precision before %d' % (
+                        letter, register, distance, d.mnemonic, 16 * k, need)))
+            written -= set(y.writes)
+            if not written or y.kind == 'BRU':
+                break
+    return out, looked
 
 
 # ---- level 3: validation of "everything at the instruction" (the frame) ----
@@ -4865,6 +4911,10 @@ def main():
         wrong, followed, complement = data_overwritten(mc, result_code)
         kinds['(schedule) registers that a memory instruction reads as data, followed to what writes them next'] += followed
         kinds['(schedule) writes of such a register under the complement of the guard of the store that reads it'] += complement
+        for at, what in wrong:
+            problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
+        wrong, looked = double_read_early(mc, result_code)
+        kinds['(schedule) readers of a result of double precision, each as far after it as Volta keeps them'] += looked
         for at, what in wrong:
             problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
         # ---- even-register alignment: an operand of two registers begins on an even one ----

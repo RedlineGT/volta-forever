@@ -47,16 +47,16 @@ instruction descriptions give it the same reading, by one of two tables that
   compiles for sm_80 while it runs (erfc, erfinv, exp2) were translated and gave wrong results
   on a V100 (`tests/gpu/torch.sh` told 8.0 with `VF_CAPABILITY_ALL=1`: 3 of 925 cases
   different), although every word of them reads the same as sm_80 and as sm_75
-  (`reference/ampere_check.py`) and the independent validator finds nothing in the translation
-  of their code read as sm_75; which instruction, or which other difference between the two
-  architectures, was not found. So a word passes by its class only in a form listed in
+  (`reference/ampere_check.py`): what differs between the two architectures there is not an
+  instruction but when its result may be read (section 7, "A result of double precision";
+  `docs/validation.md`, section 8). So a word passes by its class only in a form listed in
   `reference/ampere-evidence.txt`: the class with the values of all its modifiers (registers,
   predicates and immediates free), each seen in translated sm_80 code that gave the right
   results on a V100 against a native build or a host computation
   (`reference/ampere_evidence.py` prints the forms of a kernel). 74 forms of 43 classes at
   2026-11-25, from the kernels of `tests/kernels/k_told.cu`, vLLM's bf16 norm and the float32
-  kernels of erfc, erfinv and exp2; none of double precision. A form is added with the kernel
-  that shows it.
+  kernels of erfc, erfinv and exp2; none of double precision, which the generator refuses
+  until a translated kernel with it ran right. A form is added with the kernel that shows it.
 
 The translator lowers global loads and stores through a memory descriptor (every size), paired
 FP32-to-FP16 conversions, and 16-byte asynchronous copies. Each copy uses a four-register
@@ -874,6 +874,18 @@ cycle when every late writer names a scoreboard, which the wait covers). The
 delays and their correctness were measured on a V100 for `DSETP` (stalls 1 to
 15, in a straight line and after a taken branch) and for `FCHK`.
 
+
+### A result of double precision
+
+An instruction of double precision (DADD, DMUL, DFMA, DSETP) names a scoreboard for its
+result, and its reader waits for it. That wait is not all that Volta's own code keeps: a
+reader of such a result never comes closer than 8 cycles when it is of the same pipe (double
+or half precision), 9 otherwise, and a predicate of DSETP 15 cycles as a guard or to a branch
+(`docs/validation.md`, section 8, has the measurements). Code for sm_75 keeps the same
+distances, so its instructions are right as the compiler had them; code for sm_80 has 6 and
+14. The schedule gives these distances wherever the writer or the reader is the translation's
+(`Machine.waited`, `distance::waited`): in a function of sm_80 code, everywhere. No such
+function is translated yet (no form of these instructions passes: section 1).
 
 ### R2P reads all seven predicates
 

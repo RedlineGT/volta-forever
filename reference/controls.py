@@ -19,6 +19,9 @@ sm_75 cubins named with it, and counts what validate.py finds. A control that pa
     nowait      the instruction after one that reads late a register of the translation does not
                 wait for it
     close       a wait comes one cycle after the instruction that names its scoreboard
+    doublesoon  the instruction after an instruction of double precision, which reads its
+                result, comes 6 cycles after it, as in code for sm_80 (Volta's own code has 8 or
+                more: with that, three kernels of PyTorch were wrong on a V100)
     returns     a number that makes a return address is off by one instruction
     waitless    what an instruction waited for, the first instruction of what it became does not
                 wait for (ULDC lost its wait that way until a review found it)
@@ -515,6 +518,14 @@ def patched(control):
             if (before.changed or items[k].changed) and any(mask >> s & 1 for s in named) and before.d.kind != 'BRU':
                 before.word = with_stall(before.word, 1)
 
+    def doublesoon(self):
+        schedule(self)
+        items = self.items
+        for k in range(len(items) - 1):
+            if items[k].d.mnemonic in ('DADD', 'DMUL', 'DFMA', 'DSETP') and stall_of(items[k].word) > 6 and any(
+                    (letter, register) in items[k].d.writes for letter, register, role in items[k + 1].d.reads):
+                items[k].word = with_stall(items[k].word, 6)
+
     def returns(self):
         return_addresses(self)
         for item in self.items:
@@ -733,6 +744,7 @@ def patched(control):
         'masks': {'liveness': masks},
         'nowait': {'late': nowait},
         'close': {'schedule': close},
+        'doublesoon': {'schedule': doublesoon},
         'returns': {'return_addresses': returns},
         'waitless': {'schedule': waitless},
         'unlisted': {},
@@ -1203,7 +1215,7 @@ def patched(control):
     return all_controls[control]
 
 
-CONTROLS = ['as it is', 'unsaved', 'blind', 'cut', 'masks', 'nowait', 'close', 'returns', 'waitless', 'unlisted', 'swapped', 'batched', 'unmoved', 'named', 'unguarded', 'lanes', 'unwaited', 'unordered', 'complement_rewritten', 'complement_same', 'soon', 'partial', 'boardless', 'unmasked', 'early', 'unheld', 'unwritten', 'stale', 'unkept', 'slowno', 'slowshort', 'slownowait', 'slownever', 'slowfree', 'slowsaved', 'alive_scratch']
+CONTROLS = ['as it is', 'unsaved', 'blind', 'cut', 'masks', 'nowait', 'close', 'doublesoon', 'returns', 'waitless', 'unlisted', 'swapped', 'batched', 'unmoved', 'named', 'unguarded', 'lanes', 'unwaited', 'unordered', 'complement_rewritten', 'complement_same', 'soon', 'partial', 'boardless', 'unmasked', 'early', 'unheld', 'unwritten', 'stale', 'unkept', 'slowno', 'slowshort', 'slownowait', 'slownever', 'slowfree', 'slowsaved', 'alive_scratch']
 # (Those of pairs of products on whole rows: only when the translator makes them, not with VF_PAIRS=0.)
 PAIR_CONTROLS = ['rowlane', 'otherrow', 'rowwait', 'rowread', 'halfswap', 'halfk', 'inplace', 'stepfast', 'unsettled', 'unsynced', 'unpermuted', 'unconverted', 'notalso']
 CONTROLS += PAIR_CONTROLS

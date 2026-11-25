@@ -1216,27 +1216,68 @@ operands. With every whole class taken: 791,674 distinct words of vLLM 0.34.0's 
 failed (the check was seen to fail: with the class beside `F2FP` taken whole, as a first
 version of the table had it, a word of `F2FP` to bf16 passes as that class, nvdisasm reads it
 as sm_80 and not as sm_75, and the check says so; classes kept for some values only no longer
-vouch for their neighbours). The two translators agreed on all 544 cubins (27,360 functions, 8,387 translated,
-where 452 were). And the independent validator, given a function as the sm_80 path normalizes
-it (sm_75 words; a script of the day, not in the repository) and its translation, found 0
-problems in the kernels it was given. **All of that passed, and three kernels were wrong on
-the GPU**: PyTorch's double-precision erfc, erfinv and exp2, which it compiles for sm_80 while
-it runs when it is told 8.0, gave other results than the CPU in `tests/gpu/torch.sh` (erfc and
-erfinv in every element, exp2 in 67 of 2,145), where the three had been refused before. The
-cause was not found (a control on the GPU that would separate the path's own rescheduling of
-every instruction from the rules of the sm_75 translator was not run). What was done instead:
-a word passes by its class only in a form that ran right on a V100
-(`reference/ampere-evidence.txt`: 74 forms of 43 classes, none of double precision), which
-refuses the three kernels again; with it the two translators agree on the same corpora (519
-functions of PyTorch's and vLLM's sm_80 code translated, where 452 were), `ampere_check.py`
-passes on them, and `torch.sh` told 8.0 gives 867 right, 57 refused, none different (864 and
-60 before: the float32 erfc and exp2 and the float16 erfc are now given, and are the CPU's
-within the battery's tolerances). The translation of sm_80 machine code is **still not
-independently validated**, and the day's lesson is that the checks above do not replace
-results on the hardware: a form enters the list with a kernel that ran right. To close the
-gap: find what was wrong in those three kernels (their cubins can be saved with
-`VF_TRANSLATE_DUMP`), give the validator the normalized function with a rule for each
-rewritten form, and a control on the GPU for each class.
+vouch for their neighbours). The two translators agreed on all 544 cubins. And the validator
+of that day, given a function as the sm_80 path normalizes it (sm_75 words) and its
+translation, found 0 problems. **All of that passed, and three kernels were wrong on the
+GPU**: PyTorch's double-precision erfc, erfinv and exp2, which it compiles for sm_80 while it
+runs when it is told 8.0, gave other results than the CPU in `tests/gpu/torch.sh` (erfc and
+erfinv in every element, exp2 in 67 of 2,145), where the three had been refused before.
+
+**The cause, shown from the code; confirmed on the GPU: not yet.** A review of the same day
+found it in the schedule, not in the instructions. An instruction of double precision (DADD,
+DMUL, DFMA, DSETP: Volta's `fma64lite` pipe) announces its result on a scoreboard, and its
+reader waits for it; the translator, and the validator, took that wait to be enough. NVIDIA's
+compiler does not: in its own code for sm_70 a reader of such a result never comes closer than
+a fixed distance, scoreboard or not: 8 cycles to an instruction of the same pipe (54,085
+pairs of 108 cubins of cuSPARSE 12.9 and of a corpus of double-precision kernels built for
+sm_70, none below, two thirds at 8), 9 to any other, and a predicate of DSETP 9 as data, 8 to
+an instruction of double precision and 15 as a guard or to a branch; its tables for sm_70 and
+sm_75 say 9 and 15, and code for sm_75 keeps the same distances. Code for sm_80 keeps 6, 6 to
+7 and 14, and the sm_80 path, which schedules every instruction anew, lengthened only the
+distances from writers without a scoreboard. The three wrong translations have 165, 192 and 33
+reads closer than Volta's own code has any; every kernel that ran right (the float32 ones of
+the same functions, the test kernels, vLLM's norm) has none. Of 2,060,115 waited pairs of the
+sm_80 corpora (cuSPARSE, PyTorch, vLLM), 314,815 are under Volta's floor, all but 11 from
+these four instructions (8 from an atomic operation, read 11 cycles later where 32 native
+pairs have 13 or more, and 3 from I2F, whose "floor" native sm_75 code itself goes under 63
+times: neither is taken for a rule, and no form that the path takes has such a pair). How each
+kernel failed fits: erfc reads the seed of its reciprocal 6 cycles after the DADD that makes
+its operand, in every element; erfinv branches on a DSETP 14 cycles before, into the path of
+values outside the domain; exp2 has few such reads.
+
+What was done:
+
+- **The schedule** (`reference/machine.py`, `Machine.waited`; `crates/vf-sass/src/distance.rs`,
+  `schedule.rs`): a reader of what DADD, DMUL, DFMA or DSETP writes comes no earlier than
+  Volta's own code has one (8, 9, 15), whatever scoreboard is named and waited for, wherever
+  one of the two instructions is the translation's (in an sm_80 function, every one). With it,
+  the three kernels translated as on that day have no read under the floor (165, 192 and 33
+  without).
+- **The validator** (`double_read_early`): the same distances, written there on their own, for
+  every translation. Given the three functions as normalized: 420, 448 and 66 problems in the
+  translations that were wrong, none in those made with the rule; none in the translations
+  of 79 of PyTorch's 475 sm_75 cubins (every sixth; 418,387 such readers looked at; the whole
+  corpus was not run again). Control `doublesoon` (`reference/controls.py`: the reader after
+  an instruction of double precision 6 cycles after it; objected to 237 times in a cubin of
+  double-precision kernels built for sm_75, and in PyTorch's 0097).
+- **No form of double precision passes** all the same: a word passes by its class only in a
+  form that ran right on a V100 (`reference/ampere-evidence.txt`: 74 forms of 43 classes), and
+  the generator refuses a form of these four instructions, until the measurement that decides
+  is made: the three kernels as translated then, and the same with only their stall counts
+  raised to the floor, on a V100 against the CPU (prepared by the review, not run: it runs code
+  known to be wrong, and waits for the owner's word). Until then the rule above is a rule that
+  no translated code exercises on a GPU.
+
+With the evidence list the three kernels are refused again: the two translators agree on the
+same corpora (519 functions of PyTorch's and vLLM's sm_80 code translated, where 452 were),
+`ampere_check.py` passes on them, and `torch.sh` told 8.0 gives 867 right, 57 refused, none
+different (864 and 60 before: the float32 erfc and exp2 and the float16 erfc are now given, and
+are the CPU's within the battery's tolerances). The translation of sm_80 machine code is
+**still not independently validated**: the validator does not read sm_80 originals (the
+normalized function was given to it by a script of the day), and it has no rule for the forms
+that the path rewrites. The day's lesson is that agreement of descriptions, of translators and
+of the validator did not replace results on the hardware: a form enters the list with a
+kernel that ran right.
 
 **Triton's machine code.** Triton makes its kernels while the program runs, for its shapes and
 settings; told 7.5 (the default), it gives them as sm_75 machine code, which the layer

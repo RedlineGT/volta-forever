@@ -1331,3 +1331,70 @@ fn the_report_says_which_functions_compute_their_products_in_pairs() {
     // VF_PAIRS=0 (and safe mode, which sets it so in machine code): each product by itself.
     assert_eq!(paired(false).1, Vec::<String>::new());
 }
+
+/// A result of double precision is read no earlier than Volta's own code reads one, also when the
+/// reader waits for the scoreboard that announces it: 8 cycles to an instruction of the same
+/// pipe, 9 to any other, and a predicate of DSETP 15 as a guard or to a branch. Code for sm_80
+/// has 6 and 14 there, and every instruction of an sm_80 function is scheduled anew (`changed`):
+/// with the scoreboard trusted, PyTorch's double-precision erfc, erfinv and exp2 for sm_80 were
+/// translated with 165, 192 and 33 such reads, and were wrong on a V100 (docs/validation.md,
+/// section 8). The words are of a native sm_70 build of exp2.
+#[test]
+fn a_result_of_double_precision_is_read_no_earlier_than_volta_reads_one() {
+    use crate::generated::special::{WAIT, WRITE_BARRIER};
+    const DADD: u128 = 0x001e1000000008060000000002067229; // DADD R6, R2, -R6 (writes R6:R7 on scoreboard 0)
+    const DMUL: u128 = 0x001e1000000000000080000006087a28; // DMUL R8, R6, c[0x2][0x0], waits for 0
+    const DFMA: u128 = 0x001e1000000000083ff000000608742b; // DFMA R8, R6, R8, 1 (writes R8:R9 on 0)
+    const IMAD: u128 = 0x002fe400078e02090010000004077824; // IMAD R7, R4, 0x100000, R9
+    const DSETP: u128 = 0x000fe20003f0c2007ff000000200742a; // DSETP P0, |R2|, +INF
+    const BRA: u128 = 0x000fea0003800000000000e000008947; // @P0 BRA
+    const FSEL: u128 = 0x001fe40000000000000000ff06067208; // FSEL R6, R6, RZ, P0
+    let board = |word: u128, board: u128| (word & !(7 << WRITE_BARRIER)) | board << WRITE_BARRIER;
+    let waits = |word: u128, mask: u128| (word & !(63 << WAIT)) | mask << WAIT;
+    let run = |writer: u128, reader: u128, changed: bool| {
+        let mut decoder = Decoder::new(70);
+        let nop = assemble::assemble("nop_", &[]).unwrap();
+        let mut items: Vec<Item> = [with_stall(writer, 6, false), waits(reader, 1), nop]
+            .into_iter()
+            .enumerate()
+            .map(|(i, word)| {
+                let mut item = Item::new(word, i, "same", changed);
+                item.first = true;
+                item.d = Some(decoder.decode(word).unwrap());
+                item
+            })
+            .collect();
+        super::schedule::schedule(&mut items, &[]).unwrap();
+        stalls(&items)[0]
+    };
+    // Each pair six cycles apart, the reader waiting for the writer's scoreboard.
+    assert_eq!(run(board(DADD, 0), DMUL, true), 8);
+    assert_eq!(
+        run(board(DADD, 0), IMAD, true),
+        6,
+        "IMAD reads nothing that this DADD writes"
+    );
+    assert_eq!(run(board(DFMA, 0), IMAD, true), 9);
+    assert_eq!(run(board(DSETP, 0), FSEL, true), 9);
+    assert_eq!(run(board(DSETP, 0), BRA, true), 15);
+    // Already further apart: left.
+    let far = |writer: u128, reader: u128| {
+        let mut decoder = Decoder::new(70);
+        let mut items: Vec<Item> = [with_stall(writer, 12, false), waits(reader, 1)]
+            .into_iter()
+            .chain([assemble::assemble("nop_", &[]).unwrap()])
+            .enumerate()
+            .map(|(i, word)| {
+                let mut item = Item::new(word, i, "same", true);
+                item.first = true;
+                item.d = Some(decoder.decode(word).unwrap());
+                item
+            })
+            .collect();
+        super::schedule::schedule(&mut items, &[]).unwrap();
+        stalls(&items)[0]
+    };
+    assert_eq!(far(board(DADD, 0), DMUL), 12);
+    // The program's own instructions of sm_75 code, both as they were: as the compiler had them.
+    assert_eq!(run(board(DADD, 0), DMUL, false), 6);
+}

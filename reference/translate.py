@@ -2455,6 +2455,11 @@ class Function:
                             if not item.changed:
                                 raise Refused('the %s at 0x%x reads a predicate of the translation that a scoreboard announces' % (item.d.mnemonic, 16 * item.origin))
                             self.waits_for(item, (w[1].word >> WRITE_BARRIER) & 7)
+                        # (A result of double precision is not read earlier than Volta's own
+                        # code reads one, whatever is waited for: `Machine.waited`.)
+                        floor = mc.waited(letter, role, w[1].d, item.d.kind)
+                        if floor is not None:
+                            need = max(need, w[0] + floor - t)
                         continue
                     need = max(need, w[0] + mc.least(letter, role, w[1].d, item.d.kind) - t)
                 if item.changed and (item.d.kind not in ('FXU', 'IMAD', 'FMAI') or item.d.mnemonic == 'R2P'):
