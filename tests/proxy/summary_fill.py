@@ -22,8 +22,9 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   lacks those lines; its library's destructor, after the layer's, removes it there: 0, as after any last write);
   after the last write, a removal returns EBUSY at once while a call is under way (the fill that never returns;
   one that runs 3 s, whose library unmaps what it reads when its removal returns 0: the page stays and the call
-  ends well; a removal's own call of the fill, stalled 3 s after its look at the last write by stall.c), and
-  the thread calls no fill after it; a fill that forks on the layer's thread, its child
+  ends well; a removal's own call of the fill, stalled 3 s after its look at the last write by stall.c; the
+  layer's thread stalled between its announcement of a call and the call), and the thread calls no fill after
+  it; a fill that forks on the layer's thread, its child
   returning from it: the thread ends in the child, which ends with it and writes no file;
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
@@ -236,6 +237,18 @@ def child(proxy, library, mode):
         while sprung() != 1 and time.time() < end:
             time.sleep(0.01)
         assert sprung() == 1, "the race thread's removal did not stall"
+        say("exiting")
+        return
+
+    if mode == "ordergap":  # the layer's thread stalled between its announcement of a call and the call (stall.c)
+        assert add(b"stall", b"stall") == 0 and lib.fill_add_pageread(b"page") == 0  # in this order: the slots'
+        lib.fill_exit_page(2)
+        lib.fill_arm(1)
+        sprung = c.CDLL(None).stall_sprung
+        end = time.time() + 10
+        while sprung() != 1 and time.time() < end:
+            time.sleep(0.01)
+        assert sprung() == 1, "the layer's thread did not stall"
         say("exiting")
         return
 
@@ -776,6 +789,18 @@ if __name__ == "__main__":
                                                      f"{errno.EBUSY}; the race thread's removal returned 0"), \
             (status, out, err[-1500:])
         text = well_formed(Path(f"{summary}.{p.pid}"), ["race"])
+        assert exited(text, p.pid) and "not returned 2 s after the exit began\n" in text, text
+        # The layer's thread stalled 3 s between its announcement of a call and the call (stall.c, in its look at
+        # whether it runs in a child), the exit beginning meanwhile: the destructor's removal of that fill gets EBUSY,
+        # the call being announced before the look; the page stays and the call ends well. (Were the look made
+        # before the announcement, the removal would find no call, get 0 and unmap the page under it.)
+        p = start("ordergap", LD_PRELOAD=stall, **on)
+        p.line()
+        assert p.line() == ["exiting"]
+        status, out, err = p.end()
+        assert status == 0 and err.rstrip().endswith(f"fill library: at its end: the page fill's removal returned "
+                                                     f"{errno.EBUSY}"), (status, out, err[-1500:])
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["stall", "page"])
         assert exited(text, p.pid) and "not returned 2 s after the exit began\n" in text, text
         print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here;"
               f" {ahead:.1f} s with the time of day an hour ahead), the"

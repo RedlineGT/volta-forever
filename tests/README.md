@@ -623,8 +623,9 @@ destructor returns 0); after the last write, a removal returning `EBUSY` at once
 (the function that never returns, removed by its library's destructor; one that runs 3 s, whose library
 unmaps the page it reads when its removal returns 0: the page stays, the call ends well, and the function
 after it in the slots is not called; a removal's own call of the function, stalled 3 s after its look at
-the last write by `stall.c`, the destructor's removal of the same function then returning `EBUSY`); a
-function that forks on the layer's thread, its child returning
+the last write by `stall.c`, the destructor's removal of the same function then returning `EBUSY`; the
+layer's thread stalled between its announcement of a call and the call, the same); a function that forks
+on the layer's thread, its child returning
 from it: the child ends and writes no file; the layer's thread blocking every signal but those
 of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
 the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
