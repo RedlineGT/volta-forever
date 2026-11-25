@@ -622,7 +622,9 @@ layer's thread (the process ends with that status, its last write made, and its 
 destructor returns 0); after the last write, a removal returning `EBUSY` at once while a call is under way
 (the function that never returns, removed by its library's destructor; one that runs 3 s, whose library
 unmaps the page it reads when its removal returns 0: the page stays, the call ends well, and the function
-after it in the slots is not called); a function that forks on the layer's thread, its child returning
+after it in the slots is not called; a removal's own call of the function, stalled 3 s after its look at
+the last write by `stall.c`, the destructor's removal of the same function then returning `EBUSY`); a
+function that forks on the layer's thread, its child returning
 from it: the child ends and writes no file; the layer's thread blocking every signal but those
 of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
 the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
@@ -635,7 +637,8 @@ itself in its destructor (its last report stays, the process lives on), and one 
 its lines written as they change; and, the control, one unloaded without removing itself, into which
 the thread calls (the process ends by SIGSEGV). Each case in a process of its own, killed with its
 children when a wait of the test passes 60 s; it needs a C compiler (`summary_fill.c`,
-`link_mock_driver.c`, and `clock_ahead.c`, a `clock_gettime` put in front of the C library's).
+`link_mock_driver.c`, `clock_ahead.c`, a `clock_gettime` put in front of the C library's, and `stall.c`,
+a `calloc` and a `getpid` that stall one thread once).
 
 ### Forwarding stack test (`tests/forward/`)
 
