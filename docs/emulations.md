@@ -734,11 +734,32 @@ of blocks (`barrier.cluster`, `mapa`, `getctarank`, `clusterlaunchcontrol`, memo
 `.explicitcluster`, `.reqnctapercluster`, `.maxclusterrank`), the `mbarrier` forms the table
 above does not list (`mbarrier.try_wait`, `mbarrier.expect_tx`, `mbarrier.arrive_drop`, ...),
 bulk copies (`cp.async.bulk`) and proxy fences (`fence.proxy.async`, `fence.proxy.tensormap`,
-`fence.mbarrier_init`), tensor maps (`tensormap`), multicast memory (`multimem`), `wmma` on
-integers, bf16, tf32 or f64, `cvt.pack`, and other `stmatrix` shapes and layouts. A form on a
-type of later targets (bf16, tf32, FP8, E2M1, UE8M0, UE4M3) that the sections above do not
-list is refused too (`neg.bf16x2`, `cvt.rna.tf32.f32`). These
+`fence.mbarrier_init`), tensor maps (`tensormap`), multicast memory (`multimem`, but see
+below), `wmma` on integers, bf16, tf32 or f64, `cvt.pack`, and other `stmatrix` shapes and
+layouts. A form on a type of later targets (bf16, tf32, FP8, E2M1, UE8M0, UE4M3) that the
+sections above do not list is refused too (`neg.bf16x2`, `cvt.rna.tf32.f32`). These
 forms are refused on Volta.
+
+**Reported traps: the multimem family.** `multimem.ld_reduce`, `multimem.st`, `multimem.red` and
+the other `multimem.*` instructions operate on a multimem address, and the PTX manual leaves them
+undefined on any other ("Address operand a must be a multimem address. Otherwise, the behavior is
+undefined", PTX ISA 9.3, sections 8.2.3 and 9.7.10.15). Such an address is the mapping of a
+multicast object, whose team can only hold GPUs that have `CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED`;
+a V100 has not (the 580 driver answers 0, and `cuMulticastGetGranularity` and `cuMulticastCreate`
+return 801, `CUDA_ERROR_NOT_SUPPORTED`, without the layer and through it). So in a process where
+the driver answers 0 for every GPU, no such instruction can be reached with a defined result, and
+the layer replaces each one, not its function, by a reported trap: under the instruction's guard,
+a call of `__assertfail` (the file `volta-forever`, the number of the trap in its function, the
+function's name, the message "FORM cannot run on this GPU: it needs a multicast address, which no
+GPU of this process can have; volta-forever put this trap in its place") and a `trap` after it.
+What the instruction would have written is not written: nothing of the thread runs after it. The
+rest of the function is lowered as any other, and its kernels are given, each said once
+(`LIMITS.md`, "Several GPUs and NCCL"). Reached all the same, the kernel stops with
+`CUDA_ERROR_ASSERT` (710), the driver writes the assertion with the block and the thread, and the
+context ends, as for any trap. Where a GPU of the process has multicast, with `VF_REPORTED_TRAPS=0`,
+in modules of 32-bit addresses and in what `vf ptxas` and the nvJitLink adapter make, the function
+traps and its kernels are refused, as for the forms above. No other form is replaced so: a program
+can execute any of them.
 
 **What the driver's compiler refuses.** The lowering rewrites or traps the instructions it
 knows. The driver may still refuse what remains: a function whose compiler error is
@@ -749,7 +770,9 @@ collected is replaced by a trap, and its kernels are refused at the lookup
 `cta-mbarrier`, `ptx-reduction-exited`, `ptx-reduction-exited-f32`, `guarded-copy` and
 `chosen-copy` for the table above; `refuse-library`, `refuse-module` (through both driver
 interfaces: a refused kernel is refused at the lookup, the others run; an emulated kernel
-is announced). Half bounds: `f16-bounds` and `signed-zero-bounds`.
+is announced); `reported-library`, `reported-module`, `reported-library-lazy-off`, `reported-off`
+for the reported traps (`tests/kernels/test_reported.c`). Half bounds: `f16-bounds` and
+`signed-zero-bounds`.
 
 ## 10. The same emulations in machine code
 
