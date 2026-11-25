@@ -636,9 +636,16 @@ the buffer's end and no further; a removal that waits for the call under way (of
 function once more, keeps its lines marked as its last report, and calls nothing after; a function
 that calls the layer back, refused, not left waiting; functions that break the contract: one that never
 returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then is made
-without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` (the
-process ends with that status, its last write made); the layer's thread blocking every signal (its
-`SigBlk`), the thread that loaded the layer keeping its mask; children made by `fork()` while the thread
+without the libraries' lines and says so, 2 s of the monotonic clock with the time of day an hour ahead
+under `clock_ahead.c`), one that forks at each write, one that calls `exit(3)` on the
+layer's thread (the process ends with that status, its last write made, and its library's removal in its
+destructor returns 0); after the last write, a removal returning `EBUSY` at once while a call is under way
+(the function that never returns, removed by its library's destructor; one that runs 3 s, whose library
+unmaps the page it reads when its removal returns 0: the page stays, the call ends well, and the function
+after it in the slots is not called); a function that forks on the layer's thread, its child returning
+from it: the child ends and writes no file; the layer's thread blocking every signal but those
+of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
+the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
 writes and holds the lock, in which both functions do nothing, nothing is called, and which end and
 write nothing; without `VF_SUMMARY` no thread and no call, and without the thread (it cannot be
 started under `RLIMIT_NPROC`) the lines at exit; at exit, the library loaded after the layer called
@@ -647,7 +654,8 @@ with its last report written; a library unloaded by `dlclose` while the thread r
 itself in its destructor (its last report stays, the process lives on), and one pinned, which stays,
 its lines written as they change; and, the control, one unloaded without removing itself, into which
 the thread calls (the process ends by SIGSEGV). Each case in a process of its own, killed with its
-children when a wait of the test passes 60 s; it needs a C compiler.
+children when a wait of the test passes 60 s; it needs a C compiler (`summary_fill.c`,
+`link_mock_driver.c`, and `clock_ahead.c`, a `clock_gettime` put in front of the C library's).
 The twenty-first checks, with the stand-in of the fourth and devices whose
 multicast it chooses, that a kernel of NCCL's name that calls a function holding a multimem
 instruction is given with a reported trap, said in one line for its image (the kernel itself from
