@@ -42,8 +42,10 @@ int cuDeviceGetCount(int *count) {
 int cuDeviceGet(int *device, int ordinal) { *device = ordinal; return 0; }
 int cuDeviceGetAttribute(int *value, int attribute, int device) {
     const char *flags = getenv("MOCK_MULTICAST");
+    static int asked;
     if (attribute == 132) {
         if (getenv("MOCK_ATTRIBUTE_FAILS")) return 1;
+        if (getenv("MOCK_ATTRIBUTE_FAILS_ONCE") && asked++ == 0) return 1;
         *value = flags && flags[device] == '1';
         return 0;
     }
@@ -107,10 +109,11 @@ def fat_binary(cubin, sm=70):
 def child(proxy, mock, mode):
     api, backend = c.CDLL(proxy), c.CDLL(mock)
     handle, function = c.c_void_p(), c.c_void_p()
-    if mode == "lookup":
-        assert api.cuModuleLoadData(c.byref(handle), module(NCCL)) == 0
-        sys.stderr.flush()
-        print(api.cuModuleGetFunction(c.byref(function), handle, NCCL), flush=True)
+    if mode in ("lookup", "lookup-twice"):
+        for _ in range(1 if mode == "lookup" else 2):
+            assert api.cuModuleLoadData(c.byref(handle), module(NCCL)) == 0
+            sys.stderr.flush()
+            print(api.cuModuleGetFunction(c.byref(function), handle, NCCL), flush=True)
     elif mode in ("large-nccl", "large-other"):
         name = NCCL if mode == "large-nccl" else OTHER
         image = module(name, 17 << 20)
@@ -143,7 +146,7 @@ def child(proxy, mock, mode):
 def run(proxy, mock, mode, **settings):
     env = dict(os.environ, VF_REAL_LIBCUDA=mock, VF_PROXY_CACHE="0", MOCK_MULTICAST="00")
     for variable in ("VF_LOG_LEVEL", "VF_LOG", "VF_SAFE", "VF_EMULATION_WARNINGS", "VF_REPORTED_TRAPS",
-                     "MOCK_LOAD_SLEEP", "MOCK_ATTRIBUTE_FAILS"):
+                     "MOCK_LOAD_SLEEP", "MOCK_ATTRIBUTE_FAILS", "MOCK_ATTRIBUTE_FAILS_ONCE"):
         env.pop(variable, None)
     env.update(settings)
     return subprocess.run([sys.executable, __file__, proxy, mock, mode], env=env, check=True,
@@ -173,6 +176,12 @@ def check(proxy, mock):
             # A refused kernel of NCCL's still brings the remedy.
             assert REMEDY in done.stderr, (name, done.stderr)
         print(f"PASS {name}: {'given with a reported trap' if given else 'refused'}")
+
+    # An answer that cannot be had once is kept for the process: the second load is refused too, as
+    # the cache's key and the adaptation say (until 2026-11-25 it was asked again, and given).
+    done = run(proxy, mock, "lookup-twice", MOCK_ATTRIBUTE_FAILS_ONCE="1")
+    assert done.stdout.split() == ["218", "218"], (done.stdout, done.stderr)
+    print("PASS an answer of the driver that failed once: kept for the process")
 
     # A large image: the line comes before the driver's load begins, once in the process.
     for mode in ("large-nccl", "large-other"):

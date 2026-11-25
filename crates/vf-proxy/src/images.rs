@@ -978,14 +978,19 @@ const MULTICAST_SUPPORTED: c_int = 132;
 /// (`policy`); otherwise the functions that hold them trap and their kernels are refused, as before
 /// 0.1.4: on a machine with a GPU that has multicast, code adapted for the V100 may also run on that
 /// GPU (a library whose PTX is compiled kernel by kernel gives a later card the V100's PTX), where
-/// the instruction can be reached. Asked once, at the first load that adapts an image (the driver
-/// is initialized then); an answer that cannot be had (an error of the driver) is taken for a GPU
-/// with multicast, and asked again at the next load.
+/// the instruction can be reached. Asked once in the process, at the first load that adapts an image
+/// or makes a cache key for one (the driver is initialized then); an answer that cannot be had (an
+/// error of the driver) is taken for a GPU with multicast, and kept too: the key of the layer's
+/// cache and the adaptation then agree for every image of the process (until 2026-11-25 a failed
+/// answer was asked again at the next load, and an image could be keyed without traps and adapted
+/// with them).
 fn without_multicast() -> bool {
     static ANSWER: OnceLock<bool> = OnceLock::new();
-    if let Some(answer) = ANSWER.get() {
-        return *answer;
-    }
+    *ANSWER.get_or_init(ask_multicast)
+}
+
+/// What `without_multicast` keeps: the driver's answer for every device.
+fn ask_multicast() -> bool {
     type Count = unsafe extern "C" fn(*mut c_int) -> c_int;
     type Get = unsafe extern "C" fn(*mut c_int, c_int) -> c_int;
     type Attribute = unsafe extern "C" fn(*mut c_int, c_int, c_int) -> c_int;
@@ -1002,6 +1007,10 @@ fn without_multicast() -> bool {
     };
     let mut devices = 0;
     if unsafe { count(&mut devices) } != 0 || devices <= 0 {
+        log::info(format_args!(
+            "the driver did not say how many GPUs the process has: the kernels that may reach a multimem \
+             instruction are refused, not given with reported traps"
+        ));
         return false;
     }
     let mut with = Vec::new();
@@ -1010,6 +1019,10 @@ fn without_multicast() -> bool {
         if unsafe { get(&mut device, ordinal) } != 0
             || unsafe { attribute(&mut supported, MULTICAST_SUPPORTED, device) } != 0
         {
+            log::info(format_args!(
+                "the driver did not say whether GPU {ordinal} can take part in multicast: the kernels that may \
+                 reach a multimem instruction are refused, not given with reported traps"
+            ));
             return false;
         }
         if supported != 0 {
@@ -1017,7 +1030,7 @@ fn without_multicast() -> bool {
         }
     }
     let answer = with.is_empty();
-    if ANSWER.set(answer).is_ok() {
+    {
         if answer {
             log::info(format_args!(
                 "no GPU of this process can take part in multicast ({devices} asked): instructions that need a \
