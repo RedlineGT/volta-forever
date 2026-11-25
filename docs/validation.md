@@ -1205,6 +1205,39 @@ PyTorch, cuBLAS, cuSOLVER and cuFFT, it translated 900 (2.9 %); some of its lowe
 (`ATOM_ADD32`, `SHARED_INC`, `COPY128`, `COMMIT`, `PACK`) are reached only from code that Triton
 emits, and neither of those checks ran them.
 
+On 2026-11-25 the path was widened, and the widening showed what this gap costs. Whole classes
+of sm_80 were taken (`docs/translator.md`, section 1): 680 classes whose every bit reads the
+same in the two descriptions, where the path took 221 forms. `reference/ampere_check.py` checks
+that claim against NVIDIA's disassembler on real code: for every distinct word of sm_80 cubins
+that passes as it is (scheduler controls apart), nvdisasm must print the same text for it as
+sm_80 and as sm_75, and each description must find one class, the same one, with the same
+operands. With every whole class taken: 791,674 distinct words of vLLM 0.34.0's sm_80 code and
+3,178,811 of PyTorch 2.14.0's, of which 620,563 and 2,688,238 passed as they are, and none
+failed (the check was seen to fail: with the class beside `F2FP` taken whole, as a first
+version of the table had it, a word of `F2FP` to bf16 passes as that class, nvdisasm reads it
+as sm_80 and not as sm_75, and the check says so; classes kept for some values only no longer
+vouch for their neighbours). The two translators agreed on all 544 cubins (27,360 functions, 8,387 translated,
+where 452 were). And the independent validator, given a function as the sm_80 path normalizes
+it (sm_75 words; a script of the day, not in the repository) and its translation, found 0
+problems in the kernels it was given. **All of that passed, and three kernels were wrong on
+the GPU**: PyTorch's double-precision erfc, erfinv and exp2, which it compiles for sm_80 while
+it runs when it is told 8.0, gave other results than the CPU in `tests/gpu/torch.sh` (erfc and
+erfinv in every element, exp2 in 67 of 2,145), where the three had been refused before. The
+cause was not found (a control on the GPU that would separate the path's own rescheduling of
+every instruction from the rules of the sm_75 translator was not run). What was done instead:
+a word passes by its class only in a form that ran right on a V100
+(`reference/ampere-evidence.txt`: 74 forms of 43 classes, none of double precision), which
+refuses the three kernels again; with it the two translators agree on the same corpora (519
+functions of PyTorch's and vLLM's sm_80 code translated, where 452 were), `ampere_check.py`
+passes on them, and `torch.sh` told 8.0 gives 867 right, 57 refused, none different (864 and
+60 before: the float32 erfc and exp2 and the float16 erfc are now given, and are the CPU's
+within the battery's tolerances). The translation of sm_80 machine code is **still not
+independently validated**, and the day's lesson is that the checks above do not replace
+results on the hardware: a form enters the list with a kernel that ran right. To close the
+gap: find what was wrong in those three kernels (their cubins can be saved with
+`VF_TRANSLATE_DUMP`), give the validator the normalized function with a rule for each
+rewritten form, and a control on the GPU for each class.
+
 **Triton's machine code.** Triton makes its kernels while the program runs, for its shapes and
 settings; told 7.5 (the default), it gives them as sm_75 machine code, which the layer
 translates. The corpus of section 6 ("Triton") is 3,516 configurations of 20 kernels written for

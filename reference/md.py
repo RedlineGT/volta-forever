@@ -289,6 +289,10 @@ class Decoder:
             elif ' SCALE ' in rhs:
                 name, scale = rhs.split(' SCALE ')
                 p.append(('scaled', fields, (name.strip(), int(scale))))
+            elif re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]* convertFloatType\(.*\)', rhs):
+                # (sm_80: an immediate whose bits are read as one type of float or another, by a
+                # modifier. The bits are the operand's either way.)
+                p.append(('converted', fields, rhs.split()[0]))
             elif re.fullmatch(r'[A-Za-z_0-9]+\(.*\)', rhs):
                 name, args = rhs[:-1].split('(', 1)
                 p.append(('function', fields, (name, [a.strip() for a in args.split(',')])))
@@ -315,7 +319,7 @@ class Decoder:
         """The raw field values of the operands of class `c` in `word`: {operand or operand@attribute: value}."""
         out = {}
         for kind, fields, data in self.plan(c):
-            if kind == 'operand':
+            if kind in ('operand', 'converted'):
                 out[data] = fields[0].get(word)
             elif kind == 'attribute':
                 out['%s@%s' % data] = fields[0].get(word)

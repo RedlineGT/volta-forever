@@ -223,3 +223,11 @@ imad_wide__RRC_RRC Pg Rd Ra Rb Sc_addr | Pg.not=1 Pu=PT reuse_src_a=reuse reuse_
 s2ur_ URd | UPg=UPT SRa=SR37
 ulop3_lut__URuIUR_URIR URd URa Sb URc imm8 | UPg=UPT UPu=UPT UPp=UPT UPp.not=1
 lop3_lut__RUR_RUR Rd Ra URb imm8 | Pg=PT Pu=PT Rc=RZ Pp=PT Pp.not=1
+lds__uImmOffset Pg Pg.not Rd Ra_offset | Ra=RZ sz=_32
+lds__uImmOffset Pg Pg.not Rd Ra_offset | Ra=RZ sz=_64
+lds__uImmOffset Pg Pg.not Rd Ra_offset | Ra=RZ sz=128
+lds__sImmOffset Pg Pg.not Rd Ra Ra_offset | sz=_32
+lds__sImmOffset Pg Pg.not Rd Ra Ra_offset | sz=_64
+lds__sImmOffset Pg Pg.not Rd Ra Ra_offset | sz=128
+mufu__RIR_RI Pg Pg.not Rd Sb | mufuop=RSQ
+mufu__RIR_RI Pg Pg.not Rd Sb | mufuop=RCP

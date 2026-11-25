@@ -872,6 +872,10 @@ class Function:
                 b = Item(store | (63 << WAIT), i, 'sm80: store asynchronous copy')
                 b.then = SEQUENCE
                 new = [a, b]
+            elif self.ampere_ops.get(i) == 'bf16add':
+                new = self.bf16_add(i, d)
+            elif self.ampere_ops.get(i) == 'bf16pack':
+                new = self.bf16_pack(i, d)
             elif self.ampere_ops.get(i) == 'pack':
                 # Ra of the surrogate feeds the low half, Rc the high half.
                 rd, low, high = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
@@ -1169,6 +1173,67 @@ class Function:
         item = Item(self.mc.assemble('p2r__RsIR_RIR', Rd=holder, Ra=255, Sb=1 << p), i, 'held: kept')
         item.more_reads = [('P', p, 'data')]
         return item
+
+    def bf16_round(self, i, new, what, to, source, other):
+        """Appends to `new` the instructions that leave in `to` the bits of the bf16 nearest to
+        the f32 in `source` (ties to even), 0x7fff for a NaN: the upper half of the f32, rounded
+        on its lower half. `to` may be `source`; `other` is written."""
+        mc = self.mc
+        def add(word, step):
+            new.append(Item(word, i, 'sm80: %s: %s' % (what, step)))
+        def right(to, source, by, fmt='U32'):
+            return mc.assemble('shf__RuIR_RIR', Rd=to, Ra=255, Sb=by, Rc=source, dir='R', fmt=fmt, hilo='HI')
+        def logic(to, a, immediate, c, lut):
+            return mc.assemble('lop3_lut__RuIR_RIR', Rd=to, Ra=a, Sb=immediate, Rc=c, imm8=lut)
+        add(right(other, source, 16), 'the bits that stay')
+        add(logic(other, other, 1, 255, 0xc0), 'the lowest of them')
+        add(mc.assemble('iadd3_imm__RsIR_RIR', Rd=other, Ra=source, Sb=0x7fff, Rc=other), 'to nearest, ties to even')
+        add(right(other, other, 16), 'rounded')
+        add(logic(to, source, 0x7fffffff, 255, 0xc0), 'magnitude')
+        add(mc.assemble('iadd3_imm__RsIR_RIR', Rd=to, Ra=to, Sb=-0x7f800001, Rc=255), 'negative unless a NaN')
+        add(right(to, to, 31, 'S32'), 'ones unless a NaN')
+        add(logic(to, other, 0x7fff, to, 0xe4), '0x7fff for a NaN')
+
+    def bf16_add(self, i, d):
+        """sm_80's HFMA2.BF16_V2 Rd, Ra, 1, 1, Rc: in each half of the register, the sum of two
+        bf16, rounded to bf16 once. Each half is widened to an f32 (a bf16 is the upper half of
+        one), the two are added as f32, and the sum is rounded to bf16 (`bf16_round`). Rounding
+        the f32 sum gives what one rounding of the exact sum gives (docs/emulations.md, "bf16")."""
+        if self.matrix_at is None:
+            raise Refused('no dedicated registers for an sm_80 bf16 sum')
+        mc, (s0, s1, s2) = self.mc, range(self.matrix_at, self.matrix_at + 3)
+        rd, ra, rc = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
+        new = []
+        def add(word, what):
+            new.append(Item(word, i, 'sm80: bf16 sum: ' + what))
+        def left(to, source):
+            return mc.assemble('shf__RuIR_RIR', Rd=to, Ra=source, Sb=16, Rc=255, dir='L', fmt='U32')
+        def upper(to, source):
+            return mc.assemble('lop3_lut__RuIR_RIR', Rd=to, Ra=source, Sb=0xffff0000, Rc=255, imm8=0xc0)
+        add(left(s0, ra), 'low half of a as f32')
+        add(left(s1, rc), 'low half of c as f32')
+        add(mc.assemble('fadd__RRR_RR', Rd=s0, Ra=s0, Rc=s1), 'low halves added')
+        add(upper(s1, ra), 'high half of a as f32')
+        add(upper(s2, rc), 'high half of c as f32')
+        add(mc.assemble('fadd__RRR_RR', Rd=s1, Ra=s1, Rc=s2), 'high halves added')
+        self.bf16_round(i, new, 'bf16 sum, low', s0, s0, s2)
+        self.bf16_round(i, new, 'bf16 sum, high', s1, s1, s2)
+        add(mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=s0, Sb=0x5410, Rc=s1), 'both halves')
+        return new
+
+    def bf16_pack(self, i, d):
+        """sm_80's F2FP.BF16.PACK_AB Rd, Ra, Rb: the f32 of Rb rounded to bf16 in the low half,
+        that of Ra in the high half. (Ra of the surrogate is the low one, Rc the high one.)"""
+        if self.matrix_at is None:
+            raise Refused('no dedicated registers for an sm_80 bf16 conversion')
+        mc, (s0, s1, s2) = self.mc, range(self.matrix_at, self.matrix_at + 3)
+        rd, low, high = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
+        new = []
+        self.bf16_round(i, new, 'bf16 pack, low', s0, low, s2)
+        if high != 255:
+            self.bf16_round(i, new, 'bf16 pack, high', s1, high, s2)
+        new.append(Item(mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=s0, Sb=0x5410, Rc=s1 if high != 255 else 255), i, 'sm80: bf16 pack: both halves'))
+        return new
 
     def pool(self, width=2):
         """The first of the two registers that the sequences of the translation compute into. Each
@@ -2731,6 +2796,8 @@ def translate(data, mc=None, listing=None, lives=None):
                 for i, op in operations.items():
                     if op == 'pack':
                         f.needs_pool |= f.src[i].ops['Rc'] != 255
+                    elif op in ('bf16add', 'bf16pack'):
+                        f.scratch_need = max(f.scratch_need, 3)
                     else:
                         f.scratch_need = max(f.scratch_need, 2 if op[0] == "increment" else 6)
             report[name] = None

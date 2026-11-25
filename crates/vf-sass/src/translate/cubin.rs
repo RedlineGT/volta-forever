@@ -198,6 +198,9 @@ pub fn translate_with_options(data: &[u8], want_map: bool, opts: &Options) -> Re
                 match op {
                     super::ampere::Operation::GlobalToShared { .. } => fd.scratch_need = fd.scratch_need.max(6),
                     super::ampere::Operation::IncrementShared { .. } => fd.scratch_need = fd.scratch_need.max(2),
+                    super::ampere::Operation::Bf16Add | super::ampere::Operation::Bf16Pack => {
+                        fd.scratch_need = fd.scratch_need.max(3)
+                    }
                     super::ampere::Operation::Pack => {
                         fd.needs_pool |= fd.src[*i].op_or(crate::generated::fields::OP_RC, 255) != 255
                     }

@@ -1,0 +1,98 @@
+# Forms of whole sm80 classes whose translation ran right on a V100. A whole class
+# (ampere_forms.whole_classes) is the same instruction on sm75 by the two descriptions: that is
+# necessary, and it was not enough (2026-11-25: with every whole class taken, three
+# double-precision kernels that PyTorch compiles while it runs, erfc, erfinv and exp2, were
+# translated from sm_80 code and gave wrong results on a V100, where every word of them reads the
+# same as sm_80 and as sm_75 and the validator finds nothing in their translation; which
+# instruction is not known). So a word passes by its class only in a form listed here: the class
+# and the values of its modifiers (reference/ampere_evidence.py prints them; registers, predicates
+# and immediates are free), each seen in translated sm_80 code that gave the right results on a
+# V100, against the reference named. A form is added with the kernel that shows it, compared on a
+# V100 with a native build or a host computation.
+#
+# tests/kernels/k_told.cu, its kernels k_bf16_sum and k_divides for sm_80 (tests/gpu/run.sh,
+# told-8.0-*: every result the host's, 2026-11-25):
+bra_ cond=0 depth=0
+bssy_
+bsync_
+fadd__RRR_RR Ra@absolute=0 Ra@negate=1 Rc@absolute=0 Rc@negate=1 ftz=1 rnd=0 sat=0
+fchk__RRR_RR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0
+ffma__RIR_RIR Ra@absolute=0 Ra@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRI_RRI Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRI_RRI Ra@absolute=0 Ra@negate=1 Rb@absolute=0 Rb@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=1 sat=0
+ffma__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=2 sat=0
+ffma__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=3 sat=0
+ffma__RRR_RRR Ra@absolute=0 Ra@negate=1 Rb@absolute=0 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=0 sat=0
+fsetp__RIR_RIR Ra@absolute=1 Ra@negate=0 bop=0 fcomp=12 ftz=1
+fsetp__RIR_RIR Ra@absolute=1 Ra@negate=0 bop=0 fcomp=13 ftz=1
+fsetp__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 bop=0 fcomp=13 ftz=1
+iadd3_imm__RsIR_RIR Ra@negate=0 Rc@negate=1
+imad__RRR_RRR Rc@negate=0 fmt=0
+imad__RRsI_RRI fmt=0
+imad_wide__RRC_RRC Sc@negate=0 fmt=1
+isetp__RRR_RRR_noEX bop=0 fmt=1 icmp=5
+isetp__RsIR_RIR_noEX bop=0 fmt=1 icmp=4
+isetp__RsIR_RIR_noEX bop=0 fmt=1 icmp=6
+isetp__RsIR_RIR_noEX bop=1 fmt=0 icmp=4
+lop3_lut__RuIR_RIR pop=0
+plop3_lut_2out_
+shf__RRR_RRR cw=0 dir=0 fmt=3 hilo=0
+shf__RRR_RRR cw=0 dir=1 fmt=3 hilo=1
+shf__RuIR_RIR cw=0 dir=1 fmt=3 hilo=1
+#
+# vLLM 0.34.0, fused_add_rms_norm_kernel<c10::BFloat16, 8, true> of its sm_80 code
+# (tests/gpu/vllm-norm.py: the residual the CPU's bits, the norm within one unit, 2026-11-25):
+fadd__RRC_RC Ra@absolute=0 Ra@negate=0 Sc@absolute=0 Sc@negate=0 ftz=0 rnd=0 sat=0
+fadd__RRR_RR Ra@absolute=0 Ra@negate=0 Rc@absolute=0 Rc@negate=0 ftz=0 rnd=0 sat=0
+fmul__RIR_RI Ra@absolute=0 Ra@negate=0 fmz=0 rnd=0 sat=0 scale=4
+fsetp__RIR_RIR Ra@absolute=1 Ra@negate=0 bop=0 fcomp=14 ftz=0
+i2f__Cb_32b dstfmt=2 rnd=0 srcfmt=5
+iadd3_noimm__RRR_RRR Ra@negate=0 Rb@negate=0 Rc@negate=0
+imad__RsIR_RIR Rc@negate=0 fmt=1
+isetp__RCR_RCR_noEX bop=0 fmt=1 icmp=4
+isetp__RUR_RUR_noEX bop=0 fmt=1 icmp=6
+isetp__RsIR_RIR_noEX bop=0 fmt=1 icmp=4
+isetp__RsIR_RIR_noEX bop=0 fmt=1 icmp=6
+isetp__RsIR_RIR_noEX bop=1 fmt=0 icmp=4
+lea_hi_noimm__RRR_RRR Ra@negate=0 Rb@negate=0 hilo=1
+lea_hi_noimm_sx32_x__RRR_RRR Ra@invert=0 Rb@invert=0 X=1 hilo=1 sx32=1
+prmt__RuIR_RIR pmode=0
+s2r_ SRa=0
+shf__RuIR_RIR cw=0 dir=1 fmt=0 hilo=0
+shf__RuIR_RIR cw=0 dir=1 fmt=2 hilo=1
+shfl__RII shflmd=2
+shfl__RIR shflmd=2
+sts__sImmOffset stride=1 sz=4
+ulea_hi_noimm__URURUR_URURUR URa@negate=0 URb@negate=0 hilo=1
+ushf__URuIUR_URIR cw=0 dir=1 fmt=0 hilo=0
+#
+# PyTorch 2.14.0, the float32 kernels of erfc, erfinv and exp2 that it compiles for sm_80 while it
+# runs (tests/gpu/torch.sh told 8.0 with VF_CAPABILITY_ALL=1: the CPU's results within the
+# battery's tolerance, 2026-11-25):
+fadd__RRI_RI Ra@absolute=0 Ra@negate=1 ftz=0 rnd=0 sat=0
+fadd__RRI_RI Ra@absolute=1 Ra@negate=0 ftz=0 rnd=0 sat=0
+fadd__RRR_RR Ra@absolute=0 Ra@negate=1 Rc@absolute=0 Rc@negate=0 ftz=0 rnd=0 sat=0
+ffma__RIR_RIR Ra@absolute=0 Ra@negate=0 Rc@absolute=0 Rc@negate=1 fmz=0 rnd=0 sat=0
+ffma__RIR_RIR Ra@absolute=0 Ra@negate=0 Rc@absolute=1 Rc@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRI_RRI Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=1 fmz=0 rnd=0 sat=0
+ffma__RRI_RRI Ra@absolute=0 Ra@negate=1 Rb@absolute=0 Rb@negate=1 fmz=0 rnd=0 sat=0
+ffma__RRI_RRI Ra@absolute=1 Ra@negate=0 Rb@absolute=0 Rb@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRR_RRR Ra@absolute=1 Ra@negate=0 Rb@absolute=0 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRR_RRR Ra@absolute=1 Ra@negate=0 Rb@absolute=0 Rb@negate=1 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=0 sat=0
+ffma__RRR_RRR Ra@absolute=1 Ra@negate=1 Rb@absolute=1 Rb@negate=0 Rc@absolute=0 Rc@negate=0 fmz=0 rnd=0 sat=0
+fmul__RRR_RR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 fmz=0 rnd=0 sat=0 scale=4
+frnd__f32_R Rb@absolute=0 Rb@negate=0 fmt=10 ftz=0 rnd=3
+fsel__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 ftz=0
+fsetp__RIR_RIR Ra@absolute=0 Ra@negate=0 bop=0 fcomp=14 ftz=0
+fsetp__RIR_RIR Ra@absolute=0 Ra@negate=0 bop=1 fcomp=14 ftz=0
+fsetp__RIR_RIR Ra@absolute=1 Ra@negate=0 bop=0 fcomp=4 ftz=0
+fsetp__RRR_RRR Ra@absolute=0 Ra@negate=0 Rb@absolute=0 Rb@negate=0 bop=0 fcomp=14 ftz=0
+iadd3_noimm__RCR_RCR Ra@negate=1 Rc@negate=0 Sb@negate=0
+isetp__RRR_RRR_noEX bop=0 fmt=0 icmp=6
+lop3_lut__RRR_RRR pop=0
+mufu__RRR_RR Rb@absolute=0 Rb@negate=0 mufuop=2
+mufu__RRR_RR Rb@absolute=0 Rb@negate=0 mufuop=3
+mufu__RRR_RR Rb@absolute=0 Rb@negate=0 mufuop=4
+mufu__RRR_RR Rb@absolute=0 Rb@negate=1 mufuop=5
