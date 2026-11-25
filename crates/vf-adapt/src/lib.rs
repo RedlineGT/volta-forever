@@ -19,7 +19,7 @@ mod contraction;
 pub mod emulation;
 
 use vf_fatbin::{self as fatbin, Entry, FatBinary, KIND_ELF, KIND_PTX, NewEntry};
-pub use vf_ptx::{Emulated, EmulatedCounts, Refused, RefusedFunction, Trapped};
+pub use vf_ptx::{Emulated, EmulatedCounts, Refused, RefusedFunction, Replaced, Reported, Trapped};
 
 /// Kernels that an image holds without code: their code in the image is a trap and nothing else
 /// (`vf_ptx::stubs`, `vf_sass::effects::entry_stubs`), which is how a kernel built for other
@@ -258,6 +258,7 @@ impl Default for Policy {
             lowering: vf_ptx::lower::Options {
                 aligned_rows: true,
                 pairs: true,
+                reported_traps: true,
                 ..Default::default()
             },
             told_sm: None,
@@ -289,6 +290,11 @@ pub enum Outcome {
         refused: Vec<Refused>,
         /// The kernels that run emulated instructions, with the counts by kind.
         emulated: Vec<Emulated>,
+        /// The functions in which instructions were replaced by a reported trap
+        /// (`vf_ptx::lower::Options::reported_traps`).
+        replaced: Vec<Replaced>,
+        /// The kernels given that are, or may reach, one of those functions.
+        reported: Vec<Reported>,
         /// The kernels without code (`Stubs`).
         stubs: Stubs,
     },
@@ -438,12 +444,17 @@ fn embedded_ptx(cubin: &[u8], sm: u32) -> Option<(Vec<u8>, vf_ptx::Header)> {
 }
 
 impl Policy {
-    /// Offline CUDA 12.9 tools accept PTX ISA through 8.8 on Volta.
+    /// Offline CUDA 12.9 tools accept PTX ISA through 8.8 on Volta. What they make is not
+    /// announced by the layer where it is loaded, and the GPUs of the process that loads it are not
+    /// known to them: no instruction is replaced by a reported trap (`reported_traps`); the functions
+    /// that hold one trap, and their kernels are refused, as before 0.1.6.
     pub fn cuda_12_9() -> Self {
-        Self {
+        let mut policy = Self {
             ptx_max: (8, 8),
             ..Self::default()
-        }
+        };
+        policy.lowering.reported_traps = false;
+        policy
     }
 
     /// This policy with what the environment asks for. `VF_ALIGNED_ROWS=0`: do not take the rows
@@ -458,7 +469,9 @@ impl Policy {
     /// where an image has PTX (`Translate`). `VF_PAIRS=0`: compute every tensor-core product by
     /// itself, in machine code (`pairs`) and in program text (`lowering.pairs`). `VF_SAFE=1`: what
     /// these ask for whose results are not bit-identical to the default's is not used, nor the pairs
-    /// of machine code (`make_safe`).
+    /// of machine code (`make_safe`). `VF_REPORTED_TRAPS=0` (that value only: any other leaves it
+    /// on): no instruction is replaced by a reported trap (`lowering.reported_traps`): the functions
+    /// that hold one trap, and their kernels are refused.
     pub fn with_environment(self) -> Policy {
         self.with_environment_said().0
     }
@@ -494,7 +507,12 @@ impl Policy {
     ///
     /// Not changed: what the programs are told (`told_sm`): the code a program then chooses is its
     /// own choice; nor `lowering.pairs` (the pairs of program text give the bits of each product by
-    /// itself: `docs/pairs.md`, section 13), `borrow` and `lowering.aligned_rows`.
+    /// itself: `docs/pairs.md`, section 13), `borrow`, `lowering.aligned_rows` and
+    /// `lowering.reported_traps` (a reported trap computes nothing: where a refusal would not have
+    /// given the kernel, it stops the kernel if it is ever reached, and every path that does not
+    /// reach it runs the program's own instructions; turning it off would refuse NCCL's collectives,
+    /// and safe mode could then not say whether a difference of a run on several GPUs comes from
+    /// the layer).
     pub fn make_safe(&mut self) -> Vec<&'static str> {
         use vf_ptx::lower::{Bf16Column, Bf16Row};
         let mut turned_off = Vec::new();
@@ -572,6 +590,9 @@ impl Policy {
         }
         if let Ok(value) = std::env::var("VF_BORROW") {
             self.borrow = vf_sass::translate::borrow_from(Some(&value));
+        }
+        if std::env::var("VF_REPORTED_TRAPS").as_deref() == Ok("0") {
+            self.lowering.reported_traps = false;
         }
         self
     }
@@ -665,6 +686,8 @@ impl Policy {
             trapped: lowering.trapped,
             refused: lowering.refused,
             emulated: lowering.emulated,
+            replaced: lowering.replaced,
+            reported: lowering.reported,
             stubs,
         };
         Adapted {
@@ -1153,6 +1176,7 @@ impl Policy {
         let mut entries = Vec::with_capacity(fat.entries.len());
         let (mut rewritten, mut tensor_rewritten, mut tanh_expanded, mut trapped) = (0, 0, 0, Vec::new());
         let (mut refused, mut emulated, mut stubs) = (Vec::new(), Vec::new(), Stubs::default());
+        let (mut replaced, mut reported) = (Vec::new(), Vec::new());
         for entry in &fat.entries {
             if entry.kind() != kind || entry.sm() != source {
                 entries.push(NewEntry::copy_of(entry));
@@ -1187,6 +1211,8 @@ impl Policy {
             trapped.extend(lowering.trapped);
             refused.extend(lowering.refused);
             emulated.extend(lowering.emulated);
+            replaced.extend(lowering.replaced);
+            reported.extend(lowering.reported);
             let (major, minor) = version.min(self.ptx_max);
             let version = (major as u16, minor as u16);
             let target = self.device_sm.min(source);
@@ -1206,6 +1232,8 @@ impl Policy {
                 trapped,
                 refused,
                 emulated,
+                replaced,
+                reported,
                 stubs,
             },
             image: Some(fatbin::build(&entries)),
@@ -1500,6 +1528,8 @@ mod tests {
                 trapped: vec![],
                 refused: vec![],
                 emulated: vec![],
+                replaced: vec![],
+                reported: vec![],
                 stubs: Stubs::default(),
             }
         );
@@ -1633,6 +1663,8 @@ mod tests {
                 trapped: vec![],
                 refused: vec![],
                 emulated: vec![],
+                replaced: vec![],
+                reported: vec![],
                 stubs: Stubs::default(),
             }
         );
@@ -1684,6 +1716,8 @@ mod tests {
                 trapped: vec![],
                 refused: vec![],
                 emulated: vec![],
+                replaced: vec![],
+                reported: vec![],
                 stubs: Stubs::default(),
             }
         );
@@ -1702,6 +1736,55 @@ mod tests {
     }
 
     #[test]
+    fn multimem_instructions_are_reported_traps_by_default_and_not_kernels_without_code() {
+        // A kernel whose one instruction is multimem.st, as NCCL's kernels that store to multicast
+        // memory, and one that holds it behind a test.
+        let text = b".version 9.3\n.target sm_90\n.address_size 64\n\
+                     .visible .entry only(.param .u64 a)\n{\n\t.reg .b64 %rd<2>;\n\tld.param.u64 %rd1, [a];\n\
+                     \tmultimem.st.global.b32 [%rd1], 1;\n\tret;\n}\n\
+                     .visible .entry tested(.param .u64 a, .param .u32 f)\n{\n\t.reg .b64 %rd<2>;\n\t.reg .b32 %r<2>;\n\
+                     \t.reg .pred %p<2>;\n\tld.param.u64 %rd1, [a];\n\tld.param.u32 %r1, [f];\n\tsetp.ne.u32 %p1, %r1, 0;\n\
+                     \t@%p1 multimem.red.relaxed.sys.global.add.u32 [%rd1], 1;\n\tret;\n}\n";
+        let adapted = Policy::default().adapt_ptx(text);
+        let Outcome::Retargeted {
+            trapped,
+            refused,
+            replaced,
+            reported,
+            stubs,
+            ..
+        } = &adapted.outcome
+        else {
+            panic!("{:?}", adapted.outcome);
+        };
+        assert!(trapped.is_empty() && refused.is_empty());
+        let names: Vec<&str> = reported.iter().map(|kernel| kernel.kernel.as_str()).collect();
+        assert_eq!(names, ["only", "tested"]);
+        assert_eq!(replaced.len(), 2);
+        // `only` is all a trap once its instruction is replaced; it is not a kernel without code: that
+        // is read in the program's text, where it stores.
+        assert!(stubs.is_empty(), "{stubs:?}");
+        let image = String::from_utf8(adapted.image.unwrap()).unwrap();
+        assert!(image.starts_with(".version 9.0\n.target sm_70\n.address_size 64\n.extern .func __assertfail"));
+        // The offline tools of CUDA 12.9 make code that the layer does not announce: refused there.
+        let Outcome::Retargeted { refused, reported, .. } = Policy::cuda_12_9().adapt_ptx(text).outcome else {
+            panic!();
+        };
+        assert_eq!((refused.len(), reported.len()), (2, 0));
+        let off = Policy {
+            lowering: vf_ptx::lower::Options {
+                reported_traps: false,
+                ..Policy::default().lowering
+            },
+            ..Policy::default()
+        };
+        let Outcome::Retargeted { refused, reported, .. } = off.adapt_ptx(text).outcome else {
+            panic!();
+        };
+        assert_eq!((refused.len(), reported.len()), (2, 0));
+    }
+
+    #[test]
     fn ptx_with_turing_instructions_is_lowered() {
         let text = b".version 9.5\n.target sm_75\n.entry a()\n{\n\ttanh.approx.f32 %f1, %f2;\n}\n\
                      .entry b()\n{\n\tmovmatrix.sync.aligned.m8n8.trans.b16 %r1, %r2;\n}\n\
@@ -1716,6 +1799,7 @@ mod tests {
             refused,
             emulated,
             stubs,
+            ..
         } = &adapted.outcome
         else {
             panic!("{:?}", adapted.outcome);

@@ -137,13 +137,18 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
             trapped,
             refused,
             emulated,
+            replaced,
+            reported,
             stubs,
         } => {
             println!(
                 "{input}: PTX for sm_{from_sm} retargeted to sm_{} ({entries} modules, {tensor_rewritten} \
-                 tensor-core instructions rewritten, {tanh_expanded} tanh expanded, {} functions made to trap)",
+                 tensor-core instructions rewritten, {tanh_expanded} tanh expanded, {} functions made to trap, \
+                 {} instructions in {} functions replaced by reported traps)",
                 policy.device_sm,
-                trapped.len()
+                trapped.len(),
+                replaced.iter().map(|function| function.forms.len()).sum::<usize>(),
+                replaced.len()
             );
             for function in trapped {
                 println!("  trap: {}: {}", function.function, function.reason);
@@ -156,6 +161,22 @@ fn adapt(input: &str, output: &str) -> Result<(), String> {
             }
             for kernel in emulated {
                 println!("  emulated in kernel: {}: {}", kernel.kernel, kernel.counts.summary());
+            }
+            for function in replaced {
+                let mut forms: Vec<&str> = function.forms.iter().map(String::as_str).collect();
+                forms.sort_unstable();
+                forms.dedup();
+                println!(
+                    "  reported trap: {}: {} instructions ({})",
+                    function.function,
+                    function.forms.len(),
+                    forms.join(", ")
+                );
+            }
+            for kernel in reported {
+                // What the layer gives in a process where no GPU can take part in multicast
+                // (`vf_ptx::lower::Options::reported_traps`); elsewhere the kernel is refused.
+                println!("  given with reported traps: {}: {}", kernel.kernel, kernel.summary());
             }
             print_stubs(stubs);
         }

@@ -85,7 +85,7 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 212 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
+  an RTX 5090 say. 219 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
   partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -110,7 +110,23 @@ Where the GPU scripts write:
   (`sections-*`, `tests/kernels/test_sections.c`): told 8.0, the lookup of that kernel fails with
   500 as the driver answers, and the layer says once, through a module, a file and a library, that
   only the code for sm_80 has it; told 7.5 it says nothing; with `VF_TRANSLATE=first` the kernel
-  runs from the sm_80 code.
+  runs from the sm_80 code; and kernels that hold, or call through a table, an instruction of the
+  multimem family (`reported-*`, `tests/kernels/test_reported.c`): given with the instruction
+  replaced by a reported trap, said in one line for their image, and right on every path that does
+  not reach it (one with its multimem instructions under a guard that is false among them), through
+  a module, a library and with `VF_LAZY=0`, and in a module with comments before its header, while the same call that may reach
+  `barrier.cluster.arrive` is refused, and with `VF_REPORTED_TRAPS=0` all of them are, with the same
+  check of the kernel's log; and what the driver answers about multicast, without the layer and
+  through it (`multicast-*`: the attribute is 0, `cuMulticastCreate` an error).
+- `nccl.sh [cuda13|cuda12] [--bench]`: NCCL's collectives through PyTorch on the first two V100s
+  visible, one process for each (`nccl-collectives.py`): all-reduce (sum in int32, int64,
+  float64, float32, float16 and bfloat16, max and min in those but int64), broadcast, all-gather, reduce-scatter, reduce,
+  send/receive and all-to-all on 1 to 4,194,304 elements, every value compared with the CPU's
+  exactly (floats that every order of addition sums exactly), first as NCCL chooses, then with each
+  algorithm and protocol pinned (Ring and Tree; Simple, LL and LL128), NCCL's lines saying what ran;
+  with the wheel's CUDA 13 NCCL (`cuda13`, given with reported traps: a refused kernel of its
+  collectives or an assertion of the layer fails it) or the CUDA 12 build put in its place
+  (`cuda12`); `--bench` times an all-reduce of 64 MiB and one of 8 bytes.
 - `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
   `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary
   contexts, capture and launch per-GPU CUDA graphs simultaneously, and run a cross-device
@@ -243,6 +259,7 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 |---|---|---|---|---|
 | `run.sh` | test kernels through the proxy | native sm_70 builds, host models, RTX 5090 reference vectors | a minute or two | toolkits |
 | `multi-gpu.sh` | one-process dual-GPU concurrency (`cuModuleLoadData`, `cuLibraryLoadData`, CUDA graphs) & peer copy | host exact computation | a few seconds | 2+ GPUs |
+| `nccl.sh` | NCCL's collectives through PyTorch, one process for each of two GPUs, with the wheel's CUDA 13 NCCL (`cuda13`, its multicast instructions given as reported traps) or the CUDA 12 build (`cuda12`), as NCCL chooses and with each algorithm and protocol pinned; `--bench` times two all-reduces | the CPU, exactly | 65 s (`cuda13` once the driver's cache holds NCCL's code: its first run compiles it for about 15 minutes in each process), 30 s (`cuda12`) | 2 V100s, PyTorch 2.14 (`VF_TORCH`), the CUDA 12 NCCL for `cuda12` (`VF_NCCL12`) |
 | `forward.sh` | forwarding libraries | host computation | a minute | toolkits |
 | `torch.sh` | 925 PyTorch operations | the CPU | 3 min | PyTorch 2.14.0+cu130 wheel |
 | `torch-models.sh` | 32 small whole models | the CPU | 4 min | PyTorch 2.14.0+cu130 wheel |
@@ -271,7 +288,9 @@ says how to build and run it.
 default only the control runs: the same kernels without the one that faults, after which nothing
 is said (`fault-none`, `fault-none-silent`). The four cases in which a kernel writes through a null
 pointer on purpose (`fault-candidates`, `fault-exact` under `VF_FAULT_TRACE=1`, `fault-graph`,
-`fault-copy`) end their CUDA context and add one to three lines with "Xid" to the
+`fault-copy`), and the one in which a kernel reaches a reported trap (`reported-fault`: the
+driver's line for the assertion, error 710, the layer's report naming the kernel with what it was
+given with), end their CUDA context and add lines with "Xid" to the
 kernel's log each: they run only with `VF_TEST_FAULTS=1` (exactly), which no release check and no
 suite sets, and each log says how many such lines the kernel's log had before and after the case.
 
@@ -422,7 +441,7 @@ through the stand-in.
 | `marker.sh` | The functions by which a program can tell that the layer is there (`volta_forever_abi`, `volta_forever_version`): found by `dlsym` in the layer's `libcuda.so.1`, with the interface number 1 and the workspace's version; and that the library names no path of the crates as the build host keeps them (`/.cargo/registry/`, `CARGO_HOME`'s when it is set) | seconds | the proxy built, gcc |
 | `lifecycle.sh` | What the layer keeps over the life of a process, and what it does at its end: a child made by `fork()` while another thread of the parent waits in a write of the log ends when it calls `exit()`; what the layer keeps of the modules of a context (adapted images, kernels, originals kept for a second translation, second translations) is dropped when the context is destroyed, released for the last time or reset, by both names of each call, and not otherwise (a release that is not the last, another context, a library, a module that another thread loads once the driver destroyed the context, in a context made at its address or with the handle of one of its modules, and a retain of the primary context by another thread meanwhile); while a library restored from the cache is adapted for a kernel whose code the cache does not have, a kernel of another library is given at once, the same kernel asked for by another thread is the same, and another kernel of the library asked for meanwhile is given from the same adaptation; a write to the cache that fails leaves no temporary file, and the first use of the cache removes one left an hour before; a file whose name is not UTF-8 is adapted as any other. Each case in a process of its own | seconds | the proxy built, gcc, `tests/kernels/k_fit_test.135.sm75.cubin` |
 
-Twenty more host regressions exercise the built libraries directly:
+Twenty-one more host regressions exercise the built libraries directly:
 
 ```sh
 python3 tests/proxy/library_entries.py dist/lib/libcuda.so.1
@@ -445,6 +464,7 @@ python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
 python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
 python3 tests/proxy/parallel_threads.py dist/lib/libcuda.so.1
 python3 tests/proxy/summary_fill.py dist/lib/libcuda.so.1
+python3 tests/proxy/reported_traps.py dist/lib/libcuda.so.1
 ```
 
 The first checks filtered kernel counts and enumeration with a stand-in driver, including
@@ -628,6 +648,16 @@ itself in its destructor (its last report stays, the process lives on), and one 
 its lines written as they change; and, the control, one unloaded without removing itself, into which
 the thread calls (the process ends by SIGSEGV). Each case in a process of its own, killed with its
 children when a wait of the test passes 60 s; it needs a C compiler.
+The twenty-first checks, with the stand-in of the fourth and devices whose
+multicast it chooses, that a kernel of NCCL's name that calls a function holding a multimem
+instruction is given with a reported trap, said in one line for its image (the kernel itself from
+level 2) and without the line about NCCL's CUDA 12 build, when no GPU of the process can take part
+in multicast; refused (218, with that line) when the second GPU can, when the driver does not
+answer the attribute, with `VF_REPORTED_TRAPS=0`, and in both loads of a process where the first
+question failed; that before the stand-in's slow load of a module of 17 MiB the layer says, once,
+what the driver compiles (naming NCCL's CUDA 12 build for NCCL's kernels only); and that a cubin
+that the driver's linker made from such PTX, given as the relocatable fat binary of a wrapper, has
+its kernel said. It needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 
@@ -653,12 +683,12 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 519, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 526, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
 `log_lines.py`, `summary_file.py`, `summary_fill.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py`,
-`parallel_threads.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
+`parallel_threads.py`, `reported_traps.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `tests/scripts/kernel-log.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/python/triton_tc.py` (without a Triton);
 `tests/gpu/torch-workers.py` and `tests/gpu/vllm-engine-verdicts.py`; `install.py` under `dash`

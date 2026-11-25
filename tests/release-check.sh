@@ -97,6 +97,7 @@ if [ -f "$W/dist/lib/libcuda.so.1" ]; then
     step driver_capability python3 tests/proxy/driver_capability.py dist/lib/libcuda.so.1
     step link_refusals python3 tests/proxy/link_refusals.py dist/lib/libcuda.so.1
     step nccl_remedy python3 tests/proxy/nccl_remedy.py dist/lib/libcuda.so.1
+    step reported_traps python3 tests/proxy/reported_traps.py dist/lib/libcuda.so.1
     step launch_guard python3 tests/proxy/launch_guard.py dist/lib/libcuda.so.1
     step fault python3 tests/proxy/fault.py dist/lib/libcuda.so.1
     step driver_calls python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
@@ -191,6 +192,8 @@ gpu_suites=(
 # (CUDA_VISIBLE_DEVICES) and end with status 2 when fewer than two are visible, which is a skip.
 gpu2_suites=(
     "multi-gpu||tests/gpu/multi-gpu.sh"
+    "nccl||tests/gpu/nccl.sh"
+    "nccl-cuda12||tests/gpu/nccl.sh cuda12"
 )
 # The GPU, as the command finds it: VF_GPU, else the first of CUDA_VISIBLE_DEVICES, else 0.
 pick='gpu=${VF_GPU:-${CUDA_VISIBLE_DEVICES:-0}}; gpu=${gpu%%,*}'

@@ -519,7 +519,8 @@ fn tanh_is_expanded_where_it_stands() {
         Counts {
             tanh: 1,
             tensor: 0,
-            other: 0
+            other: 0,
+            reported: 0
         }
     );
     assert!(lowered.starts_with("{\n\t{\n\t.reg .f32 %vf_e, %vf_a;"));

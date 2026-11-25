@@ -184,6 +184,24 @@ Hopper's barriers, tensor maps) is made to trap. The kernels that need it are li
 and refused when the program asks for them (error 218; the reason is printed), while
 the other kernels of the module load and run.
 
+One family is not refused so: the instructions of multicast memory (`multimem.*`), which the PTX
+manual leaves undefined without a multicast address, which no GPU of a process can have when the
+driver says that none can take part in multicast (every V100). There each such instruction, not
+its function, is replaced by a reported trap: a call of `__assertfail` that names the instruction
+and the function, then `trap` (`vf_ptx::lower::Options::reported_traps`, `docs/emulations.md`).
+The kernels that are, or may reach, a function with one are given, said in one line for their
+image at level 1 and each when the program takes it from level 2 (`kernels::with_traps`, `given`),
+counted at exit, and named in the report of a fault (`images::origin_text`). Before the driver
+compiles the first image of the process given so with 16 MiB of PTX or more, a line says what is
+compiled and that the first time takes minutes (`images::say_large`; NCCL's CUDA 13 build: 248 MB,
+about 15 minutes). The question to the driver is asked once in the process, at the first image the
+layer adapts or keys for its cache, and its answer, a failure too, is kept for the process
+(`images::without_multicast`): the key and the adaptation agree. Where any GPU of the process can
+take part in multicast, or the answer cannot be had, or with `VF_REPORTED_TRAPS=0`, those functions
+trap and their kernels are refused as above. The strings of the traps go after the module's header
+(`vf_ptx::trap_strings_at`), whatever comments come before it. NCCL's CUDA 13 build holds such instructions in nearly every
+function of its collectives, behind tests of flags that only its multicast transport sets.
+
 Kernels that run emulated (slower) instructions are announced on the console. The
 first 20 are listed by default (`VF_EMULATION_WARNINGS`); the total is printed when
 the process ends.
@@ -243,10 +261,15 @@ too), and dropped at `cuLinkDestroy`. Each input is adapted alone: a kernel that
 function of another input that cannot run is not refused, and traps when it is launched.
 Inputs given with `cuLinkAddFile` are not adapted.
 
-The first refused kernel of NCCL in a process (a name that starts with `ncclDevKernel_`,
-`ncclSymkDevKernel_` or `ncclKernel_`) also makes the proxy say, at the default log level,
-that NCCL's CUDA 12 build is what the program needs and that `vf fetch --only libnccl`
-downloads it (`LIMITS.md`, "Several GPUs and NCCL").
+The first refused kernel of NCCL's collectives in a process (a name that starts with
+`ncclDevKernel_` or `ncclKernel_`) also makes the proxy say, at the default log level, that
+NCCL's CUDA 12 build is what the program needs and that `vf fetch --only libnccl` downloads it
+(`LIMITS.md`, "Several GPUs and NCCL"). Since 0.1.6 those kernels are given with reported traps
+(above), and the line comes only where they are still refused: a GPU of the process with
+multicast, `VF_REPORTED_TRAPS=0`, or a kernel that needs what Volta lacks for another reason. Not
+for its kernels for symmetric memory (`ncclSymkDevKernel_`): NCCL 2.30 ignores a failure to look
+one up, and the only ones refused copy with `cp.async.bulk`, which it chooses on sm_100 and later
+only, with `NCCL_SYM_TMA_ENABLE=1`.
 
 There are two origins of refusal:
 
@@ -324,8 +347,9 @@ What is cached, keyed by a 128-bit hash of the image, the adaptation policy and 
 build identity of the layer:
 
 - A **manifest**: every entry point, which can be compiled alone, which are refused
-  (and why), which run emulated instructions (and how many), which have no code (a body
-  that is a trap and nothing else, section 5).
+  (and why), which run emulated instructions (and how many), which are given with reported
+  traps (the first function and form, how many), which have no code (a body that is a trap and
+  nothing else, section 5).
 - **Sub-module PTX** for each independent kernel a program actually used, as it was
   given to the driver.
 - For images with machine code only, the **translation**: the whole replacement image, with
@@ -577,6 +601,10 @@ comments are not instructions); in machine code for sm_75 that it translates
 `BPT.TRAP` (before it, only the setting of the stack pointer and instructions guarded by `!PT`).
 Anything else is code: a trap under a guard, behind a branch or after any other instruction. A
 kernel that the layer itself made to trap is a refused kernel (section 3), not one without code.
+The search reads the program's text, before it is lowered: a kernel whose one instruction is of the
+multimem family is not one without code, though its lowered body is a reported trap and nothing
+else (section 3): it is given, and its launch goes to the driver, as for any kernel given with
+reported traps.
 
 Such a kernel is not refused at a lookup: fat binaries are full of them, and programs look them up
 (by name, by enumeration, at the start under eager loading) without launching them. It is given,

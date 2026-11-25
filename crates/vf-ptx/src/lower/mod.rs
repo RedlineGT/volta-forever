@@ -148,6 +148,8 @@ pub struct Counts {
     pub tensor: usize,
     /// Other instructions replaced: asynchronous copies, conversions to packed half floats.
     pub other: usize,
+    /// Instructions replaced by a reported trap (`Options::reported_traps`).
+    pub reported: usize,
 }
 
 /// Texts that reveal what this module rewrites or refuses; a body without any of them needs no
@@ -251,6 +253,62 @@ fn later_only(opcode: &str, operands: &str) -> Option<String> {
     Some(format!("{name}: a register of later targets"))
 }
 
+/// Whether `opcode` is that of an instruction that can be replaced by a reported trap
+/// (`Options::reported_traps`): one of the `multimem` family (`multimem.ld_reduce`, `multimem.st`,
+/// `multimem.red`, and the asynchronous and bulk forms of later targets). The PTX manual requires
+/// their address operand to be a multimem address, and leaves the behaviour undefined otherwise
+/// ("Address operand a must be a multimem address. Otherwise, the behavior is undefined"; PTX ISA
+/// 9.3, sections 8.2.3 and 9.7.10.15). A multimem address is the mapping of a multicast object
+/// (`cuMulticastCreate`, `cuMulticastAddDevice`, `cuMemMap`), which only a GPU that has
+/// `CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED` can take part in: in a process where no GPU has it, no
+/// such address exists, and an instruction that needs one cannot run with a defined result.
+pub fn reported_trap_form(opcode: &str) -> bool {
+    opcode.split('.').next() == Some("multimem")
+}
+
+/// The names that a reported trap uses outside the body of its function: the strings that it gives
+/// to `__assertfail` (`trap_strings`).
+pub const TRAP_FILE: &str = "$vf_trap_file";
+/// What stands for the string of the function's name in a lowered body, until the module gives it
+/// its own name (`$vf_trap_function_N`).
+pub const TRAP_FUNCTION: &str = "$vf_trap_function";
+const TRAP_MESSAGE: &str = "$vf_trap_m";
+
+/// The name of the string that says why the instruction `form` was replaced by a reported trap: the
+/// same in every function of a module, made from the form alone.
+pub fn trap_message_name(form: &str) -> String {
+    // FNV-1a: the name depends on the form and nothing else, in every build.
+    let hash = form.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!("{TRAP_MESSAGE}{hash:016x}")
+}
+
+/// What a reported trap that stands for `form` says, in the line that the driver writes when it is
+/// reached: an assertion of the program that failed, in the function and at the place it names.
+pub fn trap_message(form: &str) -> String {
+    format!(
+        "{form} cannot run on this GPU: it needs a multicast address, which no GPU of this process can have; \
+         volta-forever put this trap in its place"
+    )
+}
+
+/// The declaration of a module variable that holds `value` and a terminating zero, as nvcc declares
+/// the strings it gives to `__assertfail`.
+pub fn string_variable(name: &str, value: &str) -> String {
+    let bytes: Vec<String> = value.bytes().chain([0]).map(|byte| byte.to_string()).collect();
+    format!(
+        ".global .align 1 .b8 {name}[{}] = {{{}}};\n",
+        bytes.len(),
+        bytes.join(", ")
+    )
+}
+
+/// The declaration of `__assertfail` as nvcc writes it, for a module that does not declare it.
+pub const ASSERTFAIL_DECLARATION: &str = ".extern .func __assertfail\n(\n\t.param .b64 __assertfail_param_0,\n\t\
+     .param .b64 __assertfail_param_1,\n\t.param .b32 __assertfail_param_2,\n\t.param .b64 __assertfail_param_3,\n\t\
+     .param .b64 __assertfail_param_4\n)\n;\n";
+
 const TANH: &str = "tanh.approx.f32";
 
 /// Shuffles after which a basic block is ended (see the module documentation).
@@ -306,6 +364,14 @@ pub struct Options {
     /// products per half of k each instead of four, where the plan proves it gives the same bits
     /// (`pairs`, `docs/pairs.md` section 13). Needs `aligned_rows`.
     pub pairs: bool,
+    /// Replace each instruction of a form that `reported_trap_form` accepts by a reported trap,
+    /// instead of making its whole function trap: a call of `__assertfail` with a message that
+    /// names the form (the driver writes it, with the function, the block and the thread, when it is
+    /// reached; the kernel then stops with `CUDA_ERROR_ASSERT`, 710), and a `trap` after it. For a
+    /// process in which no GPU can take part in multicast, where such an instruction cannot have the
+    /// address it needs (`reported_trap_form`): the caller says so. In a module of 64-bit addresses
+    /// only.
+    pub reported_traps: bool,
 }
 
 /// The names of `text` that begin with `%`, without repetition: for the text of a module outside
@@ -349,6 +415,17 @@ pub fn body_in(
     address_bits: u32,
     options: Options,
 ) -> Result<(String, Counts), Unsupported> {
+    body_reporting(text, outside, address_bits, options).map(|(lowered, counts, _)| (lowered, counts))
+}
+
+/// `body_in`, with the forms of the instructions replaced by a reported trap
+/// (`Options::reported_traps`), in the order of the body: one for each, `Counts::reported` in all.
+pub fn body_reporting(
+    text: &str,
+    outside: &[String],
+    address_bits: u32,
+    options: Options,
+) -> Result<(String, Counts, Vec<String>), Unsupported> {
     // Comments go first. Everything below reads statements as text (the names that a
     // directive declares, the operands of an instruction), and a comment inside a statement
     // would be read with the rest: `.reg .b32 %d<4> /* four */;` was not taken for a family,
@@ -448,6 +525,7 @@ pub fn body_in(
         active_chains: BTreeMap::new(),
         kept_halves: BTreeMap::new(),
         current_index: 0,
+        reported_forms: Vec::new(),
     };
     for (index, item) in items.iter().enumerate() {
         body.current_index = index;
@@ -530,7 +608,7 @@ pub fn body_in(
     let prologue = body.prologue();
     let lowered = format!("{{{prologue}{}", body.out);
     if lowered == blanked.as_deref().unwrap_or(source) {
-        return Ok((source.to_string(), body.counts));
+        return Ok((source.to_string(), body.counts, body.reported_forms));
     }
-    Ok((lowered, body.counts))
+    Ok((lowered, body.counts, body.reported_forms))
 }

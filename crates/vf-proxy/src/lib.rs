@@ -26,6 +26,9 @@
 //!   could not be adapted (default), 2 what was adapted, 3 every image and lookup;
 //! - `VF_ADAPT=0`: forward images unchanged;
 //! - `VF_LAZY=0`: compile whole modules when they are loaded, not each kernel when it is asked for;
+//! - `VF_REPORTED_TRAPS=0`: refuse the kernels that may reach an instruction of the `multimem`
+//!   family, instead of replacing each such instruction by a reported trap where no GPU of the
+//!   process can take part in multicast (`images::policy`);
 //! - `VF_ALIGNED_ROWS=0`: do not take it that programs keep the rows `ldmatrix` reads at multiples
 //!   of 16, as the PTX manual requires and as the layer assumes: test the addresses when the code
 //!   runs. Slower emulated tensor-core kernels; for a program that stops with a misaligned-address
@@ -395,6 +398,9 @@ fn report() -> Vec<String> {
 fn report_lines() -> Vec<(u8, String)> {
     let mut lines: Vec<(u8, String)> = fault::summary_lines().into_iter().map(|line| (0, line)).collect();
     if let Some(line) = kernels::summary_line() {
+        lines.push((1, line));
+    }
+    if let Some(line) = kernels::traps_summary_line() {
         lines.push((1, line));
     }
     if let Some(line) = fit::summary_line() {

@@ -13,7 +13,10 @@ use super::lane::Lane;
 use super::parse::{Tensor, is_branch, is_later, is_plain, is_tensor, parse};
 use super::plan::Plan;
 use super::types::{Declarations, Form, Key, ScopeFrame, all_ones, first_operand, is_zero};
-use super::{Counts, NEVER, Options, SPLIT_AFTER, TANH, Unsupported, later_only};
+use super::{
+    Counts, NEVER, Options, SPLIT_AFTER, TANH, TRAP_FILE, TRAP_FUNCTION, Unsupported, later_only, reported_trap_form,
+    trap_message_name,
+};
 
 pub(super) struct Body<'a> {
     pub(super) text: &'a str,
@@ -83,6 +86,8 @@ pub(super) struct Body<'a> {
     pub(super) kept_halves: BTreeMap<[String; 2], Vec<String>>,
     /// The index of the item being processed, for chain detection.
     pub(super) current_index: usize,
+    /// The forms of the instructions replaced by a reported trap, in the order of the body.
+    pub(super) reported_forms: Vec<String>,
 }
 
 impl<'a> Body<'a> {
@@ -335,8 +340,11 @@ impl<'a> Body<'a> {
         operands: &str,
         followed: bool,
     ) -> Result<(), Unsupported> {
-        if let Some(reason) = later_only(opcode, operands) {
-            return Err(Unsupported(reason));
+        let later = later_only(opcode, operands);
+        if let Some(reason) = &later
+            && !(self.options.reported_traps && self.address_bits == 64 && reported_trap_form(opcode))
+        {
+            return Err(Unsupported(reason.clone()));
         }
         // An open chain ends before a statement that names its accumulator (a product of another
         // chain too), for the registers of the program to hold it again; and every chain before a
@@ -359,6 +367,10 @@ impl<'a> Body<'a> {
                         ));
                 self.chain_end_touching(operands, product);
             }
+        }
+        if later.is_some() {
+            self.reported_trap(range, opcode, operands);
+            return Ok(());
         }
         // The two-input FP32 bounds are native. Blackwell also accepts a third input.
         let three_input_bound = matches!(opcode, "min.f32" | "max.f32" | "min.ftz.f32" | "max.ftz.f32")
@@ -589,6 +601,51 @@ impl<'a> Body<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Replace the statement at `range`, an instruction that `reported_trap_form` accepts, by a
+    /// reported trap (`Options::reported_traps`), under the statement's guard: a call of
+    /// `__assertfail` with the message for the form (`trap_message_name`), the file `volta-forever`,
+    /// the number of the trap in the body and the name of the function (`TRAP_FUNCTION`, named by
+    /// the module), and a `trap`, which stops the thread if the call ever returned. Its registers and
+    /// parameters are of a block of their own. What the instruction would have written is not
+    /// written: nothing runs after the trap, and where the guard is false the instruction writes
+    /// nothing either.
+    fn reported_trap(&mut self, range: Range<usize>, opcode: &str, operands: &str) {
+        let at = opcode.as_ptr() as usize - self.text.as_ptr() as usize;
+        let guard = self.text[range.start..at].to_string();
+        for name in scan::names(first_operand(operands)) {
+            self.written(name);
+        }
+        self.out.push_str(&self.text[self.copied..range.start]);
+        self.copied = range.end;
+        self.first_line = true;
+        self.counts.reported += 1;
+        self.reported_forms.push(opcode.to_string());
+        let site = self.counts.reported;
+        let message = trap_message_name(opcode);
+        emit!(self, "{{");
+        emit!(self, ".reg .b64 %vf_trap_q<3>;");
+        for (index, kind) in ["b64", "b64", "b32", "b64", "b64"].iter().enumerate() {
+            emit!(self, ".param .{kind} %vf_trap_a{index};");
+        }
+        // The message, the file and the function: parameters 0, 1 and 3.
+        for (register, (string, parameter)) in [(message.as_str(), 0), (TRAP_FILE, 1), (TRAP_FUNCTION, 3)]
+            .into_iter()
+            .enumerate()
+        {
+            emit!(self, "mov.u64 %vf_trap_q{register}, {string};");
+            emit!(self, "cvta.global.u64 %vf_trap_q{register}, %vf_trap_q{register};");
+            emit!(self, "st.param.b64 [%vf_trap_a{parameter}], %vf_trap_q{register};");
+        }
+        emit!(self, "st.param.b32 [%vf_trap_a2], {site};");
+        emit!(self, "st.param.b64 [%vf_trap_a4], 1;");
+        emit!(
+            self,
+            "{guard}call __assertfail, (%vf_trap_a0, %vf_trap_a1, %vf_trap_a2, %vf_trap_a3, %vf_trap_a4);"
+        );
+        emit!(self, "}}");
+        emit!(self, "{guard}trap;");
     }
 
     /// Declarations of the generated registers and the computation of the lane values.
