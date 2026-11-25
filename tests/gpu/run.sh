@@ -747,6 +747,53 @@ VF_LAZY=0 nocode nocode-ptx-library-lazy-off "$G/k_nocode.135.sm75.ptx" library
 nocode nocode-cubin-module "$G/k_nocode.135.sm75.cubin" module
 nocode nocode-cubin-library "$G/k_nocode.135.sm75.cubin" library
 
+# Instructions that need a multicast address (multimem.*), which no GPU of a process of V100s can
+# have, are replaced by a reported trap (tests/kernels/test_reported.c): a kernel that calls through
+# a table a function that holds one, one that holds one behind a test of a flag (as NCCL's step
+# counters are read), and one that holds nothing else are given, and the first two compute right on
+# their paths; each is said once at the default level. The same call that may reach
+# barrier.cluster.arrive, which a program can really execute, is still refused, and so are the
+# first ones with VF_REPORTED_TRAPS=0 (until 0.1.4 they were all refused: the CUDA 13 build of NCCL
+# could not run its collectives). No case reaches a trap; what the driver says of multicast is read
+# without the layer and through it. A trap reached is the opt-in case at the end (VF_TEST_FAULTS=1).
+[ -x "$out/bin/test_reported" ] && [ "$out/bin/test_reported" -nt "$G/test_reported.c" ] || gcc -O2 -Wall -o "$out/bin/test_reported" "$G/test_reported.c" -ldl || exit 2
+reported() {  # reported NAME MODE EXPECTED...
+    local name=$1 mode=$2 before after; shift 2
+    log=$out/logs/$name.log
+    before=$(xids)
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_reported" "$mode" >"$log" 2>&1
+    after=$(xids)
+    if [ -n "$kernel_log_source" ]; then
+        echo "lines with Xid in the kernel's log ($kernel_log_source): $before before, $after after" >>"$log"
+        [ "$before" = "$after" ] && echo "no Xid line more" >>"$log"
+    else
+        echo "no Xid line more (the kernel's log cannot be read here)" >>"$log"
+        xid_unchecked=1
+    fi
+    check "$name" "ALL CHECKS PASSED" "no Xid line more" "$@"
+}
+given_with=("kernel pick is given with 1 instruction that cannot run on this GPU replaced by a reported trap: multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32 in gathered\. Such an instruction needs a multicast address"
+    "kernel polled is given with 1 instruction that cannot run on this GPU replaced by a reported trap: multimem\.ld_reduce\.acquire\.sys\.global\.min\.u32 in polled"
+    "kernel stored is given with 1 instruction that cannot run on this GPU replaced by a reported trap: multimem\.st\.global\.b32 in stored"
+    "kernel pick cannot run on this GPU and is not given to the program: .*barrier\.cluster\.arrive: no Volta sequence")
+reported reported-library library "${given_with[@]}"
+reported reported-module module "${given_with[@]}"
+VF_LAZY=0 reported reported-library-lazy-off library "${given_with[@]}"
+VF_REPORTED_TRAPS=0 reported reported-off refused \
+    "kernel pick cannot run on this GPU and is not given to the program: .*multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32: no Volta sequence" \
+    "kernel polled cannot run on this GPU and is not given to the program: multimem\.ld_reduce\.acquire\.sys\.global\.min\.u32: no Volta sequence"
+if grep -q "replaced by a reported trap" "$out/logs/reported-off.log"; then
+    echo "FAIL  reported-off-silent: VF_REPORTED_TRAPS=0 gave a kernel with reported traps ($out/logs/reported-off.log)"; failed=1
+else
+    echo "PASS  reported-off-silent"
+fi
+for how in native layer; do
+    log=$out/logs/multicast-$how.log
+    if [ $how = native ]; then "$out/bin/test_reported" multicast >"$log" 2>&1; else
+        DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_reported" multicast >"$log" 2>&1; fi
+    check "multicast-$how" "^GPU 0: CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED -> 0, value 0$" "^cuMulticastCreate -> [1-9][0-9]*$"
+done
+
 # A kernel whose usual translation takes more registers than a block of 1,024 threads can have is
 # launched from a second translation that keeps to the kernel's own count (`docs/architecture.md`, "Launch"): taken
 # from a module and from a library, with an attribute that the program set on its kernel, in a
@@ -818,7 +865,7 @@ rm -rf "$cache_dir"
 # its last synchronisation that succeeded, and not those before; alone under VF_FAULT_TRACE=1; as a
 # node of a CUDA graph that faulted; and when only a copy, which the layer does not route, met the
 # fault, at the next launch. The report at exit (VF_SUMMARY) says it too.
-# EACH OF THE FOUR STOPS THE GPU'S CONTEXT ON PURPOSE and adds lines with "Xid" to the kernel's log
+# EACH OF THE FOUR (AND reported-fault BELOW) STOPS THE GPU'S CONTEXT ON PURPOSE and adds lines with "Xid" to the kernel's log
 # (one to three each), each in a process of its own (after a fault no other context of the process
 # runs): they run only with VF_TEST_FAULTS=1 (exactly), never by default. The control, the same
 # kernels without the one that faults, runs always: nothing is said, at exit either.
@@ -862,6 +909,19 @@ if [ "${VF_TEST_FAULTS:-0}" = 1 ]; then
         "^launch add_one -> 700$" \
         "work on the GPU failed: cuLaunchKernel returned 700" \
         "^\[volta-forever\]   write_null \(cuLaunchKernel"
+    # A reported trap reached (tests/kernels/test_reported.c, mode fault): the call of pick takes the
+    # function with the multimem instruction. The kernel stops with the assertion that the trap
+    # makes, which the driver writes with the function and the thread; the layer's report names pick
+    # with what it was given with.
+    log=$out/logs/reported-fault.log
+    before=$(xids)
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 "$out/bin/test_reported" fault >"$log" 2>&1
+    after=$(xids)
+    echo "lines with Xid in the kernel's log: $before before, $after after ($(date -u +%T))" >>"$log"
+    check reported-fault "^pick through the multimem function -> 0xdead02c6$" \
+        "volta-forever:1: gathered: block: \[0,0,0\], thread: \[0,0,0\] Assertion .multimem\.ld_reduce\.relaxed\.sys\.global\.add\.u32 cannot run on this GPU" \
+        "work on the GPU failed: cuCtxSynchronize returned 710 \(CUDA_ERROR_ASSERT\)" \
+        "pick \(cuLaunchKernel, grid 1x1x1, block 32x1x1, the null stream\): .*given with 1 instruction that cannot run on this GPU replaced by a reported trap"
 fi
 
 # The guard and nocode cases above pass their check of the kernel's log where it cannot be read
