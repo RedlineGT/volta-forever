@@ -16,7 +16,8 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   marked; nothing is called after it; the same name registered again takes the slot back;
 - a fill that calls the layer back is refused (EDEADLK), not left waiting; fills that break the contract: one
   that never returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then
-  is made without the libraries' lines and says so), one that forks at each write (no deadlock), one that calls
+  is made without the libraries' lines and says so; 2 s of the monotonic clock, the time of day an hour ahead
+  under clock_ahead.c), one that forks at each write (no deadlock), one that calls
   exit(3) on the layer's thread (the process ends with that status and its last write is made, saying why it
   lacks those lines; its library's destructor, after the layer's, removes it there: 0, as after any last write);
   after the last write, a removal returns EBUSY at once while a call is under way (the fill that never returns;
@@ -489,6 +490,9 @@ if __name__ == "__main__":
         subprocess.run(["cc", "-shared", "-fPIC", "-o", mock, here.with_name("link_mock_driver.c")], check=True)
         subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", library, here.with_name("summary_fill.c"),
                         "-ldl"], check=True)
+        clock_ahead = str(tmp / "clock_ahead.so")
+        subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", clock_ahead, here.with_name("clock_ahead.c"),
+                        "-ldl"], check=True)
         base = dict(os.environ, VF_REAL_LIBCUDA=mock, VF_PROXY_CACHE="0")
         for name in ("VF_LOG", "VF_LOG_LEVEL", "VF_SUMMARY", "VF_SUMMARY_INTERVAL", "VF_STATS", "FILL_NO_REMOVE"):
             base.pop(name, None)
@@ -674,6 +678,17 @@ if __name__ == "__main__":
                 "not returned 2 s after the exit began\n") in text and "\n[hang] " not in text, text
         # Its library's destructor removes it after the last write: at once, EBUSY (its call is under way).
         assert err.rstrip().endswith(f"vf_summary_remove returned {errno.EBUSY}"), err
+        # The same with the time of day an hour ahead of the clock that the kernel counts a deadline of the time of
+        # day by (clock_ahead.c, as when it is set during the wait): the last write's 2 s are 2 s of the monotonic
+        # clock, not an hour and 2 s.
+        p = start("hang", LD_PRELOAD=clock_ahead, CLOCK_AHEAD="3600", **on)
+        for _ in range(3):
+            p.line()
+        t0 = time.time()
+        out, err = p.finish(30)
+        ahead = time.time() - t0
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["hang"])
+        assert exited(text, p.pid) and ahead < 10 and "not returned 2 s after the exit began\n" in text, (ahead, text)
         # One that forks at each write: no deadlock (the fork's handlers do not wait for the fill's own lock).
         p = start("forks", **on)
         p.line()
@@ -735,7 +750,8 @@ if __name__ == "__main__":
         if ended not in ("gone", "Z"):
             os.kill(kid, signal.SIGKILL)  # the fill's child of this test's own process
         assert ended in ("gone", "Z") and not left.exists(), (ended, left.read_text() if left.exists() else "no file")
-        print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here), the"
+        print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here;"
+              f" {ahead:.1f} s with the time of day an hour ahead), the"
               f" last write made without the libraries' lines and saying so, and a fork from another thread does not wait"
               f" for it ({fork[1]} ms); one that forks at each write is called {calls[1]} times; one that calls exit(3)"
               f" ends the process with that status, its last write made and saying why it lacks the libraries' lines,"

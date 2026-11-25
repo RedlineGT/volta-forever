@@ -616,7 +616,8 @@ the buffer's end and no further; a removal that waits for the call under way (of
 function once more, keeps its lines marked as its last report, and calls nothing after; a function
 that calls the layer back, refused, not left waiting; functions that break the contract: one that never
 returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then is made
-without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` on the
+without the libraries' lines and says so, 2 s of the monotonic clock with the time of day an hour ahead
+under `clock_ahead.c`), one that forks at each write, one that calls `exit(3)` on the
 layer's thread (the process ends with that status, its last write made, and its library's removal in its
 destructor returns 0); after the last write, a removal returning `EBUSY` at once while a call is under way
 (the function that never returns, removed by its library's destructor; one that runs 3 s, whose library
@@ -633,7 +634,8 @@ with its last report written; a library unloaded by `dlclose` while the thread r
 itself in its destructor (its last report stays, the process lives on), and one pinned, which stays,
 its lines written as they change; and, the control, one unloaded without removing itself, into which
 the thread calls (the process ends by SIGSEGV). Each case in a process of its own, killed with its
-children when a wait of the test passes 60 s; it needs a C compiler.
+children when a wait of the test passes 60 s; it needs a C compiler (`summary_fill.c`,
+`link_mock_driver.c`, and `clock_ahead.c`, a `clock_gettime` put in front of the C library's).
 
 ### Forwarding stack test (`tests/forward/`)
 

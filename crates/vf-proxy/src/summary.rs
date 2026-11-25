@@ -85,20 +85,31 @@ impl Lock {
         Held(self)
     }
 
-    /// The lock if it can be taken within `wait`, else `None`.
+    /// The lock if it can be taken within `wait`, else `None`. The deadline is on the monotonic clock,
+    /// which a change of the time of day does not move.
     fn take_within(&'static self, wait: Duration) -> Option<Held> {
         let mut deadline = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         // SAFETY: a timespec to write.
-        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut deadline) };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut deadline) };
         let nanos = deadline.tv_nsec as u64 + u64::from(wait.subsec_nanos());
         deadline.tv_sec += (wait.as_secs() + nanos / 1_000_000_000) as libc::time_t;
         deadline.tv_nsec = (nanos % 1_000_000_000) as _;
-        // SAFETY: as for `take`.
-        let taken = unsafe { libc::pthread_mutex_timedlock(self.0.get(), &deadline) } == 0;
+        // SAFETY: as for `take`; a deadline on the clock named.
+        let taken = unsafe { pthread_mutex_clocklock(self.0.get(), libc::CLOCK_MONOTONIC, &deadline) } == 0;
         // (`then`, not `then_some`: a `Held` made and dropped when the wait failed would let go of the lock
         // of the thread that holds it.)
         taken.then(|| Held(self))
     }
+}
+
+unsafe extern "C" {
+    /// The C library's (glibc 2.30; the layer needs 2.34): `pthread_mutex_timedlock` with its deadline on
+    /// the clock named, not on the time of day.
+    fn pthread_mutex_clocklock(
+        mutex: *mut libc::pthread_mutex_t,
+        clock: libc::clockid_t,
+        deadline: *const libc::timespec,
+    ) -> c_int;
 }
 
 struct Held(&'static Lock);
