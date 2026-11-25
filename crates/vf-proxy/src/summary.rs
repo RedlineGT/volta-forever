@@ -91,7 +91,10 @@ impl Lock {
         deadline.tv_sec += (wait.as_secs() + nanos / 1_000_000_000) as libc::time_t;
         deadline.tv_nsec = (nanos % 1_000_000_000) as _;
         // SAFETY: as for `take`.
-        (unsafe { libc::pthread_mutex_timedlock(self.0.get(), &deadline) } == 0).then_some(Held(self))
+        let taken = unsafe { libc::pthread_mutex_timedlock(self.0.get(), &deadline) } == 0;
+        // (`then`, not `then_some`: a `Held` made and dropped when the wait failed would let go of the lock
+        // of the thread that holds it.)
+        taken.then(|| Held(self))
     }
 }
 
@@ -791,6 +794,8 @@ mod tests {
         let wait = || HELD.take_within(Duration::from_millis(200)).is_some();
         assert!(!std::thread::spawn(wait).join().unwrap());
         assert!(t0.elapsed() >= Duration::from_millis(190), "{:?}", t0.elapsed());
+        // Still held by its thread: a wait that failed did not let it go.
+        assert!(!std::thread::spawn(wait).join().unwrap());
         drop(held);
         assert!(std::thread::spawn(wait).join().unwrap());
     }
