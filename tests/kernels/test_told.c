@@ -20,6 +20,9 @@
  *   k_divides             quotients of f32 against the host's (IEEE division), bit for bit
  *   k_reads_data          80 times the variable `told_scale`, which the program sets to 3
  *                         through the module it holds (a module interface only)
+ *   k_reads_table         an element of the table `told_table`
+ *   k_adds_const          0 plus `told_bias[1]`, which the program sets to 20 the same way (the
+ *                         image has 1.5): a kernel in another module would add 1.5
  * then unloads the image, loads it again and looks the bf16 kernel up and runs it once more.
  * With TOLD_ONLY=NAME in the environment, only that kernel is launched.
  *
@@ -267,7 +270,8 @@ int main(int argc, char **argv) {
     CUresult (*library_module)(void **, void *) = API("cuLibraryGetModule");
 
     const char *names[] = {"k_both", "k_before_80", "k_bf16_sum", "k_divides", "k_reads_data", "k_not_translated",
-                           "k_nowhere"};
+                           "k_nowhere", "k_reads_table", "k_adds_const"};
+    const int count = sizeof names / sizeof names[0];
     int lookups = 0;
     for (int load = 0; load < 2; ++load) {
         void *loaded = NULL, *module = NULL;
@@ -303,11 +307,15 @@ int main(int argc, char **argv) {
             r = module_global(&scale, &bytes, loaded, "told_scale");
             if (!r) r = to_device(scale, &three, sizeof three);
             printf("told_scale set to 3: %d\n", r);
+            float bias[4] = {10, 20, 30, 40};
+            r = module_global(&scale, &bytes, loaded, "told_bias");
+            if (!r) r = to_device(scale, bias, sizeof bias);
+            printf("told_bias set to 10, 20, 30, 40: %d\n", r);
         }
         /* Each name twice through the main interface, once more through the library's module. */
         for (int round = 0; round < 3; ++round) {
             if (round == 2 && !module) break;
-            for (int i = 0; i < 7; ++i) {
+            for (int i = 0; i < count; ++i) {
                 void *function = NULL, *kernel = NULL;
                 if (round == 2) {
                     r = module_function(&function, module, names[i]);
@@ -338,15 +346,27 @@ int main(int argc, char **argv) {
                     run_bf16(function, "");
                 } else if (i == 3) {
                     run_divides(function);
-                } else if (i < 2 || i == 4) {
+                } else if (i == 8) {
+                    /* Were it given: what it adds says whose copy of told_bias it read. */
+                    float a[128] = {0}, sum[128];
+                    int n = 128;
+                    void *args[] = {&device[0], &device[1], &n};
+                    r = to_device(device[0], a, sizeof a);
+                    if (!r) r = launch(function, 1, 1, 1, 128, 1, 1, 0, NULL, args, NULL);
+                    if (!r) r = synchronize();
+                    if (!r) r = to_host(sum, device[1], sizeof sum);
+                    if (r) printf("k_adds_const: launch %d\n", r);
+                    else printf("k_adds_const: added %g\n", sum[0]);
+                } else if (i < 2 || i == 4 || i == 7) {
                     int got[2] = {0, 0};
-                    void *args[] = {&out};
+                    int which = 2;
+                    void *args[] = {&out, &which};
                     memset_d32(out, 0, 32);
                     r = launch(function, 1, 1, 1, 32, 1, 1, 0, NULL, args, NULL);
                     if (!r) r = synchronize();
                     if (!r) r = to_host(got, out, sizeof got);
                     if (r) printf("%s: launch %d\n", names[i], r);
-                    else if (i == 4) printf("k_reads_data: stored %d\n", got[1]);
+                    else if (i == 4 || i == 7) printf("%s: stored %d\n", names[i], got[1]);
                     else printf("%s: ran the code for sm_%d\n", names[i], i == 0 ? got[0] : got[1]);
                 }
             }

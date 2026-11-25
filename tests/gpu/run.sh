@@ -700,12 +700,13 @@ VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections sections-told-8.0-off test_sections li
 # (two instructions of sm_80 that Volta has not, rewritten) are the host's, every one, also through
 # the library's module and after the image is loaded again; the quotients of a division whose slow
 # path is a function inside the kernel are the host's; the kernel's library is the one the program
-# loaded. A kernel that the layer does not translate is not given (a sum of pairs of f16; and the
-# kernel that reads a variable of the image, whose move from the bank of the image's addresses is
-# of a form that never ran on a V100: were it translated, it would not be given either, as a module
-# of the layer's own has another copy of the variable, vf-adapt's unit tests): their lookups fail as
-# before, and the line says why for each. In safe mode the same (the kernel has no other code here).
-# Told 7.5 none is given, and nothing is said.
+# loaded. Not given, their lookups failing as before with a line that says why for each: a kernel
+# that reads a variable of the image, which the program sets through the module it holds, and one
+# that reads a table of the image (both through the bank of the image's addresses), one that adds
+# a `__constant__` variable (read from a constant bank of the module, with no relocation: the
+# program sets it to 20 where the image has 1.5, and a module of the layer's own would add 1.5),
+# and one that the layer does not translate (a sum of pairs of f16). In safe mode the same (the
+# kernel has no other code here). Told 7.5 none is given, and nothing is said.
 bf16=("k_bf16_sum: lookup 0$" "k_bf16_sum: 16384 sums, 0 differ from the sum rounded once to bf16"
     "k_bf16_sum: 16384 conversions, 0 differ from the nearest bf16"
     "k_bf16_sum, loaded again: 16384 sums, 0 differ" "k_bf16_sum, loaded again: 16384 conversions, 0 differ"
@@ -714,22 +715,25 @@ bf16=("k_bf16_sum: lookup 0$" "k_bf16_sum: 16384 sums, 0 differ from the sum rou
     "kernel k_bf16_sum is given from the machine code for sm_80 of its image" "kernel k_divides is given from the machine code for sm_80 of its image"
     "lines that say a kernel is given from the sm_80 code: 2$"
     "k_reads_data: lookup 500$" "k_not_translated: lookup 500$" "k_nowhere: lookup 500$"
-    "kernel k_reads_data is not in the code that the layer gives for its image .*\(LIMITS\.md, \"The capability told with VF_CAPABILITY\"\)\. The kernel alone is not given from the code for sm_80 either: its machine code for sm_80 is not translated \(unsupported sm_80 instruction"
+    "k_reads_table: lookup 500$" "k_adds_const: lookup 500$"
+    "kernel k_reads_data is not in the code that the layer gives for its image .*\(LIMITS\.md, \"The capability told with VF_CAPABILITY\"\)\. The kernel alone is not given from the code for sm_80 either: it can reach data of its image, of which a (module|library) of its own would have another copy than the one that the program reads and writes: constant bank 4, which holds addresses of the image's variables"
+    "kernel k_reads_table is not in the code .* either: it can reach data of its image, .*: constant bank 4, which holds addresses of the image's variables"
+    "kernel k_adds_const is not in the code .* either: it can reach data of its image, .*: constant bank 3, which is not this kernel's alone"
     "kernel k_not_translated is not in the code that the layer gives for its image .*\. The kernel alone is not given from the code for sm_80 either: its machine code for sm_80 is not translated \(unsupported sm_80 instruction [0-9a-f]{32} at 0x[0-9a-f]+\)$"
-    "lines that say a kernel is not in the code given: 2$" "lookups that failed otherwise than 500: 0$"
+    "lines that say a kernel is not in the code given: 4$" "lookups that failed otherwise than 500: 0$"
     "^unload: 0$" "the context goes on: 7$")
-VF_CAPABILITY=8.0 sections told-8.0-module test_told module "${bf16[@]}" "told_scale set to 3: 0" "^14 lookups"
-VF_CAPABILITY=8.0 sections told-8.0-file test_told file "${bf16[@]}" "^14 lookups"
+VF_CAPABILITY=8.0 sections told-8.0-module test_told module "${bf16[@]}" "told_scale set to 3: 0" "told_bias set to 10, 20, 30, 40: 0" "^18 lookups"
+VF_CAPABILITY=8.0 sections told-8.0-file test_told file "${bf16[@]}" "^18 lookups"
 VF_CAPABILITY=8.0 sections told-8.0-library test_told library "${bf16[@]}" "k_bf16_sum: its library is the one loaded" \
     "k_divides: its library is the one loaded" "k_bf16_sum: lookup 0 \(in the library's module\)" \
-    "k_bf16_sum \(in the library's module\): 16384 sums, 0 differ" "k_reads_data: lookup 500 \(in the library's module\)" "^21 lookups"
-VF_CAPABILITY=8.0 VF_SAFE=1 sections told-8.0-safe test_told library "${bf16[@]}" "^21 lookups"
+    "k_bf16_sum \(in the library's module\): 16384 sums, 0 differ" "k_reads_data: lookup 500 \(in the library's module\)" "k_adds_const: lookup 500 \(in the library's module\)" "^27 lookups"
+VF_CAPABILITY=8.0 VF_SAFE=1 sections told-8.0-safe test_told library "${bf16[@]}" "^27 lookups"
 by_default sections told-7.5 test_told library "k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75" \
     "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" "k_reads_data: lookup 500$" "k_bf16_sum, loaded again: lookup 500$" \
     "lines that say a kernel is not in the code given: 0$" "lines that say a kernel is given from the sm_80 code: 0$" \
-    "lookups that failed otherwise than 500: 0$" "^21 lookups"
+    "lookups that failed otherwise than 500: 0$" "^27 lookups"
 VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections told-8.0-off test_told library "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" \
-    "lines that say a kernel is not in the code given: 4$" "lines that say a kernel is given from the sm_80 code: 0$" "^21 lookups"
+    "lines that say a kernel is not in the code given: 6$" "lines that say a kernel is given from the sm_80 code: 0$" "^27 lookups"
 
 # A refused kernel of which the program holds a handle that the layer did not give (taken here from
 # NVIDIA's driver itself, as cuFFT takes the functions of its modules from a private table) is not

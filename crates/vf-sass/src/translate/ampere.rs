@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use crate::generated::ampere::{
-    ATOM_ADD32, BF16_ADD, BF16_PACK, BRA_MASK_ALL, COMMIT, COPY128, HALF_CONSTANT, LOAD, LOAD_CONST, PACK,
-    SHARED_FORMS, SHARED_INC, STORE, WHOLE_CLASSES,
+    ATOM_ADD32, BF16_ADD, BF16_PACK, BRA_MASK_ALL, COMMIT, COPY128, DESCRIBED_CLASSES, HALF_CONSTANT, LOAD, LOAD_CONST,
+    PACK, SHARED_FORMS, SHARED_INC, STORE, WHOLE_CLASSES,
 };
 
 use crate::assemble::{
@@ -46,6 +46,10 @@ pub enum Word {
     Same,
     /// A form of sm_80's own that is rewritten. None of them reads a constant bank.
     Rewritten,
+    /// Of a whole class of sm_80 (the same instruction on sm_75 by the two descriptions) in a
+    /// form that the translator does not take: its function is refused, and the word still
+    /// reads as the sm_75 instruction of the same bits.
+    Described,
     /// Not translated: its function is refused.
     Unsupported,
 }
@@ -71,9 +75,23 @@ pub fn word(word: u128) -> Word {
         Word::Rewritten
     } else if SHARED_FORMS.iter().any(|&form| matches_form(bits, form)) || whole_class(bits) {
         Word::Same
+    } else if described(bits).is_some() {
+        Word::Described
     } else {
         Word::Unsupported
     }
+}
+
+/// The class of sm_80 that the word is of, when it is a whole class (`DESCRIBED_CLASSES`).
+pub fn described(bits: u128) -> Option<&'static str> {
+    let bits = bits & !CONTROLS;
+    let opcode = bits & 0xfff;
+    let first = DESCRIBED_CLASSES.partition_point(|&(_, fixed, _)| fixed & 0xfff < opcode);
+    DESCRIBED_CLASSES[first..]
+        .iter()
+        .take_while(|&&(_, fixed, _)| fixed & 0xfff == opcode)
+        .find(|&&(_, fixed, variable)| matches_form(bits, (fixed, variable)))
+        .map(|&(name, _, _)| name)
 }
 
 pub(super) fn source(header: &[u8]) -> Result<u8, String> {
@@ -1450,13 +1468,33 @@ mod tests {
         // a word of the bank of addresses, in the kernel that reads a variable (the same class
         // from the bank of the kernel's own parameters is an audited form).
         let reads = code(".text.k_reads_data");
-        assert_eq!(word(at(&reads, 0x40)), Word::Unsupported);
+        assert_eq!(word(at(&reads, 0x40)), Word::Described);
+        assert_eq!(described(at(&reads, 0x40)), Some("mov__RC"));
         assert_eq!(word(at(&reads, 0x00)), Word::Same);
         for name in ["k_not_translated", "k_reads_data"] {
             assert!(
                 refused(name).unwrap().contains("unsupported sm_80 instruction"),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn no_form_of_double_precision_is_taken_by_its_class() {
+        // Volta's own code never reads a result of DADD, DMUL, DFMA or DSETP as early as sm_80
+        // code does (docs/validation.md, section 8): until a kernel with them ran right on a
+        // V100, no form of theirs passes by its class (the generator refuses to list one).
+        let double = |name: &str| {
+            ["dadd_", "dmul_", "dfma_", "dsetp_"]
+                .iter()
+                .any(|p| name.starts_with(p))
+        };
+        assert!(DESCRIBED_CLASSES.iter().any(|&(name, _, _)| double(name)));
+        for &(name, fixed, variable) in DESCRIBED_CLASSES.iter().filter(|&&(name, _, _)| double(name)) {
+            for &(taken, free) in WHOLE_CLASSES {
+                // No word is of both: they differ in a bit that both fix.
+                assert_ne!((fixed ^ taken) & !variable & !free, 0, "{name}");
+            }
         }
     }
 
@@ -1726,9 +1764,16 @@ mod tests {
         let mut guarded = code.clone();
         put(&mut guarded, 0x820, copy & !(7 << 12));
         check(&guarded, "unproven sm_80 return");
-        // A branch that enters between the copy and the return (BRA 0x810 at 0x7f0 made BRA 0x830).
-        let mut entered = code.clone();
-        put(&mut entered, 0x7f0, word(0x7f0) + (0x20 << 32));
-        check(&entered, "a copy that a branch may skip");
+        // A branch that enters between the copy and the return (BRA 0x810 at 0x7f0 made BRA 0x830),
+        // or lands on the return itself (0x840): either skips the copy.
+        for to in [0x20u128, 0x30] {
+            let mut entered = code.clone();
+            put(&mut entered, 0x7f0, word(0x7f0) + (to << 32));
+            check(&entered, "a copy that a branch may skip");
+        }
+        // One that lands on the copy does not.
+        let mut before = code.clone();
+        put(&mut before, 0x7f0, word(0x7f0) + (0x10 << 32));
+        assert!(normalize(&before, &mut Decoder::new(75), helper).is_ok());
     }
 }

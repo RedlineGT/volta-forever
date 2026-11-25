@@ -3,12 +3,26 @@
 # necessary, and it was not enough (2026-11-25: with every whole class taken, three
 # double-precision kernels that PyTorch compiles while it runs, erfc, erfinv and exp2, were
 # translated from sm_80 code and gave wrong results on a V100, where every word of them reads the
-# same as sm_80 and as sm_75 and the validator finds nothing in their translation; which
-# instruction is not known). So a word passes by its class only in a form listed here: the class
-# and the values of its modifiers (reference/ampere_evidence.py prints them; registers, predicates
-# and immediates are free), each seen in translated sm_80 code that gave the right results on a
-# V100, against the reference named. A form is added with the kernel that shows it, compared on a
-# V100 with a native build or a host computation.
+# same as sm_80 and as sm_75: code for sm_80 reads a result of double precision earlier than
+# Volta's own code ever does, docs/validation.md, section 8). So a word passes by its class only
+# in a form listed here: the class and the values of its modifiers (reference/ampere_evidence.py
+# prints them; registers, predicates, immediates and the bank of a constant are free), each seen
+# in translated sm_80 code that gave the right results on a V100, against the reference named. A
+# form is added with the kernel that shows it, compared on a V100 with a native build or a host
+# computation. No form of DADD, DMUL, DFMA or DSETP may be listed (the generator refuses one)
+# until a kernel with them, translated with the distances of docs/validation.md, section 8, ran
+# right on a V100.
+#
+# The list is what `python3 -I reference/ampere_evidence.py CUBIN FUNCTION...` prints for the
+# cubins below, sorted together. Those that are not in the repository, by the SHA-256 of the
+# cubin: vLLM 0.34.0's, the sm_80 entry of the fat binary of 581,184 bytes (XXH64
+# 6955b544916e04ba) of vllm/_C_stable_libtorch.abi3.so,
+# 08409efccac43ae1f95460cb04f8792939e315a32c2ab0ab2738f471d856a857; PyTorch 2.14.0's, as
+# VF_TRANSLATE_DUMP saves them while torch.erfc, torch.erfinv and torch.exp2 run on float32
+# tensors told 8.0: erfc_kernel_vectorized4_kernel
+# 1e3b7b016e484c9eeddc56435afcc24a62db6371261b6d24847991d9cd48345f, erfinv_kernel_vectorized4_kernel
+# 530d3ab7fb3c3c50bb7af03d34dffc3d80e207f41c987535683402d1400e003d, exp2_kernel_vectorized4_kernel
+# 0eef7812ff9740608f1eb29a62512e639c4d7b44f87a88d8d566258ec8cc456f.
 #
 # tests/kernels/k_told.cu, its kernels k_bf16_sum and k_divides for sm_80 (tests/gpu/run.sh,
 # told-8.0-*: every result the host's, 2026-11-25):

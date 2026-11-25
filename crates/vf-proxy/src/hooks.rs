@@ -600,22 +600,36 @@ pub(crate) unsafe fn lookup_told(
     }
 }
 
-/// What the layer loaded for the kernels of `owner` that only the code for the capability told
-/// has (`told`) is unloaded, before `owner` is.
-unsafe fn unload_told(owner: usize) {
-    for (second, library) in told::take(owner) {
-        let result = unsafe {
-            if library {
-                cuLibraryUnload(second as *mut c_void)
-            } else {
-                cuModuleUnload(second as *mut c_void)
-            }
-        };
-        if result != CUDA_SUCCESS {
-            log::info(format_args!(
-                "what was loaded for the kernels of sm_80 code of a module was not unloaded (error {result})"
-            ));
+/// Unloads a module or library that `load_told` loaded.
+///
+/// # Safety
+/// `second` is such a handle, not unloaded yet.
+pub(crate) unsafe fn unload_second(second: usize, library: bool) {
+    let result = unsafe {
+        if library {
+            cuLibraryUnload(second as *mut c_void)
+        } else {
+            cuModuleUnload(second as *mut c_void)
         }
+    };
+    if result != CUDA_SUCCESS {
+        log::info(format_args!(
+            "what was loaded for the kernels of sm_80 code of a module was not unloaded (error {result})"
+        ));
+    }
+}
+
+/// The driver answered `result` to the unload of `owner`, of which `taken` is what the layer had
+/// loaded for its kernels that only the code for the capability told has (`told::take`, taken
+/// before the driver was asked): unloaded too when the driver unloaded `owner`; the program's
+/// again when it did not (its handles to those kernels are what they were).
+unsafe fn unloaded_told(owner: usize, taken: told::Taken, result: CUresult) {
+    if result != CUDA_SUCCESS {
+        told::restore(owner, taken.load, taken.seconds, taken.given);
+        return;
+    }
+    for (second, library, ..) in taken.seconds {
+        unsafe { unload_second(second, library) };
     }
 }
 
@@ -830,13 +844,28 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
-    unsafe { unload_told(module as usize) };
+    let result = unsafe { module_unload(module) };
+    // (Outside `ending`: the unload of what the layer loaded beside it is a call of its own.)
+    let taken = TOLD_TAKEN.take();
+    if let Some(taken) = taken {
+        unsafe { unloaded_told(module as usize, taken, result) };
+    }
+    result
+}
+
+thread_local! {
+    /// What `told::take` took for the unload that this thread is making, for after it.
+    static TOLD_TAKEN: std::cell::Cell<Option<told::Taken>> = const { std::cell::Cell::new(None) };
+}
+
+unsafe fn module_unload(module: *mut c_void) -> CUresult {
     let _ending = kernels::ending();
     let real = real!(cuModuleUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     // What is kept for the module is forgotten before the driver unloads it: from then on, the
     // driver may give its handle to a load in another thread, whose records are not to be dropped.
     fit::unload(module as usize);
     let released = images::release(module as usize);
+    TOLD_TAKEN.set(Some(told::take(module as usize)));
     let result = unsafe { real(module) };
     if result != CUDA_SUCCESS {
         // (Known again first: a fault reported here names its kernels as they still are.)
@@ -1350,7 +1379,15 @@ unsafe extern "C" fn library_load_from_file(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
-    unsafe { unload_told(library as usize) };
+    let result = unsafe { library_unload(library) };
+    let taken = TOLD_TAKEN.take();
+    if let Some(taken) = taken {
+        unsafe { unloaded_told(library as usize, taken, result) };
+    }
+    result
+}
+
+unsafe fn library_unload(library: *mut c_void) -> CUresult {
     let _ending = kernels::ending();
     // Check if this is a lazy library: unload its sub-modules and stand-in.
     // (Forgotten before the driver's unload: see `cuModuleUnload`.)
@@ -1364,6 +1401,7 @@ pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
     let real = real!(cuLibraryUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     fit::unload(library as usize);
     let released = images::release(library as usize);
+    TOLD_TAKEN.set(Some(told::take(library as usize)));
     let result = unsafe { real(library) };
     if result != CUDA_SUCCESS {
         images::unload_failed(released);

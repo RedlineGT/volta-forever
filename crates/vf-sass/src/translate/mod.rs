@@ -30,7 +30,7 @@ use crate::generated::fields::*;
 use crate::generated::special::*;
 
 pub use self::util::find_relative_decoded;
-pub use ampere::{Word as AmpereWord, word as ampere_word};
+pub use ampere::{Word as AmpereWord, described as ampere_class, word as ampere_word};
 pub use cubin::{translate, translate_with_options};
 
 // ---- Error type ----

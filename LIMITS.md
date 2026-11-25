@@ -841,10 +841,17 @@ What that does not cover:
   with 500 and a line says why (`kernel NAME is not in the code that the layer gives for its
   image ...: it is only in the image's machine code for sm_80 ... The kernel alone is not given
   from the code for sm_80 either: REASON`):
-  - a kernel that can reach data of its image (a `__device__` variable, a table: anything
-    addressed through the bank of the image's addresses, or by a relocation): the module of the
-    layer's own has another copy of that data than the one the program reads and writes through
-    the module it holds, so such a kernel is never given from it;
+  - a kernel that can reach data of its image: a `__device__` variable or a table (addressed
+    through the bank of the image's addresses, or by a relocation), a `__constant__` variable
+    (read from a constant bank of the module with no relocation), a function of other code.
+    The module of the layer's own has another copy of that data than the one the program reads
+    and writes through the module it holds, so such a kernel is not given from it: every
+    constant bank that the kernel reads must be its own alone (its parameters, or a bank that
+    the image has for that kernel only, with no name in it), and what the layer cannot read of a
+    kernel counts as data (until 2026-11-25, for a few hours of an unreleased build, a kernel
+    that read a `__constant__` variable was given, and read the image's initial values);
+  - a function of a module asked for while another context than the module's is current: the
+    layer would load the kernel's code in that other context;
   - a kernel that the layer does not translate from sm_80 machine code (at 2026-11-25 it
     translates 55 of the 3,652 functions of vLLM 0.34.0's sm_80 code and 464 of the 23,708 of
     PyTorch 2.14.0's; 23 and 429 before: an instruction passes only in a form that was seen to
@@ -858,7 +865,8 @@ What that does not cover:
   name is not looked at (PyTorch's attention kernels for sm_80, stubs in its sm_75 code, are
   still refused). The kernels that a program is given when it lists those of a library
   (`cuLibraryEnumerateKernels`) are those of the sm_75 code; `cuKernelGetLibrary` answers the
-  program's library for such a kernel, `cuFuncGetModule` the layer's module. The translation of
+  program's library for such a kernel, `cuFuncGetModule` the layer's module (a program that
+  unloads that module, or asks it for a variable, acts on the layer's copy). The translation of
   sm_80 machine code is still not independently validated (`docs/validation.md`, section 8, says
   what checks it); two instructions of sm_80 for bfloat16 are rewritten (`docs/emulations.md`,
   "What is not in machine code"): the results are those of one rounding, as on sm_80, and a NaN

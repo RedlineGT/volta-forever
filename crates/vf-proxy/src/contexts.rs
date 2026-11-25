@@ -53,6 +53,11 @@ fn primary() -> MutexGuard<'static, HashMap<c_int, usize>> {
 }
 
 /// The context current in this thread, if there is one.
+/// The current context of this thread, as the driver says it.
+pub fn current_context() -> Option<usize> {
+    current()
+}
+
 fn current() -> Option<usize> {
     let real = REALS[idx::cuCtxGetCurrent].load(Relaxed);
     if real == 0 {

@@ -146,6 +146,11 @@ def canonical_forms():
 
 # The sm80 classes that one sm75 class was split into, by the ending of their names.
 SPLIT = ("_noEX", "_EX")
+# The instructions of double precision whose results Volta's own code never reads as early as
+# sm80 code does, also behind a scoreboard (docs/validation.md, section 8): the schedule gives
+# their readers Volta's distances, and none of their forms is taken as evidence until a kernel
+# with them ran right on a V100.
+WAITED_LONGER = ("DADD", "DMUL", "DFMA", "DSETP")
 # More forms than this for one class (an operand whose values differ, taken value by value): left out.
 MOST_FORMS = 512
 
@@ -406,6 +411,9 @@ def evidenced_forms():
         name, *pins = line.split()
         if name not in whole:
             raise ValueError(f"ampere-evidence.txt: {name} is not a whole class")
+        if classes[name].mnemonic in WAITED_LONGER:
+            raise ValueError(f"ampere-evidence.txt: {name}: no form of {classes[name].mnemonic} is listed before "
+                             "its translation was seen to run right on a V100 (docs/validation.md, section 8)")
         places = {}
         for kind, fields, data in decoder.plan(classes[name]):
             if kind == "operand":
@@ -448,6 +456,13 @@ def write(path, header):
             lines.append(f"    // {name}")
             previous = name
         lines.append(f"    (0x{fixed:032x}, 0x{variable:032x}),")
+    lines.append("];")
+    lines.extend(["", "/// Every form of every whole class of sm80, listed above or not, with the name of its class:",
+                  "/// a word of one reads as the sm75 instruction of the same bits, whether or not the translator",
+                  "/// takes it. Sorted by the twelve low bits of the opcode.",
+                  "pub const DESCRIBED_CLASSES: &[(&str, u128, u128)] = &["])
+    for name, fixed, variable in sorted(whole_classes()[0], key=lambda form: (form[1] & 0xfff, form[1], form[2], form[0])):
+        lines.append(f'    ("{name}", 0x{fixed:032x}, 0x{variable:032x}),')
     lines.append("];")
     for name, (fixed, variable) in canonical_forms().items():
         lines.extend(["", f"pub const {name}: (u128, u128) = (0x{fixed:032x}, 0x{variable:032x});"])

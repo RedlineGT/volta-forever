@@ -429,9 +429,9 @@ pub fn release(handle: usize) -> Released {
 /// The module `handle` went with its context (`contexts::destroyed`, which holds its record's
 /// lock and has dropped the record): what is kept for it is dropped.
 pub fn dropped(handle: usize) {
+    KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
     // (What the layer loaded beside it was a module of the same context: it went too.)
     drop(crate::told::take(handle));
-    KEPT.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
     kernels::forget(handle);
 }
 

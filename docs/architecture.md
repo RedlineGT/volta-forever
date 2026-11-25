@@ -171,9 +171,12 @@ A kernel is given so only if it can reach no data of its image
 section 5, read for sm_80 code too): the module of the layer's own has its own copy of the
 image's variables, which nothing keeps in step with the copy that the program reads and writes
 through the module it holds (`cuModuleGetGlobal`, `cudaMemcpyToSymbol`). A kernel whose code,
-and the code it calls, has no relocation and reads no constant bank in which a relocation
-names such data shares nothing with the image's other kernels but the memory that the program
-gives it as arguments. The other conditions: its code is translated (a refused kernel is not
+and the code it calls, has no relocation to anything but functions of the cubin, and reads no
+constant bank but its own (its parameters, or a bank that the cubin has for that kernel alone
+with no symbol in it: a `__constant__` variable is in a bank of the module, read with no
+relocation), shares nothing with the image's other kernels but the memory that the program
+gives it as arguments (`vf_adapt::told_kernel_reach`). A function of a module is given only
+while the module's context is the current one, where the layer loads. The other conditions: its code is translated (a refused kernel is not
 given), and the image is a fat binary of executable cubins (`kernels::Elsewhere` is not known
 of an image linked from relocatable code). Where one fails, the lookup fails as the driver
 answered, and the line of `kernels::not_given` says which code has the kernel and why it is not

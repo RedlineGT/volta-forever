@@ -14,6 +14,11 @@
 // k_reads_data:  sm_80 only. It reads `told_scale`, a variable of the image that the program sets
 //                through the module it holds: a module of the layer's own would have another copy.
 //                It is not given.
+// k_reads_table: sm_80 only. It reads `told_table`, a table of the image that no kernel writes:
+//                through the same bank of addresses, so not given either.
+// k_adds_const:  sm_80 only. It adds `told_bias[1]`, a `__constant__` variable, which is read from
+//                a constant bank of the module with no relocation, and which the program sets
+//                through the module it holds: not given.
 // k_not_translated: sm_80 only. A sum of pairs of f16 (HADD2), which the layer does not translate
 //                from sm_80 machine code: not given.
 // k_before_80:   sm_75 only (the other overload).
@@ -25,6 +30,8 @@
 #include <cuda_fp16.h>
 
 __device__ int told_scale = 1;
+__device__ const int told_table[4] = {3, 5, 7, 11};
+__constant__ float told_bias[4] = {0.5f, 1.5f, 2.5f, 3.5f};
 
 extern "C" __global__ void k_both(int *out) {
 #if defined(__CUDA_ARCH__)
@@ -48,6 +55,15 @@ extern "C" __global__ void k_divides(const float *a, const float *b, float *out,
 
 extern "C" __global__ void k_reads_data(int *out) {
     if (threadIdx.x == 0) out[1] = 80 * told_scale;
+}
+
+extern "C" __global__ void k_reads_table(int *out, int which) {
+    if (threadIdx.x == 0) out[1] = told_table[which & 3];
+}
+
+extern "C" __global__ void k_adds_const(const float *a, float *out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] + told_bias[1];
 }
 
 extern "C" __global__ void k_not_translated(const __half2 *a, __half2 *out) {

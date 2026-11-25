@@ -16,11 +16,14 @@
 //!
 //! What makes it sound, and is refused otherwise with the line of `kernels::not_given`:
 //!
-//! - **The kernel can reach no data of its image** (`vf_adapt::told_kernel_names_global_data`). A
-//!   module of its own has its own copy of the image's variables, which nothing keeps in step
-//!   with the copy that the program reads and writes through the module it holds. A kernel whose
-//!   code names none of them (no relocation, no constant bank that holds their addresses) shares
-//!   nothing with the other kernels but the memory that the program gives it as arguments.
+//! - **The kernel can reach no data of its image** (`vf_adapt::told_kernel_reach`). A module of
+//!   its own has its own copy of the image's variables, which nothing keeps in step with the copy
+//!   that the program reads and writes through the module it holds. A kernel whose code names
+//!   none of them (no relocation to anything but the cubin's functions, no constant bank but its
+//!   own: a `__constant__` variable is in a bank of the module) shares nothing with the other
+//!   kernels but the memory that the program gives it as arguments.
+//! - **For a function of a module, the module's context is the current one**: the layer loads
+//!   in the current context, and a function of another context would not be the module's.
 //! - **Its code is translated.** A kernel that the translator refuses is not given; nor one of an
 //!   image that the driver refuses.
 //! - **The image is one that `Elsewhere` is known of**: a fat binary of executable cubins, not one
@@ -34,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use crate::{config, hooks, images, kernels, log};
+use crate::{config, contexts, hooks, images, kernels, log};
 
 type CUresult = i32;
 const CUDA_SUCCESS: CUresult = 0;
@@ -162,6 +165,23 @@ unsafe fn give(
         .and_then(|fat| vf_adapt::told_cubin(&fat, elsewhere.loads_sm, name))
         .ok_or("its code is not read")?;
     drop(image);
+    // (Before anything is loaded: a kernel that reaches data is not given, translated or not.)
+    let unknown = match vf_adapt::told_kernel_reach(&cubin, name) {
+        vf_adapt::Reach::Data(what) => {
+            return Err(format!(
+                "it can reach data of its image, of which a {} of its own would have another copy than the one \
+                 that the program reads and writes: {what}",
+                if told.library { "library" } else { "module" }
+            ));
+        }
+        vf_adapt::Reach::Unknown(why) => Some(why),
+        vf_adapt::Reach::Nothing => None,
+    };
+    if !told.library && !same_context(contexts::context_of(told.owner), contexts::current_context()) {
+        // The function would be of a module of the current context, where the program's module,
+        // and what it launches from it, are of another.
+        return Err("its module is of another context than the current one, in which the layer would load it".into());
+    }
     let digest = images::xxh64(&cubin);
     let second = {
         let _loading = LOADING.lock().unwrap_or_else(|e| e.into_inner());
@@ -182,6 +202,14 @@ unsafe fn give(
                     digest,
                 };
                 let mut state = state();
+                if images::load_of(told.owner) != load || images::retained(told.owner).is_none() {
+                    // The program unloaded its module meanwhile (`take` found nothing of this, or
+                    // comes after: under this lock either it sees what is kept here, or the load
+                    // is gone already): what was just loaded goes too.
+                    drop(state);
+                    unsafe { hooks::unload_second(handle, told.library) };
+                    return Err("its module was unloaded meanwhile".into());
+                }
                 let entry = state.seconds.entry(told.owner).or_insert_with(|| (load, Vec::new()));
                 if entry.0 != load {
                     // (The handle was given to another load since: what was loaded for the one
@@ -196,11 +224,10 @@ unsafe fn give(
     if let Some(reason) = kernels::refusal(second.handle, name) {
         return Err(reason);
     }
-    if vf_adapt::told_kernel_names_global_data(&second.cubin, name) {
+    if let Some(why) = unknown {
+        // (Translated, and yet not read here: not given.)
         return Err(format!(
-            "it can reach data of its image, of which a {} of its own would have another copy than the one that \
-             the program reads and writes",
-            if told.library { "library" } else { "module" }
+            "what it can reach of the data of its image is not known ({why})"
         ));
     }
     let result = unsafe { hooks::lookup_told(second.handle, second.library, c_name, out, through) };
@@ -208,6 +235,32 @@ unsafe fn give(
         return Err(format!("the lookup in its translation failed (error {result})"));
     }
     Ok(second)
+}
+
+/// Whether a module of context `owner` may be given a function of a module that the layer loads
+/// in context `current`: only in the same one, both known.
+fn same_context(owner: Option<usize>, current: Option<usize>) -> bool {
+    owner.is_some() && owner == current
+}
+
+/// What `take` took is the program's again: the driver did not unload `owner`.
+pub fn restore(owner: usize, load: u64, taken: Vec<(usize, bool, Arc<Vec<u8>>, u64)>, given: Vec<usize>) {
+    let mut state = state();
+    if !taken.is_empty() {
+        let seconds = taken
+            .into_iter()
+            .map(|(handle, library, cubin, digest)| Second {
+                handle,
+                library,
+                cubin,
+                digest,
+            })
+            .collect();
+        state.seconds.entry(owner).or_insert((load, seconds));
+    }
+    for kernel in given {
+        state.given.entry(kernel).or_insert(owner);
+    }
 }
 
 /// Whether `kernel` (a kernel or a function) was given from the code for the capability told.
@@ -221,17 +274,37 @@ pub fn library_of(kernel: usize) -> Option<usize> {
     state().given.get(&kernel).copied()
 }
 
+/// What `take` took of a module or library: what was loaded for it (handle, whether a library,
+/// its bytes and their digest), the number of its load, and the kernels given from it.
+pub struct Taken {
+    pub load: u64,
+    pub seconds: Vec<(usize, bool, Arc<Vec<u8>>, u64)>,
+    pub given: Vec<usize>,
+}
+
 /// The program's module or library `owner` is unloaded, or went with its context: what was loaded
-/// for it is forgotten here, and returned (handle, whether a library) for the caller to unload
-/// where the driver has not done so itself.
-pub fn take(owner: usize) -> Vec<(usize, bool)> {
+/// for it is forgotten here, and returned for the caller to unload once the driver unloaded
+/// `owner` (or to give back, `restore`, when it did not). Called once the image kept for `owner`
+/// is forgotten (`images::release`, `images::dropped`): a lookup that loads for it from then on
+/// finds that, under the same lock, and keeps nothing (`give`).
+pub fn take(owner: usize) -> Taken {
     let mut state = state();
+    let given: Vec<usize> = state
+        .given
+        .iter()
+        .filter(|&(_, &of)| of == owner)
+        .map(|(&kernel, _)| kernel)
+        .collect();
     state.given.retain(|_, of| *of != owner);
-    state
-        .seconds
-        .remove(&owner)
-        .map(|(_, seconds)| seconds.iter().map(|s| (s.handle, s.library)).collect())
-        .unwrap_or_default()
+    let (load, seconds) = state.seconds.remove(&owner).unwrap_or_default();
+    Taken {
+        load,
+        seconds: seconds
+            .into_iter()
+            .map(|s| (s.handle, s.library, s.cubin, s.digest))
+            .collect(),
+        given,
+    }
 }
 
 #[cfg(test)]
@@ -281,10 +354,31 @@ mod tests {
         }
         assert!(gave(0x7e57_3200));
         assert_eq!(library_of(0x7e57_3200), Some(owner));
-        assert_eq!(take(owner), vec![(0x7e57_3100, false)]);
+        let taken = take(owner);
+        assert_eq!(
+            taken.seconds.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(),
+            vec![(0x7e57_3100, false)]
+        );
+        assert_eq!(taken.given, vec![0x7e57_3200]);
         assert!(!gave(0x7e57_3200));
         assert!(gave(0x7e57_3210));
-        assert_eq!(take(owner), vec![]);
-        assert_eq!(take(other), vec![(0x7e57_3110, false)]);
+        assert!(take(owner).seconds.is_empty());
+        // The driver did not unload it: the program's handles are what they were.
+        restore(owner, taken.load, taken.seconds, taken.given);
+        assert!(gave(0x7e57_3200));
+        assert_eq!(take(owner).seconds.len(), 1);
+        assert_eq!(take(other).seconds.len(), 1);
+    }
+
+    #[test]
+    fn a_function_is_given_only_in_the_context_of_its_module() {
+        // A program loads a module in one context and asks it for a function while another is
+        // current: the layer would load the sm_80 code in that other one.
+        assert!(same_context(Some(0xa), Some(0xa)));
+        assert!(!same_context(Some(0xa), Some(0xb)));
+        // A module whose context is not known, or no current context: not given.
+        assert!(!same_context(None, Some(0xb)));
+        assert!(!same_context(Some(0xa), None));
+        assert!(!same_context(None, None));
     }
 }
