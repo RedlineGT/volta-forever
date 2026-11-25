@@ -16,12 +16,20 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   marked; nothing is called after it; the same name registered again takes the slot back;
 - a fill that calls the layer back is refused (EDEADLK), not left waiting; fills that break the contract: one
   that never returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then
-  is made without the libraries' lines and says so), one that forks at each write (no deadlock), one that calls
-  exit(3) (the process ends with that status and its last write is made, saying why it lacks those lines);
+  is made without the libraries' lines and says so; 2 s of the monotonic clock, the time of day an hour ahead
+  under clock_ahead.c), one that forks at each write (no deadlock), one that calls
+  exit(3) on the layer's thread (the process ends with that status and its last write is made, saying why it
+  lacks those lines; its library's destructor, after the layer's, removes it there: 0, as after any last write);
+  after the last write, a removal returns EBUSY at once while a call is under way (the fill that never returns;
+  one that runs 3 s, whose library unmaps what it reads when its removal returns 0: the page stays and the call
+  ends well), and the thread calls no fill after it; a fill that forks on the layer's thread, its child
+  returning from it: the thread ends in the child, which ends with it and writes no file;
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
   thread holds the lock, which the child then has held for ever: both functions return ECHILD there at once;
-- the layer's thread blocks every signal, and the thread that loaded the layer keeps its mask;
+- the layer's thread blocks every signal but those of a fault (SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS),
+  and the thread that loaded the layer keeps its mask; a fill that faults on the layer's thread, in a process
+  under Python's faulthandler: the handler says so before the process ends by SIGSEGV;
 - without VF_SUMMARY: no thread and no call; without the thread (it could not be started): the lines at exit;
 - at exit, in both orders of the destructors (the library loaded after the layer and before it; with glibc 2.39
   the destructors run in the order of loading, and the two cases must show both orders): when the layer's comes
@@ -65,6 +73,7 @@ def load(path, mode=os.RTLD_LOCAL):
         f.restype = c.c_longlong
     lib.fill_slow_start.argtypes = lib.fill_slow_end.argtypes = [c.c_int]
     lib.fill_at_exit.argtypes = [c.c_char_p, c.c_long]
+    lib.fill_add_page.argtypes = [c.c_char_p]
     return lib
 
 
@@ -207,8 +216,41 @@ def child(proxy, library, mode):
         say("masks", hex(mask), hex(blocked(os.getpid())), *(hex(blocked(t)) for t in mine))
         return
 
+    if mode == "segv":  # a fault on the layer's thread, under Python's crash handler
+        import faulthandler
+        faulthandler.enable()
+        assert add(b"segv", b"segv") == 0
+        lib.fill_arm(1)
+        time.sleep(10)  # the thread's next write faults first
+        say("still alive")
+        return
+
+    if mode == "forkret":  # a fill that forks, its child returning from it into the layer's thread
+        assert add(b"forkret", b"forkret") == 0
+        lib.fill_arm(1)
+        end = time.time() + 15
+        while not lib.fill_child() and time.time() < end:
+            time.sleep(0.02)
+        say("child", lib.fill_child())
+        time.sleep(3.5)  # writes of the thread, here and in the fill's child
+        say("exiting")
+        return
+
+    if mode == "slowexit":  # a fill that runs past the last write's 2 s, and a library that frees what it reads
+        assert lib.fill_add_page(b"slowexit") == 0 and add(b"counter", b"count") == 0  # in this order: the slots'
+        lib.fill_exit_page(1)
+        lib.fill_arm(1)
+        end = time.time() + 15
+        while not lib.fill_entered() and time.time() < end:
+            time.sleep(0.02)
+        assert lib.fill_entered(), "the armed fill was not called"
+        say("exiting")
+        return
+
     if mode in ("hang", "forks", "exits"):  # fills that break the contract
         assert add(mode.encode(), mode.encode()) == 0
+        if mode in ("hang", "exits"):
+            lib.fill_at_exit(mode.encode(), 0)  # its library's destructor removes it at exit
         lib.fill_arm(1)
         end = time.time() + 15
         while not lib.fill_entered() and time.time() < end:
@@ -448,6 +490,9 @@ if __name__ == "__main__":
         subprocess.run(["cc", "-shared", "-fPIC", "-o", mock, here.with_name("link_mock_driver.c")], check=True)
         subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", library, here.with_name("summary_fill.c"),
                         "-ldl"], check=True)
+        clock_ahead = str(tmp / "clock_ahead.so")
+        subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", clock_ahead, here.with_name("clock_ahead.c"),
+                        "-ldl"], check=True)
         base = dict(os.environ, VF_REAL_LIBCUDA=mock, VF_PROXY_CACHE="0")
         for name in ("VF_LOG", "VF_LOG_LEVEL", "VF_SUMMARY", "VF_SUMMARY_INTERVAL", "VF_STATS", "FILL_NO_REMOVE"):
             base.pop(name, None)
@@ -570,19 +615,27 @@ if __name__ == "__main__":
         print("PASS a child made without fork()'s handlers while the thread held the lock (held for ever in it): add"
               " and remove return ECHILD at once")
 
-        # The layer's thread blocks every signal; the thread that loaded the layer keeps its own mask.
+        # The layer's thread blocks every signal but those of a fault; the thread that loaded the layer keeps its
+        # own mask. A fault on the layer's thread reaches the program's crash handler (Python's faulthandler): with
+        # SIGSEGV blocked there, the kernel would end the process with the handler reset, and nothing said.
         p = start("signals", **on)
         p.line()
         masks = p.line()
         p.finish()
         assert masks[0] == "masks" and len(masks) == 4, masks
         before, after, thread = (int(m, 16) for m in masks[1:])
-        wanted = sum(1 << (n - 1) for n in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
-                                            signal.SIGPIPE, signal.SIGALRM, signal.SIGTERM, signal.SIGCHLD,
-                                            signal.SIGRTMIN))
-        assert thread & wanted == wanted and after == before, masks
-        print(f"PASS the layer's thread blocks every signal (its SigBlk {masks[3]}), the thread that loaded the layer"
-              f" keeps its mask ({masks[2]})")
+        bits = lambda *signals: sum(1 << (n - 1) for n in signals)
+        wanted = bits(signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGPIPE,
+                      signal.SIGALRM, signal.SIGTERM, signal.SIGCHLD, signal.SIGRTMIN)
+        faults = bits(signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE, signal.SIGILL, signal.SIGTRAP, signal.SIGSYS)
+        assert thread & wanted == wanted and thread & faults == 0 and after == before, masks
+        p = start("segv", **on)
+        p.line()
+        status, out, err = p.end()
+        assert status == -signal.SIGSEGV and "Fatal Python error: Segmentation fault" in err and \
+            "still alive" not in out, (status, out, err[-2000:])
+        print(f"PASS the layer's thread blocks every signal but those of a fault (its SigBlk {masks[3]}), the thread"
+              f" that loaded the layer keeps its mask ({masks[2]}); a fault there reaches the program's crash handler")
 
         # Without VF_SUMMARY: no thread, no call.
         p = start("unset")
@@ -623,6 +676,19 @@ if __name__ == "__main__":
         assert exited(text, p.pid) and took < 10, (took, text)
         assert ("\n[volta-forever] the lines of other libraries are not in this last write: one of their functions had "
                 "not returned 2 s after the exit began\n") in text and "\n[hang] " not in text, text
+        # Its library's destructor removes it after the last write: at once, EBUSY (its call is under way).
+        assert err.rstrip().endswith(f"vf_summary_remove returned {errno.EBUSY}"), err
+        # The same with the time of day an hour ahead of the clock that the kernel counts a deadline of the time of
+        # day by (clock_ahead.c, as when it is set during the wait): the last write's 2 s are 2 s of the monotonic
+        # clock, not an hour and 2 s.
+        p = start("hang", LD_PRELOAD=clock_ahead, CLOCK_AHEAD="3600", **on)
+        for _ in range(3):
+            p.line()
+        t0 = time.time()
+        out, err = p.finish(30)
+        ahead = time.time() - t0
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["hang"])
+        assert exited(text, p.pid) and ahead < 10 and "not returned 2 s after the exit began\n" in text, (ahead, text)
         # One that forks at each write: no deadlock (the fork's handlers do not wait for the fill's own lock).
         p = start("forks", **on)
         p.line()
@@ -635,6 +701,8 @@ if __name__ == "__main__":
         assert exited(text, p.pid) and forked and forked[0] >= 3, text
         # One that calls exit(3): the process ends with that status, and the last write is made, without the other
         # libraries' lines (this thread was in one of their functions), and says so.
+        # (Its library's destructor, after the layer's, removes it on that thread: after the last write, 0, as for any
+        # caller, not EDEADLK.)
         p = start("exits", **on)
         p.line()
         status, out, err = p.end()
@@ -643,10 +711,53 @@ if __name__ == "__main__":
         assert exited(text, p.pid), text
         assert ("\n[volta-forever] the lines of other libraries are not in this last write: the process exited from "
                 "one of their functions\n") in text, text
-        print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here), the"
+        assert "fill library: removed at its end: " in err and err.rstrip().endswith("vf_summary_remove returned 0"), err
+        # One that runs past the last write's 2 s (3 s from when the exit begins), and a library that frees what its
+        # fill reads once its removal returns 0: after the last write its removal returns EBUSY at once while the call
+        # is under way, so the page stays and the call ends well; the count fill, after it in the slots, is not
+        # called after the last write. (A removal that returned 0 there would unmap the page under the call.)
+        p = start("slowexit", **on)
+        p.line()
+        assert p.line() == ["exiting"]
+        status, out, err = p.end()
+        busy = errno.EBUSY
+        assert status == 0 and err.rstrip().endswith(f"fill library: at its end: the slow fill's removal returned {busy},"
+                                                     f" the count fill's {busy}; the count fill called 0 times after them"), \
+            (status, out, err[-1500:])
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["slowexit", "counter"])
+        assert exited(text, p.pid) and ("\n[volta-forever] the lines of other libraries are not in this last write: "
+                                        "one of their functions had not returned 2 s after the exit began\n") in text, text
+        # One that forks on the layer's thread, its child returning from it (and so into the layer's thread, the
+        # child's only one): the thread ends there, the child with it, and it writes no file.
+        p = start("forkret", **on)
+        p.line()
+        child = p.line()
+        assert child[0] == "child" and int(child[1]) > 0, child
+        kid = int(child[1])
+        assert p.line() == ["exiting"]
+        p.finish()
+
+        def state(pid):
+            try:
+                return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return "gone"
+
+        end = time.time() + 5
+        while state(kid) not in ("gone", "Z") and time.time() < end:
+            time.sleep(0.1)
+        ended, left = state(kid), Path(f"{summary}.{kid}")
+        if ended not in ("gone", "Z"):
+            os.kill(kid, signal.SIGKILL)  # the fill's child of this test's own process
+        assert ended in ("gone", "Z") and not left.exists(), (ended, left.read_text() if left.exists() else "no file")
+        print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here;"
+              f" {ahead:.1f} s with the time of day an hour ahead), the"
               f" last write made without the libraries' lines and saying so, and a fork from another thread does not wait"
               f" for it ({fork[1]} ms); one that forks at each write is called {calls[1]} times; one that calls exit(3)"
-              f" ends the process with that status, its last write made and saying why it lacks the libraries' lines")
+              f" ends the process with that status, its last write made and saying why it lacks the libraries' lines,"
+              f" and its removal in its library's destructor returns 0; after the last write, while a call runs past"
+              f" its 2 s, a removal returns EBUSY at once and nothing is called; the child of a fork in a fill that"
+              f" returns from it ends, writing nothing")
 
         # At exit, in both orders of the destructors: which one came first is read from the removal (whether it
         # called the fill once more), and the file must hold what that order gives; the two cases must show both.
