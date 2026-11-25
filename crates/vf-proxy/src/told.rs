@@ -20,7 +20,8 @@
 //!   its own has its own copy of the image's variables, which nothing keeps in step with the copy
 //!   that the program reads and writes through the module it holds. A kernel whose code names
 //!   none of them (no relocation to anything but the cubin's functions, no constant bank but its
-//!   own: a `__constant__` variable is in a bank of the module) shares nothing with the other
+//!   own, and of bank 0 only the words known to be the launch's: a `__constant__` variable is in
+//!   a bank of the module, whose address is a word of bank 0; no texture) shares nothing with the other
 //!   kernels but the memory that the program gives it as arguments.
 //! - **For a function of a module, the module's context is the current one**: the layer loads
 //!   in the current context, and a function of another context would not be the module's.

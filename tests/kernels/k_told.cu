@@ -19,6 +19,11 @@
 // k_adds_const:  sm_80 only. It adds `told_bias[1]`, a `__constant__` variable, which is read from
 //                a constant bank of the module with no relocation, and which the program sets
 //                through the module it holds: not given.
+// k_const_address: sm_80 only. It stores the address of `told_bias`, which it takes from the word of
+//                bank 0 where the driver puts the address of the module's `__constant__` bank
+//                (c[0x0][0x50]): bank 0 is not all the kernel's own. Not given.
+// k_mixed_ptr:   sm_80 only. It reads through a pointer that is `told_bias` or its argument: the
+//                same word of bank 0, and a load that the layer does not read. Not given.
 // k_not_translated: sm_80 only. A sum of pairs of f16 (HADD2), which the layer does not translate
 //                from sm_80 machine code: not given.
 // k_before_80:   sm_75 only (the other overload).
@@ -64,6 +69,16 @@ extern "C" __global__ void k_reads_table(int *out, int which) {
 extern "C" __global__ void k_adds_const(const float *a, float *out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = a[i] + told_bias[1];
+}
+
+extern "C" __global__ void k_const_address(const float **out) {
+    if (threadIdx.x == 0) out[0] = told_bias;
+}
+
+extern "C" __global__ void k_mixed_ptr(const float *a, float *out, int n, int sel) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const float *p = sel ? told_bias : a;
+    if (i < n) out[i] = p[i & 3];
 }
 
 extern "C" __global__ void k_not_translated(const __half2 *a, __half2 *out) {

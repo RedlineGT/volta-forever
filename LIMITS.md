@@ -846,8 +846,11 @@ What that does not cover:
     (read from a constant bank of the module with no relocation), a function of other code.
     The module of the layer's own has another copy of that data than the one the program reads
     and writes through the module it holds, so such a kernel is not given from it: every
-    constant bank that the kernel reads must be its own alone (its parameters, or a bank that
-    the image has for that kernel only, with no name in it), and what the layer cannot read of a
+    constant bank that the kernel reads must be its own alone (its parameters and the launch's
+    sizes, stack pointer and memory descriptor in bank 0, each at a fixed place, and no other
+    word of bank 0: the driver puts the address of the image's `__constant__` data there too;
+    or a bank that the image has for that kernel only, with no name in it), a kernel that uses
+    a texture or a surface is not given, and what the layer cannot read of a
     kernel counts as data (until 2026-11-25, for a few hours of an unreleased build, a kernel
     that read a `__constant__` variable was given, and read the image's initial values);
   - a function of a module asked for while another context than the module's is current: the

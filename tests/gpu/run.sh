@@ -705,6 +705,8 @@ VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections sections-told-8.0-off test_sections li
 # that reads a table of the image (both through the bank of the image's addresses), one that adds
 # a `__constant__` variable (read from a constant bank of the module, with no relocation: the
 # program sets it to 20 where the image has 1.5, and a module of the layer's own would add 1.5),
+# one that stores the address of that variable (which the driver puts in a word of the kernel's
+# own bank 0: every instruction of it is translated, and it has no relocation),
 # and one that the layer does not translate (a sum of pairs of f16). In safe mode the same (the
 # kernel has no other code here). Told 7.5 none is given, and nothing is said.
 bf16=("k_bf16_sum: lookup 0$" "k_bf16_sum: 16384 sums, 0 differ from the sum rounded once to bf16"
@@ -715,25 +717,26 @@ bf16=("k_bf16_sum: lookup 0$" "k_bf16_sum: 16384 sums, 0 differ from the sum rou
     "kernel k_bf16_sum is given from the machine code for sm_80 of its image" "kernel k_divides is given from the machine code for sm_80 of its image"
     "lines that say a kernel is given from the sm_80 code: 2$"
     "k_reads_data: lookup 500$" "k_not_translated: lookup 500$" "k_nowhere: lookup 500$"
-    "k_reads_table: lookup 500$" "k_adds_const: lookup 500$"
+    "k_reads_table: lookup 500$" "k_adds_const: lookup 500$" "k_const_address: lookup 500$"
     "kernel k_reads_data is not in the code that the layer gives for its image .*\(LIMITS\.md, \"The capability told with VF_CAPABILITY\"\)\. The kernel alone is not given from the code for sm_80 either: it can reach data of its image, of which a (module|library) of its own would have another copy than the one that the program reads and writes: constant bank 4, which holds addresses of the image's variables"
     "kernel k_reads_table is not in the code .* either: it can reach data of its image, .*: constant bank 4, which holds addresses of the image's variables"
     "kernel k_adds_const is not in the code .* either: it can reach data of its image, .*: constant bank 3, which is not this kernel's alone"
+    "kernel k_const_address is not in the code .* either: it can reach data of its image, .*: the word of constant bank 0 at 0x50, which is not known to be the kernel's own"
     "kernel k_not_translated is not in the code that the layer gives for its image .*\. The kernel alone is not given from the code for sm_80 either: its machine code for sm_80 is not translated \(unsupported sm_80 instruction [0-9a-f]{32} at 0x[0-9a-f]+\)$"
-    "lines that say a kernel is not in the code given: 4$" "lookups that failed otherwise than 500: 0$"
+    "lines that say a kernel is not in the code given: 5$" "lookups that failed otherwise than 500: 0$"
     "^unload: 0$" "the context goes on: 7$")
-VF_CAPABILITY=8.0 sections told-8.0-module test_told module "${bf16[@]}" "told_scale set to 3: 0" "told_bias set to 10, 20, 30, 40: 0" "^18 lookups"
-VF_CAPABILITY=8.0 sections told-8.0-file test_told file "${bf16[@]}" "^18 lookups"
+VF_CAPABILITY=8.0 sections told-8.0-module test_told module "${bf16[@]}" "told_scale set to 3: 0" "told_bias set to 10, 20, 30, 40: 0" "^20 lookups"
+VF_CAPABILITY=8.0 sections told-8.0-file test_told file "${bf16[@]}" "^20 lookups"
 VF_CAPABILITY=8.0 sections told-8.0-library test_told library "${bf16[@]}" "k_bf16_sum: its library is the one loaded" \
     "k_divides: its library is the one loaded" "k_bf16_sum: lookup 0 \(in the library's module\)" \
-    "k_bf16_sum \(in the library's module\): 16384 sums, 0 differ" "k_reads_data: lookup 500 \(in the library's module\)" "k_adds_const: lookup 500 \(in the library's module\)" "^27 lookups"
-VF_CAPABILITY=8.0 VF_SAFE=1 sections told-8.0-safe test_told library "${bf16[@]}" "^27 lookups"
+    "k_bf16_sum \(in the library's module\): 16384 sums, 0 differ" "k_reads_data: lookup 500 \(in the library's module\)" "k_adds_const: lookup 500 \(in the library's module\)" "^30 lookups"
+VF_CAPABILITY=8.0 VF_SAFE=1 sections told-8.0-safe test_told library "${bf16[@]}" "^30 lookups"
 by_default sections told-7.5 test_told library "k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75" \
     "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" "k_reads_data: lookup 500$" "k_bf16_sum, loaded again: lookup 500$" \
     "lines that say a kernel is not in the code given: 0$" "lines that say a kernel is given from the sm_80 code: 0$" \
-    "lookups that failed otherwise than 500: 0$" "^27 lookups"
+    "lookups that failed otherwise than 500: 0$" "^30 lookups"
 VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections told-8.0-off test_told library "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" \
-    "lines that say a kernel is not in the code given: 6$" "lines that say a kernel is given from the sm_80 code: 0$" "^27 lookups"
+    "lines that say a kernel is not in the code given: 7$" "lines that say a kernel is given from the sm_80 code: 0$" "^30 lookups"
 
 # A refused kernel of which the program holds a handle that the layer did not give (taken here from
 # NVIDIA's driver itself, as cuFFT takes the functions of its modules from a private table) is not

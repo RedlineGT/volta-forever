@@ -23,6 +23,8 @@
  *   k_reads_table         an element of the table `told_table`
  *   k_adds_const          0 plus `told_bias[1]`, which the program sets to 20 the same way (the
  *                         image has 1.5): a kernel in another module would add 1.5
+ *   k_const_address       (looked up only) the address of `told_bias`, from a word of its own
+ *                         bank 0
  * then unloads the image, loads it again and looks the bf16 kernel up and runs it once more.
  * With TOLD_ONLY=NAME in the environment, only that kernel is launched.
  *
@@ -270,7 +272,7 @@ int main(int argc, char **argv) {
     CUresult (*library_module)(void **, void *) = API("cuLibraryGetModule");
 
     const char *names[] = {"k_both", "k_before_80", "k_bf16_sum", "k_divides", "k_reads_data", "k_not_translated",
-                           "k_nowhere", "k_reads_table", "k_adds_const"};
+                           "k_nowhere", "k_reads_table", "k_adds_const", "k_const_address"};
     const int count = sizeof names / sizeof names[0];
     int lookups = 0;
     for (int load = 0; load < 2; ++load) {
