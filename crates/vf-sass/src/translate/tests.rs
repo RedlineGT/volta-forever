@@ -1397,4 +1397,38 @@ fn a_result_of_double_precision_is_read_no_earlier_than_volta_reads_one() {
     assert_eq!(far(board(DADD, 0), DMUL), 12);
     // The program's own instructions of sm_75 code, both as they were: as the compiler had them.
     assert_eq!(run(board(DADD, 0), DMUL, false), 6);
+    // The reader may be where a branch goes, which the schedule does not see: at the end of
+    // straight-line code a result of double precision is as old as any reader needs (9 cycles
+    // for a register, 15 for a predicate), in code for sm_80 (`Item::anew`): the reciprocal of
+    // linalg's zlascl for sm_80 has a DFMA, a branch five cycles later and a DMUL at its
+    // target, six cycles on that path. Code for sm_75 keeps Volta's distances on such paths,
+    // and what the translation changes of it is left as far from the end as it was.
+    let ends = |words: &[u128], targets: &[u64], anew: bool| {
+        let mut decoder = Decoder::new(70);
+        let mut items: Vec<Item> = words
+            .iter()
+            .enumerate()
+            .map(|(i, &word)| {
+                let mut item = Item::new(word, i, "same", true);
+                item.anew = anew;
+                item.first = true;
+                item.d = Some(decoder.decode(word).unwrap());
+                item
+            })
+            .collect();
+        super::schedule::schedule(&mut items, targets).unwrap();
+        stalls(&items)
+    };
+    let nop = assemble::assemble("nop_", &[]).unwrap();
+    let dfma = with_stall(board(DFMA, 0), 1, false);
+    let bra = with_stall(BRA, 5, false);
+    // Before a branch: the wait is on the instruction before it.
+    assert_eq!(ends(&[dfma, bra, nop], &[], true)[..2], [4, 5]);
+    assert_eq!(ends(&[dfma, bra, nop], &[], false)[..2], [1, 5]);
+    // Before a place where a branch goes, the writer the last instruction before it.
+    assert_eq!(ends(&[with_stall(board(DADD, 0), 1, false), nop], &[16], true)[0], 9);
+    assert_eq!(ends(&[with_stall(board(DSETP, 0), 1, false), nop], &[16], true)[0], 15);
+    // A writer earlier in the code that goes on to that place.
+    let through = ends(&[with_stall(board(DSETP, 0), 2, false), nop, nop], &[32], true);
+    assert_eq!(through[0] + through[1], 15, "{through:?}");
 }

@@ -134,6 +134,13 @@ class Machine:
             return 15
         return 8 if reader_kind == 'FMALITE' else 9
 
+    def waited_longest(self, letter, writer):
+        """`waited` for any reader: what is kept from `writer` to the end of straight-line code,
+        where the reader is not seen (it may be the first instruction of a branch's target)."""
+        if writer.mnemonic not in WAITED:
+            return None
+        return 15 if letter == 'P' else 9
+
     def longest(self, letter, writer):
         """The distance that is enough from `writer` to any reader of what it writes."""
         return max(self.least(letter, role, writer, kind) for role in (('data', 'guard') if letter == 'P' else ('data',))

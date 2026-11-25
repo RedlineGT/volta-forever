@@ -69,6 +69,16 @@ pub fn waited(letter: u8, role: u8, writer: &Decoded, reader_kind: Kind) -> Opti
     Some(if reader_kind == Kind::FMALITE { 8 } else { 9 })
 }
 
+/// `waited` for any reader: what is kept from `writer` to the end of straight-line code, where
+/// the reader is not seen (it may be the first instruction of a branch's target). Port of
+/// `Machine.waited_longest`.
+pub fn waited_longest(letter: u8, writer: &Decoded) -> Option<u32> {
+    if !matches!(writer.mnemonic, "DADD" | "DMUL" | "DFMA" | "DSETP") {
+        return None;
+    }
+    Some(if letter == 2 { 15 } else { 9 })
+}
+
 /// The distance that is enough from `writer` to any reader of what it writes.
 pub fn longest(letter: u8, writer: &Decoded) -> u32 {
     let mut max_d = 0u32;

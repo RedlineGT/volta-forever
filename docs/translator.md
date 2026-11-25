@@ -884,8 +884,14 @@ or half precision), 9 otherwise, and a predicate of DSETP 15 cycles as a guard o
 (`docs/validation.md`, section 8, has the measurements). Code for sm_75 keeps the same
 distances, so its instructions are right as the compiler had them; code for sm_80 has 6 and
 14. The schedule gives these distances wherever the writer or the reader is the translation's
-(`Machine.waited`, `distance::waited`): in a function of sm_80 code, everywhere. No such
-function is translated yet (no form of these instructions passes: section 1).
+(`Machine.waited`, `distance::waited`): in a function of sm_80 code, everywhere. The schedule
+sees straight-line code, and the reader may be the first instruction where a branch goes (the
+reciprocal of a double-precision division: a DFMA, a branch five cycles later, a DMUL at its
+target). So in a function of sm_80 code a result of double precision is also as old at the end
+of straight-line code as any reader needs, 9 cycles for a register and 15 for a predicate
+(`Machine.waited_longest`, `Item.anew`); code for sm_75 keeps Volta's distances along its
+branches too, and nothing is added there. No such function is translated yet (no form of these
+instructions passes: section 1).
 
 ### R2P reads all seven predicates
 

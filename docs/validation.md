@@ -1253,6 +1253,22 @@ What was done:
   one of the two instructions is the translation's (in an sm_80 function, every one). With it,
   the three kernels translated as on that day have no read under the floor (165, 192 and 33
   without).
+- **Across a branch** (2026-11-25, found by the review): the schedule and the validator's rule
+  both saw straight-line code only, and a reader at a branch's target was neither kept away nor
+  looked at. With every whole class taken (a variant of each translator made for the
+  measurement), over 253 sm_80 cubins (the linalg library's 65, vLLM's 69, every fourth of
+  PyTorch's), 24 readers were under the floor on a path through a branch (23 `DFMA` to `DMUL`
+  at 6 or 7 cycles in linalg's reciprocals, one `DMUL` to a store at 7). Now, in code for
+  sm_80, a result of double precision is as old at the end of straight-line code as any reader
+  needs (9 cycles, a predicate 15), and the validator follows the next instruction and the
+  targets of the code's branches (not a branch through a register, a BSYNC or a return): 0 of
+  189,426 readers in the same 253 translations, by the validator and by the review's own
+  tool; the two translators give the same bytes for all 253. Native sm_75 code has no reader
+  under the floor on any such path (PyTorch's 475 cubins), so nothing is added to its
+  translation: the 1,107 cubins of the corpora are translated to the same bytes as before.
+  Control `doubleacross` (the reader where a branch goes is brought to 6 cycles on the path
+  through the branch): objected to in PyTorch's 0434, 0467 and 0469, and in none of them by
+  the rule as it was.
 - **The validator** (`double_read_early`): the same distances, written there on their own, for
   every translation. Given the three functions as normalized: 420, 448 and 66 problems in the
   translations that were wrong, none in those made with the rule; none in the translations

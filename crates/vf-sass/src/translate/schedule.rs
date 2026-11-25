@@ -186,6 +186,16 @@ pub(super) fn schedule(items: &mut Vec<Item>, targets: &[u64]) -> Result<(), Ref
                 let wd = items[wi].d.as_ref().unwrap();
                 need = need.max(when + crate::distance::longest(letter, wd) as i32 - t);
             }
+            // (A result of double precision of code for sm_80, scoreboard or not: its reader
+            // may be the first instruction where a branch goes, which waits and is still too
+            // early. Code for sm_75 keeps Volta's distances along its branches too: none shorter
+            // in the 475 cubins of PyTorch, and the translation shortens none.)
+            if items[wi].anew
+                && wi != b - 1
+                && let Some(floor) = crate::distance::waited_longest(letter, items[wi].d.as_ref().unwrap())
+            {
+                need = need.max(when + floor as i32 - t);
+            }
         }
         let wd = items[b - 1].d.as_ref().unwrap().clone();
         let writes: Vec<(u8, u32)> = wd.writes.iter().chain(&items[b - 1].more_writes).copied().collect();
@@ -193,6 +203,14 @@ pub(super) fn schedule(items: &mut Vec<Item>, targets: &[u64]) -> Result<(), Ref
             tail_idx = b - 1;
             for &(l, _) in &writes {
                 need = need.max(crate::distance::longest(l, &wd) as i32 - stall_of(items[b - 1].word) as i32);
+            }
+        }
+        if items[b - 1].anew {
+            for &(l, _) in &wd.writes {
+                if let Some(floor) = crate::distance::waited_longest(l, &wd) {
+                    tail_idx = b - 1;
+                    need = need.max(floor as i32 - stall_of(items[b - 1].word) as i32);
+                }
             }
         }
         if need > 0 {

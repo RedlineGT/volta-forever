@@ -42,7 +42,7 @@ class Refused(Exception):
 
 class Item:
     """One instruction of the result."""
-    __slots__ = ('word', 'origin', 'first', 'changed', 'what', 'target', 'fix', 'd', 'late', 'then', 'also', 'says', 'borrows', 'covered', 'more_reads', 'more_writes')
+    __slots__ = ('word', 'origin', 'first', 'changed', 'what', 'target', 'fix', 'd', 'late', 'then', 'also', 'says', 'borrows', 'covered', 'more_reads', 'more_writes', 'anew')
 
     def __init__(self, word, origin, what, changed=True, first=False):
         self.word, self.origin, self.what, self.changed, self.first = word, origin, what, changed, first
@@ -52,6 +52,7 @@ class Item:
         self.says = False       # an instruction of the program made to say when it has read (the same)
         self.borrows = ()       # the borrowed registers that the sequence it is part of writes for the translation
         self.covered = False    # its result is waited for with that of a later instruction of its sequence
+        self.anew = False       # of code for sm_80: the distances that the program had are not those Volta needs
         # What it reads and writes besides what its operands say: the predicates that P2R saves
         # and R2P gives back are in a mask.
         self.more_reads, self.more_writes = [], []
@@ -896,7 +897,7 @@ class Function:
                 new = self.one(i, d)
             if self.ampere:
                 for item in new:
-                    item.changed = True
+                    item.changed = item.anew = True
             if i in self._lane_taken:
                 # Level 3: the lane is read where a sequence goes by it, and what follows waits.
                 lane = Item(mc.assemble('s2r_', Rd=self._lane_taken[i], SRa='SR_LANEID', dst_wr_sb=SEQUENCE), i, 'lane')
@@ -2410,7 +2411,9 @@ class Function:
     def schedule(self):
         """Raise stall counts where an instruction of the translation is read, or reads, closer than
         native sm_70 code allows: within straight-line code by the measured distance for the pair, and
-        at the end of it by the longest distance any reader could need."""
+        at the end of it by the longest distance any reader could need (for a writer that names no
+        scoreboard, and for a result of double precision of code for sm_80, which is not read
+        early even when waited for)."""
         mc, items = self.mc, self.items
         blocks, start = [], 0
         for k, item in enumerate(items):
@@ -2502,9 +2505,19 @@ class Function:
             for (letter, register), (when, item, through) in last.items():
                 if item.changed and (item.word >> WRITE_BARRIER) & 7 == 7 and not item.covered and item is not items[b - 1]:
                     need = max(need, when + mc.longest(letter, item.d) - t)
+                # (A result of double precision of code for sm_80, scoreboard or not: its reader
+                # may be the first instruction where a branch goes, which waits and is still too
+                # early. Code for sm_75 keeps Volta's distances along its branches too: none
+                # shorter in the 475 cubins of PyTorch, and the translation shortens none.)
+                floor = mc.waited_longest(letter, item.d)
+                if item.anew and floor is not None and item is not items[b - 1]:
+                    need = max(need, when + floor - t)
             if items[b - 1].changed and items[b - 1].d.writes + items[b - 1].more_writes and (items[b - 1].word >> WRITE_BARRIER) & 7 == 7:
                 tail = b - 1
                 need = max(need, max(mc.longest(l, items[b - 1].d) for l, r in items[b - 1].d.writes + items[b - 1].more_writes) - stall_of(items[b - 1].word))
+            if items[b - 1].anew and items[b - 1].d.writes and mc.waited_longest('R', items[b - 1].d) is not None:
+                tail = b - 1
+                need = max(need, max(mc.waited_longest(l, items[b - 1].d) for l, r in items[b - 1].d.writes) - stall_of(items[b - 1].word))
             if need > 0:
                 t += self.delay(tail, need, inserted)
         for k, word in sorted(inserted, reverse=True):

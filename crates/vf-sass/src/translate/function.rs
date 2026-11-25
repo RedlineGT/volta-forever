@@ -131,6 +131,7 @@ pub(super) fn translate_function(
         if fd.ampere {
             for item in &mut new_items {
                 item.changed = true;
+                item.anew = true;
             }
         }
         // Level 3: insert lane S2R where a sequence goes by it.

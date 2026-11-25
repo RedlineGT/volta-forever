@@ -66,6 +66,8 @@ struct Item {
     /// Its result is waited for with that of a later instruction of its sequence: the schedule
     /// treats it like a writer that names a scoreboard.
     covered: bool,
+    /// Of code for sm_80: the distances that the program had are not those Volta needs.
+    anew: bool,
     /// What it reads and writes besides what its operands say: the predicates that P2R saves and
     /// R2P gives back are in a mask.
     more_reads: Vec<(u8, u32, u8)>,
@@ -92,6 +94,7 @@ impl Item {
             says: false,
             borrows: HashSet::new(),
             covered: false,
+            anew: false,
             more_reads: Vec::new(),
             more_writes: Vec::new(),
             what_detail: None,
