@@ -3,7 +3,8 @@
 
 Environment:
   MODEL       path to the model (required)
-  DTYPE       float16 or float32 (default float16)
+  DTYPE       float16, bfloat16 or float32 (default float16); with bfloat16, REF_FILE is to be the
+              CPU's reference in bfloat16 (vllm-ref.py with DTYPE=bfloat16)
   MAX_TOKENS  maximum new tokens (default 50)
   TEMPERATURE 0 for greedy (default), >0 for sampling
   TOP_K       top-k for sampling (default: not set)
@@ -123,7 +124,10 @@ def main():
             total_tokens += n
             print(f'  prompt {i}: {n} tokens: {text[:80]!r}')
             if ref and i < len(ref):
-                kind, detail = greedy_compare.compare(ref[i], ids=token_ids)
+                # (A bfloat16 model is compared with the CPU's bfloat16 reference, whose leads are
+                # in units of bfloat16: greedy_compare.NEAR_BF16.)
+                near = greedy_compare.NEAR_BF16 if DTYPE == 'bfloat16' else greedy_compare.NEAR
+                kind, detail = greedy_compare.compare(ref[i], ids=token_ids, near=near)
                 kinds.append(kind)
                 print('    %s: %s' % ({'match': 'MATCH', 'near': 'NEAR TIE', 'differ': 'DIFFER'}[kind], detail))
             elif ref:

@@ -4,7 +4,7 @@
 Writes a JSON file of {prompt, text, token_ids} records.
 Environment:
   MODEL       path to the model (required)
-  DTYPE       float16 or float32 (default float32)
+  DTYPE       float16, bfloat16 or float32 (default float32)
   MAX_TOKENS  maximum new tokens (default 50)
   PENALTY     the repetition penalty: a number (default 1.0: plain greedy, what vLLM's and SGLang's
               engines do when asked for a temperature of 0), or `model` for what the model's own
@@ -25,7 +25,7 @@ OUTFILE = os.environ.get('OUTFILE')
 if not OUTFILE:
     print('OUTFILE is required', file=sys.stderr); sys.exit(2)
 
-torch_dtype = torch.float16 if DTYPE == 'float16' else torch.float32
+torch_dtype = {'float16': torch.float16, 'bfloat16': torch.bfloat16}.get(DTYPE, torch.float32)
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch_dtype)
 model = model.to('cpu')

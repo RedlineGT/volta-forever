@@ -16,15 +16,15 @@
 #       this stage sets: below 8.0 vLLM makes the model float16), its compilation off as in every
 #       stage, through the launcher of this tree (`vf env`; not VF_PROXY). Its vectorized bf16
 #       norm is then a kernel that only the sm_80 code of its library has, which the layer gives
-#       from that code (LIMITS.md, "The capability told with VF_CAPABILITY"). Two programs: the
-#       norm alone on the GPU against the CPU (vllm-norm.py: the residual bit for bit, the norm
-#       within one unit in the last place), whose verdict is the stage's; and the engine, greedy,
-#       which must give a text for every prompt and end well. The engine's tokens are shown
-#       against the CPU's float32 ones without being judged: with 8 bits of significand a bf16
-#       model leaves the float32 text where the CPU led by a few tenths in logit (measured
-#       2026-11-25: one prompt of three at a lead of 0.28, the two others at near ties; with
-#       vLLM's compilation on, which computes the norm with PyTorch's operations, three near
-#       ties). Or LIMIT (below).
+#       from that code (LIMITS.md, "The capability told with VF_CAPABILITY"). Two programs, and
+#       both must pass: the norm alone on the GPU against the CPU (vllm-norm.py: with a weight
+#       and without, the residual bit for bit, the norm within one unit in the last place); and
+#       the engine, greedy, against the CPU's reference in bfloat16 (the same model run in
+#       bfloat16 by transformers: a float32 reference confounds what bfloat16 costs with what
+#       the layer does; measured 2026-11-25: where the float32 CPU led by 0.2764, the bfloat16
+#       CPU leads by 0.0625, one unit of a bfloat16 logit, and the engine takes the other
+#       token): every token the CPU's, or the first that differs where the CPU led by less than
+#       0.25 (greedy_compare.NEAR_BF16). Or LIMIT (below).
 # REFUSED: the layer did not give a kernel to the program, and says which and why. (Until
 # 2026-11-19, c, c2 and d were refused: a kernel of vLLM's sampling names every register of the
 # machine; `docs/translator.md`, "Registers", says how it is translated.)
@@ -258,7 +258,10 @@ fi
 # vLLM refuses bfloat16.
 if want e; then
     echo ""
-    echo "=== stage e: vLLM in bfloat16, told 8.0 with VF_CAPABILITY_ALL=1 (through the launcher): its norm against the CPU, and the engine ==="
+    echo "=== stage e: vLLM in bfloat16, told 8.0 with VF_CAPABILITY_ALL=1 (through the launcher): its norm against the CPU, and the engine against the CPU in bfloat16 ==="
+    refb=$run/ref-bf16.json
+    CUDA_VISIBLE_DEVICES="" MODEL="$model" DTYPE=bfloat16 MAX_TOKENS=50 OUTFILE="$refb" \
+        "${py[@]}" "$W/tests/gpu/vllm-ref.py" > /dev/null 2>&1 || { echo "FAIL: the CPU's reference in bfloat16"; exit 1; }
     told=(VF_CAPABILITY=8.0 VF_CAPABILITY_ALL=1)
     norm_out=$(unset LD_AUDIT VF_AUDIT_MAP_FILE LD_LIBRARY_PATH; VF_LAUNCHER=1 vf_layer "$proxy" "$map"
         env "${told[@]}" timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-norm.py" 2>&1)
@@ -266,19 +269,15 @@ if want e; then
     echo "$norm_out" | grep -E "^  (bfloat16|float16) |verdict|^FAIL|is given from the machine code|Error: " | cut -c1-240
     vllm_bf16=$(unset LD_AUDIT VF_AUDIT_MAP_FILE LD_LIBRARY_PATH; VF_LAUNCHER=1 vf_layer "$proxy" "$map"
         env "${told[@]}" MODEL="$model" DTYPE=bfloat16 MAX_TOKENS=50 TEMPERATURE=0 \
-            REF_FILE="$ref" timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1)
+            REF_FILE="$refb" timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1)
     status=$?
     # (With the errors that stopped the engine: the first of them is where it stopped.)
     echo "$vllm_bf16" | grep -E "prompt [0-9]|MATCH|NEAR TIE|DIFFER|tok/s|^FAIL|Error: " | cut -c1-200
-    texts=$(echo "$vllm_bf16" | grep -cE "^  prompt [0-9]+: [1-9][0-9]* tokens")
     if [ "$norm_status" != 0 ] || [ "$(echo "$norm_out" | sed -n 's/^verdict: //p' | tail -1)" != NORM_MATCH ]; then
+        # (The norm first: the engine's text is of no use while its kernel is wrong.)
         verdict_or_limit e "$norm_out" NORM_MATCH "$norm_status"
-    elif [ "$status" != 0 ] || [ "$texts" != 3 ] || ! echo "$vllm_bf16" | grep -qx PASS; then
-        # (The engine did not give its three texts: judged as a stage whose verdict is missing.)
-        verdict_or_limit e "$(echo "$vllm_bf16" | grep -v '^verdict: ')" ENGINE_RAN "$([ "$status" = 0 ] && echo 1 || echo "$status")"
     else
-        echo "the engine gave a text for each of its 3 prompts (its tokens against the CPU's float32 ones, above, are not judged)"
-        verdict e "$norm_out" NORM_MATCH "$norm_status"
+        verdict_or_limit e "$vllm_bf16" ALL_MATCH "$status"
     fi
 fi
 
