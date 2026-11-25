@@ -125,7 +125,9 @@ Where the GPU scripts write:
   module loaded there; an unload from another thread while the layer loads leaves nothing
   loaded; what was loaded goes with the module or library, and stays when the driver refuses
   the unload; nothing is loaded with `VF_TOLD_CODE=0`, nor for an image of relocatable code
-  (`k_told_rdc.cu`), loaded or linked. Three changes of `told.rs` each fail it (the context
+  (`k_told_rdc.cu`), loaded or linked (on the driver itself: `told-8.0-rdc`, `test_told_rdc.c`,
+  the two units linked by `cuLinkComplete`, the lookup of the kernel that only the sm_80 code
+  has failing with 500 and nothing said of that code). Three changes of `told.rs` each fail it (the context
   not checked, the library's module not checked, the unload during the load not looked for).
 - `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
   `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary

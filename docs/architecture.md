@@ -172,8 +172,8 @@ section 5, read for sm_80 code too): the module of the layer's own has its own c
 image's variables, which nothing keeps in step with the copy that the program reads and writes
 through the module it holds (`cuModuleGetGlobal`, `cudaMemcpyToSymbol`). A kernel whose code,
 and the code it calls, has no relocation to anything but functions of the cubin, and reads no
-constant bank but its own (of bank 0 the words whose meaning is known, at a fixed offset: its
-parameters, the sizes of the block and of the grid, the stack pointer and the descriptor of
+constant bank but its own (of bank 0 the words whose meaning is known, at a fixed offset that
+is not negative: its parameters, as far as the bank reaches in the cubin, the sizes of the block and of the grid, the stack pointer and the descriptor of
 global memory, since the driver also puts words of the module there, as the address of the
 module's `__constant__` bank at 0x50; or a bank that the cubin has for that kernel alone
 with no symbol in it and no relocation to a constant bank: a `__constant__` variable is in a

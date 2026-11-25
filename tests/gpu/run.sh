@@ -738,6 +738,19 @@ by_default sections told-7.5 test_told library "k_both: ran the code for sm_75" 
 VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections told-8.0-off test_told library "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" \
     "lines that say a kernel is not in the code given: 7$" "lines that say a kernel is given from the sm_80 code: 0$" "^30 lookups"
 
+# An image that the driver's linker makes from relocatable code (two units built with -rdc=true,
+# tests/kernels/k_told_rdc.cu and k_told_rdc2.cu), one of whose kernels only the sm_80 code of
+# its unit has: the module is of the linked image, the lookup fails with 500 as the driver
+# answers, and the layer loads nothing for it and says nothing of the code for sm_80. (The kernel
+# that both codes have is refused today: a call that a relocation resolves is not translated.)
+[ -x "$out/bin/test_told_rdc" ] && [ "$out/bin/test_told_rdc" -nt "$G/test_told_rdc.c" ] || gcc -O2 -Wall -o "$out/bin/test_told_rdc" "$G/test_told_rdc.c" -ldl || exit 2
+log=$out/logs/told-8.0-rdc.log
+VF_CAPABILITY=8.0 DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=1 "$out/bin/test_told_rdc" \
+    "$G/k_told_rdc.135.sm75-sm80.fatbin" "$G/k_told_rdc2.135.sm75-sm80.fatbin" >"$log" 2>&1
+echo "lines about the code for sm_80: $(grep -Ec 'is given from the machine code for sm_80|is not in the code that the layer gives' "$log")" >>"$log"
+check told-8.0-rdc "link: complete 0$" "^load: 0$" "k_rdc_both: lookup (0|218)$" "k_rdc_calls_out: lookup 500, handle null$" \
+    "lines about the code for sm_80: 0$" "^unload: 0$" "the context goes on: 0$"
+
 # A refused kernel of which the program holds a handle that the layer did not give (taken here from
 # NVIDIA's driver itself, as cuFFT takes the functions of its modules from a private table) is not
 # launched: every launch function, a kernel node of a graph and the questions about it return 218,
