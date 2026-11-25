@@ -689,7 +689,7 @@ fn lower_to_volta_with_threads(text: &[u8], options: lower::Options, max_threads
 /// `.extern` before its first function, as nvcc does (the traps call it; a module that defines it,
 /// or declares it later, is not changed so).
 fn can_report_traps(text: &[u8], functions: &[Function]) -> bool {
-    if address_bits(text) != 64 || contains(text, b"$vf_trap") {
+    if address_bits(text) != 64 || contains(text, b"$vf_trap") || trap_strings_at(text).is_none() {
         return false;
     }
     let first = functions.first().map_or(text.len(), |function| function.name.start);
@@ -700,6 +700,23 @@ fn can_report_traps(text: &[u8], functions: &[Function]) -> bool {
         }
     });
     declared_before
+}
+
+/// Where the strings of the reported traps go (`trap_strings`): at the start of the line after the
+/// `.address_size` directive, found as `retarget` finds the header, in the text with its comments
+/// blanked (a directive in a comment is not one). The header is then whole before them, whatever
+/// comes before it: a block comment, line comments, blank lines (until 2026-11-25 they went where
+/// `deps::find_header_end_pub` said, which does not pass a block comment: a module that began with
+/// one had its declarations before `.version`, and the driver refused it whole). `None` when a
+/// block comment begins after the directive on its line (the next line is then inside it), when
+/// nothing follows that line, or when the text is not UTF-8.
+fn trap_strings_at(text: &[u8]) -> Option<usize> {
+    let code = scan::blank_comments(std::str::from_utf8(text).ok()?);
+    let arg = directive(code.as_bytes(), b".address_size")?;
+    if contains(&text[arg.clone()], b"/*") || arg.end >= text.len() {
+        return None;
+    }
+    Some(arg.end + 1)
 }
 
 /// Whether the module `text` declares or defines `__assertfail`.
@@ -836,14 +853,12 @@ fn lower_to_volta_inner(text: &[u8], options: lower::Options, max_threads: Optio
         }
     }
     out.extend_from_slice(&text[copied..]);
-    if !lowering.replaced.is_empty() {
-        // Before the first function: the header ends there, and `out` holds what `text` holds up to
-        // it (what is changed is in functions).
-        let header_end = deps::find_header_end_pub(text).min(functions.first().map_or(text.len(), |f| f.name.start));
-        let at = text[..header_end]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |at| at + 1);
+    if !lowering.replaced.is_empty()
+        && let Some(at) = trap_strings_at(text)
+    {
+        // Right after the header (`trap_strings_at`, which `can_report_traps` asked for), before the
+        // first function: `out` holds what `text` holds up to there (what is changed is in
+        // functions).
         let names: Vec<&str> = lowering.replaced.iter().map(|r| r.function.as_str()).collect();
         let forms: Vec<&str> = lowering
             .replaced
@@ -1479,6 +1494,71 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn the_strings_of_the_traps_come_after_the_header_whatever_comes_before_it() {
+        // The module of the review (2026-11-25), which begins with a block comment: until then the
+        // declarations went before `.version`, and the driver refused the module whole.
+        let fixture = include_str!("../tests/data/block-comment-multimem.ptx");
+        let line_comments = MULTICAST.replacen(".version 9.3", "// a line comment\n\n// another\n.version 9.3", 1);
+        // Comments that hold `.version` and `.address_size` (a block comment over two lines, a line
+        // comment), and a comment after the directive on its line. (A line of a block comment that
+        // begins with a directive is read as one by `header` and `retarget`, as before: not tried.)
+        let tricky = MULTICAST
+            .replacen(
+                ".version 9.3",
+                "/* not the header: this needs .version 9.3\n   and .address_size 64 */\n// .version 2.0\n.version 9.3",
+                1,
+            )
+            .replacen(".address_size 64", ".address_size 64 // of the device", 1);
+        for (name, text) in [
+            ("fixture", fixture.to_string()),
+            ("line comments", line_comments),
+            ("tricky", tricky.clone()),
+            ("plain", MULTICAST.to_string()),
+        ] {
+            let (lowered, lowering) = lower_to_volta_with(text.as_bytes(), reporting());
+            assert!(!lowering.replaced.is_empty(), "{name}");
+            let mut lowered = String::from_utf8(lowered).unwrap();
+            retarget(unsafe { lowered.as_bytes_mut() }, (9, 0), 70);
+            let at = |needle: &str| {
+                lowered
+                    .find(needle)
+                    .unwrap_or_else(|| panic!("{name}: {needle} missing"))
+            };
+            // The real header first, retargeted; then the declarations; then the functions.
+            let header = lowered
+                .lines()
+                .map(str::trim)
+                .rfind(|line| line.starts_with(".version") || line.starts_with(".target"))
+                .unwrap();
+            assert!(header.starts_with(".target sm_70"), "{name}: {header}");
+            // (The directives where a line begins with them: a comment may name them too.)
+            assert!(at("\n.target sm_70") < at("\n.address_size 64"), "{name}");
+            assert!(at("\n.address_size 64") < at("$vf_trap_file["), "{name}");
+            assert!(at("$vf_trap_file[") < at(".entry"), "{name}");
+            assert!(at(".extern .func __assertfail") > at("\n.address_size 64"), "{name}");
+            // The header is still what `header` reads: the module's version (9.0 at the most) and sm_70.
+            let (major, minor, target) = header_of(&lowered).unwrap();
+            assert!(
+                target == 70 && (major, minor) <= (9, 0),
+                "{name}: {major}.{minor} sm_{target}"
+            );
+        }
+        // A block comment that begins after the directive and goes on: not changed so.
+        let open = MULTICAST.replacen(
+            ".address_size 64",
+            ".address_size 64 /* begins
+ ends */",
+            1,
+        );
+        let (_, lowering) = lower_to_volta_with(open.as_bytes(), reporting());
+        assert!(lowering.replaced.is_empty() && !lowering.refused.is_empty());
+    }
+
+    fn header_of(text: &str) -> Option<(u32, u32, u32)> {
+        header(text.as_bytes()).map(|h| (h.version.0, h.version.1, h.target))
     }
 
     #[test]

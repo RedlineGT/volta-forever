@@ -22,7 +22,9 @@
  *     counters are read (0: a plain load);
  *   - stored: a kernel whose only work is multimem.st, given (never launched here);
  *   - plain: nothing of later GPUs (a control of the module).
- * The second module has the same `pick`, with a function that holds barrier.cluster.arrive, an
+ * A third module has comments before its header (a block comment, a line comment that names
+ * `.version`, a blank line), `stored` and `plain`: it loads, and plain runs.
+ * The last module has the same `pick`, with a function that holds barrier.cluster.arrive, an
  * instruction of later GPUs that a program can really execute: `pick` stays refused (218).
  * With VF_REPORTED_TRAPS=0 the first module's pick, polled and stored are refused too (the run.sh
  * case says which is expected: argument 2, `refused`).
@@ -153,6 +155,37 @@ static const char module_refused[] =
     "    ret;\n"
     "}\n"
     PICK
+    ".visible .entry plain(.param .u64 out)\n"
+    "{\n"
+    "    .reg .u64 %rd<2>;\n"
+    "    .reg .u32 %r<2>;\n"
+    "    ld.param.u64 %rd1, [out];\n"
+    "    cvta.to.global.u64 %rd1, %rd1;\n"
+    "    ld.global.u32 %r1, [%rd1];\n"
+    "    add.u32 %r1, %r1, 7;\n"
+    "    st.global.u32 [%rd1], %r1;\n"
+    "    ret;\n"
+    "}\n";
+
+/* The same kernels behind comments before the header: a block comment over two lines, a line
+ * comment that names a directive, blank lines. Until 2026-11-25 the strings of the traps went before
+ * `.version` in such a module, and the driver refused it whole (218 from cuModuleLoadData, 200 from
+ * the lookups of a library). */
+static const char module_commented[] =
+    "/* A block comment\n"
+    "   before the version */\n"
+    "// .version 1.0 is not the header\n"
+    "\n"
+    HEADER
+    ".visible .entry stored(.param .u64 out, .param .u32 value)\n"
+    "{\n"
+    "    .reg .u64 %rd<2>;\n"
+    "    .reg .u32 %r<2>;\n"
+    "    ld.param.u64 %rd1, [out];\n"
+    "    ld.param.u32 %r1, [value];\n"
+    "    multimem.st.global.b32 [%rd1], %r1;\n"
+    "    ret;\n"
+    "}\n"
     ".visible .entry plain(.param .u64 out)\n"
     "{\n"
     "    .reg .u64 %rd<2>;\n"
@@ -327,6 +360,17 @@ int main(int argc, char **argv) {
             given("stored");
         }
         check("plain(35) is still 42", run("plain", 35, plain_args) == 42);
+        unload();
+    }
+    r = load(module_commented);
+    printf("module with comments before its header: load -> %d\n", r);
+    check("the module loads", r == 0);
+    if (r == 0) {
+        check("plain(3) is 10", run("plain", 3, plain_args) == 10);
+        if (switched_off)
+            refused("stored");
+        else
+            given("stored");
         unload();
     }
     r = load(module_refused);
