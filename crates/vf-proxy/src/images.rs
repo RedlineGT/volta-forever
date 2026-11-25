@@ -1828,9 +1828,10 @@ fn say_large(name: &str, replacement: &Replacement) {
         .any(|kernel| kernels::nccl_kernel(&kernel.kernel));
     log::warn(format_args!(
         "{name}: the driver now compiles the {} MB of PTX that the layer made of it (its kernels given with \
-         reported traps). The first time, this can take many minutes (NCCL 2.30.7's 248 MB took about 15 \
-         minutes of one core in each process); the driver then keeps what it made in its cache \
-         (CUDA_CACHE_PATH; CUDA_CACHE_MAXSIZE, 1 GiB by default, is shared by all the code it compiles){}",
+         reported traps), unless its cache has them from an earlier start. The first time, this can take many \
+         minutes (NCCL 2.30.7's 248 MB took about 15 minutes of one core in each process); the driver then \
+         keeps what it made in its cache (CUDA_CACHE_PATH; CUDA_CACHE_MAXSIZE, 1 GiB by default, is shared by \
+         all the code it compiles){}",
         bytes.div_ceil(1 << 20),
         if nccl {
             ". These are kernels of NCCL's collectives: NCCL's CUDA 12 build has code for this GPU and starts in \
