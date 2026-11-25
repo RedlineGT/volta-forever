@@ -72,7 +72,7 @@ run() {  # run NAME DIR ENV... -- ARGS... : the test program with LD_LIBRARY_PAT
     shift
     log=$out/$name.log
     env -u VF_CUBLAS_BF16_TC -u VF_CUBLAS_BF16_SKINNY -u VF_SAFE -u VF_BF16_CONTROL -u VF_BF16_INJECT -u STUB_CUBLAS_VERSION \
-        -u VF_BF16_TC_MIN_K \
+        -u VF_BF16_TC_MIN_K -u STUB_LAYER_ADD \
         LD_LIBRARY_PATH="$out/old/lib" "${envs[@]}" "$out/host_test" "$dir" "$@" >"$log" 2>&1
     status=$?
 }
@@ -193,6 +193,27 @@ if summary_lines 0; then
     echo "PASS  the layer's summary, without the layer's functions: nothing registered, the exit report's lines as they were before the summary"
 else
     echo "FAIL  the layer's summary, without the layer's functions (status $status, $log)"; failed=1
+fi
+# The layer refusing the registration (the stand-in's vf_summary_add returning STUB_LAYER_ADD): the runtime asked once,
+# is not registered, and goes on; at VF_LOG_LEVEL=2 it says so once, with the code, but not for ECHILD (a child made by
+# fork(), where the layer writes no file), and not below level 2.
+refusal() {  # refusal CODE LEVEL SAID [TEXT] : the mode summary-refused said ok, with SAID lines of the runtime about
+             # the refusal, TEXT in one of them
+    run summary-refused-$1-$2 "$out/test" VF_CUBLAS_BF16_TC=1 VF_LOG_LEVEL=$2 STUB_LAYER_ADD=$1 \
+        LD_LIBRARY_PATH="$out/layer:$out/old/lib" -- summary-refused
+    [ "$status" = 0 ] && grep -q '^ok ' "$log" && ! grep -q '^stub layer:' "$log" &&
+        [ "$(grep -c '^\[volta-forever\] libvf_cublas_bf16\.so: vf_summary_add returned ' "$log")" = "$3" ] &&
+        { [ -z "${4:-}" ] || grep -qF -- "$4" "$log"; } || refused="$refused $log"
+}
+refused=
+refusal 28 2 1 "vf_summary_add returned 28 (ENOSPC): the layer's VF_SUMMARY file will not hold this library's lines"
+refusal 17 2 1 "vf_summary_add returned 17 (EEXIST)"
+refusal 10 2 0  # ECHILD
+refusal 28 1 0  # below level 2
+if [ -z "$refused" ]; then
+    echo "PASS  the layer refusing the registration: the runtime is not registered and serves its calls; at VF_LOG_LEVEL=2 it says so once, with the code (ENOSPC, EEXIST), not for ECHILD, not at level 1"
+else
+    echo "FAIL  the layer refusing the registration:$refused"; failed=1
 fi
 # The controls of the summary exist in test builds only: the release runtime does not hold their names.
 rel=0

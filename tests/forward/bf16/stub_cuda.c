@@ -348,7 +348,8 @@ EXPORT CUresult cuGetErrorName(CUresult e, const char **s)
 #ifdef STUB_LAYER
 /* ---- the layer's summary (VF_SUMMARY, crates/vf-proxy/src/summary.rs): what the runtime registers; its fill called
  * when the test asks, and once more at its removal, as the layer calls it then while its file is still to be written,
- * each line of what it gives said on standard error ("stub layer: last report: LINE") ---- */
+ * each line of what it gives said on standard error ("stub layer: last report: LINE"); with STUB_LAYER_ADD=CODE, the
+ * registration refused with CODE ---- */
 typedef size_t (*summary_fill)(char *, size_t, void *);
 static int layer_adds, layer_removes;
 static unsigned layer_abi;
@@ -361,6 +362,8 @@ EXPORT int vf_summary_add(unsigned abi, const char *name, summary_fill fill, voi
     ++layer_adds;
     layer_abi = abi;
     snprintf(layer_name, sizeof layer_name, "%s", name ? name : "(null)");
+    const char *refuse = getenv("STUB_LAYER_ADD"); /* STUB_LAYER_ADD=CODE: refused with CODE, nothing registered */
+    if (refuse && atoi(refuse)) return atoi(refuse);
     layer_fill = fill;
     layer_ctx = ctx;
     return 0;

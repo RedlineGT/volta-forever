@@ -180,7 +180,10 @@ Where the GPU scripts write:
   registers its fill once, at its first handle, which gives the exit report's lines with the counts as
   they are, and at the runtime's end what the exit report printed; under the plain stand-in nothing is
   registered, and the exit report prints the lines in the text of before, which a test build's control,
-  `report-format`, changes), each control making its test fail.
+  `report-format`, changes; mode `summary-refused`: the stand-in refusing the registration with a code,
+  `STUB_LAYER_ADD`, the runtime is not registered, serves its calls, and says so once at
+  `VF_LOG_LEVEL=2` with the code, not for `ECHILD` and not at level 1), each control making its test
+  fail.
 - `torch.sh`: every PyTorch operation on the GPU, computed by translated kernels, gives what
   the CPU gives (within the tolerance of different rounding).
 - `llamacpp.sh`: the next-token distributions of a text are those of the CPU's (mean KL

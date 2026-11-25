@@ -37,6 +37,7 @@
 // test of that mechanism can fail. A release build reads neither.
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
@@ -550,7 +551,8 @@ static size_t summary_fill(char *buf, size_t cap, void *ctx)
  * The layer may call summary_fill until vf_summary_remove returns, so this file is pinned first (RTLD_NODELETE: a
  * dlclose does not unload it), and its destructor removes it all the same (summary_unregister, which also runs at
  * an unloading, if the pin did not take). The layer itself stays loaded for that call: this file never closes its
- * handle. */
+ * handle. A refusal of the layer's is said at VF_LOG_LEVEL=2, with its code, but ECHILD (a child made by fork(),
+ * where the layer writes no file); the exit report holds the counts all the same. */
 typedef size_t (*summary_fill_fn)(char *, size_t, void *);
 typedef int (*summary_remove_fn)(summary_fill_fn, void *);
 static _Atomic(summary_remove_fn) summary_remove; /* once registered (the destructor may run in another thread) */
@@ -564,8 +566,13 @@ static void summary_register(void *driver)
     Dl_info info;
     if (!CONTROL("no-pin") && dladdr((void *)summary_fill, &info) && info.dli_fname)
         dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE);
-    if (add(1, "libvf_cublas_bf16.so", summary_fill, NULL) == 0)
+    const int r = add(1, "libvf_cublas_bf16.so", summary_fill, NULL);
+    if (r == 0)
         atomic_store_explicit(&summary_remove, remove, memory_order_release);
+    else if (r != ECHILD)
+        SAY(2, "vf_summary_add returned %d (%s): the layer's VF_SUMMARY file will not hold this library's lines (its "
+               "exit report does)", r, r == ENOSPC ? "ENOSPC" : r == EEXIST ? "EEXIST" : r == EINVAL ? "EINVAL" :
+               r == ENOTSUP ? "ENOTSUP" : r == EDEADLK ? "EDEADLK" : r == EIO ? "EIO" : "an error");
 }
 
 /* (Test builds: VF_BF16_SUMMARY_SAY=1 says what the removal returned, and whether it called the fill.) */

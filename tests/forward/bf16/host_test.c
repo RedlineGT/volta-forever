@@ -542,6 +542,34 @@ static void summary_mode(void)
            tc, out[0], out[1], out[2], out[3], out[3] ? 100.0 * (double)out[2] / (double)out[3] : 0.0);
 }
 
+/* ---- the layer refusing the registration (the stand-in layer, STUB_LAYER_ADD=CODE): the runtime asked once, is not
+ * registered, and goes on, its calls served; tests/forward/bf16.sh reads what it said of the refusal. ---- */
+static void summary_refused_mode(void)
+{
+    void *rt = dlopen("libvf_cublas_bf16.so", RTLD_NOW | RTLD_NOLOAD);
+    int (*rt_summary)(unsigned long long *, int) = NULL;
+    int (*layer_state)(unsigned *, char *, size_t) = NULL;
+    if (rt) *(void **)&rt_summary = dlsym(rt, "vf_bf16_test_summary");
+    *(void **)&layer_state = dlsym(RTLD_DEFAULT, "stub_layer_state");
+    if (!rt_summary || !layer_state) {
+        CHECK(0, "summary-refused: not the test build of the runtime under the stand-in layer");
+        return;
+    }
+    G g = gemm(1, 0, 1536, 128, 4096);
+    take();
+    const cublasStatus_t served = call(&g);
+    take();
+    CHECK(served == 0 && count("gemmex ") == 0 && count("launch vf_bf16_epilogue") == 1,
+          "summary-refused: the call was not served");
+    unsigned long long st[2] = {9, 9};
+    rt_summary(st, 2);
+    unsigned abi = 0;
+    char name[80] = "";
+    const int adds = layer_state(&abi, name, sizeof name);
+    CHECK(adds == 1 && st[0] == 0, "summary-refused: %d calls of vf_summary_add, not 1; registered: %llu, not 0", adds,
+          st[0]);
+}
+
 /* ---- verify mode (VF_CUBLAS_BF16_VERIFY=1, with the skinny path): every call the skinny path serves is also made
  * through cuBLAS 12.9's own entry point, on the same handle and stream (or with the same descriptors, algorithm and
  * workspace), with its output in a scratch buffer of the stream that has the output's address modulo 256 and its
@@ -1537,6 +1565,8 @@ int main(int argc, char **argv)
         verify_threads_mode();
     } else if (!strcmp(mode, "summary")) { /* VF_CUBLAS_BF16_TC=1, VF_LOG_LEVEL=2; with the stand-in layer or not */
         summary_mode();
+    } else if (!strcmp(mode, "summary-refused")) { /* VF_CUBLAS_BF16_TC=1; the stand-in layer, STUB_LAYER_ADD=CODE */
+        summary_refused_mode();
     } else if (!strcmp(mode, "noruntime")) {
         G g = gemm(0, 1, 1536, 8, 1920);
         take();
