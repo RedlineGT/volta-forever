@@ -1081,6 +1081,7 @@ unsafe extern "C" fn library_load_data(
                 adapted_data,
                 replacement.refused(),
                 replacement.emulated(),
+                replacement.reported(),
                 replacement.trap_only(),
                 replacement.retargeted_from,
                 jit_options,

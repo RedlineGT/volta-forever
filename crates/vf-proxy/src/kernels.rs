@@ -8,6 +8,11 @@
 //!   private interface of the driver, an enumeration made before a refusal was known): what the
 //!   driver says of a handle leads back to these records (`verdict`), for `guard`.
 //! - Kernels that run emulated instructions: announced on the console when the program takes them.
+//! - Kernels given with reported traps (`vf_ptx::Reported`): they are, or may reach, a function in
+//!   which instructions that cannot run on this GPU, and that a correct program cannot reach on it,
+//!   were replaced by a trap that names them (`vf_ptx::lower::Options::reported_traps`). Announced
+//!   once each when the program takes them, counted at exit, and named in the report of a fault
+//!   (`traps_of`).
 //! - Kernels without code: their code in the image is a trap and nothing else (`vf_adapt::Stubs`).
 //!   They are given at a lookup, as NVIDIA's driver gives them (programs look them up without
 //!   launching them), and a use that would run one is refused (`guard`): launched, it would end
@@ -27,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed, O
 use std::sync::{LazyLock, Mutex};
 
 use vf_adapt::emulation::{Announcer, KEPT_KERNELS, Load};
-use vf_adapt::{Emulated, EmulatedCounts, Refused};
+use vf_adapt::{Emulated, EmulatedCounts, Refused, Reported};
 
 use crate::{REALS, config, idx, images, log, profile};
 
@@ -49,6 +54,8 @@ struct Kernels {
     /// By kernel: the function it needs that traps, and why.
     refused: HashMap<String, (String, String)>,
     emulated: HashMap<String, EmulatedCounts>,
+    /// By kernel: what it is given with of reported traps.
+    reported: HashMap<String, Reported>,
     /// For the module of a library: that library, with which it goes away.
     library: Option<usize>,
     /// The handle is a library's (`cuLibraryLoadData`), not a module's: the driver makes a module
@@ -107,9 +114,13 @@ static EXPLAINED: LazyLock<Mutex<Explained>> = LazyLock::new(|| Mutex::new(Expla
 /// Whether the remedy for NCCL's kernels was given (`nccl_remedy`).
 static NCCL_REMEDY_GIVEN: AtomicBool = AtomicBool::new(false);
 
-/// Whether `name` is the name of one of NCCL's device kernels (`ncclDevKernel_...`,
-/// `ncclSymkDevKernel_...`; `ncclKernel_...` before NCCL 2.19), as the compiler gives it: plain, or
-/// mangled as a function at global scope (`_Z`, the length of the name, the name, its parameters).
+/// Whether `name` is the name of one of the kernels of NCCL's collectives (`ncclDevKernel_...`;
+/// `ncclKernel_...` before NCCL 2.19), as the compiler gives it: plain, or mangled as a function at
+/// global scope (`_Z`, the length of the name, the name, its parameters). Not its kernels for
+/// symmetric memory (`ncclSymkDevKernel_...`), of which NCCL goes on without those it cannot take
+/// (it ignores a failure to look one up), and chooses them only among those its GPUs can run: the
+/// layer refuses those that copy with `cp.async.bulk`, which NCCL 2.30 chooses on sm_100 and later
+/// only, with `NCCL_SYM_TMA_ENABLE=1`.
 fn nccl_kernel(name: &str) -> bool {
     let identifier = match name.strip_prefix("_Z") {
         Some(rest) => {
@@ -121,23 +132,25 @@ fn nccl_kernel(name: &str) -> bool {
         }
         None => name,
     };
-    ["ncclDevKernel_", "ncclSymkDevKernel_", "ncclKernel_"]
+    ["ncclDevKernel_", "ncclKernel_"]
         .iter()
         .any(|prefix| identifier.starts_with(prefix))
 }
 
-/// For the first refused kernel of NCCL: what the program needs instead. The CUDA 13 build of NCCL
-/// reaches instructions that Volta does not have; its CUDA 12 build has code for Volta, and the
-/// launcher gives it to the program when it is installed.
+/// For the first refused kernel of NCCL's collectives: what the program needs instead. Their
+/// multicast instructions are given as reported traps where no GPU of the process can take part in
+/// multicast (`images::policy`); elsewhere, with `VF_REPORTED_TRAPS=0`, or for another reason, the
+/// CUDA 13 build of NCCL cannot run its collectives through the layer. Its CUDA 12 build has code
+/// for Volta, and the launcher gives it to the program when it is installed.
 fn nccl_remedy(name: &str) -> Option<String> {
     if !nccl_kernel(name) || NCCL_REMEDY_GIVEN.swap(true, Relaxed) {
         return None;
     }
     Some(format!(
-        "{name} is a kernel of NCCL, whose CUDA 13 build cannot run its collectives on this GPU: a program \
-         that uses several GPUs needs NCCL's CUDA 12 build, which has code for it. `vf fetch --only libnccl` \
-         downloads it, and a program started through `vf` is given it in place of its own (`vf doctor` says \
-         whether it is found)"
+        "{name} is a kernel of NCCL's collectives, which cannot run without it: a program that uses several \
+         GPUs then needs NCCL's CUDA 12 build, which has code for this GPU. `vf fetch --only libnccl` downloads \
+         it, and a program started through `vf` is given it in place of its own (`vf doctor` says whether it \
+         is found; LIMITS.md, \"Several GPUs and NCCL\")"
     ))
 }
 
@@ -304,6 +317,92 @@ pub fn describe(handle: usize, shown: Option<String>, refused: Vec<Refused>, emu
         kernels.emulated.insert(kernel.kernel, kernel.counts);
     }
     changed(&known);
+}
+
+/// Record the kernels of the image loaded as `handle` (a library's when `library`) that are given
+/// with reported traps. (Nothing that `guard` concludes changes: no new generation.)
+pub fn with_traps(handle: usize, reported: Vec<Reported>, library: bool) {
+    if reported.is_empty() {
+        return;
+    }
+    let mut known = known();
+    let kernels = known.entry(handle).or_default();
+    kernels.is_library |= library;
+    for kernel in reported {
+        kernels.reported.insert(kernel.kernel.clone(), kernel);
+    }
+}
+
+/// What kernel `name` of `handle` is given with of reported traps, if it is (for the report of a
+/// fault).
+pub fn traps_of(handle: usize, name: &str) -> Option<Reported> {
+    metadata(&known(), handle).and_then(|kernels| kernels.reported.get(name).cloned())
+}
+
+/// The kernels with reported traps that were said, and how many were given: the line at exit.
+#[derive(Default)]
+struct TrapsSaid {
+    /// The names said (at most `KEPT_KERNELS`).
+    said: HashSet<String>,
+    /// Kernels given, and whether more than were kept came.
+    given: usize,
+    beyond: bool,
+    /// The first form replaced in what each kernel reaches, for the line at exit (the
+    /// instructions replaced are not added up: kernels share the functions they reach).
+    forms: std::collections::BTreeSet<String>,
+}
+
+static TRAPS_SAID: LazyLock<Mutex<TrapsSaid>> = LazyLock::new(|| Mutex::new(TrapsSaid::default()));
+
+/// Kernel `name` is given with `reported`: the line that says so, the first time a kernel of its
+/// name is given, while no more than `limit` were said (all of them with `all`); and once that
+/// further ones are not listed.
+fn traps_given(name: &str, reported: &Reported, limit: usize, all: bool) -> Option<String> {
+    let mut said = TRAPS_SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.said.contains(name) {
+        return None;
+    }
+    if said.said.len() >= KEPT_KERNELS {
+        said.beyond = true;
+        return None;
+    }
+    said.said.insert(name.to_string());
+    said.given += 1;
+    said.forms.insert(reported.form.clone());
+    if limit > 0 && (said.given <= limit || all) {
+        return Some(format!(
+            "kernel {name} is given with {}. Such an instruction needs a multicast address, which no GPU of this \
+             process can have: reached all the same, the kernel stops with an assertion that names it \
+             (CUDA_ERROR_ASSERT, 710) and the context ends (VF_REPORTED_TRAPS=0 refuses such kernels instead)",
+            reported.summary()
+        ));
+    }
+    (limit > 0 && said.given == limit + 1).then(|| {
+        "further kernels given with reported traps are not listed (VF_EMULATION_WARNINGS); their number is said \
+         at exit"
+            .to_string()
+    })
+}
+
+/// For the report at exit: the kernels given with reported traps.
+pub fn traps_summary_line() -> Option<String> {
+    let said = TRAPS_SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.given == 0 {
+        return None;
+    }
+    let forms: Vec<&str> = said.forms.iter().map(String::as_str).take(4).collect();
+    Some(format!(
+        "{} {} given to the program with reported traps{} (in place of {}{})",
+        said.given,
+        if said.given == 1 { "kernel was" } else { "kernels were" },
+        if said.beyond {
+            ", and more that were not counted"
+        } else {
+            ""
+        },
+        forms.join(", "),
+        if said.forms.len() > forms.len() { ", ..." } else { "" }
+    ))
 }
 
 /// Record the kernels without code of the image loaded as `handle` (a library's when `library`):
@@ -901,14 +1000,20 @@ pub unsafe fn verdict(handle: usize, device: Option<c_int>) -> Verdict {
 /// Kernel `name` of `handle` is given to the program: announce it if it runs emulated instructions.
 /// When the profiler is on, also record the code origin and emulated counts for the kernel.
 pub fn given(handle: usize, name: &str) {
-    let (counts, origin_val, load, shown) = {
+    let (counts, origin_val, load, shown, reported) = {
         let k = known();
         let kernels = metadata(&k, handle);
         let counts = kernels.and_then(|k| k.emulated.get(name)).cloned();
         let origin_val = kernels.and_then(|k| k.origin);
         let shown = kernels.and_then(|k| k.shown.clone());
-        (counts, origin_val, load_of(&k, handle), shown)
+        let reported = kernels.and_then(|k| k.reported.get(name)).cloned();
+        (counts, origin_val, load_of(&k, handle), shown, reported)
     };
+    if let Some(reported) = &reported
+        && let Some(line) = traps_given(name, reported, config().emulation_warnings, log::at_level(2))
+    {
+        log::warn(format_args!("{line}"));
+    }
     if let Some(ref counts) = counts {
         let limit = config().emulation_warnings;
         let all = log::at_level(2);
@@ -1054,7 +1159,6 @@ mod tests {
         for name in [
             "_Z39ncclDevKernel_AllReduce_Sum_f32_RING_LL24ncclDevKernelArgsStorageILm4096EE",
             "_Z22ncclDevKernel_SendRecv24ncclDevKernelArgsStorageILm4096EE",
-            "_Z32ncclSymkDevKernel_AllGather_STMC21ncclSymkDevWorkArgs4K",
             "ncclDevKernel_Generic",
             "_Z38ncclKernel_AllReduce_RING_LL_Sum_float14ncclDevKernelArgs",
         ] {
@@ -1068,6 +1172,9 @@ mod tests {
             "_ZN4nccl13ncclDevKernel_E",
             "_Z12ncclDevFunc_v",
             "my_ncclDevKernel_copy",
+            // Its kernels for symmetric memory: NCCL goes on without those it cannot have.
+            "_Z32ncclSymkDevKernel_AllGather_STMC21ncclSymkDevWorkArgs4K",
+            "_Z33ncclSymkDevKernel_AllGather_TmaST21ncclSymkDevWorkArgs4K",
             "_Z",
             "",
         ] {
@@ -1139,5 +1246,48 @@ mod tests {
             nccl_remedy("_Z39ncclDevKernel_AllReduce_Sum_f32_RING_LL24ncclDevKernelArgsStorageILm4096EE"),
             None
         );
+    }
+
+    #[test]
+    fn a_kernel_given_with_reported_traps_is_said_once_counted_and_known_to_the_report_of_a_fault() {
+        let (library, module) = (0x7e57_3000, 0x7e57_3010);
+        let reported = |kernel: &str, instructions| Reported {
+            kernel: kernel.into(),
+            function: "_Z43ncclDevFunc_AllGather_COLLNET_DIRECT_SIMPLEv".into(),
+            form: "multimem.ld_reduce.acquire.sys.global.min.u64".into(),
+            instructions,
+            functions: 3,
+        };
+        with_traps(library, vec![reported("ring", 12), reported("tree", 1)], true);
+        share(module, library);
+        // Through the module of the library too, for the report of a fault.
+        assert_eq!(traps_of(module, "ring"), Some(reported("ring", 12)));
+        assert_eq!(traps_of(module, "other"), None);
+        let line = traps_given("ring", &reported("ring", 12), 20, false).unwrap();
+        assert_eq!(
+            line,
+            "kernel ring is given with 12 instructions that cannot run on this GPU replaced by a reported trap: \
+             multimem.ld_reduce.acquire.sys.global.min.u64 in _Z43ncclDevFunc_AllGather_COLLNET_DIRECT_SIMPLEv and 2 \
+             other functions. Such an instruction needs a multicast address, which no GPU of this process can have: \
+             reached all the same, the kernel stops with an assertion that names it (CUDA_ERROR_ASSERT, 710) and the \
+             context ends (VF_REPORTED_TRAPS=0 refuses such kernels instead)"
+        );
+        // Once for each name; beyond the limit, once that more are not listed; all counted.
+        assert_eq!(traps_given("ring", &reported("ring", 12), 20, false), None);
+        assert!(
+            traps_given("tree", &reported("tree", 1), 1, false)
+                .unwrap()
+                .starts_with("further kernels")
+        );
+        assert_eq!(traps_given("third", &reported("third", 1), 1, false), None);
+        let summary = traps_summary_line().unwrap();
+        assert_eq!(
+            summary,
+            "3 kernels were given to the program with reported traps (in place of \
+             multimem.ld_reduce.acquire.sys.global.min.u64)"
+        );
+        forget(library);
+        assert_eq!(traps_of(module, "ring"), None);
+        forget(module);
     }
 }

@@ -6,7 +6,8 @@
 //! of the layer, so that a later run that loads the same module finds:
 //!
 //! - a **manifest**: every entry point with the flags the lazy path needs, the refusal reason when
-//!   it is refused, and the emulated-instruction counts when they are announced; and the
+//!   it is refused, the emulated-instruction counts when they are announced, what it is given with
+//!   of reported traps (`vf_adapt::Reported`, format 9); and the
 //!   architecture of the PTX that was retargeted, which the program's kernels are said to be
 //!   compiled for (`hooks::versions`);
 //! - **sub-module PTX** for each independent kernel, stored when the kernel is first extracted;
@@ -57,7 +58,7 @@ use crate::{generated, log};
 /// Magic at the start of every cached file.
 const FILE_MAGIC: [u8; 4] = *b"S70C";
 /// Format version; bump to invalidate all entries when the on-disk layout changes.
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 /// File header: magic(4) + format_version(4) + key(16) + content_len(4) + checksum(8) = 36.
 const HEADER_LEN: usize = 36;
 /// Default size limit for the whole cache directory.
@@ -419,6 +420,8 @@ pub struct ManifestEntry {
     /// Its code is a trap and nothing else (`vf_adapt::Stubs::trap_only`): given at a lookup, not
     /// launched.
     pub trap_only: bool,
+    /// When the entry is given with reported traps (format 9).
+    pub reported: Option<vf_adapt::Reported>,
 }
 
 /// Encode the manifest to bytes.
@@ -447,6 +450,9 @@ fn encode_manifest(m: &CachedManifest) -> Vec<u8> {
         }
         if e.trap_only {
             flags |= 16;
+        }
+        if e.reported.is_some() {
+            flags |= 32;
         }
         buf.push(flags);
         // tables
@@ -483,6 +489,15 @@ fn encode_manifest(m: &CachedManifest) -> Vec<u8> {
             ] {
                 buf.extend_from_slice(&(v as u32).to_le_bytes());
             }
+        }
+        // reported traps: the first function and form, the instructions and the functions
+        if let Some(ref r) = e.reported {
+            for text in [&r.function, &r.form] {
+                buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+                buf.extend_from_slice(text.as_bytes());
+            }
+            buf.extend_from_slice(&(r.instructions as u32).to_le_bytes());
+            buf.extend_from_slice(&(r.functions as u32).to_le_bytes());
         }
     }
     buf
@@ -564,6 +579,17 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
         } else {
             None
         };
+        let reported = if flags & 32 != 0 {
+            Some(vf_adapt::Reported {
+                kernel: name.clone(),
+                function: read_str(&mut pos)?,
+                form: read_str(&mut pos)?,
+                instructions: read_u32(&mut pos)? as usize,
+                functions: read_u32(&mut pos)? as usize,
+            })
+        } else {
+            None
+        };
         entries.push(ManifestEntry {
             name,
             independent,
@@ -571,6 +597,7 @@ fn decode_manifest(data: &[u8]) -> Option<CachedManifest> {
             refused,
             emulated,
             trap_only,
+            reported,
         });
     }
     Some(CachedManifest {
@@ -872,6 +899,13 @@ mod tests {
                         c
                     }),
                     trap_only: false,
+                    reported: Some(vf_adapt::Reported {
+                        kernel: "kernel_a".to_string(),
+                        function: "helper".to_string(),
+                        form: "multimem.st.global.b32".to_string(),
+                        instructions: 7,
+                        functions: 2,
+                    }),
                 },
                 ManifestEntry {
                     name: "kernel_b".to_string(),
@@ -880,6 +914,7 @@ mod tests {
                     refused: Some(("bad_func".to_string(), "unknown instruction".to_string())),
                     emulated: None,
                     trap_only: false,
+                    reported: None,
                 },
                 ManifestEntry {
                     name: "kernel_c".to_string(),
@@ -888,6 +923,7 @@ mod tests {
                     refused: None,
                     emulated: None,
                     trap_only: true,
+                    reported: None,
                 },
             ],
             retargeted_from: Some(75),
@@ -919,6 +955,9 @@ mod tests {
         assert!(decoded.entries[2].independent);
         // A kernel whose code is a trap is kept as such, and only it.
         assert!(decoded.entries[2].trap_only && !decoded.entries[0].trap_only && !decoded.entries[1].trap_only);
+        // What a kernel is given with of reported traps, and only it (format 9).
+        assert_eq!(decoded.entries[0].reported, manifest.entries[0].reported);
+        assert!(decoded.entries[1].reported.is_none() && decoded.entries[2].reported.is_none());
         // The architecture of the PTX retargeted, and none (format 8).
         assert_eq!(decoded.retargeted_from, Some(75));
         let none = CachedManifest {

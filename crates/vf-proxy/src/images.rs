@@ -12,7 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
-use vf_adapt::{Adapted, Emulated, Outcome, Refused, RefusedFunction};
+use vf_adapt::{Adapted, Emulated, Outcome, Refused, RefusedFunction, Reported};
 use vf_fatbin as fatbin;
 
 use crate::{config, kernels, log};
@@ -52,6 +52,8 @@ pub struct Replacement {
     prelinked: Option<PrelinkedObjects>,
     refused: Vec<Refused>,
     emulated: Vec<Emulated>,
+    /// Kernels given with reported traps (`vf_adapt::Reported`).
+    reported: Vec<Reported>,
     /// Kernels whose code is a trap and nothing else (`vf_adapt::Stubs::trap_only`): given at a
     /// lookup, their launch is refused (`guard`).
     trap_only: Vec<String>,
@@ -110,6 +112,7 @@ impl Replacement {
             prelinked: None,
             refused: Vec::new(),
             emulated: Vec::new(),
+            reported: Vec::new(),
             trap_only: Vec::new(),
             program_image: None,
             origin: None,
@@ -140,6 +143,11 @@ impl Replacement {
         &self.emulated
     }
 
+    /// Kernels given with reported traps.
+    pub fn reported(&self) -> &[Reported] {
+        &self.reported
+    }
+
     /// Kernels whose code is a trap and nothing else.
     pub fn trap_only(&self) -> &[String] {
         &self.trap_only
@@ -155,6 +163,8 @@ impl Replacement {
         let mut next = Replacement::new(retry.image, self.wrapper.as_deref().copied());
         next.refused = self.refused.iter().cloned().chain(retry.kernels).collect();
         next.emulated = self.emulated.clone();
+        // (The kernels that the retry refuses are not given: what is said of them is not asked.)
+        next.reported = self.reported.clone();
         next.trap_only = self.trap_only.clone();
         next.program_image = self.program_image;
         next.origin = self.origin;
@@ -258,6 +268,7 @@ impl Replacement {
         let mut loaded = Replacement::new(image, None);
         loaded.refused = self.refused.into_iter().chain(refused).collect();
         loaded.emulated = self.emulated;
+        loaded.reported = self.reported;
         loaded.trap_only = self.trap_only;
         loaded.program_image = self.program_image;
         loaded.origin = self.origin;
@@ -333,6 +344,7 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         std::mem::take(&mut replacement.emulated),
         FOR_LIBRARY.get(),
     );
+    kernels::with_traps(handle, std::mem::take(&mut replacement.reported), FOR_LIBRARY.get());
     let trap_only = std::mem::take(&mut replacement.trap_only);
     if !trap_only.is_empty() {
         // What the line that refuses a launch names the image by: a digest is taken only for an
@@ -465,6 +477,7 @@ pub fn unload_failed(released: Released) {
 struct Found {
     refused: Vec<Refused>,
     emulated: Vec<Emulated>,
+    reported: Vec<Reported>,
 }
 
 /// The driver's linker gives back one image of machine code for this GPU, which the program then
@@ -512,13 +525,14 @@ unsafe fn cubin_extent(bytes: *const u8, len: Option<usize>) -> Option<usize> {
 
 /// `replacement` was added to the link `state`.
 pub fn link_input(state: usize, replacement: &Replacement) {
-    if replacement.refused.is_empty() && replacement.emulated.is_empty() {
+    if replacement.refused.is_empty() && replacement.emulated.is_empty() && replacement.reported.is_empty() {
         return;
     }
     let mut links = links();
     let found = links.inputs.entry(state).or_default();
     found.refused.extend(replacement.refused.iter().cloned());
     found.emulated.extend(replacement.emulated.iter().cloned());
+    found.reported.extend(replacement.reported.iter().cloned());
 }
 
 /// The link `state` made the `size` bytes at `image`.
@@ -613,7 +627,7 @@ fn marked(cubin: &[u8]) -> Vec<Refused> {
 fn known_of(cubin: &[u8], length: usize) -> Found {
     let mut found = Found {
         refused: marked(cubin),
-        emulated: Vec::new(),
+        ..Found::default()
     };
     let links = links();
     if !links.outputs.is_empty()
@@ -621,6 +635,7 @@ fn known_of(cubin: &[u8], length: usize) -> Found {
     {
         found.refused.extend(known.refused.iter().cloned());
         found.emulated.extend(known.emulated.iter().cloned());
+        found.reported.extend(known.reported.iter().cloned());
     }
     found
 }
@@ -648,13 +663,14 @@ unsafe fn linked(who: &dyn Display, bytes: *const u8, len: Option<usize>) -> Opt
     let length = unsafe { cubin_extent(bytes, len) }?;
     let cubin = unsafe { std::slice::from_raw_parts(bytes, length) };
     let found = known_of(cubin, length);
-    if found.refused.is_empty() && found.emulated.is_empty() {
+    if found.refused.is_empty() && found.emulated.is_empty() && found.reported.is_empty() {
         return None;
     }
     say_known(who, "cubin made by a linker", &found);
     let mut replacement = Replacement::new(cubin.to_vec(), None);
     replacement.refused = found.refused;
     replacement.emulated = found.emulated;
+    replacement.reported = found.reported;
     Some(replacement)
 }
 
@@ -679,10 +695,11 @@ fn linked_in(fat: &fatbin::FatBinary<'_>) -> Option<Found> {
             continue;
         };
         let known = known_of(&cubin[..length], length);
-        if !known.refused.is_empty() || !known.emulated.is_empty() {
+        if !known.refused.is_empty() || !known.emulated.is_empty() || !known.reported.is_empty() {
             let found = found.get_or_insert_with(Found::default);
             found.refused.extend(known.refused);
             found.emulated.extend(known.emulated);
+            found.reported.extend(known.reported);
         }
     }
     found
@@ -811,6 +828,13 @@ pub fn origin_text(owner: usize, kernel: usize, name: &str) -> String {
     if let Some(counts) = kernels::emulated_counts(owner, name).filter(|counts| counts.any()) {
         parts.push(format!("emulated: {}", counts.summary()));
     }
+    if let Some(reported) = kernels::traps_of(owner, name) {
+        parts.push(format!(
+            "given with {} (a fault of CUDA_ERROR_ASSERT, 710, with a line of the driver that names the file \
+             volta-forever, is one of them)",
+            reported.summary()
+        ));
+    }
     if let Some(program) = image.as_deref().and_then(|r| r.program.as_ref()) {
         parts.push(format!("the program's image: {program}"));
     }
@@ -829,6 +853,8 @@ fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
             trapped,
             refused,
             emulated: _,
+            replaced,
+            reported,
             stubs,
         } => {
             let device = config().policy.device_sm;
@@ -850,6 +876,18 @@ fn report(who: &dyn Display, what: &str, outcome: &Outcome) {
                     first.function,
                     first.reason,
                     refused.len()
+                ));
+            }
+            if let Some(first) = replaced.first() {
+                log::info(format_args!(
+                    "{who}: {} instructions of {} functions that cannot run on this GPU, and need a multicast address \
+                     that no GPU of this process can have, were replaced by reported traps (the first is {} in {}); \
+                     the {} kernels that may reach them are given, and said when the program takes them",
+                    replaced.iter().map(|r| r.forms.len()).sum::<usize>(),
+                    replaced.len(),
+                    first.forms[0],
+                    first.function,
+                    reported.len()
                 ));
             }
             report_stubs(who, stubs);
@@ -910,7 +948,79 @@ pub fn policy() -> vf_adapt::Policy {
         policy.told_sm = Some(sm);
     }
     policy.keep_sources = FOR_LIBRARY.get();
+    if policy.lowering.reported_traps && !without_multicast() {
+        policy.lowering.reported_traps = false;
+    }
     policy
+}
+
+/// `CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED`.
+const MULTICAST_SUPPORTED: c_int = 132;
+
+/// Whether no GPU of the process can take part in multicast, as NVIDIA's driver answers for each
+/// (`CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED` is 0 on every device it counts): then no multicast
+/// object can have a device of the process in its team, no multimem address can be mapped for one,
+/// and an instruction that needs such an address (`vf_ptx::lower::reported_trap_form`) cannot have
+/// one in any kernel of the process. Only then are such instructions replaced by reported traps
+/// (`policy`); otherwise the functions that hold them trap and their kernels are refused, as before
+/// 0.1.4: on a machine with a GPU that has multicast, code adapted for the V100 may also run on that
+/// GPU (a library whose PTX is compiled kernel by kernel gives a later card the V100's PTX), where
+/// the instruction can be reached. Asked once, at the first load that adapts an image (the driver
+/// is initialized then); an answer that cannot be had (an error of the driver) is taken for a GPU
+/// with multicast, and asked again at the next load.
+fn without_multicast() -> bool {
+    static ANSWER: OnceLock<bool> = OnceLock::new();
+    if let Some(answer) = ANSWER.get() {
+        return *answer;
+    }
+    type Count = unsafe extern "C" fn(*mut c_int) -> c_int;
+    type Get = unsafe extern "C" fn(*mut c_int, c_int) -> c_int;
+    type Attribute = unsafe extern "C" fn(*mut c_int, c_int, c_int) -> c_int;
+    use crate::{REALS, idx};
+    use std::sync::atomic::Ordering::Relaxed;
+    // SAFETY: NVIDIA's functions of these C types (or stubs that return an error), with pointers to
+    // local integers.
+    let (count, get, attribute): (Count, Get, Attribute) = unsafe {
+        (
+            std::mem::transmute::<usize, Count>(REALS[idx::cuDeviceGetCount].load(Relaxed)),
+            std::mem::transmute::<usize, Get>(REALS[idx::cuDeviceGet].load(Relaxed)),
+            std::mem::transmute::<usize, Attribute>(REALS[idx::cuDeviceGetAttribute].load(Relaxed)),
+        )
+    };
+    let mut devices = 0;
+    if unsafe { count(&mut devices) } != 0 || devices <= 0 {
+        return false;
+    }
+    let mut with = Vec::new();
+    for ordinal in 0..devices {
+        let (mut device, mut supported) = (0, 0);
+        if unsafe { get(&mut device, ordinal) } != 0
+            || unsafe { attribute(&mut supported, MULTICAST_SUPPORTED, device) } != 0
+        {
+            return false;
+        }
+        if supported != 0 {
+            with.push(ordinal.to_string());
+        }
+    }
+    let answer = with.is_empty();
+    if ANSWER.set(answer).is_ok() {
+        if answer {
+            log::info(format_args!(
+                "no GPU of this process can take part in multicast ({devices} asked): instructions that need a \
+                 multicast address are replaced by reported traps"
+            ));
+        } else {
+            // (Said at level 2: on such a machine every program would see it at level 1. A kernel
+            // refused for it says why where the program asks for it.)
+            log::info(format_args!(
+                "GPU {} of this process can take part in multicast (CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED): the \
+                 kernels that may reach a multimem instruction are refused, not given with reported traps",
+                with.join(", ")
+            ));
+        }
+    }
+    answer
 }
 
 thread_local! {
@@ -1022,22 +1132,30 @@ fn finish(
         // as it is stored, not the fat binary around it.
         replacement.original_image = policy().kept_for_second(original);
     }
-    if let Outcome::Retargeted {
-        refused,
-        emulated,
-        stubs,
-        ..
-    }
-    | Outcome::Translated {
-        refused,
-        emulated,
-        stubs,
-        ..
-    } = adapted.outcome
-    {
-        replacement.refused = refused;
-        replacement.emulated = emulated;
-        replacement.trap_only = stubs.trap_only;
+    match adapted.outcome {
+        Outcome::Retargeted {
+            refused,
+            emulated,
+            reported,
+            stubs,
+            ..
+        } => {
+            replacement.refused = refused;
+            replacement.emulated = emulated;
+            replacement.reported = reported;
+            replacement.trap_only = stubs.trap_only;
+        }
+        Outcome::Translated {
+            refused,
+            emulated,
+            stubs,
+            ..
+        } => {
+            replacement.refused = refused;
+            replacement.emulated = emulated;
+            replacement.trap_only = stubs.trap_only;
+        }
+        _ => {}
     }
     Some(replacement)
 }
@@ -1148,6 +1266,7 @@ fn adapt_fatbin(
             let mut replacement = Replacement::new(original.to_vec(), wrapper);
             replacement.refused = found.refused;
             replacement.emulated = found.emulated;
+            replacement.reported = found.reported;
             Some(replacement)
         }
         Ok((original, adapted, None, elsewhere)) => {
@@ -1184,6 +1303,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
         let mut replacement = Replacement::new(linked.to_vec(), Some(wrapper));
         replacement.refused = found.refused;
         replacement.emulated = found.emulated;
+        replacement.reported = found.reported;
         return Some(replacement);
     }
     if adapted.image.is_some() || matches!(adapted.outcome, Outcome::Native) {
@@ -1197,7 +1317,10 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     let mut objects = Vec::new();
     let mut refused = Vec::new();
     let mut emulated = Vec::new();
+    let mut reported = Vec::new();
     let mut trap_only = Vec::new();
+    // By object: its functions with reported traps (`vf_adapt::Replaced`).
+    let mut object_replaced = Vec::new();
     let mut origin = None;
     let mut retargeted = None;
     let mut object_traps = Vec::new();
@@ -1212,6 +1335,10 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
         let fat = unsafe { fatbin::parse_at(ptr) }.ok()?;
         let source = unsafe { std::slice::from_raw_parts(ptr, fat.len) };
         let lowering = adapt_container(who, source, &fat).ok()?;
+        object_replaced.push(match &lowering.outcome {
+            Outcome::Retargeted { replaced, .. } => replaced.clone(),
+            _ => Vec::new(),
+        });
         let traps = match &lowering.outcome {
             Outcome::Retargeted { trapped, refused, .. } => {
                 // An .entry cannot be called as a .func; entry-only refusals already have their
@@ -1244,6 +1371,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
                 retargeted = retargeted.into_iter().chain(replaced.retargeted_from).min();
                 refused.extend(replaced.refused);
                 emulated.extend(replaced.emulated);
+                reported.extend(replaced.reported);
                 trap_only.extend(replaced.trap_only);
                 objects.push(replaced.data);
             }
@@ -1253,29 +1381,55 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     // Nothing adapted: the program's image is loaded as it is, unless something is known of an
     // image that a link made in it.
     let origin = origin.or_else(|| (!refused.is_empty() || !emulated.is_empty()).then_some(kernels::Origin::Native))?;
-    if check_external_calls {
-        let mut graph = vf_ptx::deps::LinkedDependencies::default();
-        for (object, traps) in objects.iter().zip(&object_traps) {
-            let fat = fatbin::parse(object).ok()?;
+    let with_traps = object_replaced.iter().any(|replaced| !replaced.is_empty());
+    if check_external_calls || with_traps {
+        // Which kernels can reach a trapped function, or one with reported traps, of another object.
+        // A graph that cannot be made refuses nothing more when nothing traps: the kernels are then
+        // said to be given with the reported traps of their own object only.
+        let mut graph = Some(vf_ptx::deps::LinkedDependencies::default());
+        'objects: for ((object, traps), replaced) in objects.iter().zip(&object_traps).zip(&object_replaced) {
+            let Ok(fat) = fatbin::parse(object) else {
+                if check_external_calls {
+                    return None;
+                }
+                graph = None;
+                break;
+            };
             for entry in fat.entries.iter().filter(|entry| policy.usable(entry)) {
-                if entry.kind() == fatbin::KIND_ELF {
-                    // A machine-code caller could reach a trapped PTX helper without a visible edge.
+                let added = entry.kind() != fatbin::KIND_ELF
+                    && graph
+                        .as_mut()
+                        .is_some_and(|graph| entry.payload().is_ok_and(|text| graph.add_with(&text, traps, replaced)));
+                if added {
+                    continue;
+                }
+                if check_external_calls {
                     log::warn(format_args!(
-                        "{who}: relocatable machine code may call a trapped PTX function; loaded as is"
+                        "{who}: {}; loaded as is",
+                        if entry.kind() == fatbin::KIND_ELF {
+                            // A machine-code caller could reach a trapped PTX helper without a visible edge.
+                            "relocatable machine code may call a trapped PTX function"
+                        } else {
+                            "incomplete dependency information for relocatable PTX"
+                        }
                     ));
                     return None;
                 }
-                if !graph.add(&entry.payload().ok()?, traps) {
-                    log::warn(format_args!(
-                        "{who}: incomplete dependency information for relocatable PTX; loaded as is"
-                    ));
-                    return None;
-                }
+                graph = None;
+                break 'objects;
             }
         }
-        refused.extend(graph.refused());
-        refused.sort_by(|a, b| a.kernel.cmp(&b.kernel));
-        refused.dedup_by(|a, b| a.kernel == b.kernel);
+        if let Some(graph) = graph {
+            if with_traps {
+                reported = graph.reported();
+            }
+            if check_external_calls {
+                refused.extend(graph.refused());
+                refused.sort_by(|a, b| a.kernel.cmp(&b.kernel));
+                refused.dedup_by(|a, b| a.kernel == b.kernel);
+            }
+        }
+        reported.retain(|kernel| !refused.iter().any(|r| r.kernel == kernel.kernel));
     }
     let pointers = objects
         .iter()
@@ -1294,6 +1448,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     });
     result.refused = refused;
     result.emulated = emulated;
+    result.reported = reported;
     result.trap_only = trap_only;
     result.origin = Some(origin);
     result.retargeted_from = retargeted;
