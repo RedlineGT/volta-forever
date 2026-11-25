@@ -19,6 +19,9 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   is made without the libraries' lines and says so), one that forks at each write (no deadlock), one that calls
   exit(3) on the layer's thread (the process ends with that status and its last write is made, saying why it
   lacks those lines; its library's destructor, after the layer's, removes it there: 0, as after any last write);
+  after the last write, a removal returns EBUSY at once while a call is under way (the fill that never returns;
+  one that runs 3 s, whose library unmaps what it reads when its removal returns 0: the page stays and the call
+  ends well), and the thread calls no fill after it;
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
   thread holds the lock, which the child then has held for ever: both functions return ECHILD there at once;
@@ -68,6 +71,7 @@ def load(path, mode=os.RTLD_LOCAL):
         f.restype = c.c_longlong
     lib.fill_slow_start.argtypes = lib.fill_slow_end.argtypes = [c.c_int]
     lib.fill_at_exit.argtypes = [c.c_char_p, c.c_long]
+    lib.fill_add_page.argtypes = [c.c_char_p]
     return lib
 
 
@@ -219,10 +223,21 @@ def child(proxy, library, mode):
         say("still alive")
         return
 
+    if mode == "slowexit":  # a fill that runs past the last write's 2 s, and a library that frees what it reads
+        assert lib.fill_add_page(b"slowexit") == 0 and add(b"counter", b"count") == 0  # in this order: the slots'
+        lib.fill_exit_page(1)
+        lib.fill_arm(1)
+        end = time.time() + 15
+        while not lib.fill_entered() and time.time() < end:
+            time.sleep(0.02)
+        assert lib.fill_entered(), "the armed fill was not called"
+        say("exiting")
+        return
+
     if mode in ("hang", "forks", "exits"):  # fills that break the contract
         assert add(mode.encode(), mode.encode()) == 0
-        if mode == "exits":
-            lib.fill_at_exit(b"exits", 0)  # its destructor removes it, on the thread that exits from it
+        if mode in ("hang", "exits"):
+            lib.fill_at_exit(mode.encode(), 0)  # its library's destructor removes it at exit
         lib.fill_arm(1)
         end = time.time() + 15
         while not lib.fill_entered() and time.time() < end:
@@ -645,6 +660,8 @@ if __name__ == "__main__":
         assert exited(text, p.pid) and took < 10, (took, text)
         assert ("\n[volta-forever] the lines of other libraries are not in this last write: one of their functions had "
                 "not returned 2 s after the exit began\n") in text and "\n[hang] " not in text, text
+        # Its library's destructor removes it after the last write: at once, EBUSY (its call is under way).
+        assert err.rstrip().endswith(f"vf_summary_remove returned {errno.EBUSY}"), err
         # One that forks at each write: no deadlock (the fork's handlers do not wait for the fill's own lock).
         p = start("forks", **on)
         p.line()
@@ -668,11 +685,27 @@ if __name__ == "__main__":
         assert ("\n[volta-forever] the lines of other libraries are not in this last write: the process exited from "
                 "one of their functions\n") in text, text
         assert "fill library: removed at its end: " in err and err.rstrip().endswith("vf_summary_remove returned 0"), err
+        # One that runs past the last write's 2 s (3 s from when the exit begins), and a library that frees what its
+        # fill reads once its removal returns 0: after the last write its removal returns EBUSY at once while the call
+        # is under way, so the page stays and the call ends well; the count fill, after it in the slots, is not
+        # called after the last write. (A removal that returned 0 there would unmap the page under the call.)
+        p = start("slowexit", **on)
+        p.line()
+        assert p.line() == ["exiting"]
+        status, out, err = p.end()
+        busy = errno.EBUSY
+        assert status == 0 and err.rstrip().endswith(f"fill library: at its end: the slow fill's removal returned {busy},"
+                                                     f" the count fill's {busy}; the count fill called 0 times after them"), \
+            (status, out, err[-1500:])
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["slowexit", "counter"])
+        assert exited(text, p.pid) and ("\n[volta-forever] the lines of other libraries are not in this last write: "
+                                        "one of their functions had not returned 2 s after the exit began\n") in text, text
         print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here), the"
               f" last write made without the libraries' lines and saying so, and a fork from another thread does not wait"
               f" for it ({fork[1]} ms); one that forks at each write is called {calls[1]} times; one that calls exit(3)"
               f" ends the process with that status, its last write made and saying why it lacks the libraries' lines,"
-              f" and its removal in its library's destructor returns 0")
+              f" and its removal in its library's destructor returns 0; after the last write, while a call runs past"
+              f" its 2 s, a removal returns EBUSY at once and nothing is called")
 
         # At exit, in both orders of the destructors: which one came first is read from the removal (whether it
         # called the fill once more), and the file must hold what that order gives; the two cases must show both.

@@ -9,10 +9,16 @@
 //   empty    nothing
 //   hang, forks, exits  once armed (fill_arm): never returns; forks (its child ends at once); calls exit(3)
 //   segv     once armed, on a thread other than the main one (the layer's): writes through a null pointer
+//   slowexit (fill_add_page) once armed, on a thread other than the main one: sleeps 3 s; then gives the number
+//            on the page that its ctx points to
 // Each counts its calls. Its destructor, when fill_at_exit asked for it, takes back what it registered
 // (as a library removes itself before it goes) and says on standard error how many times its fills
 // were called before and after, and what vf_summary_remove returned; with FILL_NO_REMOVE=1 it does not
-// take them back (the control: the layer then calls into a library that is gone).
+// take them back (the control: the layer then calls into a library that is gone). When fill_exit_page
+// asked for it, it takes back the slowexit fill and the count fill, unmaps the page when the first
+// removal returned 0 (as a library frees what its fill reads once its removal says that nothing calls
+// it), gives the slow fill 2 s more (a driver's teardown at exit can take as long), and says what both
+// removals returned and how many times the count fill was called after them.
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdatomic.h>
@@ -20,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -42,10 +49,12 @@ static long long now_ns(void)
     return t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+static atomic_int removed, after_removal; /* the slowexit case's destructor ran its removals; calls after them */
 static size_t fill_count(char *buf, size_t cap, void *ctx)
 {
     (void)ctx;
     atomic_fetch_add(&calls, 1);
+    if (atomic_load(&removed)) atomic_fetch_add(&after_removal, 1);
     int n = snprintf(buf, cap, "count %lu\n", (unsigned long)atomic_load(&count));
     return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap;
 }
@@ -142,6 +151,18 @@ static size_t fill_segv(char *buf, size_t cap, void *ctx)
     int n = snprintf(buf, cap, "segv not armed\n");
     return n < 0 ? 0 : (size_t)n;
 }
+static long *page;
+static size_t fill_slowexit(char *buf, size_t cap, void *ctx)
+{
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed) && !is_main()) {
+        atomic_store(&in_fill, 1);
+        struct timespec t = {3, 0};
+        nanosleep(&t, NULL);
+    }
+    int n = snprintf(buf, cap, "slowexit %ld\n", *(volatile long *)ctx);
+    return n < 0 ? 0 : (size_t)n;
+}
 void fill_arm(int on) { atomic_store(&armed, on); }
 int fill_entered(void) { return atomic_load(&in_fill); }
 
@@ -171,6 +192,16 @@ int fill_bind(const char *layer)
 }
 
 int fill_add(unsigned abi, const char *name, const char *k, long ctx) { return add(abi, name, kind(k), (void *)ctx); }
+/* The slowexit fill, under NAME, its ctx a page of its own that holds 42. */
+int fill_add_page(const char *name)
+{
+    page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) return -1;
+    *page = 42;
+    return add(1, name, fill_slowexit, page);
+}
+static int exit_page;
+void fill_exit_page(int on) { exit_page = on; }
 int fill_remove(const char *k, long ctx) { return rm(kind(k), (void *)ctx); }
 void fill_set_count(unsigned long n) { atomic_store(&count, n); }
 unsigned long fill_calls(void) { return atomic_load(&calls); }
@@ -214,6 +245,16 @@ void fill_at_exit(const char *k, long ctx)
 
 __attribute__((destructor)) static void fill_fini(void)
 {
+    if (exit_page) {
+        const int r1 = rm(fill_slowexit, page), r2 = rm(fill_count, NULL);
+        if (r1 == 0) munmap(page, 4096);
+        atomic_store(&removed, 1);
+        struct timespec t = {2, 0};
+        nanosleep(&t, NULL);
+        fprintf(stderr, "fill library: at its end: the slow fill's removal returned %d, the count fill's %d; the count fill "
+                "called %d times after them\n", r1, r2, atomic_load(&after_removal));
+        return;
+    }
     if (!exit_fill) return;
     const char *no = getenv("FILL_NO_REMOVE");
     if (no && !strcmp(no, "1")) return;
