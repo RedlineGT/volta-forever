@@ -327,7 +327,8 @@ mod tests {
             Counts {
                 tensor: 8,
                 other: 14,
-                tanh: 0
+                tanh: 0,
+                reported: 0
             }
         );
         assert_eq!(coded.matches("L7:").count(), 1);

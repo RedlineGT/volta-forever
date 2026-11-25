@@ -1729,6 +1729,8 @@ pub struct LinkedDependencies {
     kernels: Vec<(usize, String)>,
     trapped: Vec<(usize, crate::Trapped)>,
     indirect: Vec<(usize, String)>,
+    /// The functions with reported traps (`crate::Replaced`), by node.
+    replaced: Vec<(usize, crate::Replaced)>,
 }
 
 impl LinkedDependencies {
@@ -1736,6 +1738,13 @@ impl LinkedDependencies {
     /// example an alias), so the caller must fall back when this returns false.
     #[must_use]
     pub fn add(&mut self, text: &[u8], traps: &[crate::Trapped]) -> bool {
+        self.add_with(text, traps, &[])
+    }
+
+    /// `add`, with the functions of the unit that have reported traps (`crate::Replaced`), for
+    /// `reported`.
+    #[must_use]
+    pub fn add_with(&mut self, text: &[u8], traps: &[crate::Trapped], replaced: &[crate::Replaced]) -> bool {
         let info = ModuleInfo::analyse(text);
         if info.has_unrecognised_items {
             return false;
@@ -1802,7 +1811,73 @@ impl LinkedDependencies {
                 self.trapped.push((id, trap.clone()));
             }
         }
+        for function in replaced {
+            if let Some(&id) = symbols.get(function.function.as_str()) {
+                self.replaced.push((id, function.clone()));
+            }
+        }
         true
+    }
+
+    /// The kernels in the complete link that are, or can reach, a function with reported traps, as
+    /// `refused` finds those that can reach a trapped function: through the references of each
+    /// function, and through any call by a pointer to a device function (any function that makes
+    /// one may reach each such function that is not a kernel). Whether a kernel is refused is for
+    /// `refused` to say: one that is must not be counted here.
+    pub fn reported(&self) -> Vec<crate::Reported> {
+        if self.replaced.is_empty() {
+            return Vec::new();
+        }
+        let entries: HashSet<_> = self.kernels.iter().map(|(id, _)| *id).collect();
+        // The nodes that reach `seeds`, themselves included.
+        let reaching = |seeds: &mut dyn Iterator<Item = usize>| -> Vec<bool> {
+            let mut reached = vec![false; self.callers.len()];
+            let mut pending: Vec<usize> = Vec::new();
+            for id in seeds {
+                if !reached[id] {
+                    reached[id] = true;
+                    pending.push(id);
+                }
+            }
+            while let Some(id) = pending.pop() {
+                for &caller in &self.callers[id] {
+                    if !reached[caller] {
+                        reached[caller] = true;
+                        pending.push(caller);
+                    }
+                }
+            }
+            reached
+        };
+        let through_pointers = reaching(&mut self.indirect.iter().map(|(id, _)| *id));
+        // By kernel: the functions with reported traps that it may reach, by index in `replaced`.
+        let mut found: Vec<Vec<usize>> = vec![Vec::new(); self.callers.len()];
+        for (index, (id, _)) in self.replaced.iter().enumerate() {
+            let reached = reaching(&mut std::iter::once(*id));
+            let pointed = !entries.contains(id);
+            for (kernel, _) in &self.kernels {
+                if reached[*kernel] || (pointed && through_pointers[*kernel]) {
+                    found[*kernel].push(index);
+                }
+            }
+        }
+        self.kernels
+            .iter()
+            .filter_map(|(id, kernel)| {
+                let mut functions: Vec<&crate::Replaced> = found[*id].iter().map(|&i| &self.replaced[i].1).collect();
+                // Itself first, then the others by name.
+                functions.sort_by_key(|function| (function.function != *kernel, function.function.clone()));
+                functions.dedup_by(|a, b| a.function == b.function);
+                let first = functions.first()?;
+                Some(crate::Reported {
+                    kernel: kernel.clone(),
+                    function: first.function.clone(),
+                    form: first.forms.first()?.clone(),
+                    instructions: functions.iter().map(|function| function.forms.len()).sum(),
+                    functions: functions.len(),
+                })
+            })
+            .collect()
     }
 
     /// The kernels in the complete link that can reach one of its trapped functions.
@@ -2265,6 +2340,70 @@ $str:
         assert_eq!(refused.len(), 1);
         assert_eq!(refused[0].kernel, "dispatch");
         assert!(refused[0].reason.contains("indirect call"));
+    }
+
+    #[test]
+    fn a_link_reports_the_kernels_that_may_reach_a_function_with_reported_traps() {
+        // As NCCL's objects: kernels in one, a call through a pointer in a function of it, and the
+        // device function with a reported trap in another.
+        let mut graph = LinkedDependencies::default();
+        assert!(graph.add_with(
+            br#".version 8.0
+.target sm_70
+.address_size 64
+.func invoke(.reg .b64 fp) {
+    proto: .callprototype _ ();
+    call.uni fp, (), proto;
+    ret;
+}
+.visible .entry dispatch(.param .u64 pointer) {
+    .reg .b64 f;
+    ld.param.u64 f, [pointer];
+    call invoke, (f);
+    ret;
+}
+.extern .func direct();
+.visible .entry calls_direct() {
+    call direct, ();
+    ret;
+}
+.visible .entry safe() { ret; }
+"#,
+            &[],
+            &[]
+        ));
+        let replaced = |function: &str, forms: &[&str]| crate::Replaced {
+            function: function.into(),
+            forms: forms.iter().map(|form| form.to_string()).collect(),
+        };
+        assert!(graph.add_with(
+            b".version 8.0\n.target sm_70\n.address_size 64\n.visible .func multicast() { trap; }\n\
+              .visible .func direct() { trap; }\n.visible .entry own() { trap; }\n",
+            &[],
+            &[
+                replaced("multicast", &["multimem.st.global.b32", "multimem.st.global.b32"]),
+                replaced("direct", &["multimem.red.relaxed.sys.global.add.u32"]),
+                replaced("own", &["multimem.ld_reduce.relaxed.sys.global.add.f32"]),
+            ]
+        ));
+        let reported = graph.reported();
+        let found: Vec<(&str, &str, usize, usize)> = reported
+            .iter()
+            .map(|r| (r.kernel.as_str(), r.function.as_str(), r.instructions, r.functions))
+            .collect();
+        // The call by a pointer may reach both device functions (not the kernel `own`); the direct
+        // call reaches its callee alone; a kernel with traps of its own names itself first.
+        assert_eq!(
+            found,
+            [
+                ("dispatch", "direct", 3, 2),
+                ("calls_direct", "direct", 1, 1),
+                ("own", "own", 1, 1)
+            ]
+        );
+        assert_eq!(reported[0].form, "multimem.red.relaxed.sys.global.add.u32");
+        // Nothing traps whole: nothing is refused.
+        assert!(graph.refused().is_empty());
     }
 
     #[test]

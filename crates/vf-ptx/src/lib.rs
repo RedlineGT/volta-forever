@@ -469,6 +469,49 @@ pub struct Trapped {
     pub reason: String,
 }
 
+/// A function in which instructions were replaced by a reported trap
+/// (`lower::Options::reported_traps`), the rest of it rewritten as any other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    pub function: String,
+    /// The form of each instruction replaced, in the order of the body.
+    pub forms: Vec<String>,
+}
+
+/// A kernel that is given to the program although it is, or may reach, a function in which
+/// instructions were replaced by a reported trap (`Replaced`): reached, such a trap stops the kernel
+/// with an assertion that names the form and the function (the driver writes it), and the context
+/// ends, as for any trap. A refused kernel is not among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reported {
+    pub kernel: String,
+    /// The first such function that it reaches (itself first, then the others by name), and the
+    /// first form replaced there.
+    pub function: String,
+    pub form: String,
+    /// The instructions replaced in all the functions that it reaches, and the number of those
+    /// functions.
+    pub instructions: usize,
+    pub functions: usize,
+}
+
+impl Reported {
+    /// What the line that announces the kernel says after its name: "1 instruction that cannot run
+    /// on this GPU replaced by a reported trap: FORM in FUNCTION".
+    pub fn summary(&self) -> String {
+        let plural = if self.instructions == 1 { "" } else { "s" };
+        let others = match self.functions {
+            0 | 1 => String::new(),
+            2 => " and 1 other function".to_string(),
+            n => format!(" and {} other functions", n - 1),
+        };
+        format!(
+            "{} instruction{plural} that cannot run on this GPU replaced by a reported trap: {} in {}{others}",
+            self.instructions, self.form, self.function
+        )
+    }
+}
+
 /// What `lower_to_volta` changed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Lowering {
@@ -485,6 +528,10 @@ pub struct Lowering {
     /// Kernels that run emulated instructions, in their own body or in the functions they call. A
     /// refused kernel is not among them.
     pub emulated: Vec<Emulated>,
+    /// Functions in which instructions were replaced by a reported trap.
+    pub replaced: Vec<Replaced>,
+    /// Kernels that are, or may reach, one of them, and are given (not refused).
+    pub reported: Vec<Reported>,
 }
 
 /// What became of a function that `lower_to_volta` changed.
@@ -494,6 +541,8 @@ struct Changed {
     /// Why it traps, if it does.
     trapped: Option<String>,
     counts: EmulatedCounts,
+    /// The forms of its instructions replaced by a reported trap.
+    reported: Vec<String>,
 }
 
 /// Fill the lists by kernel of `lowering` from what became of the functions. The call graph of the
@@ -511,6 +560,19 @@ fn by_kernel(text: &[u8], changed: &[Changed], lowering: &mut Lowering) {
                 reason: reason.clone(),
             });
             return;
+        }
+        let with_traps: Vec<&&Changed> = reached
+            .iter()
+            .filter(|function| !function.reported.is_empty())
+            .collect();
+        if let Some(first) = with_traps.first() {
+            lowering.reported.push(Reported {
+                kernel: name.to_string(),
+                function: first.name.clone(),
+                form: first.reported[0].clone(),
+                instructions: with_traps.iter().map(|function| function.reported.len()).sum(),
+                functions: with_traps.len(),
+            });
         }
         let mut counts = EmulatedCounts::default();
         for function in reached {
@@ -582,7 +644,7 @@ struct LowerTarget<'a> {
 }
 
 struct LoweredTarget {
-    lowered: Result<(String, lower::Counts), lower::Unsupported>,
+    lowered: Result<(String, lower::Counts, Vec<String>), lower::Unsupported>,
     emulated: EmulatedCounts,
 }
 
@@ -595,7 +657,7 @@ fn lower_single_target(
     let lowered = if target.cluster.is_empty() {
         std::str::from_utf8(target.body)
             .map_err(|_| lower::Unsupported("not text".to_string()))
-            .and_then(|body| lower::body_in(body, outside, address_bits, options))
+            .and_then(|body| lower::body_reporting(body, outside, address_bits, options))
     } else {
         Err(lower::Unsupported(
             "the kernel asks for a cluster of blocks, which this GPU does not have".to_string(),
@@ -621,8 +683,66 @@ fn lower_to_volta_with_threads(text: &[u8], options: lower::Options, max_threads
     lower_to_volta_inner(text, options, Some(max_threads))
 }
 
+/// Whether the instructions of `text` that `lower::reported_trap_form` accepts can be replaced by a
+/// reported trap there: a module of 64-bit addresses, which has no name of those that the traps add
+/// outside the bodies (`$vf_trap...`), and which either does not have `__assertfail` or declares it
+/// `.extern` before its first function, as nvcc does (the traps call it; a module that defines it,
+/// or declares it later, is not changed so).
+fn can_report_traps(text: &[u8], functions: &[Function]) -> bool {
+    if address_bits(text) != 64 || contains(text, b"$vf_trap") {
+        return false;
+    }
+    let first = functions.first().map_or(text.len(), |function| function.name.start);
+    let mut declared_before = true;
+    scan_functions(text, |_, name, body, _| {
+        if &text[name.clone()] == b"__assertfail" && (body.is_some() || name.start > first) {
+            declared_before = false;
+        }
+    });
+    declared_before
+}
+
+/// Whether the module `text` declares or defines `__assertfail`.
+fn has_assertfail(text: &[u8]) -> bool {
+    let mut found = false;
+    scan_functions(text, |_, name, _, _| found |= &text[name] == b"__assertfail");
+    found
+}
+
+/// What a module whose functions have reported traps needs before its first function: the
+/// declaration of `__assertfail` when it has none, and the strings that the traps give it, the file,
+/// one message for each form (`lower::trap_message_name`) and the name of each function (in the
+/// order of `functions`, the `N` of `$vf_trap_function_N`).
+fn trap_strings(text: &[u8], functions: &[&str], forms: &[&str]) -> String {
+    let mut out = String::new();
+    if !has_assertfail(text) {
+        out.push_str(lower::ASSERTFAIL_DECLARATION);
+    }
+    out.push_str(&lower::string_variable(lower::TRAP_FILE, "volta-forever"));
+    let mut said = std::collections::BTreeSet::new();
+    for form in forms {
+        if said.insert(*form) {
+            out.push_str(&lower::string_variable(
+                &lower::trap_message_name(form),
+                &lower::trap_message(form),
+            ));
+        }
+    }
+    for (index, function) in functions.iter().enumerate() {
+        out.push_str(&lower::string_variable(
+            &format!("{}_{index}", lower::TRAP_FUNCTION),
+            function,
+        ));
+    }
+    out
+}
+
 fn lower_to_volta_inner(text: &[u8], options: lower::Options, max_threads: Option<usize>) -> (Vec<u8>, Lowering) {
     let functions = functions(text);
+    let options = lower::Options {
+        reported_traps: options.reported_traps && can_report_traps(text, &functions),
+        ..options
+    };
     let mut targets = Vec::new();
     let mut active_bytes = 0usize;
     let mut need_outside = false;
@@ -675,8 +795,19 @@ fn lower_to_volta_inner(text: &[u8], options: lower::Options, max_threads: Optio
         copied = target.function.body.end;
         let name = String::from_utf8_lossy(&text[target.function.name.clone()]).into_owned();
         match lowered {
-            Ok((new_body, counts)) => {
-                out.extend_from_slice(new_body.as_bytes());
+            Ok((new_body, counts, forms)) => {
+                if forms.is_empty() {
+                    out.extend_from_slice(new_body.as_bytes());
+                } else {
+                    // The string of this function's name, of its own name in the module.
+                    let placeholder = format!("{};", lower::TRAP_FUNCTION);
+                    let own = format!("{}_{};", lower::TRAP_FUNCTION, lowering.replaced.len());
+                    out.extend_from_slice(new_body.replace(&placeholder, &own).as_bytes());
+                    lowering.replaced.push(Replaced {
+                        function: name.clone(),
+                        forms: forms.clone(),
+                    });
+                }
                 lowering.tanh_expanded += counts.tanh;
                 lowering.tensor_rewritten += counts.tensor;
                 lowering.other_rewritten += counts.other;
@@ -685,6 +816,7 @@ fn lower_to_volta_inner(text: &[u8], options: lower::Options, max_threads: Optio
                     entry: target.function.entry,
                     trapped: None,
                     counts: emulated,
+                    reported: forms,
                 });
             }
             Err(lower::Unsupported(reason)) => {
@@ -698,12 +830,30 @@ fn lower_to_volta_inner(text: &[u8], options: lower::Options, max_threads: Optio
                     entry: target.function.entry,
                     trapped: Some(reason),
                     counts: EmulatedCounts::default(),
+                    reported: Vec::new(),
                 });
             }
         }
     }
     out.extend_from_slice(&text[copied..]);
-    changed.retain(|function| function.trapped.is_some() || function.counts.any());
+    if !lowering.replaced.is_empty() {
+        // Before the first function: the header ends there, and `out` holds what `text` holds up to
+        // it (what is changed is in functions).
+        let header_end = deps::find_header_end_pub(text).min(functions.first().map_or(text.len(), |f| f.name.start));
+        let at = text[..header_end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |at| at + 1);
+        let names: Vec<&str> = lowering.replaced.iter().map(|r| r.function.as_str()).collect();
+        let forms: Vec<&str> = lowering
+            .replaced
+            .iter()
+            .flat_map(|r| r.forms.iter().map(String::as_str))
+            .collect();
+        let strings = trap_strings(text, &names, &forms);
+        out.splice(at..at, strings.into_bytes());
+    }
+    changed.retain(|function| function.trapped.is_some() || function.counts.any() || !function.reported.is_empty());
     if !changed.is_empty() {
         by_kernel(text, &changed, &mut lowering);
     }
@@ -1104,6 +1254,251 @@ mod tests {
                 }
             }]
         );
+    }
+
+    /// A module as NCCL's: a kernel that calls through a table, a device function that reads with
+    /// multimem behind a flag, one that holds multimem and barrier.cluster, and a kernel that calls
+    /// that one.
+    const MULTICAST: &str = "\
+.version 9.3
+.target sm_90
+.address_size 64
+
+.func (.param .b32 r) polled(.param .b64 a);
+.func (.param .b32 r) plain(.param .b64 a);
+.global .align 8 .u64 table[2] = {polled, plain};
+
+.func (.param .b32 r) polled(.param .b64 a)
+{
+\t.reg .pred %p<2>;
+\t.reg .b32 %r<3>;
+\t.reg .b64 %rd<2>;
+\tld.param.u64 %rd1, [a];
+\tld.u32 %r1, [%rd1+8];
+\tsetp.ne.u32 %p1, %r1, 0;
+\t@%p1 multimem.ld_reduce.acquire.sys.global.min.u32 %r2, [%rd1];
+\t@!%p1 ld.volatile.global.u32 %r2, [%rd1];
+\tst.param.b32 [r], %r2;
+\tret;
+}
+.func (.param .b32 r) plain(.param .b64 a)
+{
+\t.reg .b32 %r<2>;
+\tmov.u32 %r1, 1;
+\tst.param.b32 [r], %r1;
+\tret;
+}
+.func both()
+{
+\t.reg .b64 %rd<2>;
+\tmultimem.st.global.b32 [%rd1], 1;
+\tbarrier.cluster.arrive;
+\tret;
+}
+.visible .entry dispatch(.param .u64 at, .param .u32 which)
+{
+\t.reg .b64 %rd<5>;
+\t.reg .b32 %r<3>;
+\tld.param.u64 %rd1, [at];
+\tld.param.u32 %r1, [which];
+\tmov.u64 %rd2, table;
+\tmul.wide.u32 %rd3, %r1, 8;
+\tadd.u64 %rd2, %rd2, %rd3;
+\tld.global.u64 %rd4, [%rd2];
+\t{
+\t.param .b64 a;
+\t.param .b32 r;
+\tst.param.b64 [a], %rd1;
+\tproto: .callprototype (.param .b32 _) _ (.param .b64 _);
+\tcall (r), %rd4, (a), proto;
+\tld.param.b32 %r2, [r];
+\t}
+\tst.global.u32 [%rd1], %r2;
+\tret;
+}
+.visible .entry stores(.param .u64 at)
+{
+\t.reg .b64 %rd<2>;
+\tld.param.u64 %rd1, [at];
+\tmultimem.red.relaxed.sys.global.add.u32 [%rd1], 1;
+\tmultimem.st.global.v4.f32 [%rd1], {%f1, %f1, %f1, %f1};
+\tret;
+}
+.visible .entry with_both()
+{
+\tcall both, ();
+\tret;
+}
+";
+
+    fn reporting() -> lower::Options {
+        lower::Options {
+            reported_traps: true,
+            ..lower::Options::default()
+        }
+    }
+
+    #[test]
+    fn multimem_instructions_are_replaced_by_reported_traps() {
+        let (lowered, lowering) = lower_to_volta_with(MULTICAST.as_bytes(), reporting());
+        let lowered = String::from_utf8(lowered).unwrap();
+        // Each instruction: a call of __assertfail under its guard and a trap; the rest stays.
+        assert!(!lowered.contains("multimem."));
+        assert!(lowered.contains(
+            "\t@%p1 call __assertfail, (%vf_trap_a0, %vf_trap_a1, %vf_trap_a2, %vf_trap_a3, %vf_trap_a4);\n\t}\n\t@%p1 \
+             trap;\n\t@!%p1 ld.volatile.global.u32 %r2, [%rd1];"
+        ));
+        assert_eq!(lowered.matches("call __assertfail").count(), 3);
+        // Three reported traps, and the body of `both`, which traps whole.
+        assert_eq!(
+            lowered.matches(" trap;").count() + lowered.matches("\ttrap;").count(),
+            3 + 1
+        );
+        // The strings, before the first function, once each: the declaration, the file, a message for
+        // each form, the name of each function with traps.
+        let head = &lowered[..lowered.find(".func (.param .b32 r) polled").unwrap()];
+        assert_eq!(head.matches(".extern .func __assertfail").count(), 1);
+        assert!(head.contains(".global .align 1 .b8 $vf_trap_file[14] = {118, 111, 108, 116, 97, 45,"));
+        let form = "multimem.ld_reduce.acquire.sys.global.min.u32";
+        let message = lower::trap_message(form);
+        assert!(head.contains(&lower::string_variable(&lower::trap_message_name(form), &message)));
+        assert!(head.contains(&lower::string_variable("$vf_trap_function_0", "polled")));
+        assert!(head.contains(&lower::string_variable("$vf_trap_function_1", "stores")));
+        assert_eq!(head.matches("$vf_trap_m").count(), 3);
+        assert!(!lowered.contains("$vf_trap_function;"));
+        assert!(lowered.contains("mov.u64 %vf_trap_q2, $vf_trap_function_1;"));
+        // Which functions, which forms; which kernels are given with them.
+        assert_eq!(
+            lowering.replaced,
+            [
+                Replaced {
+                    function: "polled".into(),
+                    forms: vec![form.into()]
+                },
+                Replaced {
+                    function: "stores".into(),
+                    forms: vec![
+                        "multimem.red.relaxed.sys.global.add.u32".into(),
+                        "multimem.st.global.v4.f32".into()
+                    ]
+                },
+            ]
+        );
+        assert_eq!(
+            lowering.reported,
+            [
+                Reported {
+                    kernel: "dispatch".into(),
+                    function: "polled".into(),
+                    form: form.into(),
+                    instructions: 1,
+                    functions: 1,
+                },
+                Reported {
+                    kernel: "stores".into(),
+                    function: "stores".into(),
+                    form: "multimem.red.relaxed.sys.global.add.u32".into(),
+                    instructions: 2,
+                    functions: 1,
+                },
+            ]
+        );
+        // A function that also holds an instruction a program can really execute traps whole, and its
+        // kernel is refused, not given.
+        assert_eq!(lowering.trapped.len(), 1);
+        assert_eq!(lowering.trapped[0].function, "both");
+        assert_eq!(
+            lowering.refused,
+            [Refused {
+                kernel: "with_both".into(),
+                function: "both".into(),
+                reason: "barrier.cluster.arrive: no Volta sequence for this form".into()
+            }]
+        );
+        assert_eq!(
+            lowering.reported[0].summary(),
+            "1 instruction that cannot run on this GPU replaced by a reported trap: \
+             multimem.ld_reduce.acquire.sys.global.min.u32 in polled"
+        );
+        assert!(lowering.reported[1].summary().starts_with("2 instructions that"));
+        // The strings reach nothing but __assertfail: the kernels stay independent where they were.
+        let info = deps::ModuleInfo::analyse(lowered.as_bytes());
+        assert!(info.is_entry_independent("stores"));
+    }
+
+    #[test]
+    fn without_reported_traps_the_kernels_are_refused_as_before() {
+        let (lowered, lowering) = lower_to_volta_with(MULTICAST.as_bytes(), lower::Options::default());
+        let lowered = String::from_utf8(lowered).unwrap();
+        assert!(!lowered.contains("__assertfail") && !lowered.contains("$vf_trap"));
+        assert!(lowering.replaced.is_empty() && lowering.reported.is_empty());
+        let refused: Vec<(&str, &str)> = lowering
+            .refused
+            .iter()
+            .map(|r| (r.kernel.as_str(), r.function.as_str()))
+            .collect();
+        assert_eq!(
+            refused,
+            [("dispatch", "polled"), ("stores", "stores"), ("with_both", "both")]
+        );
+        // A module of 32-bit addresses, one that defines __assertfail or declares it after a function,
+        // and one with a name of those that the traps add, are not changed so either.
+        let changed = |text: &str| {
+            let (_, lowering) = lower_to_volta_with(text.as_bytes(), reporting());
+            (lowering.replaced.len(), lowering.refused.len())
+        };
+        assert_eq!(changed(MULTICAST), (2, 1));
+        assert_eq!(
+            changed(&MULTICAST.replace(".address_size 64", ".address_size 32")),
+            (0, 3)
+        );
+        let defined = MULTICAST.replace(
+            ".global .align 8",
+            ".func __assertfail(.param .b64 a, .param .b64 b, .param .b32 c, .param .b64 d, .param .b64 e) { ret; }\n\
+             .global .align 8",
+        );
+        assert_eq!(changed(&defined), (0, 3));
+        let later = format!(
+            "{MULTICAST}.extern .func __assertfail(.param .b64 a, .param .b64 b, .param .b32 c, .param .b64 d, .param .b64 \
+             e);\n"
+        );
+        assert_eq!(changed(&later), (0, 3));
+        assert_eq!(changed(&MULTICAST.replace("table", "$vf_trap_table")), (0, 3));
+        // Declared first, as nvcc does: kept, and not declared again.
+        let declared = MULTICAST.replace(
+            ".func (.param .b32 r) polled(.param .b64 a);",
+            ".extern .func __assertfail(.param .b64 a, .param .b64 b, .param .b32 c, .param .b64 d, .param .b64 e);\n\
+             .func (.param .b32 r) polled(.param .b64 a);",
+        );
+        let (lowered, lowering) = lower_to_volta_with(declared.as_bytes(), reporting());
+        assert_eq!(lowering.replaced.len(), 2);
+        assert_eq!(
+            String::from_utf8(lowered)
+                .unwrap()
+                .matches(".func __assertfail")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn only_the_multimem_family_is_reported() {
+        for (opcode, reported) in [
+            ("multimem.ld_reduce.relaxed.sys.global.add.u32", true),
+            ("multimem.st.global.b32", true),
+            ("multimem.red.release.sys.add.u32", true),
+            ("multimem.cp.async.bulk.global.shared::cta.bulk_group", true),
+            ("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes", false),
+            ("mbarrier.try_wait.shared::cta.b64", false),
+            ("barrier.cluster.arrive", false),
+            (
+                "red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32",
+                false,
+            ),
+            ("multimemx.st", false),
+        ] {
+            assert_eq!(lower::reported_trap_form(opcode), reported, "{opcode}");
+        }
     }
 
     #[test]
