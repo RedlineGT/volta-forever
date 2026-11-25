@@ -238,7 +238,7 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 |---|---|---|---|---|
 | `run.sh` | test kernels through the proxy | native sm_70 builds, host models, RTX 5090 reference vectors | a minute or two | toolkits |
 | `multi-gpu.sh` | one-process dual-GPU concurrency (`cuModuleLoadData`, `cuLibraryLoadData`, CUDA graphs) & peer copy | host exact computation | a few seconds | 2+ GPUs |
-| `nccl.sh` | NCCL's collectives through PyTorch, one process for each of two GPUs, with the wheel's CUDA 13 NCCL (`cuda13`, its multicast instructions given as reported traps) or the CUDA 12 build (`cuda12`), as NCCL chooses and with each algorithm and protocol pinned; `--bench` times two all-reduces | the CPU, exactly | 65 s (`cuda13` once the driver's cache holds NCCL's code: its first run compiles it for about 15 minutes in each process), 30 s (`cuda12`) | 2 V100s, PyTorch 2.14 (`VF_TORCH`), the CUDA 12 NCCL for `cuda12` (`VF_NCCL12`) |
+| `nccl.sh` | NCCL's collectives through PyTorch, one process for each of two GPUs, with the wheel's CUDA 13 NCCL (`cuda13`, its multicast instructions given as reported traps) or the CUDA 12 build (`cuda12`), as NCCL chooses and with each algorithm and protocol pinned; `--bench` times two all-reduces | the CPU, exactly | 85 s (`cuda13` once the driver's cache holds NCCL's code: its first run compiles it for about 15 minutes in each process), 40 s (`cuda12`) | 2 V100s, PyTorch 2.14 (`VF_TORCH`), the CUDA 12 NCCL for `cuda12` (`VF_NCCL12`) |
 | `forward.sh` | forwarding libraries | host computation | a minute | toolkits |
 | `torch.sh` | 925 PyTorch operations | the CPU | 3 min | PyTorch 2.14.0+cu130 wheel |
 | `torch-models.sh` | 32 small whole models | the CPU | 4 min | PyTorch 2.14.0+cu130 wheel |
