@@ -163,9 +163,14 @@ Where the GPU scripts write:
   kept, both the lines of the exit report; children made by `fork()` that do nothing with the layer and
   write nothing; the variant and every reference to the runtime given back by `dlclose` while the layer's
   thread writes, the runtime staying, pinned; and its controls: no registration, no `VF_SUMMARY`, the
-  runtime not pinned, unloaded with its last report kept, and neither pinned nor removed, the child
-  ending by SIGSEGV); with
-  `VF_BF16_SANITIZE` set, under compute-sanitizer. `bf16-skinny.c` is the measurement behind the
+  runtime not pinned, unloaded with its last report kept, neither pinned nor removed, the child ending
+  by SIGSEGV, and a child that does not end, before it loads anything or instead of exiting
+  (`VF_BF16_SUMMARY_HANG=start`, `exit`), whose process group is killed at the case's limit with no
+  process of it left; no wait of it is unbounded, the child running in a process group of its own and
+  the case ending within `VF_BF16_SUMMARY_LIMIT`, 240 s by default, its checks of the file made on lines
+  from their start); every case with a time limit, 900 s (`bf16-summary`'s 300 s), past which
+  timeout(1) ends it and it fails; with `VF_BF16_SANITIZE` set, under compute-sanitizer, without a
+  time limit. `bf16-skinny.c` is the measurement behind the
   skinny path's rule and bounds (12.9's kernel per configuration; path, bits over the m rows of each
   column, writes outside them, error and time per shape), `bf16-cost.c` the one behind the
   documented host times, fallback cost and same-sign error, and `bf16-layout-cost.c` the one behind the

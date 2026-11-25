@@ -24,7 +24,13 @@
  * With VF_BF16_SUMMARY_NO_FILE=1 the child runs without VF_SUMMARY (a control: there is no file). The test runtime's
  * controls must make it fail: summary-off (no registration), no-pin (dlclose unloads the runtime; its destructor
  * removes it, and its last report is written), no-pin,no-remove (the layer's thread calls into the unloaded runtime:
- * the child ends by SIGSEGV). Prints "ok bf16-summary CASE". */
+ * the child ends by SIGSEGV). Prints "ok bf16-summary CASE".
+ * No wait is unbounded: the child runs in a process group of its own (it and the children it makes), and the case
+ * ends within VF_BF16_SUMMARY_LIMIT seconds (240 by default; then the group is killed, and the case fails, saying
+ * which wait it was), or 10 s after; a signal that ends this program (as timeout(1) sends) kills the group first,
+ * and the child is killed when this program ends (PR_SET_PDEATHSIG). VF_BF16_SUMMARY_HANG=start or exit makes the
+ * child wait for ever before it loads anything (no GPU used) or instead of exiting: a control of those limits. The
+ * checks of the file are made on lines from their start, as a reader of the file must read it. */
 #define _GNU_SOURCE
 #include <cublas_v2.h>
 #include <cuda.h>
@@ -36,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -54,7 +61,6 @@ static int failures;
     } while (0)
 
 static const char *const RUNTIME = "libvf_cublas_bf16.so";
-enum { R_SHAPE = 4, R_N = 26 }; /* the runtime's reasons to forward: the fifth of its 26 (runtime.c's order) */
 static char dir[4096], file[4300], err_path[4200];
 
 static double now(void)
@@ -62,6 +68,14 @@ static double now(void)
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+/* The case's end (VF_BF16_SUMMARY_LIMIT seconds after its start): every wait for the child ends by then. */
+static double case_start, case_end;
+static double within(double seconds)
+{
+    const double left = case_end - now();
+    return left < seconds ? (left > 0 ? left : 0) : seconds;
 }
 
 static void nap(double s)
@@ -103,6 +117,26 @@ static char *lines_of(const char *text, const char *prefix)
         p = e ? e + 1 : NULL;
     }
     return out;
+}
+
+/* Whether a line of text begins with prefix (a prefix that ends with a newline: whether it is a line of text). */
+static int has_line(const char *text, const char *prefix)
+{
+    for (const char *p = text; p && *p;) {
+        if (!strncmp(p, prefix, strlen(prefix))) return 1;
+        p = strchr(p, '\n');
+        if (p) ++p;
+    }
+    return 0;
+}
+
+/* Whether the file's first line, the layer's, is that of process pid at its exit (rest "at its exit\n") or running
+ * (rest "running for "). */
+static int report_of(const char *text, pid_t pid, const char *rest)
+{
+    char head[160];
+    snprintf(head, sizeof head, "[volta-forever] report of process %d, %s", (int)pid, rest);
+    return text && !strncmp(text, head, strlen(head));
 }
 
 /* ---- the child: CUDA through dlopen ---- */
@@ -209,13 +243,17 @@ static void work(int runtime_first)
                    8, &zero, (void *)c, CUDA_R_32F, 1536, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     if (st || f.Synchronize()) die("the calls");
     f.Destroy(h);
-    unsigned long long v[4 + R_N], s[2] = {0, 0};
+    /* calls, skinny, tensor-core, failed, then one count per reason to forward, then two more: as many values as it
+     * returns, the reasons between the fourth and the last two */
+    unsigned long long v[64], s[2] = {0, 0}, forwarded = 0;
     memset(v, 0, sizeof v);
-    f.counters(0, v, 4 + R_N);
+    const int m = f.counters(0, v, 64);
+    if (m < 6) die("vf_bf16_test_counters");
+    for (int r = 4; r < m - 2; ++r) forwarded += v[r];
     if (f.summary) f.summary(s, 2);
     char text[4096];
     const size_t n = f.text ? f.text(text, sizeof text) : 0;
-    tell("counts %llu %llu %llu %llu %llu registered %llu\n", v[0], v[1], v[2], v[3], v[4 + R_SHAPE], s[0]);
+    tell("counts %llu %llu %llu %llu %llu registered %llu\n", v[0], v[1], v[2], v[3], forwarded, s[0]);
     for (const char *p = text; p < text + n;) { /* the fill's text, one line each */
         const char *e = memchr(p, '\n', (size_t)(text + n - p));
         if (!e) e = text + n;
@@ -243,7 +281,7 @@ static void wait_for_lines(void)
     const double end = now() + 20;
     while (now() < end) {
         char *t = slurp(file);
-        const int seen = t && strstr(t, "[libvf_cublas_bf16.so] cublasGemmEx: ");
+        const int seen = t && has_line(t, "[libvf_cublas_bf16.so] cublasGemmEx: ");
         free(t);
         if (seen) return;
         nap(0.1);
@@ -301,9 +339,10 @@ static void child_fork(void)
     for (int i = 0; i < 10; ++i) {
         int status = 0;
         while (waitpid(pids[i], &status, WNOHANG) == 0) {
-            if (now() > end) {
+            if (now() > end) { /* killed, and waited for 10 s more at most */
                 kill(pids[i], SIGKILL);
-                waitpid(pids[i], &status, 0);
+                for (const double grace = now() + 10; waitpid(pids[i], &status, WNOHANG) == 0 && now() < grace;)
+                    nap(0.05);
                 status = -1;
                 break;
             }
@@ -317,20 +356,46 @@ static void child_fork(void)
     tell("children ended %d ok %d:%s\n", ended, ok, list);
 }
 
+/* VF_BF16_SUMMARY_HANG=when: the child waits for ever there (a control of the parent's limits). */
+static void hang_if(const char *when)
+{
+    const char *h = getenv("VF_BF16_SUMMARY_HANG");
+    if (h && !strcmp(h, when))
+        for (;;) pause();
+}
+
 /* ---- the parent ---- */
 static char *child_said;
 static size_t child_len;
+static volatile pid_t child_group; /* the child's process group (its pid), once it is made */
+static int reaped;                 /* the child waited for */
+
+/* A signal that ends this program (timeout(1)'s, a Ctrl-C) kills the child's process group first. */
+static void end_group(int sig)
+{
+    if (child_group > 0) kill(-child_group, SIGKILL);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static const int ENDING[] = {SIGTERM, SIGINT, SIGHUP};
 
 static int start(const char *mode, int *fd, pid_t *pid)
 {
     int p[2];
     if (pipe(p)) return 0;
+    const pid_t parent = getpid();
     *pid = fork();
     if (*pid == 0) {
+        for (size_t i = 0; i < sizeof ENDING / sizeof *ENDING; ++i) signal(ENDING[i], SIG_DFL);
+        setpgid(0, 0);                    /* a group of its own: it and the children it makes, killed together */
+        prctl(PR_SET_PDEATHSIG, SIGKILL); /* killed when this program ends */
+        if (getppid() != parent) _exit(3);
         close(p[0]);
         report_fd = p[1];
         const int e = open(err_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (e >= 0) dup2(e, 2);
+        hang_if("start");
         if (!strcmp(mode, "killed") || !strcmp(mode, "order-layer")) {
             work(0);
             if (!strcmp(mode, "killed")) {
@@ -345,17 +410,56 @@ static int start(const char *mode, int *fd, pid_t *pid)
         } else if (!strcmp(mode, "dlclose")) {
             child_dlclose();
         }
+        hang_if("exit");
         exit(0);
+    }
+    if (*pid > 0) {
+        setpgid(*pid, *pid); /* as the child does, whichever runs first */
+        child_group = *pid;
     }
     close(p[1]);
     *fd = p[0];
     return *pid > 0;
 }
 
+/* The child waited for, once it was sent SIGKILL: 10 s at most. */
+static int reap(pid_t pid, int *status)
+{
+    for (const double grace = now() + 10; !reaped && now() < grace; nap(0.05))
+        if (waitpid(pid, status, WNOHANG) == pid) reaped = 1;
+    return reaped;
+}
+
+/* The child's process group killed, the child waited for, and the group's processes gone (10 s more at most). */
+static void end_child(pid_t pid, int *status)
+{
+    kill(-pid, SIGKILL);
+    CHECK(reap(pid, status), "the child had not ended 10 s after its process group was killed");
+    for (const double grace = now() + 10; kill(-pid, 0) == 0 && now() < grace;) nap(0.05);
+    CHECK(kill(-pid, 0) != 0, "processes of the child's group were left 10 s after it was killed");
+}
+
+/* Until the child ends (its status in *status), `seconds` at most and not past the case's end; then its process group
+ * is killed and the case fails, saying which wait it was. Returns 1 when the child ended by itself. */
+static int wait_child(pid_t pid, int *status, double seconds, const char *what)
+{
+    const double wait = within(seconds), end = now() + wait;
+    for (;;) {
+        const pid_t r = waitpid(pid, status, WNOHANG);
+        if (r == pid) return reaped = 1;
+        if (r < 0 || now() >= end) break;
+        nap(0.05);
+    }
+    CHECK(0, "the child did not end (%s; waited %.0f s, %.0f s into the case, whose limit is %.0f s): its process "
+             "group killed", what, wait, now() - case_start, case_end - case_start);
+    end_child(pid, status);
+    return 0;
+}
+
 /* What the child said so far (more read when there is some), and whether it said `what`. */
 static int heard(int fd, const char *what, double seconds)
 {
-    const double end = now() + seconds;
+    const double end = now() + within(seconds);
     for (;;) {
         if (child_said && strstr(child_said, what)) return 1;
         fd_set r;
@@ -380,19 +484,26 @@ static char *reported_fill(void) { return lines_of(child_said ? child_said : "",
 
 static void check_counts(void)
 {
-    unsigned long long calls = 0, skinny = 0, tc = 0, failed = 0, shape = 0, reg = 0;
+    unsigned long long calls = 0, skinny = 0, tc = 0, failed = 0, forwarded = 0, reg = 0;
     const char *c = child_said ? strstr(child_said, "counts ") : NULL;
-    CHECK(c && sscanf(c, "counts %llu %llu %llu %llu %llu registered %llu", &calls, &skinny, &tc, &failed, &shape,
+    CHECK(c && sscanf(c, "counts %llu %llu %llu %llu %llu registered %llu", &calls, &skinny, &tc, &failed, &forwarded,
                       &reg) == 6,
           "the child did not say its counts: %s", child_said ? child_said : "");
-    CHECK(calls == 6 && skinny == 2 && tc == 3 && failed == 0 && shape == 1,
-          "the calls were not served as made: %llu calls, skinny %llu, tensor-core %llu, failed %llu, shape %llu", calls,
-          skinny, tc, failed, shape);
+    /* (Forwarded for its shape: the file's line names the reason, checked in the case killed.) */
+    CHECK(calls == 6 && skinny == 2 && tc == 3 && failed == 0 && forwarded == 1,
+          "the calls were not served as made: %llu calls, skinny %llu, tensor-core %llu, failed %llu, forwarded %llu",
+          calls, skinny, tc, failed, forwarded);
     CHECK(reg == 1 || getenv("VF_BF16_CONTROL"), "the runtime did not register with the layer");
 }
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0); /* each line written as it is made: a case ended from outside keeps them */
+    const char *limit = getenv("VF_BF16_SUMMARY_LIMIT");
+    case_start = now();
+    case_end = case_start + (limit && atof(limit) > 0 ? atof(limit) : 240);
+    struct sigaction ending = {.sa_handler = end_group};
+    for (size_t i = 0; i < sizeof ENDING / sizeof *ENDING; ++i) sigaction(ENDING[i], &ending, NULL);
     const char *mode = getenv("VF_BF16_SUMMARY_CASE");
     if (!mode) mode = "killed";
     const char *tmp = getenv("TMPDIR");
@@ -422,23 +533,22 @@ int main(void)
     char *fill = reported_fill();
     int status = 0;
     if (!strcmp(mode, "killed")) {
-        const double end = now() + 20;
+        const double end = now() + within(20);
         while (!file_has(fill, "[libvf_cublas_bf16.so] ") && now() < end) nap(0.1);
         nap(1.2); /* past one more write */
         kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+        CHECK(reap(pid, &status), "the child had not ended 10 s after SIGKILL");
         CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "the child did not end by SIGKILL (status %d)", status);
         char *text = slurp(file);
         CHECK(text, "no file %s", file);
         if (text) {
             char *mine = lines_of(text, "[libvf_cublas_bf16.so] ");
-            CHECK(strstr(text, ", running for ") && !strstr(text, "at its exit"), "the file is not that of a running process:\n%s",
-                  text);
+            CHECK(report_of(text, pid, "running for "), "the file is not that of a running process:\n%s", text);
             CHECK(!strcmp(mine, fill) && *fill, "the file's lines of the runtime are\n%s\nnot what its fill gives\n%s", mine,
                   fill);
-            CHECK(strstr(mine, "cublasGemmEx: 6 calls, 6 with bf16 operands; skinny path 2, tensor-core path 3 (0 in graph "
-                               "captures), failed after writing 0; forwarded: shape 1,\n") &&
-                      strstr(mine, "tensor-core path: the fallback's counters are on the GPU, read at exit only"),
+            CHECK(has_line(mine, "cublasGemmEx: 6 calls, 6 with bf16 operands; skinny path 2, tensor-core path 3 (0 in "
+                                 "graph captures), failed after writing 0; forwarded: shape 1,\n") &&
+                      has_line(mine, "tensor-core path: the fallback's counters are on the GPU, read at exit only"),
                   "the file does not hold the counts of the calls made, or what the fallback's are:\n%s", mine);
             printf("the file of the killed child:\n%s", text);
             free(mine);
@@ -446,7 +556,7 @@ int main(void)
         }
     } else if (!strcmp(mode, "order-layer") || !strcmp(mode, "order-runtime")) {
         const int runtime_loaded_first = !strcmp(mode, "order-runtime");
-        waitpid(pid, &status, 0);
+        wait_child(pid, &status, 60, "its exit");
         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the child ended with status %d", status);
         char *text = slurp(file), *err = slurp(err_path);
         CHECK(text, "no file %s", file);
@@ -471,14 +581,14 @@ int main(void)
                     strncat(report, p, (size_t)(e - p + 1));
                 p = e + 1;
             }
-            CHECK(strstr(text, "at its exit\n") != NULL, "the file is not that of an exit:\n%s", text);
+            CHECK(report_of(text, pid, "at its exit\n"), "the file is not that of an exit:\n%s", text);
             CHECK(*report && !strcmp(mine, report) && !*other,
                   "%s: the file's lines of the runtime (%s) are\n%s\nnot the exit report's\n%s(other lines: %s)", mode,
                   runtime_first ? "its last report" : "live", mine, report, other);
             /* (With the runtime loaded before the driver, the exit report runs after the driver's own teardown at
              * exit, registered when it was loaded: it says that it could not read them.) */
-            CHECK(strstr(report, "tensor-core path: of its 3 calls, ") ||
-                      (runtime_loaded_first && strstr(report, "tensor-core path: the fallback's counters could not be read")),
+            CHECK(has_line(report, "tensor-core path: of its 3 calls, ") ||
+                      (runtime_loaded_first && has_line(report, "tensor-core path: the fallback's counters could not be read")),
                   "the exit report has no line of the fallback's counters:\n%s", report);
             printf("the file at the exit (%s):\n%s", mode, text);
             printf("the runtime's removal: %.*s\n", s ? (int)strcspn(s, "\n") : 0, s ? s : "");
@@ -491,8 +601,9 @@ int main(void)
         free(text);
         free(err);
     } else if (!strcmp(mode, "fork")) {
-        CHECK(heard(fd, "children ", 60), "the child did not say how its children ended: %s", child_said);
-        waitpid(pid, &status, 0);
+        CHECK(heard(fd, "children ", 60), "the child did not say how its children ended: %s",
+              child_said ? child_said : "(nothing said)");
+        wait_child(pid, &status, 60, "its exit, after its children's");
         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the child ended with status %d", status);
         const char *c = child_said ? strstr(child_said, "children ") : NULL;
         int ended = 0, ok = 0, n = 0;
@@ -522,28 +633,30 @@ int main(void)
         printf("children made by fork(): %d ended, %d with vf_summary_add and vf_summary_remove refused (ECHILD) and "
                "the fill not called; at their exit, %d removals refused with the fill not called\n", ended, ok, removals);
         char *text = slurp(file);
-        CHECK(text && strstr(text, "at its exit\n") && strstr(text, "cublasGemmEx: 6 calls"),
+        CHECK(report_of(text, pid, "at its exit\n") && has_line(text, "[libvf_cublas_bf16.so] cublasGemmEx: 6 calls"),
               "the file of the process that made them:\n%s", text ? text : "(none)");
         free(err);
         free(text);
     } else if (!strcmp(mode, "dlclose")) {
         CHECK(heard(fd, "alive\n", 60), "the child did not live on: %s", child_said ? child_said : "");
-        waitpid(pid, &status, 0);
+        wait_child(pid, &status, 60, "its exit, after the dlclose");
         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the child ended %s %d", WIFSIGNALED(status) ? "by signal" : "with status",
               WIFSIGNALED(status) ? WTERMSIG(status) : WEXITSTATUS(status));
         CHECK(child_said && strstr(child_said, "after the variant's dlclose: the runtime loaded"),
-              "the variant's dlclose unloaded the runtime: %s", child_said);
+              "the variant's dlclose unloaded the runtime: %s", child_said ? child_said : "(nothing said)");
         CHECK(child_said && strstr(child_said, "after every reference: the runtime loaded"),
               "the runtime was unloaded (not pinned): %s", child_said ? child_said : "");
         char *text = slurp(file);
         char *mine = text ? lines_of(text, "[libvf_cublas_bf16.so] ") : NULL;
-        CHECK(mine && strstr(mine, "cublasGemmEx: 6 calls") && !strstr(text, "last report"),
+        CHECK(report_of(text, pid, "at its exit\n") && mine && has_line(mine, "cublasGemmEx: 6 calls") &&
+                  !has_line(text, "[libvf_cublas_bf16.so, last report] "),
               "the runtime's lines at exit:\n%s", text ? text : "(no file)");
         if (text) printf("the file at the exit (dlclose):\n%s", text);
         free(mine);
         free(text);
     }
     free(fill);
+    if (!reaped) end_child(pid, &status); /* (a case that did not wait for it) */
     if (failures) {
         char *err = slurp(err_path);
         printf("the child's standard error:\n%s", err ? err : "(none)");
