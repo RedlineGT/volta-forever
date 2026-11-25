@@ -51,7 +51,7 @@ rm -f "$out/$which".nccl.*.log
 vf_layer "$proxy" "$map"
 # NCCL's own lines, with what it ran for each collective (its algorithm and protocol), in a file of
 # each process.
-NCCL_DEBUG=${NCCL_DEBUG:-INFO} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,ENV,COLL} \
+NCCL_DEBUG=${NCCL_DEBUG:-INFO} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,ENV,TUNING} \
     NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE:-$out/$which.nccl.%p.log} VF_LOG="$layer" \
     python3 "$W/tests/gpu/nccl-collectives.py" --protocols "$@" >"$log" 2>&1
 status=$?
