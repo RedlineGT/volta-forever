@@ -807,7 +807,29 @@ products, bf16 and tf32 products, bf16 arithmetic, conversions of FP8/E2M1/UE8M0
 other instructions of section 9: these appear only in PTX and are handled by the PTX
 lowering. Two exceptions come with sm_80 machine code: the 16-byte asynchronous copy from
 global to shared memory becomes a load and a store under its predicate, and the conversion
-of two f32 to f16x2 becomes conversions and a permutation. Of the tensor-core instructions,
+of two f32 to f16x2 becomes conversions and a permutation. And two for bfloat16, which vLLM's
+vectorized bf16 norm uses (2026-11-25):
+
+- `HFMA2.BF16_V2 Rd, Ra, 1, 1, Rc`, what NVIDIA's assembler makes of `fma.rn.bf16x2` with a
+  multiplier of 1.0 in both halves (checked by assembling that PTX for sm_80), the sum of two
+  pairs of bf16: each half of each operand widened to an f32 (a shift, or a mask), `FADD`, and
+  the sum rounded to bf16 as below; the two results packed with `PRMT`. One rounding of the
+  exact sum and this give the same bf16 (section 4, "One rounding, not two": computed for every
+  pair of significands). With any other multiplier the instruction is not translated (a product
+  and a sum rounded twice can differ).
+- `F2FP.BF16.PACK_AB Rd, Ra, Rb`: each f32 rounded to bf16, Rb in the low half.
+
+The rounding, in integers, without a predicate: the upper half of the f32 plus the carry of
+`0x7fff + the lowest bit that stays` on its lower half (to nearest, ties to even; a carry out
+of the significand raises the exponent, and gives infinity at the top), and `0x7fff` in place
+of that when the magnitude is above `0x7f800000` (a NaN). 23 instructions for the sum, 17 for
+the pack. The expected values are the arithmetic's (the PTX manual's `fma.rn`: the exact
+result rounded once to nearest even): on a V100, 16,384 sums of pairs chosen at and around the
+points halfway between two bf16, zeros, subnormals, infinities and at random, and 16,384
+conversions, give the host's exact rounding, every one (`told-8.0-*` of `tests/gpu/run.sh`),
+and the sequence gives it for every one of the 2^32 f32 on a host model. For a NaN the layer
+gives `0x7fff`, as its PTX lowering of the bf16 instructions does; what an sm_80 GPU gives for
+the bits of a NaN from these two instructions was not measured. Of the tensor-core instructions,
 the machine-code translator handles Turing's matrix load and product on halves; a function
 with `IMMA` or `MOVM` is refused.
 

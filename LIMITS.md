@@ -822,21 +822,64 @@ What that does not cover:
   compiled for several architectures can have a kernel in its code for sm_80 only, or under
   another name in its code for sm_75 (a template whose `enable_if` takes another overload there).
   Told 8.0 (with `VF_CAPABILITY_ALL=1` for a library that uses a CUDA runtime), its host code asks
-  for the kernel by its name in the sm_80 code, and the lookup fails as the driver answers for a
-  name that it does not have (500; the CUDA runtime says `named symbol not found`). The layer says
-  so at that lookup, once for each kernel: `kernel NAME is not in the code that the layer gives for
-  its image (FILE: SIZE bytes, XXH64 DIGEST), its machine code for sm_75 translated: it is only in
-  the image's machine code for sm_80, ...`. Told 7.5 it says nothing: a GPU of 7.5 has no such
-  kernel either. vLLM 0.34.0 stops so at its first forward with a bfloat16 model, told 8.0 with
-  `VF_CAPABILITY_ALL=1` and its compilation off (`--enforce-eager`, or `TORCH_COMPILE_DISABLE=1`):
-  its vectorized bf16 `fused_add_rms_norm` is only in the sm_80 code of its
-  `_C_stable_libtorch.abi3.so`. With its compilation on (its default), vLLM computes that norm
-  with PyTorch's operations and runs; at the default capability it makes the model float16 and
-  does not ask for that kernel ([the vLLM guide](docs/guides/vllm.md), 2026-11-24). The sm_80 code
-  of that image would not run here either: the layer's translator refuses 102 of its 103
-  functions, that kernel among them, and the image keeps no PTX. `VF_TRANSLATE=first` gives the
-  machine code for the capability told precedence in every image, PyTorch's too, whose sm_80 code
-  the layer translates less of. Not said: a kernel of an image linked from relocatable code.
+  for the kernel by its name in the sm_80 code, and the driver has no kernel of that name in the
+  code given (500; the CUDA runtime says `named symbol not found`). Since 2026-11-25 the layer
+  then gives that one kernel from the image's sm_80 code, translated, in a module or library of
+  its own beside the program's, and says so once for each kernel: `kernel NAME is given from the
+  machine code for sm_80 of its image (FILE: SIZE bytes, XXH64 DIGEST), translated, in a library
+  of its own: ...`. Only at such a lookup: every kernel that the sm_75 code has is still given
+  from there, and a program whose lookups all succeed is given the same images as before. vLLM
+  0.34.0's vectorized bf16 `fused_add_rms_norm` is such a kernel (it is only in the sm_80 code of
+  its `_C_stable_libtorch.abi3.so`): with a bfloat16 model, told 8.0 with `VF_CAPABILITY_ALL=1`
+  and its compilation off (`--enforce-eager`, or `TORCH_COMPILE_DISABLE=1`), vLLM stopped at its
+  first forward, and now runs (measured on a V100, 2026-11-25: the kernel alone on 81,920 bf16
+  values of five shapes against the same computation in float32 on the CPU, rounded to bf16: its
+  residual the CPU's bits for every one, and its norm the CPU's bits for all but 2, which are
+  one bf16 unit away, as 4 of its float16 values are from the sm_75 code: the kernel adds the
+  squares in another order and takes the reciprocal square root from the GPU's instruction, so
+  that the float32 value before the last rounding differs in its last bits, and falls on the
+  other side of a bf16 halfway point about once in 30,000; `tests/gpu/vllm.sh`, stage e. The
+  engine then generates text, which leaves the CPU's float32 text where the CPU led by a few
+  tenths in logit: compare before relying on it). What this does not cover, where the lookup still fails
+  with 500 and a line says why (`kernel NAME is not in the code that the layer gives for its
+  image ...: it is only in the image's machine code for sm_80 ... The kernel alone is not given
+  from the code for sm_80 either: REASON`):
+  - a kernel that can reach data of its image: a `__device__` variable or a table (addressed
+    through the bank of the image's addresses, or by a relocation), a `__constant__` variable
+    (read from a constant bank of the module with no relocation), a function of other code.
+    The module of the layer's own has another copy of that data than the one the program reads
+    and writes through the module it holds, so such a kernel is not given from it: every
+    constant bank that the kernel reads must be its own alone (its parameters and the launch's
+    sizes, stack pointer and memory descriptor in bank 0, each at a fixed place, and no other
+    word of bank 0: the driver puts the address of the image's `__constant__` data there too;
+    or a bank that the image has for that kernel only, with no name in it), a kernel that uses
+    a texture or a surface is not given, and what the layer cannot read of a
+    kernel counts as data (until 2026-11-25, for a few hours of an unreleased build, a kernel
+    that read a `__constant__` variable was given, and read the image's initial values);
+  - a function of a module asked for while another context than the module's is current: the
+    layer would load the kernel's code in that other context;
+  - a kernel that the layer does not translate from sm_80 machine code (at 2026-11-25 it
+    translates 55 of the 3,652 functions of vLLM 0.34.0's sm_80 code and 464 of the 23,708 of
+    PyTorch 2.14.0's; 23 and 429 before: an instruction passes only in a form that was seen to
+    run right on a V100, `docs/translator.md`, section 1), or whose image has no code that the
+    layer translates for the capability told (sm_86 and later);
+  - an image linked from relocatable code: nothing is said either;
+  - under eager loading with the CUDA 12 runtime's interface (the module of a library), an
+    image of whose sm_80 code some kernel is refused: no module is given for it.
+  What a program gets is then a mix: that kernel from the sm_80 code, the others from the sm_75
+  code, where a GPU of 8.0 runs the sm_80 code of every one; a kernel present in both under one
+  name is not looked at (PyTorch's attention kernels for sm_80, stubs in its sm_75 code, are
+  still refused). The kernels that a program is given when it lists those of a library
+  (`cuLibraryEnumerateKernels`) are those of the sm_75 code; `cuKernelGetLibrary` answers the
+  program's library for such a kernel, `cuFuncGetModule` the layer's module (a program that
+  unloads that module, or asks it for a variable, acts on the layer's copy). The translation of
+  sm_80 machine code is still not independently validated (`docs/validation.md`, section 8, says
+  what checks it); two instructions of sm_80 for bfloat16 are rewritten (`docs/emulations.md`,
+  "What is not in machine code"): the results are those of one rounding, as on sm_80, and a NaN
+  is given as 0x7fff, where what an sm_80 GPU gives for the bits of a NaN was not measured.
+  `VF_TOLD_CODE=0` turns this off (the lookup fails as before, with the line); `VF_SAFE=1` does
+  not (below). `VF_TRANSLATE=first` gives the machine code for the capability told precedence in
+  every image, PyTorch's too.
 - NVML, answered by the audit library, reports the value asked for to every caller: told 8.0, a
   program that reads NVML (vLLM does) and a CUDA runtime that is told 7.5 give it two answers.
 - Triton compiles for the capability that PyTorch reports (`torch.cuda.get_device_capability`)
@@ -1213,6 +1256,12 @@ same everywhere:
   the same speed with `VF_SAFE=1` as without, Triton's with the same bits, while PyTorch's fp16
   attention (`scaled_dot_product_attention`, sm_75 machine code whose products pair) took 5.24 ms a
   call instead of 2.80, 1.9 times as long.
+- **A kernel given from the sm_80 code of its image stays given.** A kernel that a program told
+  8.0 asks for, and that only its image's sm_80 machine code has, is given from that code with
+  safe mode too ([The capability told with `VF_CAPABILITY`](#the-capability-told-with-vf_capability)):
+  it has no other code on this GPU, so there are no other bits to prefer; it is what the program
+  chose for the capability it is told, which safe mode does not change. `VF_TOLD_CODE=0` makes
+  the lookup fail instead.
 - **Triton compiles for 7.5.** `VF_TRITON_TC`, set or by the launcher's default, is off: Triton's
   float16 products are then computed with float32 `fma` as without the switch, not summed by
   Volta's tensor cores ([Triton's matrix products](#tritons-matrix-products)); the kernels it

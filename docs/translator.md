@@ -26,18 +26,56 @@ code, the translator is the only path.
 Ampere (sm_80) executables. A program that also carries compatible PTX uses the
 PTX path by default. `VF_TRANSLATE=first` gives machine code precedence.
 
-For sm_80, the generator checks the opcode, modifiers and positions of the variable
-operands against both architectures' instruction descriptions. The translator
-lowers supported global loads and stores, paired FP32-to-FP16 conversions, and
-16-byte asynchronous copies. Each copy uses a four-register temporary for a global
-load followed by a shared store. Both instructions preserve the original predicate.
-Global memory accesses require a proven system descriptor. The supported GPU-scope 32-bit atomic
+For sm_80, an instruction passes to the Turing translator as it is when the two architectures'
+instruction descriptions give it the same reading, by one of two tables that
+`reference/ampere_forms.py` derives from them:
+
+- **Audited forms** (`reference/ampere-forms.txt`): a class with its modifiers fixed, of which
+  the generator checks the opcode, the modifiers and the positions of the variable operands on
+  both sides.
+- **Whole classes, in the forms that ran right** (since 2026-11-25). `whole_classes` finds the
+  classes of sm_80 for which every bit of the instruction holds, in the sm_75 class of the same
+  name, the same thing: the same fixed value, or the same bit of the same operand, of a type
+  whose values read the same on both (every row of an encoding table of sm_80 a row of sm_75's;
+  a register, an immediate of the same width and sign; an enumeration whose values have the same
+  names, or else only the values that do, one form for each). An operand that one side has and
+  the other fixes must be at its default there (ISETP's `EX` and its third predicate, which
+  sm_80 splits into two classes). A class whose words could be of another class that is not
+  kept whole, on either side, is left out, so that both decoders name the same instruction for
+  every word of a kept class: 680 of sm_80's 962 classes (1,444 forms). That is necessary and
+  **was not enough**: with every such class taken, three double-precision kernels that PyTorch
+  compiles for sm_80 while it runs (erfc, erfinv, exp2) were translated and gave wrong results
+  on a V100 (`tests/gpu/torch.sh` told 8.0 with `VF_CAPABILITY_ALL=1`: 3 of 925 cases
+  different), although every word of them reads the same as sm_80 and as sm_75
+  (`reference/ampere_check.py`): what differs between the two architectures there is not an
+  instruction but when its result may be read (section 7, "A result of double precision";
+  `docs/validation.md`, section 8). So a word passes by its class only in a form listed in
+  `reference/ampere-evidence.txt`: the class with the values of all its modifiers (registers,
+  predicates and immediates free), each seen in translated sm_80 code that gave the right
+  results on a V100 against a native build or a host computation
+  (`reference/ampere_evidence.py` prints the forms of a kernel). 74 forms of 43 classes at
+  2026-11-25, from the kernels of `tests/kernels/k_told.cu`, vLLM's bf16 norm and the float32
+  kernels of erfc, erfinv and exp2; none of double precision, which the generator refuses
+  until a translated kernel with it ran right. A form is added with the kernel that shows it.
+
+The translator lowers global loads and stores through a memory descriptor (every size), paired
+FP32-to-FP16 conversions, and 16-byte asynchronous copies. Each copy uses a four-register
+temporary for a global load followed by a shared store. Both instructions preserve the original
+predicate. Global memory accesses require a proven system descriptor: on every path of the
+function, or, for a descriptor that nothing but its own load ever writes anywhere in the
+function, on every path of a thread (a thread reaches the place where the threads of a `BSSY`
+meet again by the `BSYNC` before it or by a branch, not from the `BSSY`, so a `BSSY` placed
+before the load does not undo it). The supported GPU-scope 32-bit atomic
 add preserves the previous value. A shared counter increment with a discarded result becomes a
 scaled address calculation and a predicated Volta shared atomic add. VF checks each repeated
-warp convergence barrier against the branch target on every incoming path.
+warp convergence barrier against the branch target on every incoming path. Two instructions of
+sm_80 for bfloat16 are rewritten (`docs/emulations.md`, "What is not in machine code"):
+`HFMA2.BF16_V2` with a multiplier of one in both halves (the sum of two pairs of bf16) and
+`F2FP.BF16.PACK_AB` (two f32 rounded to bf16), each in three registers of the translation's own.
 
 A kernel can call one private helper at the end of its section when each direct call establishes
-the return address and the helper preserves its return register. VF recognizes local helpers and
+the return address and the helper preserves its return register, and returns through it or through
+an unguarded copy of it that no branch can skip. VF recognizes local helpers and
 the weak functions that CUDA 12’s assembler places in the local portion of the kernel’s symbol
 table. A call invalidates any descriptor or convergence barrier the helper can change.
 Supported functions then pass through the existing register allocator and Volta scheduler.
@@ -50,7 +88,9 @@ The sm_80 path is `crates/vf-sass/src/translate/ampere.rs`, on the forms that
 (`reference/validate.py`) does not check it: it reads every original with the
 sm_75 descriptions. What checks the sm_80 path is the agreement of the two
 translators (`tests/sass/compare.sh`, whose test kernels include sm_80 cubins),
-unit tests, the sm_80 cases of `tests/gpu/run.sh`, and engines run by hand.
+`reference/ampere_check.py` (every word that passes as it is, read by NVIDIA's disassembler as
+sm_80 and as sm_75), unit tests (with a host model of the bf16 sequences), the sm_80 cases of
+`tests/gpu/run.sh`, and engines run by hand.
 `docs/validation.md`, section 8, says what this leaves out.
 
 **Where the translation happens.** The proxy (`crates/vf-proxy`, by the
@@ -834,6 +874,24 @@ cycle when every late writer names a scoreboard, which the wait covers). The
 delays and their correctness were measured on a V100 for `DSETP` (stalls 1 to
 15, in a straight line and after a taken branch) and for `FCHK`.
 
+
+### A result of double precision
+
+An instruction of double precision (DADD, DMUL, DFMA, DSETP) names a scoreboard for its
+result, and its reader waits for it. That wait is not all that Volta's own code keeps: a
+reader of such a result never comes closer than 8 cycles when it is of the same pipe (double
+or half precision), 9 otherwise, and a predicate of DSETP 15 cycles as a guard or to a branch
+(`docs/validation.md`, section 8, has the measurements). Code for sm_75 keeps the same
+distances, so its instructions are right as the compiler had them; code for sm_80 has 6 and
+14. The schedule gives these distances wherever the writer or the reader is the translation's
+(`Machine.waited`, `distance::waited`): in a function of sm_80 code, everywhere. The schedule
+sees straight-line code, and the reader may be the first instruction where a branch goes (the
+reciprocal of a double-precision division: a DFMA, a branch five cycles later, a DMUL at its
+target). So in a function of sm_80 code a result of double precision is also as old at the end
+of straight-line code as any reader needs, 9 cycles for a register and 15 for a predicate
+(`Machine.waited_longest`, `Item.anew`); code for sm_75 keeps Volta's distances along its
+branches too, and nothing is added there. No such function is translated yet (no form of these
+instructions passes: section 1).
 
 ### R2P reads all seven predicates
 

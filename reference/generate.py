@@ -768,7 +768,8 @@ def emit_assembly(f, mc, fc, onc):
 
     ASM_CLASSES.extend(['ldg__sImmOffset', 'stg__sImmOffset', 'f2f_f32_downconvert__RRR_RRR', 'prmt__RuIR_RIR',
                         'imad__RRsI_RRI', 'sts__sImmOffset', 'sts__uImmOffset', 'membar_',
-                        'lea_lo_imm__RuIR_RIR', 'atoms__RaNonRZ', 'atomg__RaNonRZ', 'bra_'])
+                        'lea_lo_imm__RuIR_RIR', 'atoms__RaNonRZ', 'atomg__RaNonRZ', 'bra_',
+                        'fadd__RRR_RR', 'hfma2__RIR'])
 
     templates = []
     all_setters = []

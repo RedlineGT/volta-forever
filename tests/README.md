@@ -85,7 +85,7 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 219 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
+  an RTX 5090 say. 226 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
   partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -107,10 +107,26 @@ Where the GPU scripts write:
   7.0 and CUB answered "invalid device function" until 2026-11-24), lookup tables
   asked for by name, answered as NVIDIA's driver answers them, except where the layer refuses one
   (`tables.py`), and a fat binary whose sm_80 machine code has a kernel that its sm_75 code has not
-  (`sections-*`, `tests/kernels/test_sections.c`): told 8.0, the lookup of that kernel fails with
-  500 as the driver answers, and the layer says once, through a module, a file and a library, that
-  only the code for sm_80 has it; told 7.5 it says nothing; with `VF_TRANSLATE=first` the kernel
-  runs from the sm_80 code; and kernels that hold, or call through a table, an instruction of the
+  (`sections-*`, `tests/kernels/test_sections.c`): told 8.0, that kernel is given from the sm_80
+  code, translated, in a module of the layer's own, through a module, a file and a library, with
+  one line, and stores what the sm_80 code stores; told 7.5 its lookup fails with 500 as the
+  driver answers and nothing is said; with `VF_TOLD_CODE=0` it fails told 8.0 too, with the line
+  that says which code has it; with `VF_TRANSLATE=first` the kernel runs from the whole sm_80
+  code. And what such kernels compute (`told-*`, `tests/kernels/k_told.cu`, `test_told.c`):
+  sums of pairs of bf16 and pairs of bf16 nearest to f32 (two instructions of sm_80 that the
+  layer rewrites), 16,384 each against the host's exact rounding, and the quotients of a
+  division whose slow path is a function inside the kernel, also through the library's module,
+  after the image is loaded again and in safe mode; a kernel that reads a variable of the image,
+  one that adds a `__constant__` variable, one that stores the address of one (a word of its
+  own bank 0) and one that is not translated are not given, with the reason for each. What needs
+  no GPU of this is in `tests/proxy/told.py`, against the stand-in driver of `launch_guard.py`,
+  which has the kernels of the machine code it is given: a function is given only in the context
+  of the module asked (the program's, or the one that the driver gives for a library), from a
+  module loaded there; an unload from another thread while the layer loads leaves nothing
+  loaded; what was loaded goes with the module or library, and stays when the driver refuses
+  the unload; nothing is loaded with `VF_TOLD_CODE=0`, nor for an image of relocatable code
+  (`k_told_rdc.cu`), loaded or linked. Three changes of `told.rs` each fail it (the context
+  not checked, the library's module not checked, the unload during the load not looked for); and kernels that hold, or call through a table, an instruction of the
   multimem family (`reported-*`, `tests/kernels/test_reported.c`): given with the instruction
   replaced by a reported trap, said in one line for their image, and right on every path that does
   not reach it (one with its multimem instructions under a guard that is false among them), through
@@ -232,6 +248,13 @@ Where the GPU scripts write:
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
   cubins included (at 0.1.4 and 0.1.5: 491 of 491, the 16 test cubins and PyTorch's 475).
+- `python3 -I reference/ampere_check.py DIR...` (not a step of the release check: it needs sm_80
+  cubins, `vf extract FILE DIR 80`, and NVIDIA's disassembler): every distinct word of sm_80 code
+  that the translator passes as it is reads the same to nvdisasm as sm_80 and as sm_75, and is of
+  the same class with the same operands in both descriptions (0 fail on the sm_80 code of PyTorch
+  2.14.0 and vLLM 0.34.0, 2026-11-25). It does not show that the translation runs right: an
+  instruction of sm_80 passes by its class only in a form listed in
+  `reference/ampere-evidence.txt`, with the kernel that ran right on a V100.
 - `validate-corpus.sh`: the independent validator finds 0 problems over the corpus (of sm_75
   code: the validator does not read sm_80 code, `docs/validation.md`, section 8).
 - `controls.sh`: the validator objects to translations that are made wrong on purpose (the
@@ -458,6 +481,7 @@ python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
 python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
 python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
 python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
+python3 tests/proxy/told.py dist/lib/libcuda.so.1
 python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
 python3 tests/proxy/fault.py dist/lib/libcuda.so.1
 python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
@@ -698,11 +722,11 @@ No GPU needed.
 ### What the CI runs
 
 On every push and pull request, `.github/workflows/ci.yml` runs the formatting and lint
-checks and the unit tests (`cargo test`, 527, in an empty home of their own that they must
+checks and the unit tests (`cargo test`, 537, in an empty home of their own that they must
 leave empty: `tests/scripts/untouched-home.sh`); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
-`log_lines.py`, `summary_file.py`, `summary_fill.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py`,
+`log_lines.py`, `summary_file.py`, `summary_fill.py`, `nocode_launch.py`, `told.py`, `profile_failure.py`, `ptx_version.py`,
 `parallel_threads.py`, `reported_traps.py` and `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `tests/scripts/kernel-log.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/python/triton_tc.py` (without a Triton);

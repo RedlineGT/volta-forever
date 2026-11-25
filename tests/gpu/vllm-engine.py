@@ -3,15 +3,28 @@
 
 Environment:
   MODEL       path to the model (required)
-  DTYPE       float16 or float32 (default float16)
+  DTYPE       float16, bfloat16 or float32 (default float16); with bfloat16, REF_FILE is to be the
+              CPU's reference in bfloat16 (vllm-ref.py with DTYPE=bfloat16)
   MAX_TOKENS  maximum new tokens (default 50)
   TEMPERATURE 0 for greedy (default), >0 for sampling
   TOP_K       top-k for sampling (default: not set)
   TOP_P       top-p for sampling (default: not set)
   SEED        random seed for sampling (default 42)
+  COMPILE     1: vLLM's compilation on (`enforce_eager` off, and TORCH_COMPILE_DISABLE=0 unless
+              it is set); by default it is off, as the stages of vllm.sh run the engine
+  IDS_OUT     a file to write the token ids of every prompt to, as JSON (optional)
+  IDS_REF     such a file of another run (optional): prints, for each prompt, how many tokens
+              are the same before the first that differs, and `same tokens: ALL` or `SOME_DIFFER`
   REF_FILE    JSON reference from vllm-ref.py (optional; compare greedy tokens: prints
               `verdict: ALL_MATCH`, `verdict: MATCH_BUT_NEAR_TIES n` or `verdict: SOME_DIFFER`, as
               greedy_compare.py defines them)
+  FORCED      1, with REF_FILE and greedy: every place of the reference is judged, not only those
+              before the first token that differs. The engine is given each prompt with the
+              reference's own tokens after it and asked for the log-probabilities of what it
+              would have put at each place (`prompt_logprobs`, of the model's own logits): the
+              reference's token must be the engine's first, or within the near-tie distance of
+              it (greedy_compare.NEAR_BF16 for bfloat16, NEAR otherwise). A place where it is
+              not makes the verdict SOME_DIFFER. Prints `teacher-forced: ...` for each prompt.
 There must be one result for each prompt; with fewer (or none), the verdict is SOME_DIFFER or
 SOME_OUTSIDE.
 With sampling and TOP_K: every token sampled must be among the TOP_K most likely, and within the
@@ -29,7 +42,8 @@ import greedy_compare
 os.environ.setdefault('DO_NOT_TRACK', '1')
 os.environ.setdefault('VLLM_NO_USAGE_STATS', '1')
 os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
-os.environ.setdefault('TORCH_COMPILE_DISABLE', '1')
+COMPILE = os.environ.get('COMPILE') == '1'
+os.environ.setdefault('TORCH_COMPILE_DISABLE', '0' if COMPILE else '1')
 
 MODEL = os.environ['MODEL']
 DTYPE = os.environ.get('DTYPE', 'float16')
@@ -39,6 +53,7 @@ TOP_K = int(os.environ['TOP_K']) if 'TOP_K' in os.environ else -1
 TOP_P = float(os.environ['TOP_P']) if 'TOP_P' in os.environ else 1.0
 SEED = int(os.environ.get('SEED', '42'))
 REF_FILE = os.environ.get('REF_FILE', '')
+FORCED = os.environ.get('FORCED') == '1'
 
 # (How much more than TOP_P the tokens before a sampled one may make, by this computation in
 # float64 of what the engine computes in float32 and cuts by its own method.)
@@ -77,6 +92,41 @@ def outside(logprobs, chosen):
     return None
 
 
+def forced(llm, SamplingParams, outputs, ref, near):
+    """For each prompt: None, or what is wrong, with a line printed. The engine reads the prompt
+    and the reference's tokens, and says for each place what it held most likely there and how
+    likely the token that stands there (a difference of log-probabilities of the same place is
+    the difference of the logits)."""
+    prompts = [{'prompt_token_ids': list(o.prompt_token_ids) + list(r['token_ids'])} for o, r in zip(outputs, ref)]
+    answers = llm.generate(prompts, SamplingParams(max_tokens=1, temperature=0, prompt_logprobs=2))
+    wrong = []
+    for i, (o, r, a) in enumerate(zip(outputs, ref, answers)):
+        start, tokens, places = len(o.prompt_token_ids), list(r['token_ids']), a.prompt_logprobs or []
+        why, other, widest = None, 0, 0.0
+        if len(places) != start + len(tokens):
+            why = '%d places of log-probabilities for %d tokens' % (len(places), start + len(tokens))
+        for k, token in enumerate(tokens if why is None else []):
+            place = places[start + k]
+            if not place or token not in place:
+                why = 'place %d: no log-probability for the reference\'s token %d' % (k, token)
+                break
+            first = max(place.values(), key=lambda lp: lp.logprob).logprob
+            behind = first - place[token].logprob
+            if not behind >= 0 or not math.isfinite(behind):
+                why = 'place %d: log-probabilities that are not numbers' % k
+                break
+            other += behind > 0
+            widest = max(widest, behind)
+            if behind >= near:
+                why = 'place %d: the reference\'s token %d is %.4f behind the engine\'s first' % (k, token, behind)
+                break
+        wrong.append(why)
+        print('  teacher-forced: prompt %d: %s' % (i, 'FAR: ' + why if why else
+              '%d places, the reference\'s token the engine\'s first in %d, within %.4f of it in the others (near: under %g)'
+              % (len(tokens), len(tokens) - other, widest, near)))
+    return wrong
+
+
 def main():
     from vllm import LLM, SamplingParams
 
@@ -95,8 +145,9 @@ def main():
     try:
         t0 = time.time()
         llm = LLM(model=MODEL, dtype=DTYPE, trust_remote_code=True,
-                   gpu_memory_utilization=0.8, max_model_len=512, enforce_eager=True,
-                   **({'max_logprobs': TOP_K, 'logprobs_mode': 'raw_logprobs'} if checked else {}))
+                   gpu_memory_utilization=0.8, max_model_len=512, enforce_eager=not COMPILE,
+                   **({'max_logprobs': TOP_K, 'logprobs_mode': 'raw_logprobs'} if checked else
+                      {'max_logprobs': 2, 'logprobs_mode': 'raw_logprobs'} if FORCED else {}))
         t_engine = time.time() - t0
         print(f'Engine created in {t_engine:.1f}s')
 
@@ -117,7 +168,10 @@ def main():
             total_tokens += n
             print(f'  prompt {i}: {n} tokens: {text[:80]!r}')
             if ref and i < len(ref):
-                kind, detail = greedy_compare.compare(ref[i], ids=token_ids)
+                # (A bfloat16 model is compared with the CPU's bfloat16 reference, whose leads are
+                # in units of bfloat16: greedy_compare.NEAR_BF16.)
+                near = greedy_compare.NEAR_BF16 if DTYPE == 'bfloat16' else greedy_compare.NEAR
+                kind, detail = greedy_compare.compare(ref[i], ids=token_ids, near=near)
                 kinds.append(kind)
                 print('    %s: %s' % ({'match': 'MATCH', 'near': 'NEAR TIE', 'differ': 'DIFFER'}[kind], detail))
             elif ref:
@@ -133,6 +187,27 @@ def main():
                         break
                 wrong.append(why)
                 print('    %s' % ('OUTSIDE: ' + why if why else 'WITHIN: %d tokens, each among the %d most likely and within %g of their probability' % (n, TOP_K, TOP_P)))
+
+        if FORCED and ref and TEMPERATURE == 0:
+            near = greedy_compare.NEAR_BF16 if DTYPE == 'bfloat16' else greedy_compare.NEAR
+            far = forced(llm, SamplingParams, outputs, ref, near) if len(outputs) == len(ref) else ['no result']
+            kinds += ['differ' for why in far if why]
+        elif FORCED:
+            print('  teacher-forced: not made (it needs REF_FILE and a temperature of 0)')
+            kinds.append('differ')
+
+        ids = [list(o.outputs[0].token_ids) for o in outputs]
+        if os.environ.get('IDS_OUT'):
+            json.dump(ids, open(os.environ['IDS_OUT'], 'w'))
+        if os.environ.get('IDS_REF'):
+            other = json.load(open(os.environ['IDS_REF']))
+            same = True
+            for i, (mine, theirs) in enumerate(zip(ids, other)):
+                first = next((k for k, (a, b) in enumerate(zip(mine, theirs)) if a != b), min(len(mine), len(theirs)))
+                whole = first == len(mine) == len(theirs)
+                same &= whole
+                print(f'  prompt {i}: {first} of {len(mine)} tokens the same as the other run\'s' + ('' if whole else ' before the first that differs'))
+            print('same tokens:', 'ALL' if same and len(ids) == len(other) else 'SOME_DIFFER')
 
         # One result for each prompt: a verdict over fewer, or over none, is not one.
         if len(outputs) != len(PROMPTS):

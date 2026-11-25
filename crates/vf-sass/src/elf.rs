@@ -13,6 +13,7 @@ const PT_PHDR: u32 = 6;
 const MAX_ALIGN: u64 = 1 << 16;
 
 /// One section of the ELF file.
+#[derive(Clone)]
 pub struct Section {
     pub name: String,
     pub name_offset: u32,

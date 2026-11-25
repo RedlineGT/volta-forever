@@ -72,6 +72,12 @@ them), with the translator's tables only for what kind an instruction is and wha
 - a register that a memory instruction reads as data (what a store stores, what a shuffle
   exchanges) is not written by arithmetic after it, in straight-line code, before a barrier or a
   wait for a scoreboard that it or a later memory instruction names (`data_overwritten`).
+- a result of double precision (what DADD, DMUL, DFMA or DSETP writes) is read, along every
+  path that the code's own branches give (not through a register, a BSYNC or a return), no
+  earlier than Volta's own code reads one, whether or not a scoreboard announces it and
+  the reader waits: 8 cycles later by an instruction of the same pipe (double or half
+  precision), 9 by any other, and a predicate of DSETP 15 as a guard or by a branch
+  (`double_read_early`; code for sm_80 has 6 and 14, docs/validation.md, section 8).
 Not checked: that an instruction comes late enough after one of the translation whose result it
 reads and that names no scoreboard (the translator's table of distances is taken on trust).
 
@@ -2156,6 +2162,90 @@ def data_overwritten(mc, code):
             if y.kind.startswith('MIO'):
                 boards |= {(words[j] >> WRITE_BARRIER) & 7, (words[j] >> READ_BARRIER) & 7} - {7}
     return out, followed, complement
+
+
+# What Volta's own code keeps between an instruction of double precision and a reader of its
+# result (docs/validation.md, section 8): written here, not taken from the translator.
+DOUBLE = ('DADD', 'DMUL', 'DFMA', 'DSETP')
+DOUBLE_PIPE, DOUBLE_OTHER, DOUBLE_GUARD = 8, 9, 15
+
+
+def code_successors(mc, words, decoded):
+    """For each instruction of sm_70 code, where control goes next that the code itself says:
+    [(index, through a branch)]. The next instruction, unless the instruction always leaves (an
+    unguarded BRA with no condition, JMP, BRX, JMX, RET or EXIT), and the target of a branch or
+    jump whose operand is a distance in the code. Not known here, and not listed: where a branch
+    through a register goes, where BSYNC and BREAK go back to, where a call returns from."""
+    out = []
+    for j, d in enumerate(decoded):
+        nexts = []
+        if d is None:
+            out.append(nexts)
+            continue
+        target = None
+        names = [n for n, o in d.c.operands.items() if o.type == 'RSImm']
+        if names and d.mnemonic in ('BRA', 'BRX', 'JMP', 'JMX'):
+            for step, fields, data in mc.d70.plan(d.c):
+                if step == 'scaled' and data[0] == names[0]:
+                    v = fields[0].get(d.word)
+                    if v >> (len(fields[0]) - 1):
+                        v -= 1 << len(fields[0])
+                    target = j + 1 + v * data[1] // 16
+        ops = d.ops
+        always = (ops.get('Pg', 7) == 7 and not ops.get('Pg@not') and ops.get('Pp', 7) == 7
+                  and not ops.get('Pp@not') and not ops.get('cond'))
+        if not (d.mnemonic in ('BRA', 'EXIT', 'RET', 'JMP', 'BRX', 'JMX') and always) and j + 1 < len(words):
+            nexts.append((j + 1, False))
+        if target is not None and 0 <= target < len(words):
+            nexts.append((target, True))
+        out.append(nexts)
+    return out
+
+
+def double_read_early(mc, code):
+    """What does not hold of the readers of results of double precision: (offset, what) for each,
+    and how many readers were looked at. From each DADD, DMUL, DFMA or DSETP, along every path
+    that the code says (the next instruction and the targets of its branches: `code_successors`),
+    to the instructions that read what it wrote, until something writes it again: each comes as
+    many cycles later as native sm_70 code keeps (never fewer in 54,085 pairs of NVIDIA's own
+    code for sm_70, with a scoreboard or without; sm_80 code keeps fewer, and its translation
+    must not). The cycles are those of the instructions passed on the path. (Until 2026-11-25 in
+    straight-line code only: the reader at a branch's target was not looked at, and the
+    translator did not keep it away either.)"""
+    words = [int.from_bytes(code[i:i + 16], 'little') for i in range(0, len(code) - 15, 16)]
+    decoded = [mc.decode(70, w) for w in words]
+    nexts = code_successors(mc, words, decoded)
+    stall = [(w >> USCHED) & 15 for w in words]
+    out, looked = [], 0
+    for k, d in enumerate(decoded):
+        if d is None or d.mnemonic not in DOUBLE or not d.writes:
+            continue
+        # (instruction, what is still as the writer left it) -> the fewest cycles to there
+        least, found = {}, {}
+        stack = [(j, stall[k], frozenset(d.writes)) for j, branch in nexts[k]]
+        while stack:
+            j, distance, written = stack.pop()
+            y = decoded[j]
+            if y is None or distance >= DOUBLE_GUARD or least.get((j, written), DOUBLE_GUARD) <= distance:
+                continue
+            least[(j, written)] = distance
+            for letter, register, role in y.reads:
+                if (letter, register) not in written:
+                    continue
+                need = (DOUBLE_GUARD if letter == 'P' and (role == 'guard' or y.kind == 'BRU')
+                        else DOUBLE_PIPE if y.kind == 'FMALITE' else DOUBLE_OTHER)
+                key = (j, letter, register, role)
+                if key not in found or distance < found[key][0]:
+                    found[key] = (distance, need)
+            written -= set(y.writes)
+            if written:
+                stack += [(n, distance + stall[j], written) for n, branch in nexts[j]]
+        looked += len(found)
+        for (j, letter, register, role), (distance, need) in sorted(found.items()):
+            if distance < need:
+                out.append((16 * j, 'reads %s%d %d cycles after the %s at 0x%x wrote it: Volta\'s own code never reads a result of double precision before %d' % (
+                    letter, register, distance, d.mnemonic, 16 * k, need)))
+    return out, looked
 
 
 # ---- level 3: validation of "everything at the instruction" (the frame) ----
@@ -4865,6 +4955,10 @@ def main():
         wrong, followed, complement = data_overwritten(mc, result_code)
         kinds['(schedule) registers that a memory instruction reads as data, followed to what writes them next'] += followed
         kinds['(schedule) writes of such a register under the complement of the guard of the store that reads it'] += complement
+        for at, what in wrong:
+            problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
+        wrong, looked = double_read_early(mc, result_code)
+        kinds['(schedule) readers of a result of double precision, each as far after it as Volta keeps them'] += looked
         for at, what in wrong:
             problems.append('%s+0x%x: %s: %s' % (name[:40], at, what, tb[at // 16]))
         # ---- even-register alignment: an operand of two registers begins on an even one ----

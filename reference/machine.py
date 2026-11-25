@@ -34,6 +34,11 @@ STRIDED = ('sts__sImmOffset', 'lds__sImmOffset', 'lds_zd__sImmOffset',
            'atoms__RaNonRZ', 'atoms_cas__RaNonRZ_CAS', 'atoms_cas__RaNonRZ_CAST')
 
 
+# The instructions whose results Volta's code reads no earlier than a fixed distance, also behind
+# a scoreboard (`Machine.waited`).
+WAITED = ('DADD', 'DMUL', 'DFMA', 'DSETP')
+
+
 class Decoded:
     """An instruction word with its class and what it reads and writes."""
     __slots__ = ('word', 'c', 'ops', 'kind', 'reads', 'writes', 'mnemonic')
@@ -114,6 +119,27 @@ class Machine:
             # (guards of memory instructions) 12 or more: 12 for everything else.
             d = max(d, 5 if (reader_kind, role) == ('FXU', 'data') else 12)
         return d
+
+    def waited(self, letter, role, writer, reader_kind):
+        """The distance that native sm_70 code keeps from `writer` to a reader that waits for the
+        scoreboard on which it announces its result, where a wait is not all it keeps: None for
+        every writer but the four of double precision. A reader of what DADD, DMUL, DFMA or
+        DSETP writes never comes closer than this in Volta's own code, scoreboard or not (8
+        cycles to an instruction of the same pipe, 9 to any other; a predicate of DSETP 15 as a
+        guard or to a branch), where code for sm_80 has 6 and 14 (docs/validation.md, section 8:
+        measured on native code, and what the compiler's own tables say)."""
+        if writer.mnemonic not in WAITED:
+            return None
+        if letter == 'P' and (role == 'guard' or reader_kind == 'BRU'):
+            return 15
+        return 8 if reader_kind == 'FMALITE' else 9
+
+    def waited_longest(self, letter, writer):
+        """`waited` for any reader: what is kept from `writer` to the end of straight-line code,
+        where the reader is not seen (it may be the first instruction of a branch's target)."""
+        if writer.mnemonic not in WAITED:
+            return None
+        return 15 if letter == 'P' else 9
 
     def longest(self, letter, writer):
         """The distance that is enough from `writer` to any reader of what it writes."""

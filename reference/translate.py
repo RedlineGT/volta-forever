@@ -42,7 +42,7 @@ class Refused(Exception):
 
 class Item:
     """One instruction of the result."""
-    __slots__ = ('word', 'origin', 'first', 'changed', 'what', 'target', 'fix', 'd', 'late', 'then', 'also', 'says', 'borrows', 'covered', 'more_reads', 'more_writes')
+    __slots__ = ('word', 'origin', 'first', 'changed', 'what', 'target', 'fix', 'd', 'late', 'then', 'also', 'says', 'borrows', 'covered', 'more_reads', 'more_writes', 'anew')
 
     def __init__(self, word, origin, what, changed=True, first=False):
         self.word, self.origin, self.what, self.changed, self.first = word, origin, what, changed, first
@@ -52,6 +52,7 @@ class Item:
         self.says = False       # an instruction of the program made to say when it has read (the same)
         self.borrows = ()       # the borrowed registers that the sequence it is part of writes for the translation
         self.covered = False    # its result is waited for with that of a later instruction of its sequence
+        self.anew = False       # of code for sm_80: the distances that the program had are not those Volta needs
         # What it reads and writes besides what its operands say: the predicates that P2R saves
         # and R2P gives back are in a mask.
         self.more_reads, self.more_writes = [], []
@@ -872,6 +873,10 @@ class Function:
                 b = Item(store | (63 << WAIT), i, 'sm80: store asynchronous copy')
                 b.then = SEQUENCE
                 new = [a, b]
+            elif self.ampere_ops.get(i) == 'bf16add':
+                new = self.bf16_add(i, d)
+            elif self.ampere_ops.get(i) == 'bf16pack':
+                new = self.bf16_pack(i, d)
             elif self.ampere_ops.get(i) == 'pack':
                 # Ra of the surrogate feeds the low half, Rc the high half.
                 rd, low, high = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
@@ -892,7 +897,7 @@ class Function:
                 new = self.one(i, d)
             if self.ampere:
                 for item in new:
-                    item.changed = True
+                    item.changed = item.anew = True
             if i in self._lane_taken:
                 # Level 3: the lane is read where a sequence goes by it, and what follows waits.
                 lane = Item(mc.assemble('s2r_', Rd=self._lane_taken[i], SRa='SR_LANEID', dst_wr_sb=SEQUENCE), i, 'lane')
@@ -1169,6 +1174,67 @@ class Function:
         item = Item(self.mc.assemble('p2r__RsIR_RIR', Rd=holder, Ra=255, Sb=1 << p), i, 'held: kept')
         item.more_reads = [('P', p, 'data')]
         return item
+
+    def bf16_round(self, i, new, what, to, source, other):
+        """Appends to `new` the instructions that leave in `to` the bits of the bf16 nearest to
+        the f32 in `source` (ties to even), 0x7fff for a NaN: the upper half of the f32, rounded
+        on its lower half. `to` may be `source`; `other` is written."""
+        mc = self.mc
+        def add(word, step):
+            new.append(Item(word, i, 'sm80: %s: %s' % (what, step)))
+        def right(to, source, by, fmt='U32'):
+            return mc.assemble('shf__RuIR_RIR', Rd=to, Ra=255, Sb=by, Rc=source, dir='R', fmt=fmt, hilo='HI')
+        def logic(to, a, immediate, c, lut):
+            return mc.assemble('lop3_lut__RuIR_RIR', Rd=to, Ra=a, Sb=immediate, Rc=c, imm8=lut)
+        add(right(other, source, 16), 'the bits that stay')
+        add(logic(other, other, 1, 255, 0xc0), 'the lowest of them')
+        add(mc.assemble('iadd3_imm__RsIR_RIR', Rd=other, Ra=source, Sb=0x7fff, Rc=other), 'to nearest, ties to even')
+        add(right(other, other, 16), 'rounded')
+        add(logic(to, source, 0x7fffffff, 255, 0xc0), 'magnitude')
+        add(mc.assemble('iadd3_imm__RsIR_RIR', Rd=to, Ra=to, Sb=-0x7f800001, Rc=255), 'negative unless a NaN')
+        add(right(to, to, 31, 'S32'), 'ones unless a NaN')
+        add(logic(to, other, 0x7fff, to, 0xe4), '0x7fff for a NaN')
+
+    def bf16_add(self, i, d):
+        """sm_80's HFMA2.BF16_V2 Rd, Ra, 1, 1, Rc: in each half of the register, the sum of two
+        bf16, rounded to bf16 once. Each half is widened to an f32 (a bf16 is the upper half of
+        one), the two are added as f32, and the sum is rounded to bf16 (`bf16_round`). Rounding
+        the f32 sum gives what one rounding of the exact sum gives (docs/emulations.md, "bf16")."""
+        if self.matrix_at is None:
+            raise Refused('no dedicated registers for an sm_80 bf16 sum')
+        mc, (s0, s1, s2) = self.mc, range(self.matrix_at, self.matrix_at + 3)
+        rd, ra, rc = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
+        new = []
+        def add(word, what):
+            new.append(Item(word, i, 'sm80: bf16 sum: ' + what))
+        def left(to, source):
+            return mc.assemble('shf__RuIR_RIR', Rd=to, Ra=source, Sb=16, Rc=255, dir='L', fmt='U32')
+        def upper(to, source):
+            return mc.assemble('lop3_lut__RuIR_RIR', Rd=to, Ra=source, Sb=0xffff0000, Rc=255, imm8=0xc0)
+        add(left(s0, ra), 'low half of a as f32')
+        add(left(s1, rc), 'low half of c as f32')
+        add(mc.assemble('fadd__RRR_RR', Rd=s0, Ra=s0, Rc=s1), 'low halves added')
+        add(upper(s1, ra), 'high half of a as f32')
+        add(upper(s2, rc), 'high half of c as f32')
+        add(mc.assemble('fadd__RRR_RR', Rd=s1, Ra=s1, Rc=s2), 'high halves added')
+        self.bf16_round(i, new, 'bf16 sum, low', s0, s0, s2)
+        self.bf16_round(i, new, 'bf16 sum, high', s1, s1, s2)
+        add(mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=s0, Sb=0x5410, Rc=s1), 'both halves')
+        return new
+
+    def bf16_pack(self, i, d):
+        """sm_80's F2FP.BF16.PACK_AB Rd, Ra, Rb: the f32 of Rb rounded to bf16 in the low half,
+        that of Ra in the high half. (Ra of the surrogate is the low one, Rc the high one.)"""
+        if self.matrix_at is None:
+            raise Refused('no dedicated registers for an sm_80 bf16 conversion')
+        mc, (s0, s1, s2) = self.mc, range(self.matrix_at, self.matrix_at + 3)
+        rd, low, high = (d.ops[k] for k in ('Rd', 'Ra', 'Rc'))
+        new = []
+        self.bf16_round(i, new, 'bf16 pack, low', s0, low, s2)
+        if high != 255:
+            self.bf16_round(i, new, 'bf16 pack, high', s1, high, s2)
+        new.append(Item(mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=s0, Sb=0x5410, Rc=s1 if high != 255 else 255), i, 'sm80: bf16 pack: both halves'))
+        return new
 
     def pool(self, width=2):
         """The first of the two registers that the sequences of the translation compute into. Each
@@ -2345,7 +2411,9 @@ class Function:
     def schedule(self):
         """Raise stall counts where an instruction of the translation is read, or reads, closer than
         native sm_70 code allows: within straight-line code by the measured distance for the pair, and
-        at the end of it by the longest distance any reader could need."""
+        at the end of it by the longest distance any reader could need (for a writer that names no
+        scoreboard, and for a result of double precision of code for sm_80, which is not read
+        early even when waited for)."""
         mc, items = self.mc, self.items
         blocks, start = [], 0
         for k, item in enumerate(items):
@@ -2390,6 +2458,11 @@ class Function:
                             if not item.changed:
                                 raise Refused('the %s at 0x%x reads a predicate of the translation that a scoreboard announces' % (item.d.mnemonic, 16 * item.origin))
                             self.waits_for(item, (w[1].word >> WRITE_BARRIER) & 7)
+                        # (A result of double precision is not read earlier than Volta's own
+                        # code reads one, whatever is waited for: `Machine.waited`.)
+                        floor = mc.waited(letter, role, w[1].d, item.d.kind)
+                        if floor is not None:
+                            need = max(need, w[0] + floor - t)
                         continue
                     need = max(need, w[0] + mc.least(letter, role, w[1].d, item.d.kind) - t)
                 if item.changed and (item.d.kind not in ('FXU', 'IMAD', 'FMAI') or item.d.mnemonic == 'R2P'):
@@ -2432,9 +2505,19 @@ class Function:
             for (letter, register), (when, item, through) in last.items():
                 if item.changed and (item.word >> WRITE_BARRIER) & 7 == 7 and not item.covered and item is not items[b - 1]:
                     need = max(need, when + mc.longest(letter, item.d) - t)
+                # (A result of double precision of code for sm_80, scoreboard or not: its reader
+                # may be the first instruction where a branch goes, which waits and is still too
+                # early. Code for sm_75 keeps Volta's distances along its branches too: none
+                # shorter in the 475 cubins of PyTorch, and the translation shortens none.)
+                floor = mc.waited_longest(letter, item.d)
+                if item.anew and floor is not None and item is not items[b - 1]:
+                    need = max(need, when + floor - t)
             if items[b - 1].changed and items[b - 1].d.writes + items[b - 1].more_writes and (items[b - 1].word >> WRITE_BARRIER) & 7 == 7:
                 tail = b - 1
                 need = max(need, max(mc.longest(l, items[b - 1].d) for l, r in items[b - 1].d.writes + items[b - 1].more_writes) - stall_of(items[b - 1].word))
+            if items[b - 1].anew and items[b - 1].d.writes and mc.waited_longest('R', items[b - 1].d) is not None:
+                tail = b - 1
+                need = max(need, max(mc.waited_longest(l, items[b - 1].d) for l, r in items[b - 1].d.writes) - stall_of(items[b - 1].word))
             if need > 0:
                 t += self.delay(tail, need, inserted)
         for k, word in sorted(inserted, reverse=True):
@@ -2731,6 +2814,8 @@ def translate(data, mc=None, listing=None, lives=None):
                 for i, op in operations.items():
                     if op == 'pack':
                         f.needs_pool |= f.src[i].ops['Rc'] != 255
+                    elif op in ('bf16add', 'bf16pack'):
+                        f.scratch_need = max(f.scratch_need, 3)
                     else:
                         f.scratch_need = max(f.scratch_need, 2 if op[0] == "increment" else 6)
             report[name] = None

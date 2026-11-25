@@ -697,6 +697,11 @@ impl Policy {
     }
 
     /// Machine code for `sm` can be translated for the device.
+    /// Whether the layer translates machine code for `sm` to the device's.
+    pub fn translates(&self, sm: u32) -> bool {
+        self.translatable(sm)
+    }
+
     fn translatable(&self, sm: u32) -> bool {
         self.translate != Translate::Never && self.device_sm == 70 && matches!(sm, 75 | 80)
     }
@@ -1396,16 +1401,125 @@ pub fn kept_cubin(kept: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
 /// On Turing, false for a name that the cubin has no function of. Other architectures require
 /// a separate analysis of their constant-bank operands and stay in the original module.
 pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
-    // Constant-bank operands have only been audited for Turing. Keep other kernels in their
+    // A second translation at launch is of Turing code only. Other kernels stay in their
     // original module, where writable globals cannot diverge between two translations.
     if fatbin::cubin_sm(cubin) != Some(75) {
         return true;
     }
-    let Ok(elf) = vf_sass::elf::Elf::parse(cubin) else {
-        return true;
-    };
+    names_global_data(cubin, kernel_name, 75)
+}
+
+/// What a kernel of an image's machine code can reach of the data of its image (`told_kernel_reach`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// Nothing: every word of it was read, and names none.
+    Nothing,
+    /// Data of the image, or what may be: what names it.
+    Data(String),
+    /// Not known: an instruction of it was not read (why). Its code is not translated either.
+    Unknown(String),
+}
+
+/// What a kernel of an image's machine code for the capability told, which would be given from a
+/// module of its own (`told_cubin`), can reach of the image's data: the question of
+/// `kernel_names_global_data`, of Turing code or of Ampere code, and stricter. That module has
+/// its own copy of everything the image holds, which nothing keeps in step with the copy that the
+/// program reads and writes through the module it holds, by name (`cuModuleGetGlobal`,
+/// `cudaMemcpyToSymbol`). So, beside the relocations and the banks that relocations taint:
+///
+/// - **every constant bank that the kernel reads must be the kernel's alone.** Bank 0 is the
+///   kernel's own (`.nv.constant0.<kernel>`), and the driver fills it, but not all of it for the
+///   launch: beside the parameters and the launch's constants it holds words of the module (at
+///   0x50, the address of the module's `__constant__` bank: a kernel that stores that address, or
+///   reads through it, has the layer's copy). So only the words whose meaning is known count as
+///   the kernel's (`OWN_WORDS`), read at a fixed offset: the parameters (from 0x160), the sizes of
+///   the block and of the grid (0x0 to 0x14), the stack pointer (0x28) and the descriptor of
+///   global memory (0x118, the same in every module). Any other word of bank 0 is data. Another
+///   bank is the kernel's when the cubin has a section of it named for the
+///   kernel (`.nv.constant<N>.<kernel>`: the constants that the compiler made for that kernel),
+///   none shared by the kernels (`.nv.constant<N>`), and no symbol of the cubin is in the
+///   kernel's section: the program names data by a symbol, so nothing of the host can reach bytes
+///   that no symbol names, and they are the image's own in every copy. A `__constant__`
+///   variable is in a bank of the module (bank 3, `.nv.constant3`), read as `c[0x3][...]` with no
+///   relocation: a kernel that reads it is not given.
+/// - an Ampere instruction is read as the Turing instruction that it is by the two descriptions
+///   (`vf_sass::translate::ampere_word`: taken by the translator or only described); the forms of
+///   Ampere's own that the translator rewrites read no constant bank; of any other instruction
+///   nothing is known (`Reach::Unknown`), unless something else of the kernel names data.
+///
+/// - a relocation in one of the kernel's own banks may name a function of the cubin and nothing
+///   else, and an instruction on a texture or a surface (bound to the module by name, with no bank
+///   in its operands) is data.
+///
+/// `Unknown` for code of any other architecture.
+pub fn told_kernel_reach(cubin: &[u8], kernel_name: &str) -> Reach {
+    match fatbin::cubin_sm(cubin) {
+        Some(sm @ (75 | 80)) => reach(cubin, kernel_name, sm, true),
+        sm => Reach::Unknown(format!("machine code for sm_{}", sm.unwrap_or(0))),
+    }
+}
+
+/// Whether `told_kernel_reach` is anything but nothing.
+pub fn told_kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
+    told_kernel_reach(cubin, kernel_name) != Reach::Nothing
+}
+
+/// The cubin of `fat` for `sm` that has kernel `name` (`has_kernel`), decompressed: the machine
+/// code that a GPU of the capability told loads for it (`Policy::told_machine_code`).
+pub fn told_cubin(fat: &FatBinary<'_>, sm: u32, name: &str) -> Option<Vec<u8>> {
+    fat.entries
+        .iter()
+        .filter(|e| e.kind() == KIND_ELF && e.sm() == sm)
+        .filter_map(|entry| entry.payload().ok())
+        .find(|cubin| fatbin::cubin_entries(cubin).is_some_and(|names| names.contains(&name)))
+        .map(|cubin| cubin.into_owned())
+}
+
+fn names_global_data(cubin: &[u8], kernel_name: &str, sm: u32) -> bool {
+    reach(cubin, kernel_name, sm, false) != Reach::Nothing
+}
+
+/// The words of constant bank 0 that are a kernel's own (`told_kernel_reach`), as ranges of
+/// bytes: the sizes of the block and of the grid, the stack pointer, the descriptor of global
+/// memory, and the parameters. Over the sm_80 code of vLLM 0.34.0, PyTorch 2.14.0 and its linalg
+/// library (609 cubins, as NVIDIA's disassembler prints them): 5,218,571 reads at 0x160 or
+/// above, 104,254 at 0x0 to 0x14, 28,727 at 0x28, 30,514 at 0x118, and no other fixed offset but
+/// 0x18 (89), 0x20 and 0x24 (262 each), 0x40 and 0x44 (309) and 60 that are negative, whose
+/// meaning is not known here: not the kernel's. 0x50 is the address of the module's `__constant__`
+/// bank (`tests/kernels/k_told.cu`, `k_const_address`).
+const OWN_WORDS: [(u32, u32); 4] = [(0x0, 0x18), (0x28, 0x2c), (0x118, 0x120), (0x160, u32::MAX)];
+
+/// The mnemonics of the instructions on textures and surfaces.
+fn texture(mnemonic: &str) -> bool {
+    [
+        "TEX",
+        "TLD",
+        "TXQ",
+        "TXD",
+        "TMML",
+        "SULD",
+        "SUST",
+        "SUATOM",
+        "SURED",
+        "SUQ",
+        "FOOTPRINT",
+    ]
+    .iter()
+    .any(|prefix| mnemonic.starts_with(prefix))
+}
+
+/// `kernel_names_global_data` and `told_kernel_reach`: with `own_banks`, every constant bank read
+/// must be the kernel's alone.
+fn reach(cubin: &[u8], kernel_name: &str, sm: u32, own_banks: bool) -> Reach {
+    match vf_sass::elf::Elf::parse(cubin) {
+        Ok(elf) => reach_in(&elf, kernel_name, sm, own_banks),
+        Err(_) => Reach::Unknown("the cubin is not read".into()),
+    }
+}
+
+fn reach_in(elf: &vf_sass::elf::Elf, kernel_name: &str, sm: u32, own_banks: bool) -> Reach {
     let Ok(symbols) = elf.symbols() else {
-        return true;
+        return Reach::Unknown("the symbols of the cubin are not read".into());
     };
     let is_data = |section: usize| {
         elf.sections
@@ -1426,6 +1540,17 @@ pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
             tainted.push(bank);
         }
     }
+    // Whether bank `bank` is the kernel's alone (`told_kernel_reach`).
+    let own = |bank: u32| {
+        if bank == 0 {
+            return true;
+        }
+        let Some(section) = elf.section(&format!(".nv.constant{bank}.{kernel_name}")) else {
+            return false;
+        };
+        elf.section(&format!(".nv.constant{bank}")).is_none() && !symbols.iter().any(|s| s.shndx as usize == section)
+    };
+    let mut unknown = None;
     let mut seen = vec![kernel_name.to_string()];
     let mut work = vec![kernel_name.to_string()];
     while let Some(function) = work.pop() {
@@ -1446,37 +1571,102 @@ pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
             }
             for symbol in relocated_symbols(section) {
                 let Some(target) = symbols.get(symbol).and_then(|s| elf.sections.get(s.shndx as usize)) else {
-                    return true;
+                    return Reach::Data(format!("a relocation of {function} that names nothing of the cubin"));
                 };
                 if let Some(other) = target.name.strip_prefix(".text.") {
                     if !seen.iter().any(|name| name == other) {
                         seen.push(other.to_string());
                         work.push(other.to_string());
                     }
-                } else if !target.name.starts_with(".nv.constant") {
-                    return true;
+                } else if own_banks || !target.name.starts_with(".nv.constant") {
+                    // (For a kernel given alone, also a place in a constant bank: its address
+                    // would be the copy's.)
+                    return Reach::Data(format!("a relocation of {function} to {}", target.name));
                 }
             }
         }
         // The banks its instructions read.
         let code = &elf.sections[text].data;
         if !code.len().is_multiple_of(16) {
-            return true;
+            return Reach::Unknown(format!("the code of {function} is not whole instructions"));
         }
         let mut decoder = vf_sass::decode::Decoder::new(75);
-        for word in code.as_chunks::<16>().0 {
+        for (i, word) in code.as_chunks::<16>().0.iter().enumerate() {
             let word = u128::from_le_bytes(*word);
+            if sm == 80 {
+                match vf_sass::translate::ampere_word(word) {
+                    vf_sass::translate::AmpereWord::Same | vf_sass::translate::AmpereWord::Described => {}
+                    vf_sass::translate::AmpereWord::Rewritten => continue,
+                    vf_sass::translate::AmpereWord::Unsupported => {
+                        unknown.get_or_insert_with(|| {
+                            format!("the instruction of {function} at 0x{:x} is not read", 16 * i)
+                        });
+                        continue;
+                    }
+                }
+            }
             let Some(d) = decoder.decode(word) else {
-                return true;
+                unknown.get_or_insert_with(|| format!("the instruction of {function} at 0x{:x} is not read", 16 * i));
+                continue;
             };
+            if own_banks && texture(d.mnemonic) {
+                return Reach::Data(format!(
+                    "a texture or a surface of the image ({} at 0x{:x})",
+                    d.mnemonic,
+                    16 * i
+                ));
+            }
             for field in ["Sa_bank", "Sb_bank", "Sc_bank", "bank5"] {
-                if d.has_op_name(field) && tainted.contains(&d.op_or_name(field, 0)) {
-                    return true;
+                if !d.has_op_name(field) {
+                    continue;
+                }
+                let bank = d.op_or_name(field, 0);
+                if own_banks && bank == 0 {
+                    // The word of bank 0 that is read, at a fixed offset: in words of four bytes,
+                    // but in bytes in the load of a uniform register; the other loads from a
+                    // bank (LDC, ULDC at an index) are at an offset that a register gives. Eight
+                    // bytes for an operand of two registers.
+                    let load = d.name.starts_with("ldc") || d.name.starts_with("uldc");
+                    let fixed = !load || d.name == "uldc_const__RCR";
+                    let unit = if load { 1 } else { 4 };
+                    let offset = match field.strip_suffix("_bank").map(|operand| format!("{operand}_addr")) {
+                        Some(address) if fixed && d.has_op_name(&address) => Some(unit * d.op_or_name(&address, 0)),
+                        _ => None,
+                    };
+                    let wide = d.mnemonic.starts_with('D')
+                        || d.name.contains("_wide")
+                        || (d.mnemonic == "ULDC" && d.op_or_name("sz", 0) == 5);
+                    let own = offset.is_some_and(|at| {
+                        let end = at.saturating_add(if wide { 8 } else { 4 });
+                        at % 4 == 0 && OWN_WORDS.iter().any(|&(from, to)| from <= at && end <= to)
+                    });
+                    if !own {
+                        return Reach::Data(match offset {
+                            Some(at) => format!(
+                                "the word of constant bank 0 at 0x{at:x}, which is not known to be the kernel's \
+                                 own (read at 0x{:x}; 0x50 is the address of the image's constants)",
+                                16 * i
+                            ),
+                            None => format!("constant bank 0 at an offset that is computed (read at 0x{:x})", 16 * i),
+                        });
+                    }
+                }
+                if tainted.contains(&bank) {
+                    return Reach::Data(format!(
+                        "constant bank {bank}, which holds addresses of the image's variables (read at 0x{:x})",
+                        16 * i
+                    ));
+                }
+                if own_banks && bank != 0 && !(function == kernel_name && own(bank)) {
+                    return Reach::Data(format!(
+                        "constant bank {bank}, which is not this kernel's alone (read at 0x{:x})",
+                        16 * i
+                    ));
                 }
             }
         }
     }
-    false
+    unknown.map_or(Reach::Nothing, Reach::Unknown)
 }
 
 /// For a section of relocations (`SHT_REL`, `SHT_RELA`): the name of the section it relocates.
@@ -2105,6 +2295,237 @@ mod tests {
     /// `tests/kernels/k_sections.cu`: machine code for sm_75 and sm_80, no PTX; `k_from_80` is in the
     /// code for sm_80 only, `k_before_80` in the code for sm_75 only, `k_both` in both.
     const SECTIONS: &[u8] = include_bytes!("../../../tests/kernels/k_sections.135.sm75-sm80.fatbin");
+
+    /// `tests/kernels/k_told.cu`: machine code for sm_75 and sm_80, no PTX; in the code for sm_80
+    /// only, `k_bf16_sum` and `k_divides`, which reach no data of the image, `k_reads_data`, which
+    /// reads a variable of it, and `k_not_translated`.
+    const TOLD: &[u8] = include_bytes!("../../../tests/kernels/k_told.135.sm75-sm80.fatbin");
+
+    #[test]
+    fn a_kernel_of_the_code_for_the_capability_told_is_given_alone_only_if_it_reaches_no_data() {
+        let fat = fatbin::parse(TOLD).unwrap();
+        let policy = Policy {
+            told_sm: Some(80),
+            keep_sources: true,
+            ..Policy::default()
+        };
+        assert_eq!(policy.told_machine_code(&fat, 75), Some(80));
+        assert!(policy.translates(80) && policy.translates(75) && !policy.translates(86));
+        // The cubin that has the kernel, from the program's image and from the image given to
+        // the driver, which keeps it.
+        let cubin = told_cubin(&fat, 80, "k_bf16_sum").unwrap();
+        assert_eq!(fatbin::cubin_sm(&cubin), Some(80));
+        let given = policy.adapt_fatbin(&fat).unwrap().image.unwrap();
+        assert_eq!(
+            told_cubin(&fatbin::parse(&given).unwrap(), 80, "k_divides"),
+            Some(cubin.clone())
+        );
+        assert_eq!(told_cubin(&fat, 80, "k_before_80"), None);
+        assert_eq!(told_cubin(&fat, 86, "k_bf16_sum"), None);
+        // Kernels that reach nothing of the image.
+        for kernel in ["k_bf16_sum", "k_divides", "k_both"] {
+            assert_eq!(told_kernel_reach(&cubin, kernel), Reach::Nothing, "{kernel}");
+            // The second translation at launch is of Turing code only, as before.
+            assert!(kernel_names_global_data(&cubin, kernel), "{kernel}");
+        }
+        // A variable that the program sets, and a table that nothing writes: through the bank
+        // of the image's addresses, in instructions that the translator does not take and that
+        // are read all the same. A `__constant__` variable: in a bank of the module, read with
+        // no relocation, by an instruction that the translator takes (the kernel is translated).
+        let data = |kernel: &str| match told_kernel_reach(&cubin, kernel) {
+            Reach::Data(what) => what,
+            other => panic!("{kernel}: {other:?}"),
+        };
+        for kernel in ["k_reads_data", "k_reads_table"] {
+            assert!(
+                data(kernel).starts_with("constant bank 4, which holds addresses of the image's variables"),
+                "{}",
+                data(kernel)
+            );
+        }
+        assert!(
+            data("k_adds_const").starts_with("constant bank 3, which is not this kernel's alone"),
+            "{}",
+            data("k_adds_const")
+        );
+        let translated = vf_sass::translate::translate(&cubin, false).unwrap();
+        let refused = |name: &str| {
+            translated
+                .report
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .refused
+                .clone()
+        };
+        assert_eq!(refused("k_adds_const"), None);
+        // Bank 0 is not all the kernel's own: the driver puts the address of the module's
+        // `__constant__` bank at 0x50. A kernel that stores that address is translated, every
+        // word of it read, and has no relocation; one that reads through it has a load that is
+        // not read, and is refused for the word of bank 0 all the same, whatever is read later.
+        assert_eq!(refused("k_const_address"), None);
+        for kernel in ["k_const_address", "k_mixed_ptr"] {
+            assert!(
+                data(kernel)
+                    .starts_with("the word of constant bank 0 at 0x50, which is not known to be the kernel's own"),
+                "{}",
+                data(kernel)
+            );
+        }
+        assert!(refused("k_reads_data").is_some() && refused("k_reads_table").is_some());
+        // An instruction that is not read: nothing is known.
+        assert!(matches!(
+            told_kernel_reach(&cubin, "k_not_translated"),
+            Reach::Unknown(_)
+        ));
+        assert!(told_kernel_names_global_data(&cubin, "k_not_translated"));
+
+        // What makes a bank the kernel's alone, on copies of the cubin changed for it.
+        let parsed = || vf_sass::elf::Elf::parse(&cubin).unwrap();
+        let of = |elf: &vf_sass::elf::Elf, kernel: &str| reach_in(elf, kernel, 80, true);
+        // Bank 3 named for the kernel, with the variable's symbol still in it: the program can
+        // name those bytes. Without a symbol in it: the kernel's alone. With a bank 3 of the
+        // module beside it: not its alone.
+        let mut named = parsed();
+        let bank = named.section(".nv.constant3").unwrap();
+        named.sections[bank].name = ".nv.constant3.k_adds_const".into();
+        assert!(matches!(of(&named, "k_adds_const"), Reach::Data(_)));
+        let mut symbols = named.symbols().unwrap();
+        for symbol in symbols.iter_mut().filter(|s| s.shndx as usize == bank) {
+            symbol.shndx = 0;
+        }
+        named.set_symbols(&symbols);
+        assert_eq!(of(&named, "k_adds_const"), Reach::Nothing);
+        let mut both = parsed();
+        let mut copy = named.sections[bank].clone();
+        copy.name = ".nv.constant3.k_adds_const".into();
+        both.sections.push(copy);
+        assert!(matches!(of(&both, "k_adds_const"), Reach::Data(_)));
+        // A bank named for another kernel is not this one's.
+        let mut other = parsed();
+        other.sections[bank].name = ".nv.constant3.k_both".into();
+        assert!(matches!(of(&other, "k_adds_const"), Reach::Data(_)));
+        // For the second translation at launch (Turing code, the other guard of fit.rs), a bank
+        // without relocations is not looked at, as before.
+        assert_eq!(reach_in(&parsed(), "k_adds_const", 80, false), Reach::Nothing);
+        // A relocation of the kernel's code to a function that the cubin has not (a device
+        // function of another cubin), or to the image's data.
+        let relocation = |symbol: u64| {
+            let mut elf = parsed();
+            let mut section = elf.sections[elf.section(".rel.nv.constant4").unwrap()].clone();
+            section.name = ".rel.text.k_bf16_sum".into();
+            section.data = [0u64.to_le_bytes(), (symbol << 32 | 2).to_le_bytes()].concat();
+            elf.sections.push(section);
+            elf
+        };
+        let symbols = parsed().symbols().unwrap();
+        let variable = symbols.iter().position(|s| s.name == "told_scale").unwrap() as u64;
+        for symbol in [0, symbols.len() as u64 + 7, variable] {
+            assert!(
+                matches!(of(&relocation(symbol), "k_bf16_sum"), Reach::Data(_)),
+                "{symbol}"
+            );
+        }
+        let kernel = symbols.iter().position(|s| s.name == "k_both").unwrap() as u64;
+        assert_eq!(of(&relocation(kernel), "k_bf16_sum"), Reach::Nothing);
+        // k_mixed_ptr with the load that is not read made one that is (a word of the kernel that
+        // reads no bank): every word read, no relocation, and still the word at 0x50.
+        let mut readable = parsed();
+        let text = readable.section(".text.k_mixed_ptr").unwrap();
+        let words: Vec<u128> = readable.sections[text]
+            .data
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|w| u128::from_le_bytes(*w))
+            .collect();
+        let read = |w: u128| {
+            !matches!(
+                vf_sass::translate::ampere_word(w),
+                vf_sass::translate::AmpereWord::Unsupported
+            )
+        };
+        let mut decoder = vf_sass::decode::Decoder::new(75);
+        let plain = *words
+            .iter()
+            .find(|&&w| {
+                matches!(vf_sass::translate::ampere_word(w), vf_sass::translate::AmpereWord::Same)
+                    && decoder.decode(w).is_some_and(|d| {
+                        !["Sa_bank", "Sb_bank", "Sc_bank", "bank5"]
+                            .iter()
+                            .any(|f| d.has_op_name(f))
+                    })
+            })
+            .unwrap();
+        let unread: Vec<usize> = (0..words.len()).filter(|&i| !read(words[i])).collect();
+        assert!(!unread.is_empty());
+        for i in unread {
+            readable.sections[text].data[16 * i..16 * i + 16].copy_from_slice(&plain.to_le_bytes());
+        }
+        match of(&readable, "k_mixed_ptr") {
+            Reach::Data(what) => assert!(what.starts_with("the word of constant bank 0 at 0x50"), "{what}"),
+            other => panic!("{other:?}"),
+        }
+        // A relocation in a bank of the kernel's own to a place in a constant bank (a symbol of
+        // bank 3): the address of the copy. To a function of the cubin: nothing.
+        let in_bank = |symbol: u64| {
+            let mut elf = relocation(symbol);
+            elf.sections.last_mut().unwrap().name = ".rel.nv.constant0.k_bf16_sum".into();
+            elf
+        };
+        let bank3 = parsed().section(".nv.constant3").unwrap();
+        let constants = symbols.iter().position(|s| s.shndx as usize == bank3).unwrap() as u64;
+        assert!(matches!(of(&in_bank(constants), "k_bf16_sum"), Reach::Data(_)));
+        assert_eq!(of(&in_bank(kernel), "k_bf16_sum"), Reach::Nothing);
+        // The words of bank 0, on the instruction of k_both that reads the stack pointer
+        // (c[0x0][0x28]), made to read other words.
+        let word_of_bank_0 = |offset: u32| {
+            let mut elf = parsed();
+            let text = elf.section(".text.k_both").unwrap();
+            let mut decoder = vf_sass::decode::Decoder::new(75);
+            let first = u128::from_le_bytes(elf.sections[text].data[..16].try_into().unwrap());
+            let d = decoder.decode(first).unwrap();
+            let address = ["Sa_addr", "Sb_addr", "Sc_addr"]
+                .into_iter()
+                .find(|a| d.has_op_name(a))
+                .unwrap();
+            assert_eq!(4 * d.op_or_name(address, 0), 0x28, "{}", d.name);
+            // (The address is a field of the word: found by where 0x28 / 4 is.)
+            let bit = (0..114)
+                .find(|&bit| {
+                    (first >> bit) & 0x3fff == 0x28 / 4 && {
+                        let changed = (first & !(0x3fffu128 << bit)) | (u128::from(0x50u32 / 4) << bit);
+                        decoder
+                            .decode(changed)
+                            .is_some_and(|c| 4 * c.op_or_name(address, 0) == 0x50)
+                    }
+                })
+                .unwrap();
+            let changed = (first & !(0x3fffu128 << bit)) | (u128::from(offset / 4) << bit);
+            elf.sections[text].data[..16].copy_from_slice(&changed.to_le_bytes());
+            of(&elf, "k_both")
+        };
+        for own in [0x0, 0x4, 0x8, 0xc, 0x10, 0x14, 0x28, 0x118, 0x11c, 0x160, 0x164, 0x400] {
+            assert_eq!(word_of_bank_0(own), Reach::Nothing, "0x{own:x}");
+        }
+        for data in [
+            0x18, 0x1c, 0x20, 0x24, 0x2c, 0x40, 0x44, 0x50, 0x54, 0x114, 0x120, 0x15c,
+        ] {
+            assert!(matches!(word_of_bank_0(data), Reach::Data(_)), "0x{data:x}");
+        }
+        assert!(texture("TEX") && texture("SULD") && texture("TLD4") && !texture("STG") && !texture("LDG"));
+
+        // Turing code is read as for the second translation at launch, and with the banks.
+        for (kernel, names_data) in [("k_fit_regs", false), ("k_fit_reads_global", true)] {
+            assert_eq!(kernel_names_global_data(FIT, kernel), names_data, "{kernel}");
+            assert_eq!(told_kernel_names_global_data(FIT, kernel), names_data, "{kernel}");
+        }
+        // Code of an architecture that the layer does not translate.
+        let mut later = cubin.clone();
+        let at = if later[8] >= 8 { 0x31 } else { 0x30 };
+        later[at] = 86;
+        assert!(matches!(told_kernel_reach(&later, "k_bf16_sum"), Reach::Unknown(_)));
+    }
 
     #[test]
     fn the_code_that_a_gpu_of_the_capability_told_loads_is_found_beside_the_code_given() {

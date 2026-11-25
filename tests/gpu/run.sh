@@ -651,35 +651,92 @@ refuse refuse-link link "ALL CHECKS PASSED" \
 
 # A fat binary whose machine code for sm_80 has a kernel that its code for sm_75 has not
 # (tests/kernels/k_sections.cu; vLLM 0.34's library has its bf16 norm so). The layer gives it its
-# sm_75 code, whatever it is told. Told 8.0, a program asks for the kernel of the sm_80 code: the
-# lookup fails as the driver answers (500), and the layer says once, whatever the interface, that
-# only the code for sm_80 has it, which it did not give, and why (until 2026-11-24 it said
-# nothing). Told 7.5 (by default) it says nothing: a GPU of 7.5 has no such kernel either. With
-# VF_TRANSLATE=first the sm_80 code is translated, and has the kernel.
+# sm_75 code, whatever it is told. Told 8.0, a program asks for the kernel of the sm_80 code, which
+# the driver does not find in the code given (500): the layer then gives that kernel from the sm_80
+# code, translated, in a module of its own, and says so once, whatever the interface; the kernel
+# runs and stores what the sm_80 code stores (until 2026-11-25 the lookup failed, with a line since
+# 2026-11-24; `VF_TOLD_CODE=0` is that again). Told 7.5 (by default) the lookup fails and nothing is
+# said: a GPU of 7.5 has no such kernel either. With VF_TRANSLATE=first the whole sm_80 code is
+# translated, and has the kernel.
 [ -x "$out/bin/test_sections" ] && [ "$out/bin/test_sections" -nt "$G/test_sections.c" ] || gcc -O2 -Wall -o "$out/bin/test_sections" "$G/test_sections.c" -ldl || exit 2
-sections() {  # sections NAME INTERFACE EXPECTED...
-    local name=$1 interface=$2; shift 2
+[ -x "$out/bin/test_told" ] && [ "$out/bin/test_told" -nt "$G/test_told.c" ] || gcc -O2 -Wall -o "$out/bin/test_told" "$G/test_told.c" -ldl -lm || exit 2
+sections() {  # sections NAME PROGRAM INTERFACE EXPECTED...
+    local name=$1 program=$2 interface=$3 image=k_sections; shift 3
+    [ "$program" = test_told ] && image=k_told
     log=$out/logs/$name.log
-    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=1 "$out/bin/test_sections" "$G/k_sections.135.sm75-sm80.fatbin" \
+    DRVRUN_LIBCUDA=$proxy/libcuda.so.1 VF_LOG_LEVEL=1 "$out/bin/$program" "$G/$image.135.sm75-sm80.fatbin" \
         "$interface" >"$log" 2>&1
     echo "lines that say a kernel is not in the code given: $(grep -c 'is not in the code that the layer gives' "$log")" >>"$log"
-    echo "of them for k_from_80: $(grep -c 'kernel k_from_80 is not in the code' "$log")" >>"$log"
+    echo "lines that say a kernel is given from the sm_80 code: $(grep -c 'is given from the machine code for sm_80 of its image' "$log")" >>"$log"
+    echo "of them for k_from_80: $(grep -c 'kernel k_from_80 is given from the machine code' "$log")" >>"$log"
+    echo "lookups that failed otherwise than 500: $(grep -E ': lookup [0-9]+' "$log" | grep -Evc ': lookup (0|500)( |$)')" >>"$log"
     check "$name" "$@"
 }
-said=("kernel k_from_80 is not in the code that the layer gives for its image \("
-    "[0-9]+ bytes, XXH64 [0-9a-f]{16}\), its machine code for sm_75 translated: it is only in the image's machine code for sm_80, which a GPU of the capability told \(8\.0\) loads\. The lookup fails as the driver answers for a name that it does not have \(error 500\): the layer gives an image that has machine code for sm_75 and sm_80 its code for sm_75, whatever the capability told")
-given=("k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75" "k_from_80: lookup 500$" "k_nowhere: lookup 500$")
-once=("lines that say a kernel is not in the code given: 1$" "of them for k_from_80: 1$")
-VF_CAPABILITY=8.0 sections sections-told-8.0-module module "${given[@]}" "${said[0]}${said[1]}" "${once[@]}" "^8 lookups"
-VF_CAPABILITY=8.0 sections sections-told-8.0-file file "${given[@]}" \
-    "${said[0]}[^ ]*/k_sections\.135\.sm75-sm80\.fatbin: ${said[1]}" "${once[@]}" "^8 lookups"
-VF_CAPABILITY=8.0 sections sections-told-8.0-library library "${given[@]}" "${said[0]}${said[1]}" \
-    "k_from_80: lookup 500 \(in the library's module\)" "${once[@]}" "^12 lookups"
-by_default sections sections-told-7.5 library "${given[@]}" "lines that say a kernel is not in the code given: 0$" \
-    "^12 lookups"
-VF_CAPABILITY=8.0 VF_TRANSLATE=first sections sections-told-8.0-first library "k_both: ran the code for sm_80" \
+from_80=("kernel k_from_80 is given from the machine code for sm_80 of its image \("
+    "[0-9]+ bytes, XXH64 [0-9a-f]{16}\), translated, in a (module|library) of its own: the code that the layer gives for the image, its machine code for sm_75, has no kernel of that name, and a GPU of the capability told \(8\.0\) loads the code for sm_80\. Its translation is not independently validated")
+given=("k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75" "k_from_80: lookup 0$"
+    "k_from_80: ran the code for sm_80" "k_nowhere: lookup 500$" "lines that say a kernel is not in the code given: 0$")
+once=("lines that say a kernel is given from the sm_80 code: 1$" "of them for k_from_80: 1$")
+VF_CAPABILITY=8.0 sections sections-told-8.0-module test_sections module "${given[@]}" "${from_80[0]}${from_80[1]}" "${once[@]}" "^8 lookups"
+VF_CAPABILITY=8.0 sections sections-told-8.0-file test_sections file "${given[@]}" \
+    "${from_80[0]}[^ ]*/k_sections\.135\.sm75-sm80\.fatbin: ${from_80[1]}" "${once[@]}" "^8 lookups"
+VF_CAPABILITY=8.0 sections sections-told-8.0-library test_sections library "${given[@]}" "${from_80[0]}${from_80[1]}" \
+    "k_from_80: lookup 0 \(in the library's module\)" "${once[@]}" "^12 lookups"
+by_default sections sections-told-7.5 test_sections library "k_both: ran the code for sm_75" \
+    "k_before_80: ran the code for sm_75" "k_from_80: lookup 500$" "k_nowhere: lookup 500$" \
+    "lines that say a kernel is not in the code given: 0$" "lines that say a kernel is given from the sm_80 code: 0$" "^12 lookups"
+VF_CAPABILITY=8.0 VF_TRANSLATE=first sections sections-told-8.0-first test_sections library "k_both: ran the code for sm_80" \
     "k_from_80: ran the code for sm_80" "k_before_80: lookup 500$" "lines that say a kernel is not in the code given: 0$" \
-    "^12 lookups"
+    "lines that say a kernel is given from the sm_80 code: 0$" "^12 lookups"
+# The same with the switch off: the lookup fails as the driver answers, and the line says which
+# code has the kernel (what 2026-11-24 did).
+VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections sections-told-8.0-off test_sections library "k_both: ran the code for sm_75" \
+    "k_from_80: lookup 500$" "k_from_80: lookup 500 \(in the library's module\)" \
+    "kernel k_from_80 is not in the code that the layer gives for its image \([0-9]+ bytes, XXH64 [0-9a-f]{16}\), its machine code for sm_75 translated: it is only in the image's machine code for sm_80, which a GPU of the capability told \(8\.0\) loads\. The lookup fails as the driver answers for a name that it does not have \(error 500\): the layer gives an image that has machine code for sm_75 and sm_80 its code for sm_75, whatever the capability told, as its translation of machine code for sm_80 covers fewer instructions and is not independently validated \(LIMITS\.md, \"The capability told with VF_CAPABILITY\"\)$" \
+    "lines that say a kernel is not in the code given: 1$" "lines that say a kernel is given from the sm_80 code: 0$"
+
+# What such a kernel computes, and which are not given (tests/kernels/k_told.cu, test_told.c). Told
+# 8.0: the sums of pairs of bf16 and the pairs of bf16 nearest to f32 that only the sm_80 code has
+# (two instructions of sm_80 that Volta has not, rewritten) are the host's, every one, also through
+# the library's module and after the image is loaded again; the quotients of a division whose slow
+# path is a function inside the kernel are the host's; the kernel's library is the one the program
+# loaded. Not given, their lookups failing as before with a line that says why for each: a kernel
+# that reads a variable of the image, which the program sets through the module it holds, and one
+# that reads a table of the image (both through the bank of the image's addresses), one that adds
+# a `__constant__` variable (read from a constant bank of the module, with no relocation: the
+# program sets it to 20 where the image has 1.5, and a module of the layer's own would add 1.5),
+# one that stores the address of that variable (which the driver puts in a word of the kernel's
+# own bank 0: every instruction of it is translated, and it has no relocation),
+# and one that the layer does not translate (a sum of pairs of f16). In safe mode the same (the
+# kernel has no other code here). Told 7.5 none is given, and nothing is said.
+bf16=("k_bf16_sum: lookup 0$" "k_bf16_sum: 16384 sums, 0 differ from the sum rounded once to bf16"
+    "k_bf16_sum: 16384 conversions, 0 differ from the nearest bf16"
+    "k_bf16_sum, loaded again: 16384 sums, 0 differ" "k_bf16_sum, loaded again: 16384 conversions, 0 differ"
+    "k_divides: lookup 0$" "k_divides: 8192 quotients, 0 differ from the host's"
+    "k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75"
+    "kernel k_bf16_sum is given from the machine code for sm_80 of its image" "kernel k_divides is given from the machine code for sm_80 of its image"
+    "lines that say a kernel is given from the sm_80 code: 2$"
+    "k_reads_data: lookup 500$" "k_not_translated: lookup 500$" "k_nowhere: lookup 500$"
+    "k_reads_table: lookup 500$" "k_adds_const: lookup 500$" "k_const_address: lookup 500$"
+    "kernel k_reads_data is not in the code that the layer gives for its image .*\(LIMITS\.md, \"The capability told with VF_CAPABILITY\"\)\. The kernel alone is not given from the code for sm_80 either: it can reach data of its image, of which a (module|library) of its own would have another copy than the one that the program reads and writes: constant bank 4, which holds addresses of the image's variables"
+    "kernel k_reads_table is not in the code .* either: it can reach data of its image, .*: constant bank 4, which holds addresses of the image's variables"
+    "kernel k_adds_const is not in the code .* either: it can reach data of its image, .*: constant bank 3, which is not this kernel's alone"
+    "kernel k_const_address is not in the code .* either: it can reach data of its image, .*: the word of constant bank 0 at 0x50, which is not known to be the kernel's own"
+    "kernel k_not_translated is not in the code that the layer gives for its image .*\. The kernel alone is not given from the code for sm_80 either: its machine code for sm_80 is not translated \(unsupported sm_80 instruction [0-9a-f]{32} at 0x[0-9a-f]+\)$"
+    "lines that say a kernel is not in the code given: 5$" "lookups that failed otherwise than 500: 0$"
+    "^unload: 0$" "the context goes on: 7$")
+VF_CAPABILITY=8.0 sections told-8.0-module test_told module "${bf16[@]}" "told_scale set to 3: 0" "told_bias set to 10, 20, 30, 40: 0" "^20 lookups"
+VF_CAPABILITY=8.0 sections told-8.0-file test_told file "${bf16[@]}" "^20 lookups"
+VF_CAPABILITY=8.0 sections told-8.0-library test_told library "${bf16[@]}" "k_bf16_sum: its library is the one loaded" \
+    "k_divides: its library is the one loaded" "k_bf16_sum: lookup 0 \(in the library's module\)" \
+    "k_bf16_sum \(in the library's module\): 16384 sums, 0 differ" "k_reads_data: lookup 500 \(in the library's module\)" "k_adds_const: lookup 500 \(in the library's module\)" "^30 lookups"
+VF_CAPABILITY=8.0 VF_SAFE=1 sections told-8.0-safe test_told library "${bf16[@]}" "^30 lookups"
+by_default sections told-7.5 test_told library "k_both: ran the code for sm_75" "k_before_80: ran the code for sm_75" \
+    "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" "k_reads_data: lookup 500$" "k_bf16_sum, loaded again: lookup 500$" \
+    "lines that say a kernel is not in the code given: 0$" "lines that say a kernel is given from the sm_80 code: 0$" \
+    "lookups that failed otherwise than 500: 0$" "^30 lookups"
+VF_CAPABILITY=8.0 VF_TOLD_CODE=0 sections told-8.0-off test_told library "k_bf16_sum: lookup 500$" "k_divides: lookup 500$" \
+    "lines that say a kernel is not in the code given: 7$" "lines that say a kernel is given from the sm_80 code: 0$" "^30 lookups"
 
 # A refused kernel of which the program holds a handle that the layer did not give (taken here from
 # NVIDIA's driver itself, as cuFFT takes the functions of its modules from a private table) is not

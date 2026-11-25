@@ -10,7 +10,7 @@
 
 /// Assembly setters: (name_id, field_id, scale, default_value, enum_entries_offset).
 /// enum_entries_offset is 0xFFFFFFFF when the operand is not an enum.
-pub static ASM_SETTERS: [(u16, u16, u16, u32, u32); 380] = [
+pub static ASM_SETTERS: [(u16, u16, u16, u32, u32); 402] = [
     (0, 1, 0, 7, 0x0),
     (10, 10, 0, 255, 0xa),
     (13, 12, 0, 255, 0xa),
@@ -391,9 +391,31 @@ pub static ASM_SETTERS: [(u16, u16, u16, u32, u32); 380] = [
     (46, 46, 0, 7, 0x0),
     (48, 47, 4, 0, 0xffffffff),
     (14, 17, 0, 0, 0xffffffff),
+    (0, 1, 0, 7, 0x0),
+    (63, 55, 0, 0, 0x410),
+    (65, 25, 0, 0, 0x415),
+    (79, 61, 0, 0, 0x466),
+    (10, 10, 0, 255, 0xa),
+    (11, 11, 0, 255, 0xa),
+    (22, 12, 0, 255, 0xa),
+    (14, 17, 0, 0, 0xffffffff),
+    (0, 1, 0, 7, 0x0),
+    (78, 65, 0, 0, 0x469),
+    (99, 68, 0, 0, 0x46c),
+    (79, 61, 0, 0, 0x466),
+    (10, 10, 0, 255, 0xa),
+    (11, 11, 0, 255, 0xa),
+    (82, 66, 0, 0, 0x470),
+    (38, 67, 0, 0, 0xffffffff),
+    (100, 52, 0, 0, 0xffffffff),
+    (22, 13, 0, 255, 0xa),
+    (101, 69, 0, 0, 0x470),
+    (14, 17, 0, 0, 0xffffffff),
+    (15, 18, 0, 7, 0xffffffff),
+    (16, 19, 0, 7, 0xffffffff),
 ];
 
-pub static ASM_ENUM_ENTRIES: [(&str, u32); 1126] = [
+pub static ASM_ENUM_ENTRIES: [(&str, u32); 1141] = [
     ("P0", 0x0),
     ("P1", 0x1),
     ("P2", 0x2),
@@ -1520,9 +1542,24 @@ pub static ASM_ENUM_ENTRIES: [(&str, u32); 1126] = [
     ("U", 0x1),
     ("nocond", 0x0),
     ("", 0xffffffff),
+    ("SAT", 0x1),
+    ("nosat", 0x0),
+    ("", 0xffffffff),
+    ("F16_V2", 0x0),
+    ("F32", 0x1),
+    ("", 0xffffffff),
+    ("FMZ", 0x1),
+    ("FTZ", 0x2),
+    ("nofmz", 0x0),
+    ("", 0xffffffff),
+    ("F32", 0x1),
+    ("H0_H0", 0x2),
+    ("H1_H0", 0x0),
+    ("H1_H1", 0x3),
+    ("", 0xffffffff),
 ];
 
-pub static ASM_ATTR_SETTERS: [(&str, u16); 76] = [
+pub static ASM_ATTR_SETTERS: [(&str, u16); 86] = [
     ("Pg_not", 15),
     ("Pg_not", 15),
     ("Pp_not", 30),
@@ -1599,11 +1636,21 @@ pub static ASM_ATTR_SETTERS: [(&str, u16); 76] = [
     ("Pg_not", 15),
     ("Pg_not", 15),
     ("Pp_not", 30),
+    ("Pg_not", 15),
+    ("Ra_absolute", 36),
+    ("Ra_negate", 2),
+    ("Rc_absolute", 58),
+    ("Rc_negate", 59),
+    ("Pg_not", 15),
+    ("Ra_absolute", 36),
+    ("Ra_negate", 2),
+    ("Rc_absolute", 70),
+    ("Rc_negate", 37),
 ];
 
 /// Assembly templates: (name, base_lo, base_hi, setter_off, setter_len, attr_off, attr_len).
 #[allow(clippy::type_complexity)]
-pub static ASM_TEMPLATES: [(&str, u64, u64, u16, u16, u16, u16); 44] = [
+pub static ASM_TEMPLATES: [(&str, u64, u64, u16, u16, u16, u16); 46] = [
     ("mov__RRR_RR", 0x0000000000000202, 0x000fc20000000000, 0, 5, 0, 1),
     ("isetp__RRR_RR", 0x000000000000020c, 0x000fc20000000000, 5, 12, 1, 3),
     ("sel__RRR_RRR", 0x0000000000000207, 0x000fc20000000000, 17, 6, 4, 2),
@@ -1760,4 +1807,6 @@ pub static ASM_TEMPLATES: [(&str, u64, u64, u16, u16, u16, u16); 44] = [
     ("atoms__RaNonRZ", 0x000000000000038c, 0x00000200000000ff, 348, 10, 72, 1),
     ("atomg__RaNonRZ", 0x00000000000003a8, 0x00000200000000ff, 358, 16, 73, 1),
     ("bra_", 0x0000000000000947, 0x000fc20000000000, 374, 6, 74, 2),
+    ("fadd__RRR_RR", 0x0000000000000221, 0x000fc20000000000, 380, 8, 76, 5),
+    ("hfma2__RIR", 0x0000000000000831, 0x0000020000000000, 388, 14, 81, 5),
 ];

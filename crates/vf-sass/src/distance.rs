@@ -53,6 +53,32 @@ fn least_in_tables(letter: u8, role: u8, writer: &Decoded, reader_kind: Kind) ->
     if found { max_d } else { 15 }
 }
 
+/// The distance that native sm_70 code keeps from `writer` to a reader that waits for the
+/// scoreboard on which it announces its result, where a wait is not all it keeps: `None` for every
+/// writer but the four of double precision. A reader of what DADD, DMUL, DFMA or DSETP writes
+/// never comes closer than this in Volta's own code, scoreboard or not (8 cycles to an instruction
+/// of the same pipe, 9 to any other; a predicate of DSETP 15 as a guard or to a branch), where
+/// code for sm_80 has 6 and 14 (docs/validation.md, section 8). Port of `Machine.waited`.
+pub fn waited(letter: u8, role: u8, writer: &Decoded, reader_kind: Kind) -> Option<u32> {
+    if !matches!(writer.mnemonic, "DADD" | "DMUL" | "DFMA" | "DSETP") {
+        return None;
+    }
+    if letter == 2 && (role == 1 || reader_kind == Kind::BRU) {
+        return Some(15);
+    }
+    Some(if reader_kind == Kind::FMALITE { 8 } else { 9 })
+}
+
+/// `waited` for any reader: what is kept from `writer` to the end of straight-line code, where
+/// the reader is not seen (it may be the first instruction of a branch's target). Port of
+/// `Machine.waited_longest`.
+pub fn waited_longest(letter: u8, writer: &Decoded) -> Option<u32> {
+    if !matches!(writer.mnemonic, "DADD" | "DMUL" | "DFMA" | "DSETP") {
+        return None;
+    }
+    Some(if letter == 2 { 15 } else { 9 })
+}
+
 /// The distance that is enough from `writer` to any reader of what it writes.
 pub fn longest(letter: u8, writer: &Decoded) -> u32 {
     let mut max_d = 0u32;

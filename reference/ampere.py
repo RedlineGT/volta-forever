@@ -1,6 +1,6 @@
 """Decode the narrow sm_80 forms with known Volta translations, or refuse the function."""
 from functools import lru_cache
-from ampere_forms import canonical_forms, forms
+from ampere_forms import canonical_forms, forms, evidenced_forms
 
 from machine import USCHED, WRITE_BARRIER, READ_BARRIER, WAIT
 
@@ -9,6 +9,16 @@ CONTROLS = 0x1ffff << USCHED
 @lru_cache(maxsize=1)
 def supported():
     return canonical_forms(), forms()
+
+
+@lru_cache(maxsize=1)
+def whole():
+    """The forms of whole classes that ran right on a V100 (ampere-evidence.txt), by the twelve
+    low bits of their opcode."""
+    by_opcode = {}
+    for _, fixed, variable in evidenced_forms():
+        by_opcode.setdefault(fixed & 0xfff, []).append((fixed, variable))
+    return by_opcode
 
 
 def matches(bits, form):
@@ -20,9 +30,11 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
     if not code or len(code) % 16:
         raise refuse('sm_80 code is empty or contains a partial instruction')
     canonical, shared = supported()
+    classes = whole()
     result, steps, uses, operations = bytearray(), [], {}, {}
     joins, syncs = {}, []
     calls, branches, helper_writes = [], set(), set()
+    copies, copied = {}, []
     returns = previous_move = None
     saw_return = False
     for at in range(0, len(code), 16):
@@ -32,28 +44,31 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
         bits = source & ~CONTROLS
         rd, addr, rb = [(source >> shift) & 255 for shift in (16, 24, 32)]
         descriptor = None
-        load128 = matches(bits, canonical['LOAD128'])
-        store128 = matches(bits, canonical['STORE128'])
-        const64 = matches(bits, canonical['LOAD64_CONST'])
-        store64 = matches(bits, canonical['STORE64'])
+        load = matches(bits, canonical['LOAD'])
+        constant = matches(bits, canonical['LOAD_CONST'])
+        store = matches(bits, canonical['STORE'])
         offset = source >> 40 & 0xffffff
-        if load128 or store128 or const64 or store64:
-            vector = rd if load128 or const64 else rb
-            width = 4 if load128 or store128 else 2
-            zero_store = store128 and vector == 255
-            aligned_vector = vector % width == 0 and vector <= 256 - 2 * width
-            if not (aligned_vector or zero_store) or addr % 2 or addr > 252:
-                raise refuse(f'invalid register group for sm_80 vector access at 0x{at:x}')
-        weak32 = matches(bits, canonical['LOAD32'])
-        const32 = matches(bits, canonical['LOAD32_CONST'])
-        if matches(bits, canonical['LOAD16']) or load128 or weak32 or const32 or const64:
+        # The size: bytes and halfwords, signed or not, then 32, 64 and 128 bits (0 to 6).
+        size = source >> 73 & 7
+        if load or constant or store:
+            if size == 7:
+                raise refuse(f'invalid size of an sm_80 global access at 0x{at:x}')
+            if size >= 5:
+                vector = rb if store else rd
+                width = 4 if size == 6 else 2
+                zero_store = store and size == 6 and vector == 255
+                aligned_vector = vector % width == 0 and vector <= 256 - 2 * width
+                if not (aligned_vector or zero_store) or addr % 2 or addr > 252:
+                    raise refuse(f'invalid register group for sm_80 vector access at 0x{at:x}')
+        if (load or constant or store) and (addr > 252 or addr % 2):
+            # (Said here, before the instruction that stands for it is made: it has no such address.)
+            raise refuse(f'unsupported sm_80 address register pair at 0x{at:x}')
+        if load or constant:
             descriptor = rb & 63
-            word = mc.assemble('ldg__sImmOffset', e='E', sz='_128' if load128 else '_64' if const64 else '_32' if const32 or weak32 else 'U16',
-                               sem='WEAK' if load128 or weak32 else 'CONSTANT', sco='SYS', cop='EN',
+            word = mc.assemble('ldg__sImmOffset', e='E', sz=size, sem='WEAK' if load else 'CONSTANT', sco='SYS', cop='EN',
                                Pu=7, Rd=rd, Ra=addr, Ra_offset=offset, Pg=source >> 12 & 7, Pg_not=source >> 15 & 1)
-        elif matches(bits, canonical['STORE16']) or matches(bits, canonical['STORE32']) or store128 or store64:
+        elif store:
             descriptor = source >> 64 & 63
-            size = '_128' if store128 else '_64' if store64 else 'U16' if matches(bits, canonical['STORE16']) else '_32'
             word = mc.assemble('stg__sImmOffset', e='E', sz=size, sem='WEAK',
                                sco='SYS', cop='EN', Rb=rb, Ra=addr, Ra_offset=offset, Pg=source >> 12 & 7, Pg_not=source >> 15 & 1)
         elif matches(bits, canonical['BRA_MASK_ALL']):
@@ -93,10 +108,19 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
                                cop='EN', Ra=addr, Rb=rd, Pg=source >> 12 & 7, **{'Pg_not':source >> 15 & 1})
         elif matches(bits, canonical['COMMIT']):
             word = mc.assemble('membar_', sem='SC', sco='CTA')
+        elif matches(bits, canonical['BF16_ADD']):
+            # What ptxas makes of fma.rn.bf16x2 by one: the sum of each half, rounded to bf16.
+            # The f16 instruction of the same registers stands for it until it is rewritten.
+            operations[at//16] = 'bf16add'
+            word = mc.assemble('hfma2__RIR', Rd=rd, Ra=addr, Rc=source >> 64 & 255, Sb=0x3c00, Sb1=0x3c00)
+        elif matches(bits, canonical['BF16_PACK']):
+            # Two f32 rounded to bf16 in one register; the surrogate is that of the f16 form.
+            operations[at//16] = 'bf16pack'
+            word = mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=rb, Sb=0x5410, Rc=addr)
         elif matches(bits, canonical['PACK']):
             operations[at//16] = 'pack'
             word = mc.assemble('prmt__RuIR_RIR', Rd=rd, Ra=rb, Sb=0x5410, Rc=addr)
-        elif any(matches(bits, form) for form in shared):
+        elif any(matches(bits, form) for form in shared) or any(matches(bits, form) for form in classes.get(bits & 0xfff, ())):
             word = bits
         else:
             raise refuse(f'unsupported sm_80 instruction {source:032x} at 0x{at:x}')
@@ -143,14 +167,27 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
                 calls.append((from_at, at//16))
                 returns = reg
             elif d.mnemonic == 'RET':
-                if not inside or returns is None or ops.get('Ra') != returns or target != 0 or conditional:
+                through = ops.get('Ra')
+                if not inside or returns is None or target != 0 or conditional or (through != returns and through not in copies):
                     raise refuse(f'unproven sm_80 return at 0x{at:x}')
+                if through != returns:
+                    # Through a copy of the return register: nothing may enter between the two.
+                    copied.append((copies[through], at//16))
                 saw_return = True
                 target,fall = None,False
             elif (target is not None and (target//16 >= helper) != inside) or (at//16 + 1 == helper and fall):
                 raise refuse(f'sm_80 control flow crosses local function boundary at 0x{at:x}')
             if inside and ('R',returns) in d.writes:
                 raise refuse(f'sm_80 local function overwrites its return register at 0x{at:x}')
+            if inside:
+                # A register that holds the return address: an unguarded move of the return register.
+                for space, r in d.writes:
+                    if space == 'R':
+                        copies.pop(r, None)
+                if (d.c.name == 'imad__RRR_RRR' and not conditional and ops['Ra'] == 255 and ops['Rb'] == 255
+                        and ops['Rc'] == returns and ops['Rd'] < 255 and ops['fmt'] == 0
+                        and not ops.get('Rc@negate') and d.writes == [('R', ops['Rd'])]):
+                    copies[ops['Rd']] = at//16
             if inside:
                 helper_writes |= killed
             if d.c.name == 'mov__RI' and not conditional:
@@ -167,9 +204,13 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
         elif d.mnemonic == 'BSYNC':
             syncs.append((at//16, ops['barReg']))
         steps.append((killed, initialized, successors))
+    # The descriptors that nothing but their own load ever writes: once loaded, they hold it.
+    constant = {q for q in set(uses.values()) if all(q in initialized for killed, initialized, _ in steps if q in killed)}
     if helper is not None:
         if not saw_return or not calls or any(first < target <= call for first, call in calls for target in branches):
             raise refuse('sm_80 local function lacks a proven call and return path')
+        if any(copy < target <= back for copy, back in copied for target in branches):
+            raise refuse('sm_80 return through a copy that a branch may skip')
         for _, call in calls:
             steps[call][0].update(helper_writes)
     # Track which convergence target is definite on each path leading to BSYNC.
@@ -200,7 +241,8 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
                 if live.get(j) != known:
                     live[j] = known
                     pending.append(j)
-        for i,b in syncs:
+        # (By barrier register, then by place: the order in which the translator looks at them.)
+        for i,b in sorted(syncs, key=lambda sync: (sync[1], sync[0])):
             if live.get(i, {}).get(b) != i+1:
                 raise refuse(f'sm_80 BSYNC B{b} at 0x{16*i:x} does not fall through to its convergence target')
     state, pending = {0: set()}, [0]
@@ -213,7 +255,23 @@ def normalize(code, mc, relative, signed, refuse, helper=None):
             if state.get(j) != joined:
                 state[j] = joined
                 pending.append(j)
+    # A thread reaches the place where the threads of a BSSY meet again by the BSYNC before it
+    # (shown above to be the instruction before that place) or by a branch, not from the BSSY.
+    # For a descriptor that is only ever written by its load, it is enough that each thread
+    # passed a load of it: the paths of a thread, without the step from a BSSY to that place.
+    passed, pending = {0: set()}, [0]
+    while pending:
+        i = pending.pop()
+        killed, initialized, successors = steps[i]
+        out = (passed[i] - killed) | initialized
+        for j in successors:
+            if i in joins and j == joins[i][1] and j != i + 1:
+                continue
+            joined = passed[j] & out if j in passed else out
+            if passed.get(j) != joined:
+                passed[j] = joined
+                pending.append(j)
     for i, q in uses.items():
-        if q not in state.get(i, set()):
+        if q not in state.get(i, set()) and not (q in constant and q in passed.get(i, set())):
             raise refuse(f'sm_80 global descriptor UR{q} is not established at 0x{16*i:x}')
     return result, operations
