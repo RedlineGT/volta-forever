@@ -22,7 +22,9 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   lacks those lines; its library's destructor, after the layer's, removes it there: 0, as after any last write);
   after the last write, a removal returns EBUSY at once while a call is under way (the fill that never returns;
   one that runs 3 s, whose library unmaps what it reads when its removal returns 0: the page stays and the call
-  ends well), and the thread calls no fill after it; a fill that forks on the layer's thread, its child
+  ends well; a removal's own call of the fill, stalled 3 s after its look at the last write by stall.c; the
+  layer's thread stalled between its announcement of a call and the call), and the thread calls no fill after
+  it; a fill that forks on the layer's thread, its child
   returning from it: the thread ends in the child, which ends with it and writes no file;
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
@@ -73,7 +75,7 @@ def load(path, mode=os.RTLD_LOCAL):
         f.restype = c.c_longlong
     lib.fill_slow_start.argtypes = lib.fill_slow_end.argtypes = [c.c_int]
     lib.fill_at_exit.argtypes = [c.c_char_p, c.c_long]
-    lib.fill_add_page.argtypes = [c.c_char_p]
+    lib.fill_add_page.argtypes = lib.fill_add_pageread.argtypes = lib.fill_say_at_exit.argtypes = [c.c_char_p]
     return lib
 
 
@@ -225,8 +227,34 @@ def child(proxy, library, mode):
         say("still alive")
         return
 
+    if mode == "rmrace":  # a removal whose own call of the fill stalls after its look at the last write (stall.c)
+        assert lib.fill_add_pageread(b"race") == 0
+        lib.fill_exit_page(2)
+        time.sleep(1.5)  # a write or two of the thread
+        assert lib.fill_race() == 0
+        sprung = c.CDLL(None).stall_sprung
+        end = time.time() + 10
+        while sprung() != 1 and time.time() < end:
+            time.sleep(0.01)
+        assert sprung() == 1, "the race thread's removal did not stall"
+        say("exiting")
+        return
+
+    if mode == "ordergap":  # the layer's thread stalled between its announcement of a call and the call (stall.c)
+        assert add(b"stall", b"stall") == 0 and lib.fill_add_pageread(b"page") == 0  # in this order: the slots'
+        lib.fill_exit_page(2)
+        lib.fill_arm(1)
+        sprung = c.CDLL(None).stall_sprung
+        end = time.time() + 10
+        while sprung() != 1 and time.time() < end:
+            time.sleep(0.01)
+        assert sprung() == 1, "the layer's thread did not stall"
+        say("exiting")
+        return
+
     if mode == "forkret":  # a fill that forks, its child returning from it into the layer's thread
         assert add(b"forkret", b"forkret") == 0
+        assert lib.fill_say_at_exit(os.environ["FILL_BUFFERED"].encode()) == 0
         lib.fill_arm(1)
         end = time.time() + 15
         while not lib.fill_child() and time.time() < end:
@@ -490,9 +518,9 @@ if __name__ == "__main__":
         subprocess.run(["cc", "-shared", "-fPIC", "-o", mock, here.with_name("link_mock_driver.c")], check=True)
         subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", library, here.with_name("summary_fill.c"),
                         "-ldl"], check=True)
-        clock_ahead = str(tmp / "clock_ahead.so")
-        subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", clock_ahead, here.with_name("clock_ahead.c"),
-                        "-ldl"], check=True)
+        clock_ahead, stall = str(tmp / "clock_ahead.so"), str(tmp / "stall.so")
+        for so, src in ((clock_ahead, "clock_ahead.c"), (stall, "stall.c")):
+            subprocess.run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-o", so, here.with_name(src), "-ldl"], check=True)
         base = dict(os.environ, VF_REAL_LIBCUDA=mock, VF_PROXY_CACHE="0")
         for name in ("VF_LOG", "VF_LOG_LEVEL", "VF_SUMMARY", "VF_SUMMARY_INTERVAL", "VF_STATS", "FILL_NO_REMOVE"):
             base.pop(name, None)
@@ -728,14 +756,17 @@ if __name__ == "__main__":
         assert exited(text, p.pid) and ("\n[volta-forever] the lines of other libraries are not in this last write: "
                                         "one of their functions had not returned 2 s after the exit began\n") in text, text
         # One that forks on the layer's thread, its child returning from it (and so into the layer's thread, the
-        # child's only one): the thread ends there, the child with it, and it writes no file.
-        p = start("forkret", **on)
+        # child's only one): the child ends there at once, writing no file and running nothing of the program's, its
+        # exit handlers and the C library's buffers being the parent's (a line left in a buffer before the fork is
+        # written once, by the parent; the exit handler runs in the parent only).
+        buffered = tmp / "buffered"
+        p = start("forkret", FILL_BUFFERED=str(buffered), **on)
         p.line()
         child = p.line()
         assert child[0] == "child" and int(child[1]) > 0, child
         kid = int(child[1])
         assert p.line() == ["exiting"]
-        p.finish()
+        out, err = p.finish()
 
         def state(pid):
             try:
@@ -750,14 +781,43 @@ if __name__ == "__main__":
         if ended not in ("gone", "Z"):
             os.kill(kid, signal.SIGKILL)  # the fill's child of this test's own process
         assert ended in ("gone", "Z") and not left.exists(), (ended, left.read_text() if left.exists() else "no file")
+        handlers = [l for l in err.splitlines() if l.startswith("fill library: exit handler in process ")]
+        assert handlers == [f"fill library: exit handler in process {p.pid}"] and \
+            buffered.read_text() == f"a line in the C library's buffer of process {p.pid}\n", \
+            (handlers, buffered.read_text())
+        # A removal whose own call of the fill, once more, stalls 3 s after it looked at whether the last write is
+        # made (stall.c, in its calloc of the buffer: a thread preempted there), while the exit begins: the last
+        # write gives up waiting, and the library's destructor, removing the same fill, gets EBUSY, the call being
+        # announced before that look; the page stays, the call ends well and the stalled removal returns 0.
+        p = start("rmrace", LD_PRELOAD=stall, **on)
+        p.line()
+        assert p.line() == ["exiting"]
+        status, out, err = p.end()
+        assert status == 0 and err.rstrip().endswith(f"fill library: at its end: the page fill's removal returned "
+                                                     f"{errno.EBUSY}; the race thread's removal returned 0"), \
+            (status, out, err[-1500:])
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["race"])
+        assert exited(text, p.pid) and "not returned 2 s after the exit began\n" in text, text
+        # The layer's thread stalled 3 s between its announcement of a call and the call (stall.c, in its look at
+        # whether it runs in a child), the exit beginning meanwhile: the destructor's removal of that fill gets EBUSY,
+        # the call being announced before the look; the page stays and the call ends well. (Were the look made
+        # before the announcement, the removal would find no call, get 0 and unmap the page under it.)
+        p = start("ordergap", LD_PRELOAD=stall, **on)
+        p.line()
+        assert p.line() == ["exiting"]
+        status, out, err = p.end()
+        assert status == 0 and err.rstrip().endswith(f"fill library: at its end: the page fill's removal returned "
+                                                     f"{errno.EBUSY}"), (status, out, err[-1500:])
+        text = well_formed(Path(f"{summary}.{p.pid}"), ["stall", "page"])
+        assert exited(text, p.pid) and "not returned 2 s after the exit began\n" in text, text
         print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here;"
               f" {ahead:.1f} s with the time of day an hour ahead), the"
               f" last write made without the libraries' lines and saying so, and a fork from another thread does not wait"
               f" for it ({fork[1]} ms); one that forks at each write is called {calls[1]} times; one that calls exit(3)"
               f" ends the process with that status, its last write made and saying why it lacks the libraries' lines,"
               f" and its removal in its library's destructor returns 0; after the last write, while a call runs past"
-              f" its 2 s, a removal returns EBUSY at once and nothing is called; the child of a fork in a fill that"
-              f" returns from it ends, writing nothing")
+              f" its 2 s, a removal returns EBUSY at once and nothing is called, a removal's own call of the fill too;"
+              f" the child of a fork in a fill that returns from it ends, writing nothing")
 
         # At exit, in both orders of the destructors: which one came first is read from the removal (whether it
         # called the fill once more), and the file must hold what that order gives; the two cases must show both.

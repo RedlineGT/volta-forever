@@ -11,20 +11,30 @@
 //   segv     once armed, on a thread other than the main one (the layer's): writes through a null pointer
 //   slowexit (fill_add_page) once armed, on a thread other than the main one: sleeps 3 s; then gives the number
 //            on the page that its ctx points to
-//   forkret  once armed, the first time: forks, and its child returns from the fill (fill_child: its pid)
+//   forkret  once armed, the first time: forks, and its child returns from the fill (fill_child: its pid);
+//            fill_say_at_exit leaves a line in the C library's buffer of a file and adds an exit handler that
+//            says in which process it runs
+//   page     (fill_add_pageread) its ctx a page of its own, holding 42: gives "page 42"
+//   stall    once armed, on a thread other than the main one, the first time: has stall.c (preloaded) stall the
+//            next getpid of that thread, the layer's, which is in its look at whether it runs in a child, after
+//            it announced its call of the next fill and before it calls it
+// fill_race starts a thread that has stall.c stall its next calloc of 4096 bytes and removes the page fill: the
+// removal stalls after it looked at whether the last write is made, in its call of the fill once more.
 // Each counts its calls. Its destructor, when fill_at_exit asked for it, takes back what it registered
 // (as a library removes itself before it goes) and says on standard error how many times its fills
 // were called before and after, and what vf_summary_remove returned; with FILL_NO_REMOVE=1 it does not
 // take them back (the control: the layer then calls into a library that is gone). When fill_exit_page
-// asked for it, it takes back the slowexit fill and the count fill, unmaps the page when the first
+// asked for it (1), it takes back the slowexit fill and the count fill, unmaps the page when the first
 // removal returned 0 (as a library frees what its fill reads once its removal says that nothing calls
 // it), gives the slow fill 2 s more (a driver's teardown at exit can take as long), and says what both
-// removals returned and how many times the count fill was called after them.
+// removals returned and how many times the count fill was called after them; with 2, the same with the
+// page fill, 4 s, and what the race thread's removal returned.
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <string.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -177,6 +187,49 @@ static size_t fill_forkret(char *buf, size_t cap, void *ctx)
     return n < 0 ? 0 : (size_t)n;
 }
 int fill_child(void) { return atomic_load(&child_pid); }
+/* For the forkret case: a line left in the C library's buffer of a stream on the file at PATH (written when the
+ * buffer is, at the exit of each process that has it, through the one file offset that they share), and an exit
+ * handler that says in which process it runs. */
+static FILE *buffered;
+static void say_exit(void) { fprintf(stderr, "fill library: exit handler in process %d\n", (int)getpid()); }
+int fill_say_at_exit(const char *path)
+{
+    buffered = fopen(path, "w");
+    if (!buffered || setvbuf(buffered, NULL, _IOFBF, 4096)) return -1;
+    fprintf(buffered, "a line in the C library's buffer of process %d\n", (int)getpid());
+    return atexit(say_exit);
+}
+static long *readpage;
+static size_t fill_pageread(char *buf, size_t cap, void *ctx)
+{
+    atomic_fetch_add(&calls, 1);
+    int n = snprintf(buf, cap, "page %ld\n", *(volatile long *)ctx);
+    return n < 0 ? 0 : (size_t)n;
+}
+static void (*stall_arm)(long, int); /* stall.c's, when it is preloaded */
+static size_t fill_stall(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed) && !is_main() && !atomic_exchange(&in_fill, 1) && stall_arm)
+        stall_arm(syscall(SYS_gettid), 2);
+    int n = snprintf(buf, cap, "stall\n");
+    return n < 0 ? 0 : (size_t)n;
+}
+static atomic_int race_result = -1000, race_started;
+static void *racer(void *arg)
+{
+    (void)arg;
+    if (stall_arm) stall_arm(syscall(SYS_gettid), 1);
+    atomic_store(&race_result, rm(fill_pageread, readpage));
+    return NULL;
+}
+int fill_race(void)
+{
+    pthread_t t;
+    atomic_store(&race_started, 1);
+    return pthread_create(&t, NULL, racer, NULL) || pthread_detach(t);
+}
 void fill_arm(int on) { atomic_store(&armed, on); }
 int fill_entered(void) { return atomic_load(&in_fill); }
 
@@ -192,6 +245,7 @@ static fill_fn kind(const char *k)
     if (!strcmp(k, "exits")) return fill_exits;
     if (!strcmp(k, "segv")) return fill_segv;
     if (!strcmp(k, "forkret")) return fill_forkret;
+    if (!strcmp(k, "stall")) return fill_stall;
     return NULL;
 }
 
@@ -203,6 +257,7 @@ int fill_bind(const char *layer)
     if (!h) return 0;
     *(void **)&add = dlsym(h, "vf_summary_add");
     *(void **)&rm = dlsym(h, "vf_summary_remove");
+    *(void **)&stall_arm = dlsym(RTLD_DEFAULT, "stall_arm");
     return add && rm;
 }
 
@@ -215,8 +270,16 @@ int fill_add_page(const char *name)
     *page = 42;
     return add(1, name, fill_slowexit, page);
 }
+/* The page fill, under NAME, its ctx a page of its own that holds 42. */
+int fill_add_pageread(const char *name)
+{
+    readpage = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (readpage == MAP_FAILED) return -1;
+    *readpage = 42;
+    return add(1, name, fill_pageread, readpage);
+}
 static int exit_page;
-void fill_exit_page(int on) { exit_page = on; }
+void fill_exit_page(int which) { exit_page = which; }
 int fill_remove(const char *k, long ctx) { return rm(kind(k), (void *)ctx); }
 void fill_set_count(unsigned long n) { atomic_store(&count, n); }
 unsigned long fill_calls(void) { return atomic_load(&calls); }
@@ -260,6 +323,17 @@ void fill_at_exit(const char *k, long ctx)
 
 __attribute__((destructor)) static void fill_fini(void)
 {
+    if (exit_page == 2) {
+        const int r = rm(fill_pageread, readpage);
+        if (r == 0) munmap(readpage, 4096);
+        struct timespec t = {4, 0};
+        nanosleep(&t, NULL);
+        fprintf(stderr, "fill library: at its end: the page fill's removal returned %d", r);
+        if (atomic_load(&race_started))
+            fprintf(stderr, "; the race thread's removal returned %d", atomic_load(&race_result));
+        fprintf(stderr, "\n");
+        return;
+    }
     if (exit_page) {
         const int r1 = rm(fill_slowexit, page), r2 = rm(fill_count, NULL);
         if (r1 == 0) munmap(page, 4096);

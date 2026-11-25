@@ -30,11 +30,12 @@
 //! at most (`LAST_WAIT`, on the monotonic clock): a `fill` that does not return would hold the exit for
 //! ever. Once it is made, both functions return at once and do nothing, a removal saying `EBUSY` while
 //! a call that ran past those 2 s is still under way (`after_last_write`). In a child made by `fork()`,
-//! both functions do nothing (the child writes no file), and no `fill` is called; the layer's thread
-//! goes on in a child only when a `fill` forked and its child returned, and it ends there. A `fill` is
-//! called by the thread that writes the file, by a removal, and at exit by the thread that exits, as the
-//! rest of the report: the layer has no handler of a signal, and calls one from a handler only if the
-//! program calls `exit()` from it, which POSIX does not allow.
+//! both functions do nothing (the child writes no file), and no `fill` is called; the layer's code goes
+//! on in a child only when a `fill` forked (on the layer's thread, or in the last write) and its child
+//! returned, and the child ends there at once (`end_child`). A `fill` is called by the thread that
+//! writes the file, by a removal, and at exit by the thread that exits, as the rest of the report: the
+//! layer has no handler of a signal, and calls one from a handler only if the program calls `exit()`
+//! from it, which POSIX does not allow.
 //!
 //! What a `fill` may do is little (the contract, `docs/architecture.md`): read its library's counters,
 //! write text, and return at once. Every other library's `fill` and every removal waits for it; it must
@@ -281,15 +282,16 @@ pub unsafe extern "C" fn vf_summary_remove(fill: Option<Fill>, ctx: *mut c_void)
         }) else {
             return libc::ENOENT;
         };
-        if SETTINGS.get().is_some() && !FINISHED.load(SeqCst) {
-            // SAFETY: as the caller promises.
-            let last = unsafe { filled(fill, ctx as usize) };
-            if let Some(s) = slot.as_mut() {
+        // SAFETY: as the caller promises.
+        let last = SETTINGS
+            .get()
+            .and_then(|_| unsafe { called(fill, ctx as usize, &FINISHED) });
+        match (last, slot.as_mut()) {
+            (Some(last), Some(s)) => {
                 s.fill = None;
                 s.kept = last;
             }
-        } else {
-            *slot = None;
+            _ => *slot = None,
         }
         0
     })
@@ -299,10 +301,10 @@ pub unsafe extern "C" fn vf_summary_remove(fill: Option<Fill>, ctx: *mut c_void)
 /// only by this thread (one that called `exit()`, which does not return to the layer); else `EBUSY`: a
 /// call is still under way on another thread, one that ran past the 2 s that the last write waits, and
 /// that may be of this library's `fill`, which must then find what it reads. No call starts from now
-/// on: a thread announces its call (`FILLING`) before it looks at whether the last write is made, as
-/// this looks at the announcement after the last write (both sequentially consistent), so that either
-/// it sees the last write and calls nothing, or this sees its call; one that announced a call and is
-/// about to give it up does within the 10 ms given here.
+/// on: every call is announced (`FILLING`) before the last write is looked at (`called`, the thread's
+/// and a removal's alike), as this looks at the announcement after the last write (both sequentially
+/// consistent), so that either the caller sees the last write and calls nothing, or this sees its call;
+/// one that announced a call and is about to give it up does within the 10 ms given here.
 fn after_last_write() -> c_int {
     let me = this_thread();
     for _ in 0..100 {
@@ -408,17 +410,24 @@ fn register(slots: &mut [Option<Slot>; SLOTS], name: &str, fill: Fill, ctx: usiz
 }
 
 /// What `fill` gives now, line by line, as the file holds it (`text_lines`): it is given `CAP` bytes,
-/// and no more of them are read, whatever it returns. With `FILLS` held, so that a removal waits.
+/// and no more of them are read, whatever it returns. With `FILLS` held, so that a removal waits. The
+/// call is announced (`FILLING`) before `finished` is looked at, and nothing else comes between them
+/// (`after_last_write` says why): `None`, and nothing called, when `finished` says the last write is
+/// made, or in a child that a `fill` made by forking (`rewrite`).
 ///
 /// # Safety
 /// `fill` and `ctx` as registered, the library not removed.
-unsafe fn filled(fill: Fill, ctx: usize) -> Vec<String> {
-    let mut buffer = vec![0u8; CAP];
+unsafe fn called(fill: Fill, ctx: usize, finished: &AtomicBool) -> Option<Vec<String>> {
     FILLING.store(this_thread(), SeqCst);
+    if finished.load(SeqCst) || !crate::loaded_here() {
+        FILLING.store(0, SeqCst);
+        return None;
+    }
+    let mut buffer = vec![0u8; CAP];
     // SAFETY: a buffer of `CAP` bytes; the rest as the caller promises.
     let written = unsafe { fill(buffer.as_mut_ptr().cast(), CAP, ctx as *mut c_void) };
     FILLING.store(0, SeqCst);
-    text_lines(&buffer[..written.min(CAP)])
+    Some(text_lines(&buffer[..written.min(CAP)]))
 }
 
 /// A library's text as lines of the file: its bytes that are not UTF-8 dropped, and the characters by
@@ -446,9 +455,8 @@ fn text_lines(text: &[u8]) -> Vec<String> {
 
 /// The lines of the registered libraries, in the order of their slots, for a write of the file: what
 /// each `fill` gives now, or a removed library's last report. With `FILLS` held. For the thread's
-/// writes (`finished`), no `fill` is called once the last write is made (an exit under way): each call
-/// is announced before that is looked at (`after_last_write` says why). A panic leaves them out of this
-/// write.
+/// writes (`finished`), no `fill` is called once the last write is made (an exit under way): `called`.
+/// A panic leaves them out of this write.
 fn libraries_lines(finished: &AtomicBool) -> Vec<String> {
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: with `FILLS` held.
@@ -456,17 +464,12 @@ fn libraries_lines(finished: &AtomicBool) -> Vec<String> {
         let mut lines = Vec::new();
         for slot in slots.iter().flatten() {
             let (prefix, text) = match slot.fill {
-                Some((fill, ctx)) => {
-                    FILLING.store(this_thread(), SeqCst);
-                    // (Not in a child made by `fork()` in a `fill` that then returned: see `rewrite`.)
-                    if finished.load(SeqCst) || !crate::loaded_here() {
-                        FILLING.store(0, SeqCst);
-                        break;
-                    }
-                    // SAFETY: registered and not removed: the library is there (it removes itself before
-                    // it goes, and the removal waits for the lock, or after the last write sees this call).
-                    (format!("[{}] ", slot.name), unsafe { filled(fill, ctx) })
-                }
+                // SAFETY: registered and not removed: the library is there (it removes itself before it
+                // goes, and the removal waits for the lock, or after the last write sees this call).
+                Some((fill, ctx)) => match unsafe { called(fill, ctx, finished) } {
+                    Some(text) => (format!("[{}] ", slot.name), text),
+                    None => break,
+                },
                 None => (format!("[{}, last report] ", slot.name), slot.kept.clone()),
             };
             lines.extend(text.into_iter().map(|line| format!("{prefix}{line}")));
@@ -542,9 +545,8 @@ pub fn start() {
 
 /// The thread: the report, written again whenever it changed (the lines of other libraries included).
 /// The other libraries' lines are read first, with `FILLS` held, then the layer's report, with `LOCK`.
-/// In a child made by `fork()` in a `fill` (only there does this thread go on in a child) that then
-/// returned, the thread ends there, writing nothing (the child ends with it, the thread being its only
-/// one).
+/// In a child made by `fork()` in a `fill` that then returned (only there does this thread go on in a
+/// child), the child ends at once, writing nothing (`end_child`).
 fn rewrite() {
     let Some(settings) = SETTINGS.get() else {
         return;
@@ -552,7 +554,10 @@ fn rewrite() {
     let mut last = None;
     loop {
         std::thread::sleep(settings.interval);
-        if FINISHED.load(SeqCst) || !crate::loaded_here() {
+        if !crate::loaded_here() {
+            end_child();
+        }
+        if FINISHED.load(SeqCst) {
             return;
         }
         let others = {
@@ -560,7 +565,7 @@ fn rewrite() {
             libraries_lines(&FINISHED)
         };
         if !crate::loaded_here() {
-            return;
+            end_child();
         }
         let _locked = LOCK.take();
         if FINISHED.load(SeqCst) {
@@ -591,7 +596,7 @@ pub fn finish(report: &[String]) {
         Err("one of their functions had not returned 2 s after the exit began")
     };
     if !crate::loaded_here() {
-        return; // in a child made by fork() in a fill, which then returned: the child writes no file
+        end_child(); // made by fork() in a fill of this last write, which then returned
     }
     FINISHED.store(true, SeqCst);
     let _locked = LOCK.take();
@@ -603,6 +608,18 @@ pub fn finish(report: &[String]) {
         )),
     }
     write(settings, &lines, true);
+}
+
+/// The end of a child that a `fill` made by forking, on the layer's thread or in the last write, and then
+/// returned from: the layer's code goes on in such a child only. It is a copy of the process in the
+/// middle of a call, and it ends here at once (`_exit`), writing nothing and running nothing more of
+/// the program's: neither its exit handlers nor its destructors, which belong to the process that
+/// loaded the layer (they would flush its buffers a second time, or wait for a lock that a thread the
+/// child does not have held when the fill forked). A `fill` that forks in a removal returns, in the
+/// child, to the library that called the removal, which goes on as it does.
+fn end_child() -> ! {
+    // SAFETY: ends this process at once; nothing is given back.
+    unsafe { libc::_exit(0) }
 }
 
 /// The layer's lines of the file, after its first.
@@ -872,7 +889,7 @@ mod tests {
 
     #[test]
     fn a_fill_is_given_4096_bytes_and_no_more_is_read() {
-        let lines = unsafe { filled(greedy, 0) };
+        let lines = unsafe { called(greedy, 0, &AtomicBool::new(false)) }.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].len(), CAP);
         assert!(lines[0].ends_with("xok"));
