@@ -85,7 +85,7 @@ Where the GPU scripts write:
 - `run.sh`: the test kernels, loaded as PTX and as machine code through the proxy (retargeting,
   translation, refusal, the cache, the second translation at launch, the CUDA runtime), give
   what the native sm_70 build of the same source, the host models or the reference vectors of
-  an RTX 5090 say. 226 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
+  an RTX 5090 say. 227 cases (200 at 0.1.5, 165 at 0.1.4), including nonconsecutive MMA fragments, a
   partial warp reduction, a zero-filled asynchronous copy, sm_80 machine code translated, refused lookups
   (error 218 and a NULL handle, through a module, a library and the driver's linker), a program
   with a refused kernel under the CUDA 12 and 13 runtimes in both loading modes
@@ -125,7 +125,9 @@ Where the GPU scripts write:
   module loaded there; an unload from another thread while the layer loads leaves nothing
   loaded; what was loaded goes with the module or library, and stays when the driver refuses
   the unload; nothing is loaded with `VF_TOLD_CODE=0`, nor for an image of relocatable code
-  (`k_told_rdc.cu`), loaded or linked. Three changes of `told.rs` each fail it (the context
+  (`k_told_rdc.cu`), loaded or linked (on the driver itself: `told-8.0-rdc`, `test_told_rdc.c`,
+  the two units linked by `cuLinkComplete`, the lookup of the kernel that only the sm_80 code
+  has failing with 500 and nothing said of that code). Three changes of `told.rs` each fail it (the context
   not checked, the library's module not checked, the unload during the load not looked for); and kernels that hold, or call through a table, an instruction of the
   multimem family (`reported-*`, `tests/kernels/test_reported.c`): given with the instruction
   replaced by a reported trap, said in one line for their image, and right on every path that does

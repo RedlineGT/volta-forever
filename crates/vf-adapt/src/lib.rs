@@ -1432,7 +1432,8 @@ pub enum Reach {
 ///   launch: beside the parameters and the launch's constants it holds words of the module (at
 ///   0x50, the address of the module's `__constant__` bank: a kernel that stores that address, or
 ///   reads through it, has the layer's copy). So only the words whose meaning is known count as
-///   the kernel's (`OWN_WORDS`), read at a fixed offset: the parameters (from 0x160), the sizes of
+///   the kernel's (`OWN_WORDS`), read at a fixed offset that is not negative: the parameters (from
+///   0x160 to the end of the bank in the cubin), the sizes of
 ///   the block and of the grid (0x0 to 0x14), the stack pointer (0x28) and the descriptor of
 ///   global memory (0x118, the same in every module). Any other word of bank 0 is data. Another
 ///   bank is the kernel's when the cubin has a section of it named for the
@@ -1487,7 +1488,26 @@ fn names_global_data(cubin: &[u8], kernel_name: &str, sm: u32) -> bool {
 /// 0x18 (89), 0x20 and 0x24 (262 each), 0x40 and 0x44 (309) and 60 that are negative, whose
 /// meaning is not known here: not the kernel's. 0x50 is the address of the module's `__constant__`
 /// bank (`tests/kernels/k_told.cu`, `k_const_address`).
-const OWN_WORDS: [(u32, u32); 4] = [(0x0, 0x18), (0x28, 0x2c), (0x118, 0x120), (0x160, u32::MAX)];
+/// The parameters end where the kernel's bank 0 does in the cubin (`.nv.constant0.<kernel>`, whose
+/// size is 0x160 and the parameters): `own_word` bounds the last range by that. An offset is a
+/// signed number of 16 bits once in bytes (the field of an ordinary operand is 14 bits of words,
+/// that of the load of a uniform register 16 bits of bytes; whether NVIDIA reads the second with a
+/// sign is not known here, and it is taken so): a negative one reads before the bank, and is not
+/// the kernel's.
+const OWN_WORDS: [(u32, u32); 4] = [(0x0, 0x18), (0x28, 0x2c), (0x118, 0x120), (PARAMETERS, u32::MAX)];
+const PARAMETERS: u32 = 0x160;
+
+/// Whether the `width` bytes of bank 0 at `at` (the offset as its field has it, in bytes) are the
+/// kernel's own, in a bank of `size` bytes.
+fn own_word(at: u32, width: u32, size: u32) -> bool {
+    let negative = at >= 0x8000;
+    let end = at.saturating_add(width);
+    !negative
+        && at.is_multiple_of(4)
+        && OWN_WORDS
+            .iter()
+            .any(|&(from, to)| from <= at && end <= if from == PARAMETERS { to.min(size) } else { to })
+}
 
 /// The mnemonics of the instructions on textures and surfaces.
 fn texture(mnemonic: &str) -> bool {
@@ -1550,6 +1570,10 @@ fn reach_in(elf: &vf_sass::elf::Elf, kernel_name: &str, sm: u32, own_banks: bool
         };
         elf.section(&format!(".nv.constant{bank}")).is_none() && !symbols.iter().any(|s| s.shndx as usize == section)
     };
+    // Where the kernel's bank 0 ends: its parameters do not reach further.
+    let bank_0_size = elf
+        .section(&format!(".nv.constant0.{kernel_name}"))
+        .map_or(0, |section| u32::try_from(elf.sections[section].size).unwrap_or(0));
     let mut unknown = None;
     let mut seen = vec![kernel_name.to_string()];
     let mut work = vec![kernel_name.to_string()];
@@ -1636,10 +1660,7 @@ fn reach_in(elf: &vf_sass::elf::Elf, kernel_name: &str, sm: u32, own_banks: bool
                     let wide = d.mnemonic.starts_with('D')
                         || d.name.contains("_wide")
                         || (d.mnemonic == "ULDC" && d.op_or_name("sz", 0) == 5);
-                    let own = offset.is_some_and(|at| {
-                        let end = at.saturating_add(if wide { 8 } else { 4 });
-                        at % 4 == 0 && OWN_WORDS.iter().any(|&(from, to)| from <= at && end <= to)
-                    });
+                    let own = offset.is_some_and(|at| own_word(at, if wide { 8 } else { 4 }, bank_0_size));
                     if !own {
                         return Reach::Data(match offset {
                             Some(at) => format!(
@@ -2479,8 +2500,12 @@ mod tests {
         assert_eq!(of(&in_bank(kernel), "k_bf16_sum"), Reach::Nothing);
         // The words of bank 0, on the instruction of k_both that reads the stack pointer
         // (c[0x0][0x28]), made to read other words.
-        let word_of_bank_0 = |offset: u32| {
+        let word_of_bank_0 = |offset: u32, size: Option<u64>| {
             let mut elf = parsed();
+            if let Some(size) = size {
+                let bank = elf.section(".nv.constant0.k_both").unwrap();
+                elf.sections[bank].size = size;
+            }
             let text = elf.section(".text.k_both").unwrap();
             let mut decoder = vf_sass::decode::Decoder::new(75);
             let first = u128::from_le_bytes(elf.sections[text].data[..16].try_into().unwrap());
@@ -2505,14 +2530,84 @@ mod tests {
             elf.sections[text].data[..16].copy_from_slice(&changed.to_le_bytes());
             of(&elf, "k_both")
         };
-        for own in [0x0, 0x4, 0x8, 0xc, 0x10, 0x14, 0x28, 0x118, 0x11c, 0x160, 0x164, 0x400] {
-            assert_eq!(word_of_bank_0(own), Reach::Nothing, "0x{own:x}");
+        // (k_both has one parameter of eight bytes: its bank 0 ends at 0x168.)
+        for own in [0x0, 0x4, 0x8, 0xc, 0x10, 0x14, 0x28, 0x118, 0x11c, 0x160, 0x164] {
+            assert_eq!(word_of_bank_0(own, None), Reach::Nothing, "0x{own:x}");
         }
+        // Past the parameters' end, and negative (c[0x0][-0x8] and [-0x4] are 0xfff8 and 0xfffc
+        // in the field): data.
         for data in [
-            0x18, 0x1c, 0x20, 0x24, 0x2c, 0x40, 0x44, 0x50, 0x54, 0x114, 0x120, 0x15c,
+            0x18, 0x1c, 0x20, 0x24, 0x2c, 0x40, 0x44, 0x50, 0x54, 0x114, 0x120, 0x15c, 0x168, 0x400, 0x7ffc, 0x8000,
+            0xfff8, 0xfffc,
         ] {
-            assert!(matches!(word_of_bank_0(data), Reach::Data(_)), "0x{data:x}");
+            assert!(matches!(word_of_bank_0(data, None), Reach::Data(_)), "0x{data:x}");
         }
+        // In a bank as large as the field reaches, the parameters go as far, and a negative
+        // offset is still not one.
+        for own in [0x168, 0x400, 0x7ffc] {
+            assert_eq!(word_of_bank_0(own, Some(0x1_0000)), Reach::Nothing, "0x{own:x}");
+        }
+        for data in [0x8000, 0xfff8, 0xfffc] {
+            assert!(
+                matches!(word_of_bank_0(data, Some(0x1_0000)), Reach::Data(_)),
+                "0x{data:x}"
+            );
+        }
+        // The load of a uniform register (ULDC), in a kernel that has one of its own bank 0: its
+        // offset is in bytes, 16 bits.
+        let uniform_load = |offset: u32, size: Option<u64>| {
+            let mut elf = parsed();
+            let mut decoder = vf_sass::decode::Decoder::new(75);
+            let (kernel, text, at, word) = ["k_bf16_sum", "k_divides", "k_both"]
+                .into_iter()
+                .find_map(|kernel| {
+                    let text = elf.section(&format!(".text.{kernel}")).unwrap();
+                    elf.sections[text]
+                        .data
+                        .as_chunks::<16>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .find_map(|(at, w)| {
+                            let word = u128::from_le_bytes(*w);
+                            let d = decoder.decode(word)?;
+                            (d.name == "uldc_const__RCR" && d.op_or_name("Sa_bank", 9) == 0)
+                                .then_some((kernel, text, at, word))
+                        })
+                })
+                .expect("a ULDC of bank 0");
+            let was = decoder.decode(word).unwrap().op_or_name("Sa_addr", 0);
+            let bit = (0..112)
+                .find(|&bit| {
+                    (word >> bit) & 0xffff == u128::from(was) && {
+                        let changed = (word & !(0xffffu128 << bit)) | (0x5554u128 << bit);
+                        decoder
+                            .decode(changed)
+                            .is_some_and(|c| c.name == "uldc_const__RCR" && c.op_or_name("Sa_addr", 0) == 0x5554)
+                    }
+                })
+                .unwrap();
+            let changed = (word & !(0xffffu128 << bit)) | (u128::from(offset) << bit);
+            elf.sections[text].data[16 * at..16 * at + 16].copy_from_slice(&changed.to_le_bytes());
+            if let Some(size) = size {
+                let bank = elf.section(&format!(".nv.constant0.{kernel}")).unwrap();
+                elf.sections[bank].size = size;
+            }
+            of(&elf, kernel)
+        };
+        assert_eq!(uniform_load(0x160, None), Reach::Nothing);
+        for data in [0x50, 0x162, 0x4000, 0x8000, 0xfff8, 0xfffc] {
+            assert!(matches!(uniform_load(data, None), Reach::Data(_)), "0x{data:x}");
+        }
+        assert_eq!(uniform_load(0x4000, Some(0x1_0000)), Reach::Nothing);
+        for data in [0x8000, 0xfff8, 0xfffc] {
+            assert!(
+                matches!(uniform_load(data, Some(0x1_0000)), Reach::Data(_)),
+                "0x{data:x}"
+            );
+        }
+        // (Eight bytes that end past the bank, a place that is not a word's.)
+        assert!(own_word(0x160, 8, 0x168) && !own_word(0x164, 8, 0x168) && !own_word(0x162, 4, 0x168));
         assert!(texture("TEX") && texture("SULD") && texture("TLD4") && !texture("STG") && !texture("LDG"));
 
         // Turing code is read as for the second translation at launch, and with the banks.
