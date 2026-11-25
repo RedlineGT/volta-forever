@@ -616,8 +616,9 @@ the buffer's end and no further; a removal that waits for the call under way (of
 function once more, keeps its lines marked as its last report, and calls nothing after; a function
 that calls the layer back, refused, not left waiting; functions that break the contract: one that never
 returns (a fork from another thread does not wait for it, and the last write waits 2 s for it, then is made
-without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` (the
-process ends with that status, its last write made); the layer's thread blocking every signal but those
+without the libraries' lines and says so), one that forks at each write, one that calls `exit(3)` on the
+layer's thread (the process ends with that status, its last write made, and its library's removal in its
+destructor returns 0); the layer's thread blocking every signal but those
 of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
 the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
 writes and holds the lock, in which both functions do nothing, nothing is called, and which end and

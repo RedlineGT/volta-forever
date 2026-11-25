@@ -191,7 +191,7 @@ fn not_filling() {
 /// - `ENOSPC`: 4 other names are registered (a removed library's name keeps its slot);
 /// - `ECHILD`: the process is a child made by `fork()` of the one that loaded the layer, which writes
 ///   no file: nothing is registered;
-/// - `EDEADLK`: called from a `fill`;
+/// - `EDEADLK`: called from a `fill` (before the last write);
 /// - `EIO`: an internal error of the layer.
 ///
 /// # Safety
@@ -234,7 +234,7 @@ pub unsafe extern "C" fn vf_summary_add(
 /// marked as the library's last report (`[name, last report] `); once the last write (at exit) is made,
 /// nothing is called, nothing waited for, and 0 returned. Returns 0, or `ENOENT` (not registered),
 /// `EINVAL` (`fill` is null), `ECHILD` (in a child made by `fork()`: nothing done), `EDEADLK` (called
-/// from a `fill`), `EIO` (an internal error of the layer).
+/// from a `fill`, before the last write), `EIO` (an internal error of the layer).
 ///
 /// # Safety
 /// As for `vf_summary_add`: `fill` and `ctx` still valid when this is called.
@@ -286,12 +286,13 @@ fn guarded(who: &str, f: impl FnOnce() -> c_int) -> c_int {
 /// Why `vf_summary_add` and `vf_summary_remove` do nothing here: in a child made by `fork()`, which has
 /// its parent's registrations in its copy of the memory and writes no file (it never takes the lock,
 /// which may have been held when it was made, by a thread it does not have); from a `fill`, whose
-/// caller holds the lock.
+/// caller holds the lock, until the last write is made: then nothing waits for the lock, and a `fill`
+/// that called `exit()` (whose destructors call these on its thread) is answered as any caller.
 fn refused_here() -> Option<c_int> {
     if !crate::loaded_here() {
         return Some(libc::ECHILD);
     }
-    if FILLING.load(Relaxed) == this_thread() {
+    if FILLING.load(Relaxed) == this_thread() && !FINISHED.load(Relaxed) {
         return Some(libc::EDEADLK);
     }
     None
