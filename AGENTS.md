@@ -42,11 +42,14 @@ Steps, in this order:
      other GPUs only is emitted): launched, it would end the context on any GPU. The program
      chose a kernel that has no code for this GPU; look for a setting of the program that
      chooses another (the engine guides say which).
-   - `kernel NAME is not in the code that the layer gives for its image (...)` is said where a
-     lookup fails (error 500, "named symbol not found"): the program was told a capability whose
-     machine code in that image has the kernel, and the layer gave the image's sm_75 code, which
-     has not (`LIMITS.md`, "The capability told with `VF_CAPABILITY`"). The engine guides say
-     which settings avoid it.
+   - `kernel NAME is given from the machine code for sm_80 of its image (...)`: the program was
+     told 8.0 and asked for a kernel that only the image's sm_80 code has; the layer gave the
+     image's sm_75 code and this one kernel from the sm_80 code, translated. Compare its
+     results: that translation is not independently validated.
+   - `kernel NAME is not in the code that the layer gives for its image (...)` is said where
+     such a lookup fails all the same (error 500, "named symbol not found"), with the reason:
+     the kernel can reach data of its image, or the layer does not translate it (`LIMITS.md`,
+     "The capability told with `VF_CAPABILITY`"). The engine guides say which settings avoid it.
    - `emulated in NAME: ...` is logged when VF gives the program a handle to a kernel with
      emulated instructions. Launch it and check its output to verify execution. Measure it
      before drawing conclusions about speed.
@@ -112,7 +115,11 @@ The rules agents break most often:
   (`reference/translate.py`, with `reference/ampere.py` for `sm_80`). Run `tests/sass/compare.sh`.
 - **Independent validation covers `sm_75` machine code.** Add a rule in `reference/validate.py`
   and a negative control in `reference/controls.py` for a new `sm_75` rewrite. For `sm_80`,
-  check Python/Rust agreement, run the unit tests and verify the affected kernels on a V100.
+  check Python/Rust agreement, run `reference/ampere_check.py` on sm_80 cubins (the words that
+  pass as they are, against NVIDIA's disassembler), run the unit tests and verify the affected
+  kernels on a V100: an instruction of sm_80 passes only in a form listed in
+  `reference/ampere-evidence.txt` with the kernel that ran right (three kernels were wrong on
+  the GPU with every other check passing, `docs/validation.md`, section 8).
 - **An emulation states its arithmetic** in `docs/emulations.md`, and its expected values come
   from the hardware that has the instruction, or from the PTX manual with that said.
 - **Nothing of NVIDIA's in the repository:** no library, header, documentation or tool, and no

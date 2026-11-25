@@ -83,6 +83,7 @@ mod log;
 pub mod marker;
 mod profile;
 mod summary;
+mod told;
 
 pub use generated::{HOOKED, NAMES, NSYM, idx};
 
@@ -121,6 +122,9 @@ pub struct Config {
     pub fit: bool,
     /// Retry oversized dynamic shared-memory opt-ins at the physical V100 limit.
     pub fit_shared: bool,
+    /// Whether a kernel that only the image's machine code for the capability told has is given
+    /// from that code, in a module of its own (`told`; `VF_TOLD_CODE`, default on).
+    pub told_code: bool,
     /// How many kernels with emulated instructions are listed on the console before the following
     /// are only counted (0: none, and no summary), and how many refused kernels of names said before
     /// are said (`kernels`).
@@ -157,6 +161,7 @@ pub fn config() -> &'static Config {
             fault_report: var("VF_FAULT_REPORT").as_deref() != Some("0"),
             fit: var("VF_FIT").is_none_or(|v| v != "0"),
             fit_shared: var("VF_FIT_SHARED").as_deref() == Some("1"),
+            told_code: var("VF_TOLD_CODE").is_none_or(|v| v != "0"),
             policy,
             emulation_warnings: var("VF_EMULATION_WARNINGS").and_then(|v| v.parse().ok()).unwrap_or(20),
             timing: var("VF_TIMING").is_some_and(|v| v != "0"),

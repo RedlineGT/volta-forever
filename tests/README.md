@@ -107,10 +107,17 @@ Where the GPU scripts write:
   7.0 and CUB answered "invalid device function" until 2026-11-24), lookup tables
   asked for by name, answered as NVIDIA's driver answers them, except where the layer refuses one
   (`tables.py`), and a fat binary whose sm_80 machine code has a kernel that its sm_75 code has not
-  (`sections-*`, `tests/kernels/test_sections.c`): told 8.0, the lookup of that kernel fails with
-  500 as the driver answers, and the layer says once, through a module, a file and a library, that
-  only the code for sm_80 has it; told 7.5 it says nothing; with `VF_TRANSLATE=first` the kernel
-  runs from the sm_80 code.
+  (`sections-*`, `tests/kernels/test_sections.c`): told 8.0, that kernel is given from the sm_80
+  code, translated, in a module of the layer's own, through a module, a file and a library, with
+  one line, and stores what the sm_80 code stores; told 7.5 its lookup fails with 500 as the
+  driver answers and nothing is said; with `VF_TOLD_CODE=0` it fails told 8.0 too, with the line
+  that says which code has it; with `VF_TRANSLATE=first` the kernel runs from the whole sm_80
+  code. And what such kernels compute (`told-*`, `tests/kernels/k_told.cu`, `test_told.c`):
+  sums of pairs of bf16 and pairs of bf16 nearest to f32 (two instructions of sm_80 that the
+  layer rewrites), 16,384 each against the host's exact rounding, and the quotients of a
+  division whose slow path is a function inside the kernel, also through the library's module,
+  after the image is loaded again and in safe mode; a kernel that reads a variable of the image
+  and one that is not translated are not given, with the reason for each.
 - `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
   `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary
   contexts, capture and launch per-GPU CUDA graphs simultaneously, and run a cross-device
@@ -195,6 +202,13 @@ Where the GPU scripts write:
 - `compare.sh`: the Rust translator and the Python reference give the same bytes, the same
   instruction map, the same `MAP.lives` and the same refusals for every cubin, sm_80 test
   cubins included (at 0.1.4 and 0.1.5: 491 of 491, the 16 test cubins and PyTorch's 475).
+- `python3 -I reference/ampere_check.py DIR...` (not a step of the release check: it needs sm_80
+  cubins, `vf extract FILE DIR 80`, and NVIDIA's disassembler): every distinct word of sm_80 code
+  that the translator passes as it is reads the same to nvdisasm as sm_80 and as sm_75, and is of
+  the same class with the same operands in both descriptions (0 fail on the sm_80 code of PyTorch
+  2.14.0 and vLLM 0.34.0, 2026-11-25). It does not show that the translation runs right: an
+  instruction of sm_80 passes by its class only in a form listed in
+  `reference/ampere-evidence.txt`, with the kernel that ran right on a V100.
 - `validate-corpus.sh`: the independent validator finds 0 problems over the corpus (of sm_75
   code: the validator does not read sm_80 code, `docs/validation.md`, section 8).
 - `controls.sh`: the validator objects to translations that are made wrong on purpose (the

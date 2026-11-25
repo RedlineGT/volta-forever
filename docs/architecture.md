@@ -150,16 +150,36 @@ requested capability precedence.
 A program told 8.0 all the same (`VF_CAPABILITY_ALL=1`, or a caller without code of its own)
 can ask such an image for a kernel that only its code for sm_80 has: a kernel compiled for
 later architectures only, or under another name in the code for sm_75 (a template whose
-`enable_if` takes another overload there). The lookup fails as the driver answers for a name
-that the code it has does not have (`CUDA_ERROR_NOT_FOUND`, 500). At that answer the proxy
-looks in the image it gave the driver, which keeps the program's other entries, for the
-kernel in the machine code that a GPU of the capability told loads (`vf_adapt::Policy::
-told_machine_code`, `has_kernel`), and when it is there says so once for each kernel, with the
-file the image is in (`dladdr`), its size and digest, and why that code was not given
-(`kernels::not_given`). The lookup still fails: that one kernel, given from a translation of the
-sm_80 code, would be in another module than the program's, with its own copies of the image's
-variables, and from the translation that covers fewer instructions (LIMITS.md, "The capability
-told with `VF_CAPABILITY`").
+`enable_if` takes another overload there). The driver has no kernel of that name in the code it
+was given and answers `CUDA_ERROR_NOT_FOUND` (500). At that answer, and only then, the proxy
+looks in the image it gave the driver, which keeps the program's other entries, for the kernel
+in the machine code that a GPU of the capability told loads (`vf_adapt::Policy::
+told_machine_code`, `has_kernel`), and gives it from there (`crates/vf-proxy/src/told.rs`,
+`VF_TOLD_CODE`, on by default): the cubin that has it is loaded beside the program's module or
+library, as a module (in the current context) or a library of the layer's own, through the
+layer's own entry points. It is then to the layer what an image of sm_80 machine code alone is
+when a program loads one: translated by the same translator (or taken from its retained PTX),
+its kernels refused, guarded, launched from a second translation, cached and named in the
+report of a fault the same way, under its own handle. The kernel is looked up there (for a
+function of the module that the driver gives for a library, in the module that it gives for
+the layer's library in that context), and a line says once for each kernel where it comes from
+(`told::lookup`). What was loaded goes with the program's module or library, when it is
+unloaded or when its context is destroyed.
+
+A kernel is given so only if it can reach no data of its image
+(`vf_adapt::told_kernel_names_global_data`, the rule of the second translation at launch,
+section 5, read for sm_80 code too): the module of the layer's own has its own copy of the
+image's variables, which nothing keeps in step with the copy that the program reads and writes
+through the module it holds (`cuModuleGetGlobal`, `cudaMemcpyToSymbol`). A kernel whose code,
+and the code it calls, has no relocation and reads no constant bank in which a relocation
+names such data shares nothing with the image's other kernels but the memory that the program
+gives it as arguments. The other conditions: its code is translated (a refused kernel is not
+given), and the image is a fat binary of executable cubins (`kernels::Elsewhere` is not known
+of an image linked from relocatable code). Where one fails, the lookup fails as the driver
+answered, and the line of `kernels::not_given` says which code has the kernel and why it is not
+given from there. The kernels that the sm_75 code has are not looked at: the program then runs
+a mix of the two codes, and what it is told when it lists the kernels of a library is the
+sm_75 code's (LIMITS.md, "The capability told with `VF_CAPABILITY`").
 
 ### PTX retargeted and lowered
 

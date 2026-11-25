@@ -674,6 +674,11 @@ impl Policy {
     }
 
     /// Machine code for `sm` can be translated for the device.
+    /// Whether the layer translates machine code for `sm` to the device's.
+    pub fn translates(&self, sm: u32) -> bool {
+        self.translatable(sm)
+    }
+
     fn translatable(&self, sm: u32) -> bool {
         self.translate != Translate::Never && self.device_sm == 70 && matches!(sm, 75 | 80)
     }
@@ -1368,11 +1373,39 @@ pub fn kept_cubin(kept: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
 /// On Turing, false for a name that the cubin has no function of. Other architectures require
 /// a separate analysis of their constant-bank operands and stay in the original module.
 pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
-    // Constant-bank operands have only been audited for Turing. Keep other kernels in their
+    // A second translation at launch is of Turing code only. Other kernels stay in their
     // original module, where writable globals cannot diverge between two translations.
     if fatbin::cubin_sm(cubin) != Some(75) {
         return true;
     }
+    names_global_data(cubin, kernel_name, 75)
+}
+
+/// `kernel_names_global_data` for a kernel of an image's machine code for the capability told,
+/// which is given from a module of its own (`told_cubin`): the same question, of Turing code or
+/// of Ampere code. An Ampere instruction is read as the Turing instruction that it is (the
+/// translator passes it as it is, `vf_sass::translate::ampere_word`); the forms of Ampere's own
+/// that the translator rewrites read no constant bank; an instruction that it does not translate
+/// answers true (its function is refused anyway). True for code of any other architecture.
+pub fn told_kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
+    match fatbin::cubin_sm(cubin) {
+        Some(sm @ (75 | 80)) => names_global_data(cubin, kernel_name, sm),
+        _ => true,
+    }
+}
+
+/// The cubin of `fat` for `sm` that has kernel `name` (`has_kernel`), decompressed: the machine
+/// code that a GPU of the capability told loads for it (`Policy::told_machine_code`).
+pub fn told_cubin(fat: &FatBinary<'_>, sm: u32, name: &str) -> Option<Vec<u8>> {
+    fat.entries
+        .iter()
+        .filter(|e| e.kind() == KIND_ELF && e.sm() == sm)
+        .filter_map(|entry| entry.payload().ok())
+        .find(|cubin| fatbin::cubin_entries(cubin).is_some_and(|names| names.contains(&name)))
+        .map(|cubin| cubin.into_owned())
+}
+
+fn names_global_data(cubin: &[u8], kernel_name: &str, sm: u32) -> bool {
     let Ok(elf) = vf_sass::elf::Elf::parse(cubin) else {
         return true;
     };
@@ -1438,6 +1471,13 @@ pub fn kernel_names_global_data(cubin: &[u8], kernel_name: &str) -> bool {
         let mut decoder = vf_sass::decode::Decoder::new(75);
         for word in code.as_chunks::<16>().0 {
             let word = u128::from_le_bytes(*word);
+            if sm == 80 {
+                match vf_sass::translate::ampere_word(word) {
+                    vf_sass::translate::AmpereWord::Same => {}
+                    vf_sass::translate::AmpereWord::Rewritten => continue,
+                    vf_sass::translate::AmpereWord::Unsupported => return true,
+                }
+            }
             let Some(d) = decoder.decode(word) else {
                 return true;
             };
@@ -2021,6 +2061,61 @@ mod tests {
     /// `tests/kernels/k_sections.cu`: machine code for sm_75 and sm_80, no PTX; `k_from_80` is in the
     /// code for sm_80 only, `k_before_80` in the code for sm_75 only, `k_both` in both.
     const SECTIONS: &[u8] = include_bytes!("../../../tests/kernels/k_sections.135.sm75-sm80.fatbin");
+
+    /// `tests/kernels/k_told.cu`: machine code for sm_75 and sm_80, no PTX; in the code for sm_80
+    /// only, `k_bf16_sum` and `k_divides`, which reach no data of the image, `k_reads_data`, which
+    /// reads a variable of it, and `k_not_translated`.
+    const TOLD: &[u8] = include_bytes!("../../../tests/kernels/k_told.135.sm75-sm80.fatbin");
+
+    #[test]
+    fn a_kernel_of_the_code_for_the_capability_told_is_given_alone_only_if_it_reaches_no_data() {
+        let fat = fatbin::parse(TOLD).unwrap();
+        let policy = Policy {
+            told_sm: Some(80),
+            keep_sources: true,
+            ..Policy::default()
+        };
+        assert_eq!(policy.told_machine_code(&fat, 75), Some(80));
+        assert!(policy.translates(80) && policy.translates(75) && !policy.translates(86));
+        // The cubin that has the kernel, from the program's image and from the image given to
+        // the driver, which keeps it.
+        let cubin = told_cubin(&fat, 80, "k_bf16_sum").unwrap();
+        assert_eq!(fatbin::cubin_sm(&cubin), Some(80));
+        let given = policy.adapt_fatbin(&fat).unwrap().image.unwrap();
+        assert_eq!(
+            told_cubin(&fatbin::parse(&given).unwrap(), 80, "k_divides"),
+            Some(cubin.clone())
+        );
+        assert_eq!(told_cubin(&fat, 80, "k_before_80"), None);
+        assert_eq!(told_cubin(&fat, 86, "k_bf16_sum"), None);
+        // Which kernels can reach data of the image: the one that reads the variable (through the
+        // bank that holds its address), and the one with an instruction that is not translated,
+        // of which nothing is known.
+        for (kernel, names_data) in [
+            ("k_bf16_sum", false),
+            ("k_divides", false),
+            ("k_both", false),
+            ("k_reads_data", true),
+            ("k_not_translated", true),
+        ] {
+            assert_eq!(told_kernel_names_global_data(&cubin, kernel), names_data, "{kernel}");
+            // The second translation at launch is of Turing code only, as before.
+            assert!(kernel_names_global_data(&cubin, kernel), "{kernel}");
+        }
+        // Turing code is read as for the second translation at launch.
+        for kernel in ["k_fit_regs", "k_fit_reads_global"] {
+            assert_eq!(
+                told_kernel_names_global_data(FIT, kernel),
+                kernel_names_global_data(FIT, kernel),
+                "{kernel}"
+            );
+        }
+        // Code of an architecture that the layer does not translate.
+        let mut later = cubin.clone();
+        let at = if later[8] >= 8 { 0x31 } else { 0x30 };
+        later[at] = 86;
+        assert!(told_kernel_names_global_data(&later, "k_bf16_sum"));
+    }
 
     #[test]
     fn the_code_that_a_gpu_of_the_capability_told_loads_is_found_beside_the_code_given() {

@@ -9,6 +9,11 @@ Environment:
   TOP_K       top-k for sampling (default: not set)
   TOP_P       top-p for sampling (default: not set)
   SEED        random seed for sampling (default 42)
+  COMPILE     1: vLLM's compilation on (`enforce_eager` off, and TORCH_COMPILE_DISABLE=0 unless
+              it is set); by default it is off, as the stages of vllm.sh run the engine
+  IDS_OUT     a file to write the token ids of every prompt to, as JSON (optional)
+  IDS_REF     such a file of another run (optional): prints, for each prompt, how many tokens
+              are the same before the first that differs, and `same tokens: ALL` or `SOME_DIFFER`
   REF_FILE    JSON reference from vllm-ref.py (optional; compare greedy tokens: prints
               `verdict: ALL_MATCH`, `verdict: MATCH_BUT_NEAR_TIES n` or `verdict: SOME_DIFFER`, as
               greedy_compare.py defines them)
@@ -29,7 +34,8 @@ import greedy_compare
 os.environ.setdefault('DO_NOT_TRACK', '1')
 os.environ.setdefault('VLLM_NO_USAGE_STATS', '1')
 os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
-os.environ.setdefault('TORCH_COMPILE_DISABLE', '1')
+COMPILE = os.environ.get('COMPILE') == '1'
+os.environ.setdefault('TORCH_COMPILE_DISABLE', '0' if COMPILE else '1')
 
 MODEL = os.environ['MODEL']
 DTYPE = os.environ.get('DTYPE', 'float16')
@@ -95,7 +101,7 @@ def main():
     try:
         t0 = time.time()
         llm = LLM(model=MODEL, dtype=DTYPE, trust_remote_code=True,
-                   gpu_memory_utilization=0.8, max_model_len=512, enforce_eager=True,
+                   gpu_memory_utilization=0.8, max_model_len=512, enforce_eager=not COMPILE,
                    **({'max_logprobs': TOP_K, 'logprobs_mode': 'raw_logprobs'} if checked else {}))
         t_engine = time.time() - t0
         print(f'Engine created in {t_engine:.1f}s')
@@ -133,6 +139,19 @@ def main():
                         break
                 wrong.append(why)
                 print('    %s' % ('OUTSIDE: ' + why if why else 'WITHIN: %d tokens, each among the %d most likely and within %g of their probability' % (n, TOP_K, TOP_P)))
+
+        ids = [list(o.outputs[0].token_ids) for o in outputs]
+        if os.environ.get('IDS_OUT'):
+            json.dump(ids, open(os.environ['IDS_OUT'], 'w'))
+        if os.environ.get('IDS_REF'):
+            other = json.load(open(os.environ['IDS_REF']))
+            same = True
+            for i, (mine, theirs) in enumerate(zip(ids, other)):
+                first = next((k for k, (a, b) in enumerate(zip(mine, theirs)) if a != b), min(len(mine), len(theirs)))
+                whole = first == len(mine) == len(theirs)
+                same &= whole
+                print(f'  prompt {i}: {first} of {len(mine)} tokens the same as the other run\'s' + ('' if whole else ' before the first that differs'))
+            print('same tokens:', 'ALL' if same and len(ids) == len(other) else 'SOME_DIFFER')
 
         # One result for each prompt: a verdict over fewer, or over none, is not one.
         if len(outputs) != len(PROMPTS):

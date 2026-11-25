@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use crate::guard;
 use crate::images::{CUDA_ERROR_INVALID_PTX, Replacement};
 use crate::{
-    COUNTS, REALS, callers, config, contexts, fault, fit, idx, images, kernels, lazy, log, own_entry, profile,
+    COUNTS, REALS, callers, config, contexts, fault, fit, idx, images, kernels, lazy, log, own_entry, profile, told,
 };
 
 type CUresult = c_int;
@@ -534,6 +534,91 @@ unsafe fn in_context(result: CUresult, module: *mut *mut c_void, call: &str) -> 
     result
 }
 
+thread_local! {
+    /// The capability, as an SM number, for which the load that this thread is making for the
+    /// layer itself adapts its image (`load_told`).
+    static LOADING_TOLD: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// What the caller of a load is told (`callers::told_sm`), or, for a load of the layer's own, what
+/// the program whose image it is was told.
+fn told_caller(caller: usize) -> Option<u32> {
+    LOADING_TOLD.get().or_else(|| callers::told_sm(caller))
+}
+
+/// Loads the cubin at `image` for the layer itself, as a library or as a module of the current
+/// context, adapted as for a program told `told_sm`: through the entry points that a program's
+/// load goes through, so that everything the layer keeps of a module is kept of it. Its handle.
+///
+/// # Safety
+/// `image` points to a whole cubin.
+pub(crate) unsafe fn load_told(image: *const c_void, told_sm: u32, library: bool) -> Result<usize, CUresult> {
+    let before = LOADING_TOLD.replace(Some(told_sm));
+    let mut handle = std::ptr::null_mut();
+    let (none, no_values) = (std::ptr::null_mut::<c_int>(), std::ptr::null_mut::<*mut c_void>());
+    let result = unsafe {
+        if library {
+            library_load_data(&mut handle, image, none, no_values, 0, none, no_values, 0)
+        } else {
+            module_load_data(&mut handle, image, 0)
+        }
+    };
+    LOADING_TOLD.set(before);
+    match result {
+        CUDA_SUCCESS if !handle.is_null() => Ok(handle as usize),
+        CUDA_SUCCESS => Err(CUDA_ERROR_NOT_FOUND),
+        result => Err(result),
+    }
+}
+
+/// The lookup of kernel `name` in `second`, which `load_told` loaded (a library when `library`),
+/// for a program that asked through `through`: by the entry points that a program's lookup goes
+/// through. For a function of the module of a library, the module that the driver gives for
+/// `second` in the current context is asked.
+///
+/// # Safety
+/// `name` is a C string; `out` is null or writable.
+pub(crate) unsafe fn lookup_told(
+    second: usize,
+    library: bool,
+    name: *const c_char,
+    out: *mut *mut c_void,
+    through: told::Through,
+) -> CUresult {
+    let second = second as *mut c_void;
+    match (library, through) {
+        (true, told::Through::Library) => unsafe { cuLibraryGetKernel(out, second, name) },
+        (true, told::Through::Module) => {
+            let mut module = std::ptr::null_mut();
+            let result = unsafe { library_get_module(&mut module, second, 0) };
+            if result != CUDA_SUCCESS {
+                return result;
+            }
+            unsafe { cuModuleGetFunction(out, module, name) }
+        }
+        (false, _) => unsafe { cuModuleGetFunction(out, second, name) },
+    }
+}
+
+/// What the layer loaded for the kernels of `owner` that only the code for the capability told
+/// has (`told`) is unloaded, before `owner` is.
+unsafe fn unload_told(owner: usize) {
+    for (second, library) in told::take(owner) {
+        let result = unsafe {
+            if library {
+                cuLibraryUnload(second as *mut c_void)
+            } else {
+                cuModuleUnload(second as *mut c_void)
+            }
+        };
+        if result != CUDA_SUCCESS {
+            log::info(format_args!(
+                "what was loaded for the kernels of sm_80 code of a module was not unloaded (error {result})"
+            ));
+        }
+    }
+}
+
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *const c_void) -> CUresult {
@@ -541,7 +626,7 @@ pub unsafe extern "C" fn cuModuleLoadData(module: *mut *mut c_void, image: *cons
 }
 
 unsafe extern "C" fn module_load_data(module: *mut *mut c_void, image: *const c_void, caller: usize) -> CUresult {
-    let _told = images::ForCaller::told(callers::told_sm(caller));
+    let _told = images::ForCaller::told(told_caller(caller));
     let real = real!(cuModuleLoadData: unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> CUresult);
     let result = unsafe {
         load(
@@ -664,7 +749,7 @@ unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
 /// A lookup of kernel `name` in the module or library `handle`: refused when the kernel cannot run on
 /// this GPU, else done by `find`; a kernel that is found and runs emulated instructions is announced,
 /// and one that is not found, but is in the code of its image that a GPU of the capability told
-/// loads, is said (`kernels::not_given`).
+/// loads, is given from that code (`told::lookup`), or said (`kernels::not_given`).
 /// A refusal, and any lookup that fails, leaves NULL in `kernel_out`, as NVIDIA's driver does for a
 /// name it does not have: a program that ignores the error then launches nothing, not what its
 /// variable held before. (A lookup in a deferred library can fail where the driver is not asked: a
@@ -678,14 +763,15 @@ unsafe fn load_file(module: *mut *mut c_void, path: *const c_char) -> CUresult {
 /// points to the handle the driver stored.
 unsafe fn lookup(
     handle: usize,
-    name: *const c_char,
+    c_name: *const c_char,
     kernel_out: *mut *mut c_void,
+    through: told::Through,
     find: impl FnOnce() -> CUresult,
 ) -> CUresult {
-    if name.is_null() {
+    if c_name.is_null() {
         return find();
     }
-    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    let name = unsafe { CStr::from_ptr(c_name) }.to_string_lossy();
     if kernels::refused(handle, &name) {
         if !kernel_out.is_null() {
             unsafe { *kernel_out = std::ptr::null_mut() };
@@ -696,8 +782,12 @@ unsafe fn lookup(
     if result != CUDA_SUCCESS && !kernel_out.is_null() {
         unsafe { *kernel_out = std::ptr::null_mut() };
     }
-    if result == CUDA_ERROR_NOT_FOUND {
-        kernels::not_given(handle, &name);
+    if result == CUDA_ERROR_NOT_FOUND
+        && let Some(given) = unsafe { told::lookup(handle, &name, c_name, kernel_out, through) }
+    {
+        // Given from the image's code for the capability told, in a module of its own: what is
+        // kept of a kernel that is found was kept there, for that module.
+        return given;
     }
     if result == CUDA_SUCCESS {
         kernels::given(handle, &name);
@@ -724,9 +814,13 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 ) -> CUresult {
     let real =
         real!(cuModuleGetFunction: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> CUresult);
-    let result = unsafe { lookup(module as usize, name, function, || real(function, module, name)) };
+    let result = unsafe {
+        lookup(module as usize, name, function, told::Through::Module, || {
+            real(function, module, name)
+        })
+    };
     fault::check_module(result, "cuModuleGetFunction", module as usize);
-    if result == CUDA_SUCCESS && !function.is_null() && !name.is_null() {
+    if result == CUDA_SUCCESS && !function.is_null() && !name.is_null() && !told::gave(unsafe { *function } as usize) {
         let func_handle = unsafe { *function } as usize;
         let name_str = unsafe { CStr::from_ptr(name) }.to_string_lossy();
         fit::register_kernel(func_handle, module as usize, &name_str, false);
@@ -736,6 +830,7 @@ pub unsafe extern "C" fn cuModuleGetFunction(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuModuleUnload(module: *mut c_void) -> CUresult {
+    unsafe { unload_told(module as usize) };
     let _ending = kernels::ending();
     let real = real!(cuModuleUnload: unsafe extern "C" fn(*mut c_void) -> CUresult);
     // What is kept for the module is forgotten before the driver unloads it: from then on, the
@@ -953,7 +1048,7 @@ unsafe extern "C" fn library_load_data(
     library_values: *mut *mut c_void,
     library_count: c_uint,
 ) -> CUresult {
-    let _told = images::ForCaller::told(callers::told_sm(noted_caller()));
+    let _told = images::ForCaller::told(told_caller(noted_caller()));
     let _library = images::ForLibrary::load();
     let real = real!(cuLibraryLoadData: LibraryLoad<*const c_void>);
     let call = |code: *const c_void| unsafe {
@@ -1255,6 +1350,7 @@ unsafe extern "C" fn library_load_from_file(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuLibraryUnload(library: *mut c_void) -> CUresult {
+    unsafe { unload_told(library as usize) };
     let _ending = kernels::ending();
     // Check if this is a lazy library: unload its sub-modules and stand-in.
     // (Forgotten before the driver's unload: see `cuModuleUnload`.)
@@ -1293,8 +1389,8 @@ pub unsafe extern "C" fn cuLibraryGetKernel(
             unsafe { std::mem::transmute(REALS[idx::cuLibraryGetKernel].load(Relaxed)) };
         unsafe { real(kernel, library, name) }
     };
-    let result = unsafe { lookup(handle, name, kernel, find) };
-    if result == CUDA_SUCCESS && !kernel.is_null() && !name.is_null() {
+    let result = unsafe { lookup(handle, name, kernel, told::Through::Library, find) };
+    if result == CUDA_SUCCESS && !kernel.is_null() && !name.is_null() && !told::gave(unsafe { *kernel } as usize) {
         let kernel_handle = unsafe { *kernel } as usize;
         let name_str = unsafe { CStr::from_ptr(name) }.to_string_lossy();
         fit::register_kernel(kernel_handle, handle, &name_str, true);
@@ -1788,7 +1884,8 @@ pub unsafe extern "C" fn cuKernelGetFunction(function: *mut *mut c_void, kernel:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuKernelGetLibrary(library: *mut *mut c_void, kernel: *mut c_void) -> CUresult {
     COUNTS[idx::cuKernelGetLibrary].fetch_add(1, Relaxed);
-    if let Some(lib_handle) = lazy::kernel_library(kernel as usize) {
+    // (A kernel given from the image's code for the capability told: the library that was asked.)
+    if let Some(lib_handle) = told::library_of(kernel as usize).or_else(|| lazy::kernel_library(kernel as usize)) {
         if !library.is_null() {
             unsafe { *library = lib_handle as *mut c_void };
         }
