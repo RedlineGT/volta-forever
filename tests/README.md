@@ -621,7 +621,8 @@ layer's thread (the process ends with that status, its last write made, and its 
 destructor returns 0); after the last write, a removal returning `EBUSY` at once while a call is under way
 (the function that never returns, removed by its library's destructor; one that runs 3 s, whose library
 unmaps the page it reads when its removal returns 0: the page stays, the call ends well, and the function
-after it in the slots is not called); the layer's thread blocking every signal but those
+after it in the slots is not called); a function that forks on the layer's thread, its child returning
+from it: the child ends and writes no file; the layer's thread blocking every signal but those
 of a fault (its `SigBlk`), the thread that loaded the layer keeping its mask, and a fault there reaching
 the program's crash handler (Python's faulthandler); children made by `fork()` while the thread
 writes and holds the lock, in which both functions do nothing, nothing is called, and which end and

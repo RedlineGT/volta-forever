@@ -21,7 +21,8 @@ report] "). With a stand-in driver (link_mock_driver.c) and a test library (summ
   lacks those lines; its library's destructor, after the layer's, removes it there: 0, as after any last write);
   after the last write, a removal returns EBUSY at once while a call is under way (the fill that never returns;
   one that runs 3 s, whose library unmaps what it reads when its removal returns 0: the page stays and the call
-  ends well), and the thread calls no fill after it;
+  ends well), and the thread calls no fill after it; a fill that forks on the layer's thread, its child
+  returning from it: the thread ends in the child, which ends with it and writes no file;
 - children made by fork() while the thread writes: both functions do nothing there (ECHILD), nothing is called,
   the children end and write nothing; and a child made without fork()'s handlers (clone(2) itself) while the
   thread holds the lock, which the child then has held for ever: both functions return ECHILD there at once;
@@ -221,6 +222,17 @@ def child(proxy, library, mode):
         lib.fill_arm(1)
         time.sleep(10)  # the thread's next write faults first
         say("still alive")
+        return
+
+    if mode == "forkret":  # a fill that forks, its child returning from it into the layer's thread
+        assert add(b"forkret", b"forkret") == 0
+        lib.fill_arm(1)
+        end = time.time() + 15
+        while not lib.fill_child() and time.time() < end:
+            time.sleep(0.02)
+        say("child", lib.fill_child())
+        time.sleep(3.5)  # writes of the thread, here and in the fill's child
+        say("exiting")
         return
 
     if mode == "slowexit":  # a fill that runs past the last write's 2 s, and a library that frees what it reads
@@ -700,12 +712,36 @@ if __name__ == "__main__":
         text = well_formed(Path(f"{summary}.{p.pid}"), ["slowexit", "counter"])
         assert exited(text, p.pid) and ("\n[volta-forever] the lines of other libraries are not in this last write: "
                                         "one of their functions had not returned 2 s after the exit began\n") in text, text
+        # One that forks on the layer's thread, its child returning from it (and so into the layer's thread, the
+        # child's only one): the thread ends there, the child with it, and it writes no file.
+        p = start("forkret", **on)
+        p.line()
+        child = p.line()
+        assert child[0] == "child" and int(child[1]) > 0, child
+        kid = int(child[1])
+        assert p.line() == ["exiting"]
+        p.finish()
+
+        def state(pid):
+            try:
+                return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return "gone"
+
+        end = time.time() + 5
+        while state(kid) not in ("gone", "Z") and time.time() < end:
+            time.sleep(0.1)
+        ended, left = state(kid), Path(f"{summary}.{kid}")
+        if ended not in ("gone", "Z"):
+            os.kill(kid, signal.SIGKILL)  # the fill's child of this test's own process
+        assert ended in ("gone", "Z") and not left.exists(), (ended, left.read_text() if left.exists() else "no file")
         print(f"PASS fills that break the contract: one that never returns delays the exit by 2 s ({took:.1f} s here), the"
               f" last write made without the libraries' lines and saying so, and a fork from another thread does not wait"
               f" for it ({fork[1]} ms); one that forks at each write is called {calls[1]} times; one that calls exit(3)"
               f" ends the process with that status, its last write made and saying why it lacks the libraries' lines,"
               f" and its removal in its library's destructor returns 0; after the last write, while a call runs past"
-              f" its 2 s, a removal returns EBUSY at once and nothing is called")
+              f" its 2 s, a removal returns EBUSY at once and nothing is called; the child of a fork in a fill that"
+              f" returns from it ends, writing nothing")
 
         # At exit, in both orders of the destructors: which one came first is read from the removal (whether it
         # called the fill once more), and the file must hold what that order gives; the two cases must show both.

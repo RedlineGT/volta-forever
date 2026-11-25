@@ -11,6 +11,7 @@
 //   segv     once armed, on a thread other than the main one (the layer's): writes through a null pointer
 //   slowexit (fill_add_page) once armed, on a thread other than the main one: sleeps 3 s; then gives the number
 //            on the page that its ctx points to
+//   forkret  once armed, the first time: forks, and its child returns from the fill (fill_child: its pid)
 // Each counts its calls. Its destructor, when fill_at_exit asked for it, takes back what it registered
 // (as a library removes itself before it goes) and says on standard error how many times its fills
 // were called before and after, and what vf_summary_remove returned; with FILL_NO_REMOVE=1 it does not
@@ -163,6 +164,19 @@ static size_t fill_slowexit(char *buf, size_t cap, void *ctx)
     int n = snprintf(buf, cap, "slowexit %ld\n", *(volatile long *)ctx);
     return n < 0 ? 0 : (size_t)n;
 }
+static atomic_int child_pid;
+static size_t fill_forkret(char *buf, size_t cap, void *ctx)
+{
+    (void)ctx;
+    atomic_fetch_add(&calls, 1);
+    if (atomic_load(&armed) && !atomic_exchange(&in_fill, 1)) {
+        const pid_t pid = fork();
+        if (pid > 0) atomic_store(&child_pid, pid);
+    }
+    int n = snprintf(buf, cap, "forkret in %d\n", (int)getpid());
+    return n < 0 ? 0 : (size_t)n;
+}
+int fill_child(void) { return atomic_load(&child_pid); }
 void fill_arm(int on) { atomic_store(&armed, on); }
 int fill_entered(void) { return atomic_load(&in_fill); }
 
@@ -177,6 +191,7 @@ static fill_fn kind(const char *k)
     if (!strcmp(k, "forks")) return fill_forks;
     if (!strcmp(k, "exits")) return fill_exits;
     if (!strcmp(k, "segv")) return fill_segv;
+    if (!strcmp(k, "forkret")) return fill_forkret;
     return NULL;
 }
 

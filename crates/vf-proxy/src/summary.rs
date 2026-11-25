@@ -445,7 +445,8 @@ fn libraries_lines(finished: &AtomicBool) -> Vec<String> {
             let (prefix, text) = match slot.fill {
                 Some((fill, ctx)) => {
                     FILLING.store(this_thread(), SeqCst);
-                    if finished.load(SeqCst) {
+                    // (Not in a child made by `fork()` in a `fill` that then returned: see `rewrite`.)
+                    if finished.load(SeqCst) || !crate::loaded_here() {
                         FILLING.store(0, SeqCst);
                         break;
                     }
@@ -528,6 +529,9 @@ pub fn start() {
 
 /// The thread: the report, written again whenever it changed (the lines of other libraries included).
 /// The other libraries' lines are read first, with `FILLS` held, then the layer's report, with `LOCK`.
+/// In a child made by `fork()` in a `fill` (only there does this thread go on in a child) that then
+/// returned, the thread ends there, writing nothing (the child ends with it, the thread being its only
+/// one).
 fn rewrite() {
     let Some(settings) = SETTINGS.get() else {
         return;
@@ -535,13 +539,16 @@ fn rewrite() {
     let mut last = None;
     loop {
         std::thread::sleep(settings.interval);
-        if FINISHED.load(SeqCst) {
+        if FINISHED.load(SeqCst) || !crate::loaded_here() {
             return;
         }
         let others = {
             let _held = FILLS.take();
             libraries_lines(&FINISHED)
         };
+        if !crate::loaded_here() {
+            return;
+        }
         let _locked = LOCK.take();
         if FINISHED.load(SeqCst) {
             return;
@@ -570,6 +577,9 @@ pub fn finish(report: &[String]) {
     } else {
         Err("one of their functions had not returned 2 s after the exit began")
     };
+    if !crate::loaded_here() {
+        return; // in a child made by fork() in a fill, which then returned: the child writes no file
+    }
     FINISHED.store(true, SeqCst);
     let _locked = LOCK.take();
     let mut lines = layer_lines(report);
