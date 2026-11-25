@@ -949,21 +949,30 @@ int vf_summary_remove(size_t (*fill)(char *buf, size_t cap, void *ctx), void *ct
   lock, in `vf_summary_add` or `vf_summary_remove`, would wait for it in turn: `EDEADLK` covers only the
   thread that is in the `fill`), and must not fork, exit, call `pthread_exit` or `longjmp` out of it, or
   throw: an unwinding through the layer's frames (a C++ exception, `pthread_exit`'s) aborts the process.
-  What the layer does about one that does not keep to this: the last write at exit waits 2 s at most for the
-  calls under way (the layer's thread's or a removal's), then is made without the other libraries' lines,
-  and says so on a line of its own (`[volta-forever] the lines of other libraries are not in this last
-  write: one of their functions had not returned 2 s after the exit began`); its own calls, once it has the
-  lock, are as bounded as the `fill`s are. A `fill` that calls `exit()` gets the status it gave and a last
-  write without those lines (`... the process exited from one of their functions`); a `fork()` from another
-  thread does not wait for a `fill`, nor does one from a `fill`. The two functions are not
-  async-signal-safe: a signal handler must not call them.
+  What the layer does about one that does not keep to this: the last write at exit waits 2 s at most (of
+  the monotonic clock, which a change of the time of day does not move) for the calls under way (the
+  layer's thread's or a removal's), then is made without the other libraries' lines, and says so on a line
+  of its own (`[volta-forever] the lines of other libraries are not in this last write: one of their
+  functions had not returned 2 s after the exit began`); its own calls, once it has the lock, are as bounded
+  as the `fill`s are. Such a call may still run when its library's removal returns, after the last write
+  (`EBUSY`, below): a destructor frees nothing that its `fill` reads unless its removal returned 0 (at exit,
+  what is left goes with the process). A `fill` that calls `exit()` on the layer's thread, or in a removal
+  while the process runs, gets the status it gave and a last write without those lines (`... the process
+  exited from one of their functions`); called during the exit itself, by the last write or by a removal in
+  a destructor, its `exit()` ends the process at once with that status, and there is no last write (the
+  file keeps the write before). A `fork()` from another thread does not wait for a `fill`, nor does one from
+  a `fill`; a `fill` that forks on the layer's thread and whose child returns from it puts that child in the
+  layer's thread, its only thread, which then calls nothing more, writes nothing and ends, the child with it.
+  The two functions are not async-signal-safe: a signal handler must not call them.
 - **What the functions return**, errno's values: 0; `ENOTSUP`, `abi` is not 1; `EINVAL`, `fill` or `name` is
   null, or `name` is not a name as above; `EEXIST`, this `fill` with this `ctx` is registered under another
   name, or this name with another `fill` or `ctx`; `ENOSPC`, four other names are registered; `ENOENT`,
   `vf_summary_remove` of what is not registered; `ECHILD`, the process is a child made by `fork()` of the one
   that loaded the layer, and nothing is done; `EDEADLK`, called from a `fill` by the thread that is in it,
-  which holds the `fill`s' lock; `EIO`, an internal error of the layer. Once the layer's last write (at exit)
-  is made, both return 0 at once and do nothing.
+  which holds the `fill`s' lock, before the last write; `EIO`, an internal error of the layer. Once the
+  layer's last write (at exit) is made, both return at once and do nothing: `vf_summary_add` 0, from any
+  thread (from a `fill` that called `exit()` too); `vf_summary_remove` 0, or `EBUSY` while a call of a `fill`
+  (one that ran past the last write's 2 s, maybe of this library's) is still under way on another thread.
 - **Lifetime.** A call into a library that is gone would end the process. `vf_summary_remove` takes the lock
   that each write holds while it calls the `fill`s, so it waits for the calls under way, all of that write's
   (every library's, one after the other), and `fill` is not called after it returns: a library removes
@@ -971,8 +980,10 @@ int vf_summary_remove(size_t (*fill)(char *buf, size_t cap, void *ctx), void *ct
   functions with). While the file is still to be written, in the process that loaded the layer, the removal
   calls `fill` once more, and the layer keeps what it gives (as bounded as any `fill`'s text): the library's
   last report, written in its place from then on with `[NAME, last report] ` in front, so that kept lines
-  are told from live ones. Once the layer's last write is made, a removal calls nothing, and nothing more is
-  written.
+  are told from live ones. Once the layer's last write is made, a removal calls nothing, waits for nothing,
+  and nothing more is written; no call of a `fill` starts after it (the thread announces each call before it
+  looks at whether the last write is made, and the removal looks at the announcement after it: either the
+  thread calls nothing, or the removal sees the call and returns `EBUSY`).
 - **Exit.** The layer's last write (its destructor) and the destructor of a library that removes itself both
   run in `_dl_fini`, in the order in which the two libraries were loaded (glibc 2.39 runs the destructors of
   libraries that do not depend on each other in the order of their loading). The library's first (it was
@@ -980,14 +991,17 @@ int vf_summary_remove(size_t (*fill)(char *buf, size_t cap, void *ctx), void *ct
   that last report. The layer's first (the library was loaded after it): its last write calls `fill` live, and
   the removal after it calls nothing; all that is lost is what the library counts after that write, which
   only the destructors that run after the layer's can make it count. The last write waits 2 s at most for the
-  calls of `fill`s under way, as above.
+  calls of `fill`s under way, as above; a removal after it does not wait (0 or `EBUSY`).
 - **Fork, signals.** A child made by `fork()` writes no file, as for the layer's own report: both functions
   do nothing there (`ECHILD`), take no lock, and no `fill` is called in it; a `fork()` waits for the layer's
   own part of a write (its report and the file), never for a `fill`. A `fill` is called by the layer's
   thread, by the thread that exits for the last write, and once by a removal. The layer's thread blocks
-  every signal, so that no handler of the program's runs where the layer's locks are held and other
-  libraries' code runs, and a program that takes its signals with `sigwait()` gets them all; the layer has
-  no handler of a signal, and calls a `fill` from a handler only when the program calls `exit()` from one.
+  every signal but those of a fault (SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS), so that no handler
+  of the program's runs where the layer's locks are held and other libraries' code runs, and a program that
+  takes its signals with `sigwait()` gets them all; a fault there reaches the program's crash handler
+  (Python's faulthandler, say) as in any thread, where blocked the kernel would end the process with the
+  handler reset. The layer has no handler of a signal, and calls a `fill` from a handler only when the
+  program calls `exit()` from one.
 - Without `VF_SUMMARY` there is no thread and no call of a `fill`; a registration is kept and does nothing.
   The registrations do not depend on the thread: one made before it writes is in its first write, and
   without a thread (it could not be started) the last write at exit has them.
@@ -1000,7 +1014,8 @@ before. Not in a constructor: the runtime can be loaded before the driver, in a 
 is cuBLAS's (cuBLAS 12.9 then loads the driver), and its last report is then the one kept at exit; under
 PyTorch, or in a program that opens the driver first, it is loaded after the layer, whose last write calls its
 `fill`. It pins itself first (`RTLD_NODELETE`: a `dlclose` does not unload it) and removes itself in its
-destructor all the same. A refusal of the layer's (`vf_summary_add` returning an error: four other names, say)
+destructor all the same (its `fill` reads counters that are never freed, so it does what it does whatever
+the removal returns). A refusal of the layer's (`vf_summary_add` returning an error: four other names, say)
 is said once at `VF_LOG_LEVEL=2`, with its code, but `ECHILD` (in a child made by `fork()`, where the layer
 writes no file); the exit report holds the counts all the same. Its `fill` gives the exit report's line of
 each entry point, at every log level, as the exit report prints it at `VF_LOG_LEVEL=2` (one formatter for
