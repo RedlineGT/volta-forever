@@ -112,18 +112,21 @@ Where the GPU scripts write:
   only the code for sm_80 has it; told 7.5 it says nothing; with `VF_TRANSLATE=first` the kernel
   runs from the sm_80 code; and kernels that hold, or call through a table, an instruction of the
   multimem family (`reported-*`, `tests/kernels/test_reported.c`): given with the instruction
-  replaced by a reported trap, said once each, and right on every path that does not reach it,
-  through a module, a library and with `VF_LAZY=0`, while the same call that may reach
+  replaced by a reported trap, said in one line for their image, and right on every path that does
+  not reach it (one with its multimem instructions under a guard that is false among them), through
+  a module, a library and with `VF_LAZY=0`, and in a module with comments before its header, while the same call that may reach
   `barrier.cluster.arrive` is refused, and with `VF_REPORTED_TRAPS=0` all of them are, with the same
   check of the kernel's log; and what the driver answers about multicast, without the layer and
   through it (`multicast-*`: the attribute is 0, `cuMulticastCreate` an error).
 - `nccl.sh [cuda13|cuda12] [--bench]`: NCCL's collectives through PyTorch on the first two V100s
-  visible, one process for each (`nccl-collectives.py`): all-reduce (sum in five types, max, min), broadcast,
-  all-gather, reduce-scatter, reduce, send/receive and all-to-all on 1 to 4,194,304 elements, every
-  result compared with the CPU's exactly; with the NCCL of the PyTorch wheel (`cuda13`, given with
-  reported traps: a refused kernel of NCCL's collectives or an assertion of the layer fails it) or
-  the CUDA 12 build put in its place (`cuda12`); `--bench` times an all-reduce of 64 MiB and one of
-  8 bytes.
+  visible, one process for each (`nccl-collectives.py`): all-reduce (sum in int32, int64,
+  float64, float32, float16 and bfloat16, max and min in those but int64), broadcast, all-gather, reduce-scatter, reduce,
+  send/receive and all-to-all on 1 to 4,194,304 elements, every value compared with the CPU's
+  exactly (floats that every order of addition sums exactly), first as NCCL chooses, then with each
+  algorithm and protocol pinned (Ring and Tree; Simple, LL and LL128), NCCL's lines saying what ran;
+  with the wheel's CUDA 13 NCCL (`cuda13`, given with reported traps: a refused kernel of its
+  collectives or an assertion of the layer fails it) or the CUDA 12 build put in its place
+  (`cuda12`); `--bench` times an all-reduce of 64 MiB and one of 8 bytes.
 - `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
   `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary
   contexts, capture and launch per-GPU CUDA graphs simultaneously, and run a cross-device
@@ -235,7 +238,7 @@ Need a Tesla V100, the layer built (`scripts/build.sh`), the forwarding librarie
 |---|---|---|---|---|
 | `run.sh` | test kernels through the proxy | native sm_70 builds, host models, RTX 5090 reference vectors | a minute or two | toolkits |
 | `multi-gpu.sh` | one-process dual-GPU concurrency (`cuModuleLoadData`, `cuLibraryLoadData`, CUDA graphs) & peer copy | host exact computation | a few seconds | 2+ GPUs |
-| `nccl.sh` | NCCL's collectives through PyTorch, one process for each of two GPUs, with the wheel's CUDA 13 NCCL (`cuda13`, its multicast instructions given as reported traps) or the CUDA 12 build (`cuda12`); `--bench` times two all-reduces | the CPU, exactly | 40 s (`cuda13` once the driver's cache holds NCCL's code: its first run compiles it for about 15 minutes in each process), 10 s (`cuda12`) | 2 V100s, PyTorch 2.14 (`VF_TORCH`), the CUDA 12 NCCL for `cuda12` (`VF_NCCL12`) |
+| `nccl.sh` | NCCL's collectives through PyTorch, one process for each of two GPUs, with the wheel's CUDA 13 NCCL (`cuda13`, its multicast instructions given as reported traps) or the CUDA 12 build (`cuda12`), as NCCL chooses and with each algorithm and protocol pinned; `--bench` times two all-reduces | the CPU, exactly | 65 s (`cuda13` once the driver's cache holds NCCL's code: its first run compiles it for about 15 minutes in each process), 30 s (`cuda12`) | 2 V100s, PyTorch 2.14 (`VF_TORCH`), the CUDA 12 NCCL for `cuda12` (`VF_NCCL12`) |
 | `forward.sh` | forwarding libraries | host computation | a minute | toolkits |
 | `torch.sh` | 925 PyTorch operations | the CPU | 3 min | PyTorch 2.14.0+cu130 wheel |
 | `torch-models.sh` | 32 small whole models | the CPU | 4 min | PyTorch 2.14.0+cu130 wheel |
@@ -599,10 +602,14 @@ retarget it and give its kernel, with no internal error and nothing loaded as is
 given is not compared). It needs a C compiler; run as root, `RLIMIT_NPROC` refuses no thread, and
 the fallback is not reached. The twentieth checks, with the stand-in of the fourth and devices whose
 multicast it chooses, that a kernel of NCCL's name that calls a function holding a multimem
-instruction is given with a reported trap, said once and without the line about NCCL's CUDA 12
-build, when no GPU of the process can take part in multicast; and refused (218, with that line)
-when the second GPU can, when the driver does not answer the attribute, and with
-`VF_REPORTED_TRAPS=0`. It needs a C compiler.
+instruction is given with a reported trap, said in one line for its image (the kernel itself from
+level 2) and without the line about NCCL's CUDA 12 build, when no GPU of the process can take part
+in multicast; refused (218, with that line) when the second GPU can, when the driver does not
+answer the attribute, with `VF_REPORTED_TRAPS=0`, and in both loads of a process where the first
+question failed; that before the stand-in's slow load of a module of 17 MiB the layer says, once,
+what the driver compiles (naming NCCL's CUDA 12 build for NCCL's kernels only); and that a cubin
+that the driver's linker made from such PTX, given as the relocatable fat binary of a wrapper, has
+its kernel said. It needs a C compiler.
 
 ### Forwarding stack test (`tests/forward/`)
 

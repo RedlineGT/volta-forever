@@ -754,7 +754,7 @@ nocode nocode-cubin-library "$G/k_nocode.135.sm75.cubin" library
 # nothing else are given, and the first three compute right on their paths; one line says them for
 # their image at the default level. A module with comments before its header loads and runs. The same call that may reach
 # barrier.cluster.arrive, which a program can really execute, is still refused, and so are the
-# first ones with VF_REPORTED_TRAPS=0 (until 0.1.4 they were all refused: the CUDA 13 build of NCCL
+# first ones with VF_REPORTED_TRAPS=0 (until 0.1.5 they were all refused: the CUDA 13 build of NCCL
 # could not run its collectives). No case reaches a trap; what the driver says of multicast is read
 # without the layer and through it. A trap reached is the opt-in case at the end (VF_TEST_FAULTS=1).
 [ -x "$out/bin/test_reported" ] && [ "$out/bin/test_reported" -nt "$G/test_reported.c" ] || gcc -O2 -Wall -o "$out/bin/test_reported" "$G/test_reported.c" -ldl || exit 2

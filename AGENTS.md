@@ -50,12 +50,14 @@ Steps, in this order:
    - `emulated in NAME: ...` is logged when VF gives the program a handle to a kernel with
      emulated instructions. Launch it and check its output to verify execution. Measure it
      before drawing conclusions about speed.
-   - `kernel NAME is given with N instructions that cannot run on this GPU replaced by a reported
-     trap: FORM in FUNCTION` is said of a kernel that may reach an instruction of multicast memory
-     (`multimem.*`), which no V100 can execute with a defined result: it runs right on every path
-     that does not reach one. If one is ever reached, the kernel stops with `CUDA_ERROR_ASSERT`
-     (710) and a line of the driver that starts with `volta-forever:` and names the function;
-     report that as a bug of the layer, with the line.
+   - `IMAGE: N kernels are given with instructions that cannot run on this GPU replaced by reported
+     traps (...)` is said of the kernels of an image that may reach an instruction of multicast
+     memory (`multimem.*`), which no V100 can execute with a defined result (each kernel from
+     `VF_LOG_LEVEL=2`): they run right on every path that does not reach one. If one is ever
+     reached, the kernel stops with `CUDA_ERROR_ASSERT` (710) and a line of the driver that starts
+     with `volta-forever:` and names the function; report that as a bug of the layer, with the
+     line. `IMAGE: the driver now compiles the N MB of PTX ...` says that a first start will take
+     minutes (the CUDA 13 NCCL: about 15 in each process).
    - a line about what a library `is told` is the compute capability that caller sees.
    `VF_LOG_LEVEL=2` prints which images were adapted and what each caller is told.
 5. **Libraries.** `vf fetch --all` downloads the CUDA 12.9 libraries VF forwards to and includes

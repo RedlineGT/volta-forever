@@ -17,7 +17,7 @@
  * The module (PTX for sm_90, which the layer adapts) has, as NCCL has:
  *   - pick: a call through a pointer taken from a table (`table`) of two device functions of one
  *     prototype; the program's argument chooses which. `twice` doubles a word, `gathered` reads it
- *     with multimem.ld_reduce. Until 0.1.4 the call that may reach `gathered` refused `pick`;
+ *     with multimem.ld_reduce. Until 0.1.5 the call that may reach `gathered` refused `pick`;
  *   - polled: multimem.ld_reduce behind a test of a flag that the program passes, as NCCL's step
  *     counters are read (0: a plain load);
  *   - stored: a kernel whose only work is multimem.st, given (never launched here);

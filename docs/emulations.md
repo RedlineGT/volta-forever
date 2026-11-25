@@ -753,8 +753,8 @@ a call of `__assertfail` (the file `volta-forever`, the number of the trap in it
 function's name, the message "FORM cannot run on this GPU: it needs a multicast address, which no
 GPU of this process can have; volta-forever put this trap in its place") and a `trap` after it.
 What the instruction would have written is not written: nothing of the thread runs after it. The
-rest of the function is lowered as any other, and its kernels are given, each said once
-(`LIMITS.md`, "Several GPUs and NCCL"). Reached all the same, the kernel stops with
+rest of the function is lowered as any other, and its kernels are given, said in one line for
+their image (`LIMITS.md`, "Several GPUs and NCCL"). Reached all the same, the kernel stops with
 `CUDA_ERROR_ASSERT` (710), the driver writes the assertion with the block and the thread, and the
 context ends, as for any trap. Where a GPU of the process has multicast, with `VF_REPORTED_TRAPS=0`,
 in modules of 32-bit addresses and in what `vf ptxas` and the nvJitLink adapter make, the function

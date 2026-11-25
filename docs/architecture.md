@@ -189,12 +189,17 @@ manual leaves undefined without a multicast address, which no GPU of a process c
 driver says that none can take part in multicast (every V100). There each such instruction, not
 its function, is replaced by a reported trap: a call of `__assertfail` that names the instruction
 and the function, then `trap` (`vf_ptx::lower::Options::reported_traps`, `docs/emulations.md`).
-The kernels that are, or may reach, a function with one are given, said once each when the
-program takes them (`kernels::with_traps`, `given`), counted at exit, and named in the report of a
-fault (`images::origin_text`). The question to the driver is asked once, at the first image the
-layer adapts (`images::without_multicast`); where any GPU of the process can take part in
-multicast, or the answer cannot be had, or with `VF_REPORTED_TRAPS=0`, those functions trap and
-their kernels are refused as above. NCCL's CUDA 13 build holds such instructions in nearly every
+The kernels that are, or may reach, a function with one are given, said in one line for their
+image at level 1 and each when the program takes it from level 2 (`kernels::with_traps`, `given`),
+counted at exit, and named in the report of a fault (`images::origin_text`). Before the driver
+compiles the first image of the process given so with 16 MiB of PTX or more, a line says what is
+compiled and that the first time takes minutes (`images::say_large`; NCCL's CUDA 13 build: 248 MB,
+about 15 minutes). The question to the driver is asked once in the process, at the first image the
+layer adapts or keys for its cache, and its answer, a failure too, is kept for the process
+(`images::without_multicast`): the key and the adaptation agree. Where any GPU of the process can
+take part in multicast, or the answer cannot be had, or with `VF_REPORTED_TRAPS=0`, those functions
+trap and their kernels are refused as above. The strings of the traps go after the module's header
+(`vf_ptx::trap_strings_at`), whatever comments come before it. NCCL's CUDA 13 build holds such instructions in nearly every
 function of its collectives, behind tests of flags that only its multicast transport sets.
 
 Kernels that run emulated (slower) instructions are announced on the console. The
@@ -259,7 +264,7 @@ Inputs given with `cuLinkAddFile` are not adapted.
 The first refused kernel of NCCL's collectives in a process (a name that starts with
 `ncclDevKernel_` or `ncclKernel_`) also makes the proxy say, at the default log level, that
 NCCL's CUDA 12 build is what the program needs and that `vf fetch --only libnccl` downloads it
-(`LIMITS.md`, "Several GPUs and NCCL"). Since 0.1.4 those kernels are given with reported traps
+(`LIMITS.md`, "Several GPUs and NCCL"). Since 0.1.6 those kernels are given with reported traps
 (above), and the line comes only where they are still refused: a GPU of the process with
 multicast, `VF_REPORTED_TRAPS=0`, or a kernel that needs what Volta lacks for another reason. Not
 for its kernels for symmetric memory (`ncclSymkDevKernel_`): NCCL 2.30 ignores a failure to look

@@ -447,7 +447,7 @@ impl Policy {
     /// Offline CUDA 12.9 tools accept PTX ISA through 8.8 on Volta. What they make is not
     /// announced by the layer where it is loaded, and the GPUs of the process that loads it are not
     /// known to them: no instruction is replaced by a reported trap (`reported_traps`); the functions
-    /// that hold one trap, and their kernels are refused, as before 0.1.4.
+    /// that hold one trap, and their kernels are refused, as before 0.1.6.
     pub fn cuda_12_9() -> Self {
         let mut policy = Self {
             ptx_max: (8, 8),

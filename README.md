@@ -51,7 +51,7 @@ vf venv .venv
 .venv/bin/python -c "import torch; print(torch.cuda.get_device_name())"
 ```
 
-Run `vf fetch --all` if the application needs more CUDA 12.9 libraries. PyTorch on several GPUs is best served by NVIDIA’s CUDA 12 NCCL: `vf fetch --only libnccl` downloads it (the CUDA 13 NCCL of the wheels runs too since 0.1.4, after a first start that compiles it for minutes: `LIMITS.md`). [Installation and launcher options](INSTALL.md) · [Several GPUs](LIMITS.md#several-gpus-and-nccl)
+Run `vf fetch --all` if the application needs more CUDA 12.9 libraries. PyTorch on several GPUs is best served by NVIDIA’s CUDA 12 NCCL: `vf fetch --only libnccl` downloads it (the CUDA 13 NCCL of the wheels runs too since 0.1.6, after a first start that compiles it for minutes: `LIMITS.md`). [Installation and launcher options](INSTALL.md) · [Several GPUs](LIMITS.md#several-gpus-and-nccl)
 
 ## How it works
 

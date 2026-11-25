@@ -976,7 +976,7 @@ const MULTICAST_SUPPORTED: c_int = 132;
 /// and an instruction that needs such an address (`vf_ptx::lower::reported_trap_form`) cannot have
 /// one in any kernel of the process. Only then are such instructions replaced by reported traps
 /// (`policy`); otherwise the functions that hold them trap and their kernels are refused, as before
-/// 0.1.4: on a machine with a GPU that has multicast, code adapted for the V100 may also run on that
+/// 0.1.6: on a machine with a GPU that has multicast, code adapted for the V100 may also run on that
 /// GPU (a library whose PTX is compiled kernel by kernel gives a later card the V100's PTX), where
 /// the instruction can be reached. Asked once in the process, at the first load that adapts an image
 /// or makes a cache key for one (the driver is initialized then); an answer that cannot be had (an
