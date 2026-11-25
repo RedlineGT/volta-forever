@@ -116,8 +116,17 @@ Where the GPU scripts write:
   sums of pairs of bf16 and pairs of bf16 nearest to f32 (two instructions of sm_80 that the
   layer rewrites), 16,384 each against the host's exact rounding, and the quotients of a
   division whose slow path is a function inside the kernel, also through the library's module,
-  after the image is loaded again and in safe mode; a kernel that reads a variable of the image
-  and one that is not translated are not given, with the reason for each.
+  after the image is loaded again and in safe mode; a kernel that reads a variable of the image,
+  one that adds a `__constant__` variable, one that stores the address of one (a word of its
+  own bank 0) and one that is not translated are not given, with the reason for each. What needs
+  no GPU of this is in `tests/proxy/told.py`, against the stand-in driver of `launch_guard.py`,
+  which has the kernels of the machine code it is given: a function is given only in the context
+  of the module asked (the program's, or the one that the driver gives for a library), from a
+  module loaded there; an unload from another thread while the layer loads leaves nothing
+  loaded; what was loaded goes with the module or library, and stays when the driver refuses
+  the unload; nothing is loaded with `VF_TOLD_CODE=0`, nor for an image of relocatable code
+  (`k_told_rdc.cu`), loaded or linked. Three changes of `told.rs` each fail it (the context
+  not checked, the library's module not checked, the unload during the load not looked for).
 - `multi-gpu.sh`: on systems with at least two GPUs, two threads in one process load
   `k_basic` concurrently via both `cuModuleLoadData` and `cuLibraryLoadData` on separate primary
   contexts, capture and launch per-GPU CUDA graphs simultaneously, and run a cross-device
@@ -432,6 +441,7 @@ python3 tests/proxy/safe_mode.py dist/lib/libcuda.so.1
 python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
 python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
 python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
+python3 tests/proxy/told.py dist/lib/libcuda.so.1
 python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
 python3 tests/proxy/fault.py dist/lib/libcuda.so.1
 python3 tests/proxy/driver_calls.py dist/lib/libcuda.so.1
@@ -612,7 +622,7 @@ On every push and pull request, `.github/workflows/ci.yml` runs the formatting a
 checks and the unit tests (`cargo test`, 477 at 0.1.5); `scripts/build.sh`; `fit_api.sh`, `marker.sh`,
 `graph_fit.sh`, `lifecycle.sh`, `library_entries.py`, `readonly_tables.py`, `driver_capability.py`,
 `link_refusals.py`, `nccl_remedy.py`, `launch_guard.py`, `fault.py`, `driver_calls.py`, `guard_stress.sh`, `jitlink_fork.py`, `safe_mode.py`,
-`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `profile_failure.py`, `ptx_version.py` and
+`log_lines.py`, `summary_file.py`, `nocode_launch.py`, `told.py`, `profile_failure.py`, `ptx_version.py` and
 `nvml_capability.py` of `tests/proxy/`; `tests/forward/stack.sh` and
 `tests/forward/bf16.sh`; `tests/scripts/kernel-log.sh`; `launcher.sh` under `dash` and under `bash --posix`;
 `tests/python/triton_tc.py` (without a Triton);

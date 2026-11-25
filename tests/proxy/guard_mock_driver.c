@@ -28,6 +28,13 @@
 // (in late): error 218, and that line in the error log, as ptxas writes it. Alone, late() is
 // accepted: the layer learns that it is refused when a deferred library is loaded whole, after it
 // gave the kernel compiled alone.
+//
+// For told.py: given machine code (a cubin, or a fat binary of one), a module or library has the
+// kernels of its `.text.NAME` sections. `before_load` is called once at the next load of a
+// module or library, before anything is loaded (what another thread does meanwhile); the unload
+// of the handle `unload_fails_for` fails with 201 and unloads nothing. `context_of_object` gives
+// the context that a live module was loaded in, `live_objects` the number of live modules and
+// libraries. A link (cuLinkCreate_v2 ... cuLinkComplete) gives the image `linked`.
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
@@ -38,10 +45,14 @@ enum { INVALID_VALUE = 1, INVALID_HANDLE = 400, NOT_FOUND = 500 };
 
 unsigned launched, nodes, asked, identified, loads, unloads;
 uintptr_t next_handle, next_function;
+void (*before_load)(void);
+uintptr_t unload_fails_for;
+const void *linked;
+size_t linked_size;
 
 enum { MODULE = 1, LIBRARY, CONTEXT_MODULE };
 #define MAX 256
-#define NAMES 8
+#define NAMES 16
 static struct {
     uintptr_t handle;
     int kind, live;
@@ -78,11 +89,20 @@ static size_t extent(const char *image) {
     unsigned long long size;
     if (!image) return 0;
     memcpy(&magic, image, 4);
+    if (magic == 0x464c457fu) {
+        // A cubin: as far as its section headers reach.
+        unsigned short entry, count;
+        memcpy(&size, image + 0x28, 8);
+        memcpy(&entry, image + 0x3a, 2);
+        memcpy(&count, image + 0x3c, 2);
+        return size + (size_t)entry * count;
+    }
     if (magic != 0xBA55ED50u) return strlen(image);
     memcpy(&size, image + 8, 8);
     return 16 + size;
 }
 
+static int name_index(int owner, const char *name);
 static int new_object(int kind, const char *text) {
     int i = object_count++;
     uintptr_t handle = next_handle ? next_handle : counter++;
@@ -99,6 +119,29 @@ static int new_object(int kind, const char *text) {
         while (p + n < end && p[n] && p[n] != '(' && p[n] != ' ' && p[n] != '\n' && n < 31) ++n;
         memcpy(objects[i].names[objects[i].count], p, n);
         objects[i].names[objects[i].count++][n] = 0;
+    }
+    // (Machine code: the kernels of its sections of code, by their names in the table of names.
+    // Of a fat binary, the code for sm_70, as the driver takes it on a V100, and no other.)
+    const char *code = 0, *code_end = 0;
+    unsigned magic = 0;
+    if (text && end - text >= 64) memcpy(&magic, text, 4);
+    if (magic == 0x464c457fu) code = text, code_end = end;
+    for (const char *entry = text + 16; magic == 0xBA55ED50u && entry + 64 <= end;) {
+        unsigned short kind;
+        unsigned header, arch;
+        unsigned long long stored;
+        memcpy(&kind, entry, 2);
+        memcpy(&header, entry + 4, 4);
+        memcpy(&stored, entry + 8, 8);
+        memcpy(&arch, entry + 0x1c, 4);
+        if (header < 64 || entry + header + stored > end) break;
+        if (kind == 2 && arch == 70) code = entry + header, code_end = code + stored;
+        entry += header + stored;
+    }
+    for (const char *p = code; p && (p = memmem(p, code_end - p, "\0.text.", 7)) && objects[i].count < NAMES;) {
+        p += 7;
+        int n = (int)strnlen(p, code_end - p);
+        if (n > 0 && n < 32 && name_index(i, p) < 0) memcpy(objects[i].names[objects[i].count++], p, n + 1);
     }
     for (const char *p = text; p && (p = memmem(p, end - p, ".target sm_", 11)) && objects[i].target_count < NAMES;) {
         p += 11;
@@ -199,7 +242,40 @@ CUresult cuCtxGetDevice_v2(int *device, void *context) {
     return 0;
 }
 
+static void loading(void) {
+    void (*hook)(void) = before_load;
+    before_load = 0;
+    if (hook) hook();
+}
+uintptr_t context_of_object(void *handle) {
+    int i = find_object(handle);
+    return i < 0 ? 0 : objects[i].context;
+}
+unsigned live_objects(void) {
+    unsigned live = 0;
+    for (int i = 0; i < object_count; ++i) live += objects[i].live && objects[i].kind != CONTEXT_MODULE;
+    return live;
+}
+CUresult cuLinkCreate_v2(unsigned count, int *options, void **values, void **state) {
+    (void)count; (void)options; (void)values;
+    *state = (void *)(uintptr_t)0x700000;
+    return 0;
+}
+CUresult cuLinkAddData_v2(void *state, int type, void *data, size_t size, const char *name, unsigned count,
+                          int *options, void **values) {
+    (void)state; (void)type; (void)data; (void)size; (void)name; (void)count; (void)options; (void)values;
+    return 0;
+}
+CUresult cuLinkComplete(void *state, void **image, size_t *size) {
+    (void)state;
+    *image = (void *)linked;
+    if (size) *size = linked_size;
+    return 0;
+}
+CUresult cuLinkDestroy(void *state) { (void)state; return 0; }
+
 CUresult cuModuleLoadData(void **module, const void *image) {
+    loading();
     ++loads;
     *module = (void *)objects[new_object(MODULE, image)].handle;
     return 0;
@@ -226,6 +302,7 @@ CUresult cuLibraryLoadData(void **library, const void *image, int *jo, void **jv
                      line);
         return 218;
     }
+    loading();
     ++loads;
     *library = (void *)objects[new_object(LIBRARY, image)].handle;
     return 0;
@@ -233,6 +310,7 @@ CUresult cuLibraryLoadData(void **library, const void *image, int *jo, void **jv
 CUresult cuModuleUnload(void *module) {
     int i = find_object(module);
     if (i < 0) return INVALID_HANDLE;
+    if (unload_fails_for && unload_fails_for == (uintptr_t)module) return 201;
     ++unloads;
     kill(i);
     return 0;

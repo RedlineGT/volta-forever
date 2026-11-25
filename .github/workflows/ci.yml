@@ -46,6 +46,7 @@ jobs:
           python3 tests/proxy/log_lines.py dist/lib/libcuda.so.1
           python3 tests/proxy/summary_file.py dist/lib/libcuda.so.1
           python3 tests/proxy/nocode_launch.py dist/lib/libcuda.so.1
+          python3 tests/proxy/told.py dist/lib/libcuda.so.1
           python3 tests/proxy/profile_failure.py dist/lib/libcuda.so.1
           python3 tests/proxy/ptx_version.py dist/lib/libcuda.so.1
       - name: The audit library's answer to NVML, against a stand-in

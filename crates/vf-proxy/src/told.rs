@@ -24,7 +24,8 @@
 //!   a bank of the module, whose address is a word of bank 0; no texture) shares nothing with the other
 //!   kernels but the memory that the program gives it as arguments.
 //! - **For a function of a module, the module's context is the current one**: the layer loads
-//!   in the current context, and a function of another context would not be the module's.
+//!   in the current context, and a function of another context would not be the module's. The
+//!   module that the driver gives for a library in a context is such a module.
 //! - **Its code is translated.** A kernel that the translator refuses is not given; nor one of an
 //!   image that the driver refuses.
 //! - **The image is one that `Elsewhere` is known of**: a fat binary of executable cubins, not one
@@ -101,7 +102,7 @@ pub unsafe fn lookup(
         kernels::not_given(name, &told.elsewhere, None);
         return None;
     }
-    match unsafe { give(&told, name, c_name, out, through) } {
+    match unsafe { give(&told, handle, name, c_name, out, through) } {
         Ok(second) => {
             let kernel = if out.is_null() { 0 } else { (unsafe { *out }) as usize };
             let first = {
@@ -150,6 +151,7 @@ fn given_line(name: &str, elsewhere: &kernels::Elsewhere, library: bool) -> Stri
 /// the line of `kernels::not_given` says it already).
 unsafe fn give(
     told: &kernels::Told,
+    asked: usize,
     name: &str,
     c_name: *const c_char,
     out: *mut *mut c_void,
@@ -178,9 +180,10 @@ unsafe fn give(
         vf_adapt::Reach::Unknown(why) => Some(why),
         vf_adapt::Reach::Nothing => None,
     };
-    if !told.library && !same_context(contexts::context_of(told.owner), contexts::current_context()) {
-        // The function would be of a module of the current context, where the program's module,
-        // and what it launches from it, are of another.
+    if through == Through::Module && !same_context(contexts::context_of(asked), contexts::current_context()) {
+        // The function would be of a module of the current context, where the module that the
+        // program asked (its own, or the one that the driver gave it for a library in a
+        // context), and what it launches from it, are of another.
         return Err("its module is of another context than the current one, in which the layer would load it".into());
     }
     let digest = images::xxh64(&cubin);
