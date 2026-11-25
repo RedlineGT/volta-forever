@@ -14,13 +14,17 @@ what each case needs:
 - a large image (16 MiB of PTX or more) given with reported traps, which the stand-in takes a second
   to load, as the driver takes minutes to compile one: the layer says what is being compiled before
   the load begins, once in the process, and names NCCL's CUDA 12 build only for kernels of NCCL's
-  collectives.
+  collectives;
+- a kernel linked by the driver's linker from PTX with a multimem instruction, whose cubin is then
+  given as the relocatable fat binary of a wrapper of the CUDA runtime: the line of its image names
+  it (until 2026-11-25 what the link knew of it was dropped there).
 
 Run with python3 tests/proxy/reported_traps.py path/to/libcuda.so.1.
 """
 import ctypes as c
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -79,6 +83,25 @@ IMAGE = "1 kernel is given with instructions that cannot run on this GPU replace
 REFUSED = "cannot run on this GPU and is not given to the program: multimem.ld_reduce.acquire.sys.global.min.u32"
 LARGE = "MB of PTX that the layer made of it (its kernels given with reported traps)"
 REMEDY = "vf fetch --only libnccl"
+WRAPPER_MAGIC = 0x466243B1
+CUBIN = Path(__file__).resolve().parents[1] / "kernels" / "k_basic.128.sm70.cubin"
+
+
+class Wrapper(c.Structure):
+    _fields_ = [("magic", c.c_uint), ("version", c.c_uint), ("data", c.c_void_p), ("extra", c.c_void_p)]
+
+
+def fat_binary(cubin, sm=70):
+    """`cubin` as the only entry of a fat binary, for `sm` (as link_refusals.py makes it)."""
+    native = (Path(__file__).resolve().parents[2] / "crates/vf-fatbin/tests/data/elf70-elf75-ptx70-lz4.fatbin")
+    header = bytearray(native.read_bytes()[16:16 + 64])
+    stored = cubin + bytes(-len(cubin) % 8)
+    struct.pack_into("<QI", header, 8, len(stored), 0)
+    struct.pack_into("<Q", header, 0x28, struct.unpack_from("<Q", header, 0x28)[0] & ~0xB000)
+    struct.pack_into("<Q", header, 0x38, 0)
+    struct.pack_into("<I", header, 0x1C, sm)
+    body = bytes(header) + stored
+    return struct.pack("<IHHQ", 0xBA55ED50, 1, 16, len(body)) + body
 
 
 def child(proxy, mock, mode):
@@ -94,6 +117,27 @@ def child(proxy, mock, mode):
         for _ in range(2):
             assert api.cuModuleLoadData(c.byref(handle), image) == 0
             print(api.cuModuleGetFunction(c.byref(function), handle, name), flush=True)
+    elif mode == "linked":
+        output = CUBIN.read_bytes()
+        linked = c.create_string_buffer(output, len(output))
+        c.c_void_p.in_dll(backend, "linked").value = c.addressof(linked)
+        c.c_size_t.in_dll(backend, "linked_size").value = len(output)
+        state, image, size = c.c_void_p(), c.c_void_p(), c.c_size_t()
+        ptx = module(OTHER)
+        assert api.cuLinkCreate_v2(0, None, None, c.byref(state)) == 0
+        assert api.cuLinkAddData_v2(state, 1, ptx, len(ptx), b"multicast.ptx", 0, None, None) == 0
+        assert api.cuLinkComplete(state, c.byref(image), c.byref(size)) == 0
+        # The cubin that the link made, as the relocatable fat binary of a version-2 wrapper whose
+        # first fat binary has nothing for this GPU (an entry said to be for sm_90).
+        cubin = c.string_at(image, size.value)
+        member = c.create_string_buffer(fat_binary(cubin))
+        first = c.create_string_buffer(fat_binary(cubin, 90))
+        members = (c.c_void_p * 2)(c.addressof(member), None)
+        wrapper = Wrapper(WRAPPER_MAGIC, 2, c.addressof(first), c.addressof(members))
+        sys.stderr.write("wrapper load\n")
+        sys.stderr.flush()
+        assert api.cuModuleLoadFatBinary(c.byref(handle), c.byref(wrapper)) == 0
+        print(api.cuModuleGetFunction(c.byref(function), handle, OTHER), flush=True)
 
 
 def run(proxy, mock, mode, **settings):
@@ -140,6 +184,14 @@ def check(proxy, mock):
         assert done.stdout.split() == ["0", "0"], (mode, done.stdout)
         assert (REMEDY in err) == (mode == "large-nccl"), (mode, err[:3000])
         print(f"PASS a large image ({mode}): said before the driver's load, once")
+
+    # What the driver's link knew of its input reaches the image that it made, given as the
+    # relocatable fat binary of a wrapper.
+    done = run(proxy, mock, "linked")
+    after = done.stderr[done.stderr.index("wrapper load"):]
+    assert IMAGE in after and OTHER.decode() in after, done.stderr
+    assert done.stdout.split()[-1] == "0", done.stdout
+    print("PASS a cubin made by the driver's linker, in a wrapper: its kernel said given with a reported trap")
 
 
 if __name__ == "__main__":

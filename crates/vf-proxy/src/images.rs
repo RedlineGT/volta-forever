@@ -1377,6 +1377,7 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
             say_known(who, "relocatable fat binary with a cubin made by a linker", &found);
             refused.extend(found.refused);
             emulated.extend(found.emulated);
+            reported.extend(found.reported);
         }
         match finish(who, "relocatable fat binary", lowering, None, false, Some(source)) {
             Some(replaced) => {
@@ -1393,7 +1394,9 @@ unsafe fn adapt_linked(who: &dyn Display, wrapper: Wrapper) -> Option<Replacemen
     }
     // Nothing adapted: the program's image is loaded as it is, unless something is known of an
     // image that a link made in it.
-    let origin = origin.or_else(|| (!refused.is_empty() || !emulated.is_empty()).then_some(kernels::Origin::Native))?;
+    let origin = origin.or_else(|| {
+        (!refused.is_empty() || !emulated.is_empty() || !reported.is_empty()).then_some(kernels::Origin::Native)
+    })?;
     let with_traps = object_replaced.iter().any(|replaced| !replaced.is_empty());
     if check_external_calls || with_traps {
         // Which kernels can reach a trapped function, or one with reported traps, of another object.
