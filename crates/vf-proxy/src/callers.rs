@@ -330,7 +330,9 @@ impl Mapped {
                 libc::MAP_FAILED
             };
             libc::close(fd);
-            (start != libc::MAP_FAILED).then_some(Mapped { start, len, inode })
+            // (`then`, not `then_some`: a `Mapped` made and dropped when nothing was mapped would unmap
+            // `MAP_FAILED`.)
+            (start != libc::MAP_FAILED).then(|| Mapped { start, len, inode })
         }
     }
 
@@ -971,6 +973,47 @@ mod tests {
         wild[0x3e..0x40].copy_from_slice(&0u16.to_le_bytes());
         assert!(dynamic_names(&wild).is_none());
         assert!(fat_binary_sections(&wild).is_empty());
+    }
+
+    #[test]
+    fn a_file_that_is_not_mapped_is_not_unmapped() {
+        // An empty file (nothing to map) and a directory (its mapping fails): None, and errno is what the
+        // open left (0, or the mapping's own error), not the EINVAL of an munmap of MAP_FAILED (until
+        // 2026-11-25 a `Mapped` was made of it and dropped).
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("vf-callers-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("empty"), b"").unwrap();
+        let path = |name: &str| CString::new(dir.join(name).as_os_str().as_bytes()).unwrap();
+        let (empty, here) = (path("empty"), path("."));
+        // What mmap itself says of the directory, when it is tried (a directory of some size).
+        let mapping = unsafe {
+            let fd = libc::open(here.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            let mut stat: libc::stat = std::mem::zeroed();
+            assert!(fd >= 0 && libc::fstat(fd, &mut stat) == 0);
+            *libc::__errno_location() = 0;
+            if stat.st_size > 0 {
+                let start = libc::mmap(
+                    std::ptr::null_mut(),
+                    stat.st_size as usize,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE,
+                    fd,
+                    0,
+                );
+                assert_eq!(start, libc::MAP_FAILED);
+            }
+            let error = *libc::__errno_location();
+            libc::close(fd);
+            error
+        };
+        for (file, wanted) in [(&empty, 0), (&here, mapping)] {
+            // SAFETY: this thread's errno.
+            unsafe { *libc::__errno_location() = 0 };
+            assert!(Mapped::open(file).is_none(), "{file:?}");
+            assert_eq!(unsafe { *libc::__errno_location() }, wanted, "{file:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
