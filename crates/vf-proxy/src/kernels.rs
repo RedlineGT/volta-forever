@@ -121,7 +121,7 @@ static NCCL_REMEDY_GIVEN: AtomicBool = AtomicBool::new(false);
 /// (it ignores a failure to look one up), and chooses them only among those its GPUs can run: the
 /// layer refuses those that copy with `cp.async.bulk`, which NCCL 2.30 chooses on sm_100 and later
 /// only, with `NCCL_SYM_TMA_ENABLE=1`.
-fn nccl_kernel(name: &str) -> bool {
+pub(crate) fn nccl_kernel(name: &str) -> bool {
     let identifier = match name.strip_prefix("_Z") {
         Some(rest) => {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -319,11 +319,16 @@ pub fn describe(handle: usize, shown: Option<String>, refused: Vec<Refused>, emu
     changed(&known);
 }
 
-/// Record the kernels of the image loaded as `handle` (a library's when `library`) that are given
-/// with reported traps. (Nothing that `guard` concludes changes: no new generation.)
-pub fn with_traps(handle: usize, reported: Vec<Reported>, library: bool) {
+/// Record the kernels of the image loaded as `handle` (a library's when `library`), which `image`
+/// names, that are given with reported traps, and say so in one line at level 1 (`image_traps_line`;
+/// not with `VF_EMULATION_WARNINGS=0`). Each kernel is said by itself from level 2, when the program
+/// takes it (`given`). (Nothing that `guard` concludes changes: no new generation.)
+pub fn with_traps(handle: usize, image: Option<&str>, reported: Vec<Reported>, library: bool) {
     if reported.is_empty() {
         return;
+    }
+    if config().emulation_warnings > 0 {
+        log::warn(format_args!("{}", image_traps_line(image, &reported)));
     }
     let mut known = known();
     let kernels = known.entry(handle).or_default();
@@ -331,6 +336,40 @@ pub fn with_traps(handle: usize, reported: Vec<Reported>, library: bool) {
     for kernel in reported {
         kernels.reported.insert(kernel.kernel.clone(), kernel);
     }
+}
+
+/// The line that says, once for an image, which of its kernels are given with reported traps: how
+/// many, the most instructions that one may reach, the first form of each (three at the most), the
+/// first three names. (Until 2026-11-25 each kernel had a line of its own at level 1: about 40 lines of
+/// up to 547 characters for each process of a program with the CUDA 13 NCCL.)
+fn image_traps_line(image: Option<&str>, reported: &[Reported]) -> String {
+    let most = reported.iter().map(|kernel| kernel.instructions).max().unwrap_or(0);
+    let mut forms: Vec<&str> = reported.iter().map(|kernel| kernel.form.as_str()).collect();
+    forms.sort_unstable();
+    forms.dedup();
+    let more_forms = if forms.len() > 3 { ", ..." } else { "" };
+    let names: Vec<&str> = reported.iter().take(3).map(|kernel| kernel.kernel.as_str()).collect();
+    let more_names = match reported.len() {
+        0..=3 => String::new(),
+        n => format!(" and {} more", n - 3),
+    };
+    format!(
+        "{}: {} {} given with instructions that cannot run on this GPU replaced by reported traps (at most {} in \
+         what one kernel may reach; {}{more_forms}): {}{more_names}. Such an instruction needs a multicast \
+         address, which no GPU of this process can have: reached all the same, it stops its kernel with an \
+         assertion that names it (CUDA_ERROR_ASSERT, 710) and the context ends. VF_LOG_LEVEL=2 says each \
+         kernel when the program takes it; VF_REPORTED_TRAPS=0 refuses them instead",
+        image.unwrap_or("an image"),
+        reported.len(),
+        if reported.len() == 1 {
+            "kernel is"
+        } else {
+            "kernels are"
+        },
+        most,
+        forms[..forms.len().min(3)].join(", "),
+        names.join(", ")
+    )
 }
 
 /// What kernel `name` of `handle` is given with of reported traps, if it is (for the report of a
@@ -354,10 +393,10 @@ struct TrapsSaid {
 
 static TRAPS_SAID: LazyLock<Mutex<TrapsSaid>> = LazyLock::new(|| Mutex::new(TrapsSaid::default()));
 
-/// Kernel `name` is given with `reported`: the line that says so, the first time a kernel of its
-/// name is given, while no more than `limit` were said (all of them with `all`); and once that
-/// further ones are not listed.
-fn traps_given(name: &str, reported: &Reported, limit: usize, all: bool) -> Option<String> {
+/// Kernel `name` is given with `reported`: counted for the line at exit, the first time a kernel of
+/// its name is given, and said then from level 2 (`said`; at level 1 its image's line says it,
+/// `with_traps`).
+fn traps_given(name: &str, reported: &Reported, said_here: bool) -> Option<String> {
     let mut said = TRAPS_SAID.lock().unwrap_or_else(|e| e.into_inner());
     if said.said.contains(name) {
         return None;
@@ -369,19 +408,7 @@ fn traps_given(name: &str, reported: &Reported, limit: usize, all: bool) -> Opti
     said.said.insert(name.to_string());
     said.given += 1;
     said.forms.insert(reported.form.clone());
-    if limit > 0 && (said.given <= limit || all) {
-        return Some(format!(
-            "kernel {name} is given with {}. Such an instruction needs a multicast address, which no GPU of this \
-             process can have: reached all the same, the kernel stops with an assertion that names it \
-             (CUDA_ERROR_ASSERT, 710) and the context ends (VF_REPORTED_TRAPS=0 refuses such kernels instead)",
-            reported.summary()
-        ));
-    }
-    (limit > 0 && said.given == limit + 1).then(|| {
-        "further kernels given with reported traps are not listed (VF_EMULATION_WARNINGS); their number is said \
-         at exit"
-            .to_string()
-    })
+    said_here.then(|| format!("kernel {name} is given with {}", reported.summary()))
 }
 
 /// For the report at exit: the kernels given with reported traps.
@@ -1010,9 +1037,9 @@ pub fn given(handle: usize, name: &str) {
         (counts, origin_val, load_of(&k, handle), shown, reported)
     };
     if let Some(reported) = &reported
-        && let Some(line) = traps_given(name, reported, config().emulation_warnings, log::at_level(2))
+        && let Some(line) = traps_given(name, reported, log::at_level(2))
     {
-        log::warn(format_args!("{line}"));
+        log::info(format_args!("{line}"));
     }
     if let Some(ref counts) = counts {
         let limit = config().emulation_warnings;
@@ -1258,28 +1285,38 @@ mod tests {
             instructions,
             functions: 3,
         };
-        with_traps(library, vec![reported("ring", 12), reported("tree", 1)], true);
+        with_traps(
+            library,
+            Some("lib"),
+            vec![reported("ring", 12), reported("tree", 1)],
+            true,
+        );
         share(module, library);
         // Through the module of the library too, for the report of a fault.
         assert_eq!(traps_of(module, "ring"), Some(reported("ring", 12)));
         assert_eq!(traps_of(module, "other"), None);
-        let line = traps_given("ring", &reported("ring", 12), 20, false).unwrap();
+        // One line for the image at level 1: how many, the most reached, the forms, the names.
+        let many: Vec<Reported> = ["a", "b", "c", "d", "e"].iter().map(|name| reported(name, 7)).collect();
         assert_eq!(
-            line,
+            image_traps_line(Some("cuLibraryLoadData of 9 bytes"), &many),
+            "cuLibraryLoadData of 9 bytes: 5 kernels are given with instructions that cannot run on this GPU \
+             replaced by reported traps (at most 7 in what one kernel may reach; \
+             multimem.ld_reduce.acquire.sys.global.min.u64): a, b, c and 2 more. Such an instruction needs a \
+             multicast address, which no GPU of this process can have: reached all the same, it stops its kernel \
+             with an assertion that names it (CUDA_ERROR_ASSERT, 710) and the context ends. VF_LOG_LEVEL=2 says \
+             each kernel when the program takes it; VF_REPORTED_TRAPS=0 refuses them instead"
+        );
+        assert!(image_traps_line(None, &many[..1]).starts_with("an image: 1 kernel is given with"));
+        // Each kernel from level 2, once for each name; all counted.
+        assert_eq!(
+            traps_given("ring", &reported("ring", 12), true).unwrap(),
             "kernel ring is given with 12 instructions that cannot run on this GPU replaced by a reported trap: \
              multimem.ld_reduce.acquire.sys.global.min.u64 in _Z43ncclDevFunc_AllGather_COLLNET_DIRECT_SIMPLEv and 2 \
-             other functions. Such an instruction needs a multicast address, which no GPU of this process can have: \
-             reached all the same, the kernel stops with an assertion that names it (CUDA_ERROR_ASSERT, 710) and the \
-             context ends (VF_REPORTED_TRAPS=0 refuses such kernels instead)"
+             other functions"
         );
-        // Once for each name; beyond the limit, once that more are not listed; all counted.
-        assert_eq!(traps_given("ring", &reported("ring", 12), 20, false), None);
-        assert!(
-            traps_given("tree", &reported("tree", 1), 1, false)
-                .unwrap()
-                .starts_with("further kernels")
-        );
-        assert_eq!(traps_given("third", &reported("third", 1), 1, false), None);
+        assert_eq!(traps_given("ring", &reported("ring", 12), true), None);
+        assert_eq!(traps_given("tree", &reported("tree", 1), false), None);
+        assert_eq!(traps_given("third", &reported("third", 1), false), None);
         let summary = traps_summary_line().unwrap();
         assert_eq!(
             summary,

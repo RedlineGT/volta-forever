@@ -10,6 +10,7 @@ use std::ffi::{CStr, c_int, c_void};
 use std::fmt::Display;
 use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use vf_adapt::{Adapted, Emulated, Outcome, Refused, RefusedFunction, Reported};
@@ -54,6 +55,9 @@ pub struct Replacement {
     emulated: Vec<Emulated>,
     /// Kernels given with reported traps (`vf_adapt::Reported`).
     reported: Vec<Reported>,
+    /// What names the image in the line that says which of its kernels are given with reported traps
+    /// (`kernels::with_traps`): the call, the size and the file it is in, when it has such kernels.
+    traps_named: Option<String>,
     /// Kernels whose code is a trap and nothing else (`vf_adapt::Stubs::trap_only`): given at a
     /// lookup, their launch is refused (`guard`).
     trap_only: Vec<String>,
@@ -113,6 +117,7 @@ impl Replacement {
             refused: Vec::new(),
             emulated: Vec::new(),
             reported: Vec::new(),
+            traps_named: None,
             trap_only: Vec::new(),
             program_image: None,
             origin: None,
@@ -165,6 +170,7 @@ impl Replacement {
         next.emulated = self.emulated.clone();
         // (The kernels that the retry refuses are not given: what is said of them is not asked.)
         next.reported = self.reported.clone();
+        next.traps_named = self.traps_named.clone();
         next.trap_only = self.trap_only.clone();
         next.program_image = self.program_image;
         next.origin = self.origin;
@@ -269,6 +275,7 @@ impl Replacement {
         loaded.refused = self.refused.into_iter().chain(refused).collect();
         loaded.emulated = self.emulated;
         loaded.reported = self.reported;
+        loaded.traps_named = self.traps_named;
         loaded.trap_only = self.trap_only;
         loaded.program_image = self.program_image;
         loaded.origin = self.origin;
@@ -344,7 +351,13 @@ pub fn keep(handle: usize, mut replacement: Replacement) {
         std::mem::take(&mut replacement.emulated),
         FOR_LIBRARY.get(),
     );
-    kernels::with_traps(handle, std::mem::take(&mut replacement.reported), FOR_LIBRARY.get());
+    let named = replacement.traps_named.take().or_else(|| replacement.program.clone());
+    kernels::with_traps(
+        handle,
+        named.as_deref(),
+        std::mem::take(&mut replacement.reported),
+        FOR_LIBRARY.get(),
+    );
     let trap_only = std::mem::take(&mut replacement.trap_only);
     if !trap_only.is_empty() {
         // What the line that refuses a launch names the image by: a digest is taken only for an
@@ -1712,6 +1725,13 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
             name: OnceCell::new(),
         };
         let mut replacement = unsafe { adapt_unguarded(&named, ptr, len) }?;
+        if !replacement.reported.is_empty() {
+            // SAFETY: what `adapt` was given.
+            let size = unsafe { image_extent(ptr, len) }.map(<[u8]>::len);
+            let name = traps_name(who, size, loaded_file(ptr).as_deref());
+            say_large(&name, &replacement);
+            replacement.traps_named = Some(name);
+        }
         replacement.shown = named.shown();
         if !replacement.trap_only.is_empty() || replacement.elsewhere.is_some() {
             // SAFETY: what `adapt` was given.
@@ -1723,6 +1743,87 @@ pub unsafe fn adapt(who: &str, ptr: *const c_void, len: Option<usize>) -> Option
         replacement.program = named.program();
         Some(replacement)
     })
+}
+
+/// What names an image whose kernels are given with reported traps, in the lines that say so: the
+/// call, the size of the program's image, and the file that it is in when that is known (a fat
+/// binary that a library registered is in that library's file).
+fn traps_name(call: &str, size: Option<usize>, file: Option<&str>) -> String {
+    let mut name = call.to_string();
+    if let Some(size) = size {
+        name += &format!(" of {size} bytes");
+    }
+    if let Some(file) = file {
+        name += &format!(" in {file}");
+    }
+    name
+}
+
+/// From this much PTX for the device in an image (adapted), the line of `say_large` is said: at the
+/// rate measured for the driver's compiler on a V100's host (NCCL 2.30.7's 248 MB in about 15 minutes
+/// of one core, some 3.6 s a MB), a minute or more on a first start.
+const LARGE_PTX: usize = 16 << 20;
+
+/// `say_large` said its line in this process.
+static LARGE_SAID: AtomicBool = AtomicBool::new(false);
+
+/// The bytes of PTX for this GPU in the image that the layer made, which the driver compiles: in its
+/// fat binary (or text), or in the relocatable objects that the driver links.
+fn ptx_for_device(replacement: &Replacement) -> usize {
+    let one = |bytes: &[u8]| -> usize {
+        if bytes.starts_with(&fatbin::MAGIC.to_le_bytes()) {
+            fatbin::parse(bytes).map_or(0, |fat| {
+                fat.entries
+                    .iter()
+                    .filter(|entry| entry.kind() == fatbin::KIND_PTX && config().policy.usable(entry))
+                    .map(|entry| entry.payload().map_or(0, |payload| payload.len()))
+                    .sum()
+            })
+        } else if vf_ptx::header(bytes).is_some() {
+            bytes.len()
+        } else {
+            0
+        }
+    };
+    match &replacement.prelinked {
+        Some(prelinked) => prelinked.objects.iter().map(|object| one(object)).sum(),
+        None => one(&replacement.data),
+    }
+}
+
+/// Once in a process, at the first adaptation of an image given with reported traps whose PTX for
+/// this GPU is `LARGE_PTX` or more, before the driver is given it: at level 1, what is about to be
+/// compiled, that the driver's compilation can take minutes the first time and is then kept in its
+/// cache, and, for an image with kernels of NCCL's collectives (`kernels::nccl_kernel`, by the
+/// prefix of their names, as the line of a refused one), the build of NCCL that starts at once. Until
+/// 2026-11-25 nothing was said before the kernels were taken, after the compilation: a first start
+/// of a program with the CUDA 13 NCCL was silent for about a quarter of an hour in each process.
+fn say_large(name: &str, replacement: &Replacement) {
+    if replacement.reported.is_empty() {
+        return;
+    }
+    let bytes = ptx_for_device(replacement);
+    if bytes < LARGE_PTX || LARGE_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let nccl = replacement
+        .reported
+        .iter()
+        .any(|kernel| kernels::nccl_kernel(&kernel.kernel));
+    log::warn(format_args!(
+        "{name}: the driver now compiles the {} MB of PTX that the layer made of it (its kernels given with \
+         reported traps). The first time, this can take many minutes (NCCL 2.30.7's 248 MB took about 15 \
+         minutes of one core in each process); the driver then keeps what it made in its cache \
+         (CUDA_CACHE_PATH; CUDA_CACHE_MAXSIZE, 1 GiB by default, is shared by all the code it compiles){}",
+        bytes.div_ceil(1 << 20),
+        if nccl {
+            ". These are kernels of NCCL's collectives: NCCL's CUDA 12 build has code for this GPU and starts in \
+             seconds (`vf fetch --only libnccl`, then start the program through `vf`; LIMITS.md, \"Several GPUs and \
+             NCCL\")"
+        } else {
+            ""
+        }
+    ));
 }
 
 /// What the lines of the adaptation of an image call it: the call, and from log level 2 the image,
@@ -1839,6 +1940,11 @@ pub fn adapt_file(who: &str, path: &CStr) -> Option<Replacement> {
         }
         // SAFETY: `contents` is a complete fat binary, a complete cubin, or zero-terminated bytes.
         let mut replacement = unsafe { adapt_unguarded(&named, contents.as_ptr().cast(), None) }?;
+        if !replacement.reported.is_empty() {
+            let name = traps_name(who, Some(file_len), Some(&path.to_string_lossy()));
+            say_large(&name, &replacement);
+            replacement.traps_named = Some(name);
+        }
         replacement.shown = named.shown();
         if !replacement.trap_only.is_empty() || replacement.elsewhere.is_some() {
             // The file as it is (without the zero added to text): what `xxhsum -H1` gives for it.

@@ -428,6 +428,7 @@ pub unsafe fn setup_from_cache(
 
     // Build the adapted PTX header for the stand-in by adapting just the header of the original
     // image. The stand-in needs at least `.version` and `.target sm_70`.
+    let original_len = original_bytes.len();
     let standin_ptx = build_standin_from_original(&original_bytes);
     let Some(standin_ptx) = standin_ptx else {
         return false;
@@ -515,7 +516,13 @@ pub unsafe fn setup_from_cache(
         crate::images::keep(lib_handle, kept);
         crate::kernels::describe(lib_handle, None, refused, emulated, true);
         let reported: Vec<vf_adapt::Reported> = manifest.entries.iter().filter_map(|e| e.reported.clone()).collect();
-        crate::kernels::with_traps(lib_handle, reported, true);
+        // (Set up from the cache: no adaptation, and the kernels are compiled one by one. The image is
+        // named by its size; the line of a large compilation is for an adaptation, `images::say_large`.)
+        let named = format!(
+            "cuLibraryLoadData of {} bytes, set up from the layer's cache",
+            original_len
+        );
+        crate::kernels::with_traps(lib_handle, Some(&named), reported, true);
         if let Some(image) = program_image {
             crate::kernels::without_code(lib_handle, trap_only, image, true);
         }

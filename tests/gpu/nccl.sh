@@ -61,6 +61,7 @@ if grep -q "^volta-forever:" "$log"; then
     echo "FAIL  a reported trap of the layer was reached ($log)"
     failed=1
 fi
-given=$(grep -c "is given with .* replaced by a reported trap" "$layer")
-echo "the layer's lines: $layer ($given kernels said to be given with reported traps, $(grep -c "cannot run on this GPU and is not given" "$layer") refused)"
+images=$(grep -Ec "(kernel is|kernels are) given with instructions that cannot run on this GPU replaced by reported traps" "$layer")
+large=$(grep -c "MB of PTX that the layer made of it" "$layer")
+echo "the layer's lines: $layer ($images lines of images given with reported traps, $large of a large compilation, $(grep -c "cannot run on this GPU and is not given" "$layer") refused kernels)"
 exit $failed
