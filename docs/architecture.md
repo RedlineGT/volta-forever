@@ -956,13 +956,19 @@ int vf_summary_remove(size_t (*fill)(char *buf, size_t cap, void *ctx), void *ct
   functions had not returned 2 s after the exit began`); its own calls, once it has the lock, are as bounded
   as the `fill`s are. Such a call may still run when its library's removal returns, after the last write
   (`EBUSY`, below): a destructor frees nothing that its `fill` reads unless its removal returned 0 (at exit,
-  what is left goes with the process). A `fill` that calls `exit()` on the layer's thread, or in a removal
+  what is left goes with the process). A later removal of the same `fill` answers 0 once the call has ended,
+  so that a library may try again, a bounded number of times, before it frees; a library that `dlclose`
+  can unload after the last write cannot keep its code there for a call under way, and must be pinned
+  (`RTLD_NODELETE`, as the bf16 runtime is) to honour `EBUSY`. A `fill` that calls `exit()` on the layer's thread, or in a removal
   while the process runs, gets the status it gave and a last write without those lines (`... the process
   exited from one of their functions`); called during the exit itself, by the last write or by a removal in
   a destructor, its `exit()` ends the process at once with that status, and there is no last write (the
   file keeps the write before). A `fork()` from another thread does not wait for a `fill`, nor does one from
-  a `fill`; a `fill` that forks on the layer's thread and whose child returns from it puts that child in the
-  layer's thread, its only thread, which then calls nothing more, writes nothing and ends, the child with it.
+  a `fill`; a `fill` that forks on the layer's thread, or in the last write, and whose child returns from it
+  puts that child, a copy of the process in the middle of a call, back in the layer's code: the child ends
+  there at once (`_exit(0)`), writing nothing and running nothing of the program's (its exit handlers, its
+  destructors and the C library's buffers are the parent's). One that forks in a removal returns, in the
+  child, to the library that called the removal.
   The two functions are not async-signal-safe: a signal handler must not call them.
 - **What the functions return**, errno's values: 0; `ENOTSUP`, `abi` is not 1; `EINVAL`, `fill` or `name` is
   null, or `name` is not a name as above; `EEXIST`, this `fill` with this `ctx` is registered under another
@@ -981,9 +987,10 @@ int vf_summary_remove(size_t (*fill)(char *buf, size_t cap, void *ctx), void *ct
   calls `fill` once more, and the layer keeps what it gives (as bounded as any `fill`'s text): the library's
   last report, written in its place from then on with `[NAME, last report] ` in front, so that kept lines
   are told from live ones. Once the layer's last write is made, a removal calls nothing, waits for nothing,
-  and nothing more is written; no call of a `fill` starts after it (the thread announces each call before it
-  looks at whether the last write is made, and the removal looks at the announcement after it: either the
-  thread calls nothing, or the removal sees the call and returns `EBUSY`).
+  and nothing more is written; no call of a `fill` starts after it: every call, the thread's, the last
+  write's and a removal's own, is announced before its caller looks at whether the last write is made, and
+  the removal looks at the announcement after it, so that either the caller calls nothing, or the removal
+  sees the call and returns `EBUSY`.
 - **Exit.** The layer's last write (its destructor) and the destructor of a library that removes itself both
   run in `_dl_fini`, in the order in which the two libraries were loaded (glibc 2.39 runs the destructors of
   libraries that do not depend on each other in the order of their loading). The library's first (it was

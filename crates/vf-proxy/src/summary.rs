@@ -30,11 +30,12 @@
 //! at most (`LAST_WAIT`, on the monotonic clock): a `fill` that does not return would hold the exit for
 //! ever. Once it is made, both functions return at once and do nothing, a removal saying `EBUSY` while
 //! a call that ran past those 2 s is still under way (`after_last_write`). In a child made by `fork()`,
-//! both functions do nothing (the child writes no file), and no `fill` is called; the layer's thread
-//! goes on in a child only when a `fill` forked and its child returned, and it ends there. A `fill` is
-//! called by the thread that writes the file, by a removal, and at exit by the thread that exits, as the
-//! rest of the report: the layer has no handler of a signal, and calls one from a handler only if the
-//! program calls `exit()` from it, which POSIX does not allow.
+//! both functions do nothing (the child writes no file), and no `fill` is called; the layer's code goes
+//! on in a child only when a `fill` forked (on the layer's thread, or in the last write) and its child
+//! returned, and the child ends there at once (`end_child`). A `fill` is called by the thread that
+//! writes the file, by a removal, and at exit by the thread that exits, as the rest of the report: the
+//! layer has no handler of a signal, and calls one from a handler only if the program calls `exit()`
+//! from it, which POSIX does not allow.
 //!
 //! What a `fill` may do is little (the contract, `docs/architecture.md`): read its library's counters,
 //! write text, and return at once. Every other library's `fill` and every removal waits for it; it must
