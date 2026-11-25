@@ -24,7 +24,10 @@
 #       the layer does; measured 2026-11-25: where the float32 CPU led by 0.2764, the bfloat16
 #       CPU leads by 0.0625, one unit of a bfloat16 logit, and the engine takes the other
 #       token): every token the CPU's, or the first that differs where the CPU led by less than
-#       0.25 (greedy_compare.NEAR_BF16). Or LIMIT (below).
+#       0.25 (greedy_compare.NEAR_BF16). The tokens after a first difference are another text, so
+#       the engine is also given the CPU's own text and asked what it would have put at each of
+#       its 150 places (teacher-forced, `FORCED=1` of vllm-engine.py): the CPU's token must be
+#       its first there, or less than 0.25 behind it. Or LIMIT (below).
 # REFUSED: the layer did not give a kernel to the program, and says which and why. (Until
 # 2026-11-19, c, c2 and d were refused: a kernel of vLLM's sampling names every register of the
 # machine; `docs/translator.md`, "Registers", says how it is translated.)
@@ -268,11 +271,18 @@ if want e; then
     norm_status=$?
     echo "$norm_out" | grep -E "^  (bfloat16|float16) |verdict|^FAIL|is given from the machine code|Error: " | cut -c1-240
     vllm_bf16=$(unset LD_AUDIT VF_AUDIT_MAP_FILE LD_LIBRARY_PATH; VF_LAUNCHER=1 vf_layer "$proxy" "$map"
-        env "${told[@]}" MODEL="$model" DTYPE=bfloat16 MAX_TOKENS=50 TEMPERATURE=0 \
+        env "${told[@]}" MODEL="$model" DTYPE=bfloat16 MAX_TOKENS=50 TEMPERATURE=0 FORCED=1 \
             REF_FILE="$refb" timeout -k 60 "$engine_wait" "${py[@]}" "$W/tests/gpu/vllm-engine.py" 2>&1)
     status=$?
     # (With the errors that stopped the engine: the first of them is where it stopped.)
     echo "$vllm_bf16" | grep -E "prompt [0-9]|MATCH|NEAR TIE|DIFFER|tok/s|^FAIL|Error: " | cut -c1-200
+    # (The places after a first difference too: without the line of each prompt, no verdict.)
+    if [ "$(echo "$vllm_bf16" | grep -c '^  teacher-forced: prompt [0-9]*: [0-9]* places')" != 3 ] &&
+        [ "$(echo "$vllm_bf16" | sed -n 's/^verdict: //p' | tail -1)" != SOME_DIFFER ] && [ "$status" = 0 ]; then
+        vllm_bf16="$vllm_bf16
+verdict: SOME_DIFFER"
+        echo "    the engine did not judge every place of the reference (teacher-forced)"
+    fi
     if [ "$norm_status" != 0 ] || [ "$(echo "$norm_out" | sed -n 's/^verdict: //p' | tail -1)" != NORM_MATCH ]; then
         # (The norm first: the engine's text is of no use while its kernel is wrong.)
         verdict_or_limit e "$norm_out" NORM_MATCH "$norm_status"
